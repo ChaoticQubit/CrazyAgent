@@ -10,6 +10,23 @@ use std::path::PathBuf;
 
 pub(super) const SETTINGS_JOURNAL_MAX: usize = 5 * crate::config::CONFIG_BYTES_MAX;
 
+#[cfg(all(test, unix))]
+static SOURCE_READS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Counts the settings file reads made in one folder, for tests that measure them.
+/// Input: the canonical folder. Output: how many reads opened a file in it so far.
+#[cfg(all(test, unix))]
+pub(super) fn source_reads(folder: &Path) -> usize {
+    SOURCE_READS
+        .lock()
+        .unwrap()
+        .get(folder)
+        .copied()
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
     identity: Option<(u64, u64)>,
@@ -122,6 +139,14 @@ impl SourceFile {
 
     #[cfg(unix)]
     fn read_name(&self, name: &std::ffi::OsStr) -> Result<FileState, EngineError> {
+        #[cfg(test)]
+        {
+            *SOURCE_READS
+                .lock()
+                .unwrap()
+                .entry(self.path.clone())
+                .or_default() += 1;
+        }
         self.verify()?;
         let fd = match rustix::fs::openat(
             &self.parent,
@@ -856,10 +881,20 @@ pub(super) fn verified_source_hash_at(
     snapshot.hash()
 }
 
+/// The settings source hash the first page of a model-access read verified.
+/// Holds the owner revision and config it was verified at, so the later pages of the
+/// same read are served from that snapshot instead of reading the files again.
+pub(super) struct PageSnapshot {
+    revision: u64,
+    config_id: ConfigId,
+    source_hash: String,
+}
+
 pub(super) fn read(
     db: &mut Connection,
     config: &EffectiveConfig,
     sources: Option<&SettingsSources>,
+    snapshot: &mut Option<PageSnapshot>,
     a: &Admission,
     query: &OwnerRead,
 ) -> Result<OwnerReadReply, EngineError> {
@@ -869,7 +904,6 @@ pub(super) fn read(
         return Err(error("settings_publication_pending"));
     }
     let revision = owner_revision(&tx)?;
-    let source_hash = verified_source_hash(config, sources)?;
     let writable = sources.is_some();
     let (collection, record_id, cursor, limit) = match query {
         OwnerRead::ModelAccessPage {
@@ -879,6 +913,28 @@ pub(super) fn read(
         } => (*collection, None, cursor.as_ref(), *limit),
         OwnerRead::ModelAccessRecord { collection, id } => (*collection, Some(id), None, 1),
         _ => return Err(error("model_access_read_required")),
+    };
+    let held = cursor.and_then(|cursor| {
+        snapshot
+            .as_ref()
+            .filter(|held| {
+                held.revision == revision
+                    && held.config_id == config.id
+                    && held.source_hash == cursor.source_hash
+            })
+            .map(|held| held.source_hash.clone())
+    });
+    let source_hash = match held {
+        Some(hash) => hash,
+        None => {
+            let hash = verified_source_hash(config, sources)?;
+            *snapshot = Some(PageSnapshot {
+                revision,
+                config_id: config.id.clone(),
+                source_hash: hash.clone(),
+            });
+            hash
+        }
     };
     if !(1..=16).contains(&limit) {
         return Err(error("model_access_page_limit"));

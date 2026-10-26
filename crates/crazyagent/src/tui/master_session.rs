@@ -2140,10 +2140,7 @@ fn input_cursor(
     Ok(())
 }
 
-/// Builds the master Open action the TUI submits with its default choices for a project.
-/// Inputs: a connected owner controller and the project. Output: an Open action using the
-/// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
-/// account, the first allowed sandbox and the unit allowance; or a plain-language reason.
+/// Wall time a default master turn asks for: ten minutes, before capacity clipping.
 const MASTER_TURN_WALL_MS: u64 = 600_000;
 
 /// Default allowance for one master turn: the unit budget with ten minutes of wall time,
@@ -2163,6 +2160,10 @@ fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
     budget
 }
 
+/// Builds the master Open action the TUI submits with its default choices for a project.
+/// Inputs: a connected owner controller and the project. Output: an Open action using the
+/// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
+/// account, the first allowed sandbox and the unit allowance; or a plain-language reason.
 pub async fn default_master_open(
     controller: &mut OwnerController,
     project_id: &ProjectId,
@@ -2495,12 +2496,13 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::ScopeRevoked => "Access to this project was revoked",
         MasterReason::CapacityUnavailable => "Another turn is still running; wait for it",
         MasterReason::BudgetExhausted => "Budget exhausted",
-        MasterReason::ProfileBusy => "Account is busy with a sign-in or another turn",
+        MasterReason::ProfileBusy => "Account is busy with a sign-in or sign-out",
         MasterReason::ApprovalRequired => "Needs your approval",
         MasterReason::RuntimeUnavailable => "Model runtime unavailable",
         MasterReason::CaptureIncomplete => "Reply was incomplete",
         MasterReason::OutputLimit => "Reply was too long",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
+        MasterReason::RepositoryMissing => "This project has no repository yet",
         MasterReason::Cancelled => "Cancelled",
         MasterReason::Unknown => "Reason unknown",
     }

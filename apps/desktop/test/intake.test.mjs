@@ -135,6 +135,7 @@ test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
+  assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Setup, so no code graph is built." });
 });
 
 test("a finished onboarding opens its saved setup, shows unstarted steps as skipped and saves changes", () => {
@@ -184,6 +185,11 @@ test("confirm waits for the mapping agent unless a step failed", () => {
   assert.equal(intake.settled(view()), true);
   assert.equal(intake.settled(view({ mapping: { kind: "running" } })), false);
   assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), true);
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })),
+    { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" } })), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
+  assert.equal(intake.settled(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })), false);
+  assert.equal(intake.settled(view({ graph: { kind: "off" } })), true);
 });
 
 test("a started onboarding opens only with a project id from an applied receipt", () => {
@@ -213,15 +219,16 @@ test("setup lists each tool's state in plain words", () => {
 
 const entry = (id, kind, group, on_by_default, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default, state, ...extra });
 const pack = [
-  entry("graphify", "skill", "always", true, { state: "available" }),
+  entry("graphify", "skill", "graph", true, { state: "available" }),
   entry("superpowers", "skill", "workflow", true, { state: "available" }),
   entry("context-mode", "mcp_server", "context", true, { state: "available" }),
   entry("headroom", "mcp_server", "context", true, { state: "on" }, { license: "Apache-2.0" }),
   entry("serena", "mcp_server", "optional", false, { state: "available" }),
 ];
 
-test("the pack starts with the on-by-default entries ticked and names every ticked MCP server before approval", () => {
-  assert.deepEqual(intake.packTicks(pack), ["graphify", "superpowers", "context-mode", "headroom"]);
+test("the pack starts with the on-by-default entries that are not installed yet ticked and names every ticked MCP server before approval", () => {
+  assert.deepEqual(intake.packTicks(pack), ["graphify", "superpowers", "context-mode"]);
+  assert.deepEqual(intake.packTicks([entry("graphify", "skill", "graph", true, { state: "off" }), entry("x", "skill", "workflow", true, { state: "failed", reason: "no" })]), ["x"]);
   assert.equal(intake.approvalLine(pack, ["superpowers", "context-mode", "headroom"]),
     "Continuing lets your agents run these MCP servers: context-mode, headroom. You can turn any of them off later.");
   assert.equal(intake.approvalLine(pack, ["superpowers"]), null);
@@ -248,21 +255,27 @@ test("pack states read in plain words and only on or off entries count as instal
 test("the pack groups follow the manifest order and keep pack order inside each group", () => {
   const groups = intake.packGroups([...pack, entry("caveman", "skill", "reply_style", true, { state: "available" }), entry("odd", "skill", "later", false, { state: "available" })]);
   assert.deepEqual(groups.map((group) => [group.title, group.entries.map((item) => item.id)]), [
-    ["Always on", ["graphify"]], ["Workflow skills", ["superpowers"]], ["Reply style", ["caveman"]],
+    ["Code graph", ["graphify"]], ["Workflow skills", ["superpowers"]], ["Reply style", ["caveman"]],
     ["Context plugins", ["context-mode", "headroom"]], ["Optional", ["serena"]], ["Other", ["odd"]],
   ]);
   assert.deepEqual(intake.packGroups([]), []);
 });
 
-test("setup progress counts every tool, the always-on entries and the ticked pack", () => {
+test("setup progress counts every tool and only the ticked pack, so an unticked graphify entry is not waited for", () => {
   const status = {
     dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("uv", { state: "installing" }), dep("graphify", { state: "failed", reason: "no" })],
-    pack: [entry("graphify", "skill", "always", true, { state: "on" }), entry("superpowers", "skill", "workflow", true, { state: "installing" }),
+    pack: [entry("graphify", "skill", "graph", true, { state: "available" }), entry("superpowers", "skill", "workflow", true, { state: "installing" }),
       entry("serena", "mcp_server", "optional", false, { state: "available" })],
     running: true,
   };
-  assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 3, total: 5, failed: 1 });
-  assert.deepEqual(intake.setupProgress(status, []), { done: 3, total: 4, failed: 1 });
+  assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 2, total: 4, failed: 1 });
+  assert.deepEqual(intake.setupProgress(status, []), { done: 2, total: 3, failed: 1 });
+});
+
+test("the graphify command and the graphify pack entry have names that can't be confused", () => {
+  assert.equal(intake.entryName(entry("graphify", "skill", "graph", true, { state: "available" })), "Graphify skill for agents");
+  assert.equal(intake.entryName(entry("superpowers", "skill", "workflow", true, { state: "available" })), "superpowers");
+  assert.equal(intake.dependencyView(dep("graphify", { state: "found", version: "0.9.9" }, "Graphify command")).title, "Graphify command");
 });
 
 test("new routes for adding a project and reviewing its setup parse and format back", () => {
@@ -417,26 +430,37 @@ test("the setup review shows the steps, the overview, missing items and a confir
 });
 
 test("the tools step lists dependencies and the pack by group, and names the MCP servers it approves", () => {
-  const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("graphify", { state: "missing" })], pack, running: false };
+  const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("graphify", { state: "missing" }, "Graphify command")], pack, running: false };
   const base = { status: ok(value), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
   const markup = html(ToolsSetupView, base);
+  const rows = markup.split('<li class="in-row">');
+  const rowWith = (text) => { const found = rows.filter((row) => row.includes(text)); assert.equal(found.length, 1, text); return found[0]; };
   assert.match(markup, /tmux[\s\S]*Version 3\.5a on this Mac\.[\s\S]*Found/);
-  assert.match(markup, /graphify[\s\S]*Not installed/);
-  assert.match(markup, /<legend>Always on<\/legend>[\s\S]*graphify[\s\S]*always on/);
+  assert.match(rowWith("Graphify command"), /Not installed/);
+  assert.match(markup, /<legend>Code graph<\/legend>[\s\S]*Graphify skill for agents/);
+  assert.doesNotMatch(markup, /always on/i);
+  const skill = rowWith("Graphify skill for agents");
+  assert.match(skill, /checked=""/);
+  assert.doesNotMatch(skill, /disabled=""/);
+  const unticked = html(ToolsSetupView, { ...base, ticks: base.ticks.filter((id) => id !== "graphify") }).split('<li class="in-row">').find((row) => row.includes("Graphify skill for agents"));
+  assert.doesNotMatch(unticked, /checked=""/);
+  const present = rowWith("headroom");
+  assert.doesNotMatch(present, /type="checkbox"/);
+  assert.match(present, /Already installed/);
   assert.match(markup, /<legend>Workflow skills<\/legend>[\s\S]*superpowers/);
   assert.match(markup, /<legend>Context plugins<\/legend>[\s\S]*context-mode[\s\S]*MCP server/);
   assert.match(markup, /<legend>Optional<\/legend>[\s\S]*serena[\s\S]*off by default/);
   assert.match(markup, /headroom[\s\S]*>On</);
-  assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode, headroom\./);
+  assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode\./);
   assert.match(markup, />Set up tools<\/button>/);
   assert.match(markup, />Skip for now<\/button>/);
   assert.doesNotMatch(markup, /role="status"/);
   const finished = html(ToolsSetupView, { ...base, started: true });
-  assert.match(finished, /Setup finished: 2 of 6 done\./);
+  assert.match(finished, /Setup finished: 1 of 5 done\./);
   assert.match(finished, />Continue<\/button>/);
   assert.doesNotMatch(finished, /Skip for now/);
   const running = html(ToolsSetupView, { ...base, status: ok({ ...value, running: true }) });
-  assert.match(running, /Installing: 2 of 6 done\. You can continue; setup keeps going\./);
+  assert.match(running, /Installing: 1 of 5 done\. You can continue; setup keeps going\./);
   assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
 });

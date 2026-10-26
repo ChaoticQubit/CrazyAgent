@@ -1108,6 +1108,12 @@ mod tests {
 
         let mut known = ctx();
         known.store.setup = Load::Ready(crate::tui::screens::home::tests::tools(&[]));
+        known.store.accounts = Load::Ready(vec![crate::tui::seam::AccountRow {
+            id: crate::protocol::CredentialRef::new("account-1").unwrap(),
+            name: "Team key".into(),
+            provider: "Anthropic API".into(),
+            status: crate::accounts::AccountStatus::KeySaved.label().into(),
+        }]);
         let mut shell = at(Place::Home, known);
         assert!(drain(&mut shell).contains(&"Settings".to_owned()));
         shell.arrive(reply(Err("controller_pending_intent".into())));

@@ -382,11 +382,16 @@ impl ClaudeProtocol {
             return Ok(Vec::new());
         }
         let kinds = if message_type == "system" && subtype.as_deref() == Some("init") {
-            if self.native_session_id.is_some() {
-                return Err(ProtocolError::StaleMessage);
-            }
             let model = identifier(field(value, "model")?)?.to_owned();
             let capabilities = string_list(value, "capabilities")?;
+            if let Some(bound) = self.native_session_id.as_deref() {
+                if bound != session || self.phase != State::Active {
+                    return Err(ProtocolError::StaleMessage);
+                }
+                self.seen_events.insert(uuid.to_owned());
+                self.assert_consistent();
+                return Ok(Vec::new());
+            }
             self.native_session_id = Some(session.to_owned());
             self.phase = if self.active_request.is_some() {
                 State::Active

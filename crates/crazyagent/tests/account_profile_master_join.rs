@@ -302,6 +302,17 @@ impl Fixture {
         AccountProfileReply,
         AccountProfileReceipt,
     ) {
+        self.configure_as("configure-before-project").await
+    }
+
+    async fn configure_as(
+        &self,
+        id: &str,
+    ) -> (
+        AccountProfileRequest,
+        AccountProfileReply,
+        AccountProfileReceipt,
+    ) {
         self.assert_no_projects().await;
         let basis = self
             .read(OwnerRead::ModelAccessRecord {
@@ -326,7 +337,7 @@ impl Fixture {
         .await
         .unwrap();
         let request = AccountProfileRequest {
-            request_id: RequestId::new("configure-before-project").unwrap(),
+            request_id: RequestId::new(id).unwrap(),
             scope: NativeAuthScope {
                 expected_database_instance: identity.database_instance().to_owned(),
                 connection: actual.id.clone(),
@@ -818,6 +829,43 @@ async fn physically_replaced_generated_config_cannot_be_adopted_by_master_open()
     assert_eq!(fixture.physical_pins(), replacement);
     assert_eq!(std::fs::read(&config).unwrap(), bytes);
     assert!(retained.is_file());
+    fixture.assert_no_execution();
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn touched_generated_config_is_repinned_by_account_setup_and_open_joins_the_newest() {
+    let mut fixture = Fixture::start().await;
+    let (_, _, first) = fixture.configure().await;
+    let homes = std::fs::read_dir(fixture.root.path().join("configured-sdk-homes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(homes.len(), 1);
+    let config = homes[0].join(".backboard/config.json");
+    std::fs::File::options()
+        .write(true)
+        .open(&config)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_, _, second) = fixture.configure_as("configure-after-touch").await;
+    assert_eq!(first.profile_generation, 1);
+    assert_eq!(second.profile_generation, 2);
+    assert_ne!(second.custody_id, first.custody_id);
+    assert_eq!(second.profile_config_sha256, first.profile_config_sha256);
+    assert_eq!(second.profile_ref, first.profile_ref);
+    assert_eq!(fixture.count("account_profile_operations"), 2);
+    let project = fixture.create_and_bind().await;
+    let (_, operation) = fixture.open(&project, &second).await;
+    assert_eq!(operation.result, OwnerResult::Applied);
+    let session = fixture.session(&project).await;
+    let joined = fixture.registration(&session).unwrap();
+    let row: Value = serde_json::from_slice(&joined).unwrap();
+    assert_eq!(row["proof"]["generation"], json!(2));
+    assert_eq!(row["proof"]["custody_id"], json!(second.custody_id));
     fixture.assert_no_execution();
     fixture.stop().await;
 }

@@ -12,6 +12,7 @@ const ID_BYTES_MAX: usize = 256;
 pub const DEVELOPER_INSTRUCTIONS_BYTES_MAX: usize = 48 * 1024;
 const LOGINS_MAX: usize = 16;
 const AUTH_URL_BYTES_MAX: usize = 2048;
+const AUTH_URL_ORIGIN: &str = "https://auth.openai.com";
 const AUTH_ERROR_BYTES_MAX: usize = 4096;
 const ACCOUNT_EMAIL_BYTES_MAX: usize = 320;
 
@@ -1348,15 +1349,10 @@ fn auth_url(value: &Value) -> Result<SensitiveAuthText, ProtocolError> {
     {
         return Err(ProtocolError::InvalidMessage);
     }
-    let address = text
-        .strip_prefix("https://")
-        .or_else(|| text.strip_prefix("http://"))
+    let rest = text
+        .strip_prefix(AUTH_URL_ORIGIN)
         .ok_or(ProtocolError::InvalidMessage)?;
-    if address
-        .split(['/', '?', '#'])
-        .next()
-        .is_none_or(str::is_empty)
-    {
+    if !(rest.is_empty() || rest.starts_with(['/', '?', '#'])) {
         return Err(ProtocolError::InvalidMessage);
     }
     Ok(SensitiveAuthText(text.into()))

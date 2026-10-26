@@ -3,9 +3,8 @@ use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
-use crate::setup::{
-    DependencyState, PackEntry, PackGroup, PackKind, PackState, SetupStatus, plain_reason,
-};
+use crate::setup::pack::entry_title;
+use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, plain_reason};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
@@ -25,8 +24,8 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 mod tests;
 
-const TOOL_WIDTH: usize = 12;
-const NAME_WIDTH: usize = 24;
+const TOOL_WIDTH: usize = 16;
+const NAME_WIDTH: usize = 26;
 const KIND_WIDTH: usize = 10;
 const LICENSE_WIDTH: usize = 12;
 const LABEL_WIDTH: usize = 15;
@@ -199,9 +198,6 @@ impl AppSetup {
     }
 
     fn ticked(&self, entry: &PackEntry) -> bool {
-        if entry.group == PackGroup::Always {
-            return true;
-        }
         if Self::installed(&entry.state) && !self.first_run {
             return entry.state != PackState::Off;
         }
@@ -255,20 +251,21 @@ impl AppSetup {
         let Some(entry) = self.picked().cloned() else {
             return;
         };
-        if entry.group == PackGroup::Always {
-            ctx.say(Message::warning(&format!("{} is always on.", entry.id), ""));
+        let title = entry_title(&entry.id);
+        if entry.state == PackState::Installing {
+            ctx.say(Message::warning(&format!("{title} is installing now."), ""));
             return;
         }
-        if entry.state == PackState::Installing {
+        if Self::installed(&entry.state) && self.first_run {
             ctx.say(Message::warning(
-                &format!("{} is installing now.", entry.id),
-                "",
+                &format!("{title} is already installed."),
+                "Switch it on or off in Settings, Setup.",
             ));
             return;
         }
-        if Self::installed(&entry.state) && !self.first_run {
+        if Self::installed(&entry.state) {
             let on = entry.state == PackState::Off;
-            let done = format!("{} is {}.", entry.id, if on { "on" } else { "off" });
+            let done = format!("{title} is {}.", if on { "on" } else { "off" });
             let job = AppSetupJob::Pack {
                 change: PackChange::Switch { id: entry.id, on },
                 generation: ctx.next_generation(),
@@ -297,7 +294,7 @@ impl AppSetup {
         let pack: Vec<String> = self
             .entries()
             .iter()
-            .filter(|entry| self.ticked(entry))
+            .filter(|entry| self.ticked(entry) && !Self::installed(&entry.state))
             .map(|entry| entry.id.clone())
             .collect();
         self.finished_with_problems = false;
@@ -416,12 +413,11 @@ impl AppSetup {
             return;
         };
         let id = entry.id.clone();
-        let problem = if entry.group == PackGroup::Always {
-            Some(format!("{id} is always on and can't be removed."))
-        } else if entry.state == PackState::Installing {
-            Some(format!("{id} is installing now."))
+        let title = entry_title(&id);
+        let problem = if entry.state == PackState::Installing {
+            Some(format!("{title} is installing now."))
         } else if !Self::installed(&entry.state) {
-            Some(format!("{id} is not installed."))
+            Some(format!("{title} is not installed."))
         } else {
             None
         };
@@ -644,7 +640,7 @@ impl AppSetup {
             .take(window)
             .map(|(index, entry)| {
                 let values = vec![
-                    Line::raw(checkbox(self.ticked(entry), &entry.id)),
+                    Line::raw(checkbox(self.ticked(entry), entry_title(&entry.id))),
                     Line::raw(kind_word(entry.kind)),
                     Line::raw(entry.license.clone()),
                     status(pack_word(&entry.state), theme, glyphs),
@@ -677,9 +673,12 @@ impl AppSetup {
         }) = self.picked()
         {
             lines.extend(
-                wrap(&format!("{id}: {}", plain_reason(reason)), limit)
-                    .into_iter()
-                    .map(|part| styled(part, Role::Muted, theme)),
+                wrap(
+                    &format!("{}: {}", entry_title(id), plain_reason(reason)),
+                    limit,
+                )
+                .into_iter()
+                .map(|part| styled(part, Role::Muted, theme)),
             );
         }
         let servers: Vec<&str> = self
@@ -688,7 +687,7 @@ impl AppSetup {
             .filter(|entry| {
                 entry.kind == PackKind::McpServer
                     && self.ticked(entry)
-                    && (self.first_run || !Self::installed(&entry.state))
+                    && !Self::installed(&entry.state)
             })
             .map(|entry| entry.id.as_str())
             .collect();
@@ -785,7 +784,8 @@ impl AppSetup {
         match &self.ask {
             None => return (Vec::new(), None),
             Some(Ask::Remove { id }) => lines.extend(sentence(&format!(
-                "Remove {id}? Agents in every project stop getting it."
+                "Remove {}? Agents in every project stop getting it.",
+                entry_title(id)
             ))),
             Some(Ask::SignOut) => lines.extend(sentence(
                 "Sign out of GitHub? CrazyAgent deletes the GitHub token it keeps. Cloned projects stay.",

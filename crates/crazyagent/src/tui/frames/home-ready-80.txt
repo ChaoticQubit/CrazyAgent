@@ -20,5 +20,5 @@
                                                                                 
                                                                                 
                                                                                 
- ✓ Setup done. 2 accounts ready in pool Main.                                   
+ ✓ Setup done. 2 accounts are ready for agents.                                 
  n New project  a Add project  Enter Open  s Settings  / Filter          ? Help 

@@ -612,4 +612,54 @@ mod tests {
         assert_eq!(received.recv_timeout(Duration::from_secs(30)), Ok("closed"));
         drop(stdin);
     }
+
+    #[test]
+    fn a_wrapped_agent_cannot_vacate_or_create_a_protected_path_but_still_edits_the_project() {
+        let folders = folders();
+        let tests = std::env::current_exe().unwrap();
+        let helper = tests.parent().unwrap().with_file_name(HELPER_NAME);
+        assert!(
+            helper.is_file(),
+            "build crazyagent-win-boundary first: {}",
+            helper.display()
+        );
+        let project = &folders.project;
+        let git = project.join(".git");
+        fs::create_dir_all(git.join("hooks")).unwrap();
+        fs::write(git.join("config"), "[core]\r\n").unwrap();
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("README.md"), "readme\r\n").unwrap();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let installed =
+            WindowsSandbox::install(sandbox, &helper, &folders.profiles.join("agent.sb")).unwrap();
+        let run = |line: &str| {
+            let mut shell = Command::new(cmd());
+            shell.arg("/C").arg(line).current_dir(project);
+            crate::spawn_gate::status(
+                Sandbox::wrap(&installed, &shell)
+                    .unwrap()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap()
+            .success()
+        };
+        assert!(!run("ren .git .git-moved"));
+        assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
+        assert!(!run(r"mkdir .crazyagent\context"));
+        assert!(!project.join(".crazyagent").exists());
+        assert!(!run(r"echo planted>.git\config.lock"));
+        assert!(!git.join("config.lock").exists());
+        assert!(!run(r"mkdir .git\hooks\planted"));
+        assert!(!git.join("hooks").join("planted").exists());
+        assert!(!run("ren context context-moved"));
+        assert!(project.join("context").join("brief.md").is_file());
+        assert!(run(r"echo changed>src\work.txt"));
+        assert!(run("echo changed>README.md"));
+        assert_eq!(
+            fs::read_to_string(project.join("README.md")).unwrap(),
+            "changed\r\n"
+        );
+    }
 }

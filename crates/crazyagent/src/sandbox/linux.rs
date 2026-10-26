@@ -4,7 +4,7 @@ use super::{
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -36,6 +36,7 @@ const FS_ABI: ABI = ABI::V3;
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 const NET_ABI: ABI = ABI::V4;
+const SCOPE_ABI: ABI = ABI::V6;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
     "/usr",
@@ -61,8 +62,6 @@ const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/random",
     "/dev/urandom",
     "/dev/tty",
-    "/dev/ptmx",
-    "/dev/pts",
     "/dev/shm",
 ];
 
@@ -192,6 +191,17 @@ fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     created.restrict_self()
 }
 
+/// Adds a second Landlock layer that keeps signals and abstract Unix sockets inside the
+/// agent's domain, so the agent cannot signal the engine, its tmux server or other agents.
+/// Linux before 6.12 has no scopes: there the layer holds nothing and the first layer's
+/// boundary stands alone. No input. Output: the status, or the ruleset error.
+fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
+    Ruleset::default()
+        .scope(Scope::from_all(SCOPE_ABI))?
+        .create()?
+        .restrict_self()
+}
+
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
 /// socket and a new io_uring ring both fail with `EACCES`. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
@@ -235,21 +245,42 @@ fn unix_domain() -> Result<Vec<SeccompRule>, String> {
     Ok(vec![rule])
 }
 
-fn accepted(status: &RestrictionStatus, limit_network: bool) -> bool {
-    let held = match status.ruleset {
-        RulesetStatus::FullyEnforced => true,
-        RulesetStatus::PartiallyEnforced => !limit_network,
-        RulesetStatus::NotEnforced => false,
-    };
-    held && status.no_new_privs
+/// Tells whether the ruleset the helper applied holds the boundary. Inputs: the status
+/// `restrict_self` reported and whether no-new-privileges is set. Output: true only when
+/// every requested right is enforced. A partly enforced ruleset leaves rights such as
+/// truncate (Linux before 6.2) unrestricted, so that kernel falls back to bubblewrap.
+fn accepted(ruleset: &RulesetStatus, no_new_privs: bool) -> bool {
+    matches!(ruleset, RulesetStatus::FullyEnforced) && no_new_privs
+}
+
+/// Makes the helper lead a session of its own before it starts the harness, so the agent
+/// has no controlling terminal: it cannot push input into the engine's terminal (TIOCSTI)
+/// or get that terminal's signals. A helper already leading its session, as the first
+/// process of a terminal pane, keeps it. A process group leader, which `setsid` refuses,
+/// first rejoins its parent's group. Output: Ok once session, group and pid are equal.
+fn own_session() -> Result<(), String> {
+    let helper = rustix::process::getpid();
+    if rustix::process::getsid(None) == Ok(helper) {
+        return Ok(());
+    }
+    let session = |error: rustix::io::Errno| format!("session: {error}");
+    if rustix::process::getpgrp() == helper {
+        let parent = rustix::process::getppid().ok_or("session: the engine has exited")?;
+        let group = rustix::process::getpgid(Some(parent)).map_err(session)?;
+        rustix::process::setpgid(None, Some(group)).map_err(session)?;
+    }
+    rustix::process::setsid().map_err(session)?;
+    assert_eq!(rustix::process::getsid(None), Ok(helper));
+    assert_eq!(rustix::process::getpgrp(), helper);
+    Ok(())
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
-/// A probe applies an empty ruleset and the Unix-socket filter to itself and exits 0 when
-/// this kernel holds both; a run applies the policy and the filter to itself and then
-/// replaces itself with the harness. Output: the exit
-/// code, 2 for refused arguments, 3 when the kernel cannot hold the policy, 126 when the
-/// harness cannot start.
+/// A probe applies an empty ruleset, the scope layer and the Unix-socket filter to itself
+/// and exits 0 when this kernel holds them; a run applies the policy, the scope layer and
+/// the filter to itself, moves into a session of its own and then replaces itself with the
+/// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
+/// the policy or the session, 126 when the harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
         Ok(request) => request,
@@ -273,7 +304,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         } => (policy, Some((program, args))),
     };
     match enforce(&policy) {
-        Ok(status) if accepted(&status, policy.limit_network) => {}
+        Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
             eprintln!(
                 "crazyagent-landlock: this kernel cannot hold the boundary ({:?})",
@@ -286,6 +317,10 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(3);
         }
     }
+    if let Err(error) = scope_signals() {
+        eprintln!("crazyagent-landlock: {error}");
+        return ExitCode::from(3);
+    }
     if let Err(reason) = refuse_unix_sockets() {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
@@ -293,6 +328,10 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let Some((program, args)) = launch else {
         return ExitCode::SUCCESS;
     };
+    if let Err(reason) = own_session() {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     let error = Command::new(&program).args(args).exec();
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
@@ -302,7 +341,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
 }
 
 /// The Linux mechanism holding a project agent's boundary: the `crazyagent-landlock` helper,
-/// or bubblewrap where the kernel has no Landlock.
+/// or bubblewrap where the kernel cannot fully enforce its Landlock rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxBackend {
     Landlock { helper: PathBuf },
@@ -385,7 +424,9 @@ impl LinuxSandbox {
                 },
             ),
             None => Err(SandboxError::Unavailable(
-                "this Linux enforces no Landlock and has no bubblewrap; install bubblewrap".into(),
+                "this Linux cannot fully enforce Landlock file rules (Linux 6.2 or newer) and \
+                 has no bubblewrap; install bubblewrap"
+                    .into(),
             )),
         }
     }
@@ -575,6 +616,7 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
+        "--new-session",
         "--unshare-ipc",
         "--unshare-pid",
         "--unshare-uts",
@@ -597,4 +639,28 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     }
     command.arg("--chdir").arg(cwd);
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_fully_enforced_rules_with_no_new_privs_hold_the_boundary() {
+        assert!(accepted(&RulesetStatus::FullyEnforced, true));
+        assert!(!accepted(&RulesetStatus::PartiallyEnforced, true));
+        assert!(!accepted(&RulesetStatus::NotEnforced, true));
+        assert!(!accepted(&RulesetStatus::FullyEnforced, false));
+        assert!(!accepted(&RulesetStatus::PartiallyEnforced, false));
+    }
+
+    #[test]
+    fn bubblewrap_starts_the_agent_in_a_new_session() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let command = bwrap_command(Path::new(BWRAP_PATHS[0]), &grants, Path::new("/tmp"));
+        assert!(command.get_args().any(|arg| arg == "--new-session"));
+    }
 }

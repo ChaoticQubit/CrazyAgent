@@ -2,7 +2,8 @@ use super::new_project::{HarnessChoice, HarnessState};
 use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
-use super::project_page::open_path;
+use super::project::OpenRequest;
+use super::project_page::{Opening, opening};
 use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -356,14 +357,80 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
 }
 
 #[test]
-fn opening_a_path_refuses_relative_and_missing_paths() {
+fn a_project_folder_is_revealed_and_only_documents_inside_it_open() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-open-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let bundle = home.join("notes.app");
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    std::fs::write(bundle.join("Contents/Info.plist"), "<plist/>").unwrap();
+    let crazy = bundle.join(".crazyagent");
+    std::fs::create_dir_all(crazy.join("context/research/viewer.md")).unwrap();
+    std::fs::create_dir_all(crazy.join("context/documents")).unwrap();
+    std::fs::write(crazy.join("context/research/market.md"), "# Market").unwrap();
+    std::fs::write(crazy.join("context/documents/brief.PDF"), "%PDF").unwrap();
+    std::fs::write(
+        crazy.join("context/research/report.command"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::write(home.join("outside.md"), "kept outside").unwrap();
+    std::os::unix::fs::symlink(
+        home.join("outside.md"),
+        crazy.join("context/documents/escape.md"),
+    )
+    .unwrap();
+    let folder = |path: &std::path::Path| OpenRequest::Folder(path.display().to_string());
+    let context = |path: &str| OpenRequest::Context {
+        folder: crazy.display().to_string(),
+        path: path.into(),
+    };
+
+    let refused = Err("CrazyAgent opens only documents inside the project folder.".to_owned());
+    let let_through: Vec<(&str, Result<Opening, String>)> = [
+        "context/research/report.command",
+        "context/documents/escape.md",
+        "context/research/viewer.md",
+        "../outside.md",
+        "context/../../../outside.md",
+        "/etc/hosts",
+        "context/research",
+        "context/research/missing.md",
+        "",
+    ]
+    .into_iter()
+    .map(|path| (path, opening(&context(path))))
+    .filter(|(_, got)| *got != refused)
+    .collect();
+    assert_eq!(let_through, Vec::new(), "every one is refused");
     assert_eq!(
-        open_path("context/brief.md"),
-        Err("That file or folder is not there any more.".into())
+        opening(&folder(&bundle)),
+        Ok(Opening::Reveal(bundle.clone())),
+        "a project folder is shown in the file manager, so a folder named notes.app is never launched"
     );
     assert_eq!(
-        open_path("/private/tmp/ca-no-such-folder-4f1c"),
-        Err("That file or folder is not there any more.".into())
+        opening(&context("context/research/market.md")),
+        Ok(Opening::Open(crazy.join("context/research/market.md")))
+    );
+    assert_eq!(
+        opening(&context("context/documents/brief.PDF")),
+        Ok(Opening::Open(crazy.join("context/documents/brief.PDF")))
+    );
+    let missing = Err("That file or folder is not there any more.".to_owned());
+    assert_eq!(opening(&folder(std::path::Path::new("notes.app"))), missing);
+    assert_eq!(opening(&folder(&home.join("gone"))), missing);
+    assert_eq!(
+        opening(&folder(&crazy.join("context/research/market.md"))),
+        missing
+    );
+    assert_eq!(
+        opening(&OpenRequest::Context {
+            folder: "notes.app/.crazyagent".into(),
+            path: "context/research/market.md".into(),
+        }),
+        missing
     );
 }
 

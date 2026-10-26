@@ -40,7 +40,6 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/private/etc",
     "/private/var/db",
     "/private/var/select",
-    "/dev",
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/opt/homebrew/lib",
@@ -281,11 +280,25 @@ pub fn agent_env<'a>(
     Ok(env)
 }
 
+/// The session shim a headless agent starts through inside `sandbox-exec`, followed by the
+/// harness program and its arguments. It joins the engine's process group, starts a new
+/// session and replaces itself with the harness, so the agent holds no controlling terminal
+/// and its pid stays its process group. When the session cannot start it exits unstarted.
+#[cfg(unix)]
+pub const SESSION_SHIM: [&str; 5] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-e",
+    "setpgrp(0, getpgrp(getppid())) && POSIX::setsid() > 0 or die \"crazyagent: no new session: $!\\n\"; exec {$ARGV[0]} @ARGV or die \"crazyagent: cannot start $ARGV[0]: $!\\n\"",
+    "--",
+];
+
 /// Builds the one command every sandboxed headless agent process starts from: `-f
-/// <profile> <program>` under `sandbox-exec`, a cleared environment holding exactly
-/// [`agent_env`], and its own process group. Inputs: the installed profile, the absolute
-/// program, the base variables and the harness's variables (None removes one).
-/// Output: the command, or `Invalid` when any variable fails [`agent_variable_allowed`].
+/// <profile>`, the [`SESSION_SHIM`] and `<program>` under `sandbox-exec`, a cleared
+/// environment holding exactly [`agent_env`], and its own process group. Inputs: the
+/// installed profile, the absolute program, the base variables and the harness's variables
+/// (None removes one). Output: the command, or `Invalid` when a variable fails
+/// [`agent_variable_allowed`].
 #[cfg(unix)]
 pub fn agent_command<'a>(
     profile: &Path,
@@ -298,11 +311,16 @@ pub fn agent_command<'a>(
     command
         .arg("-f")
         .arg(profile)
+        .args(SESSION_SHIM)
         .arg(program)
         .env_clear()
         .envs(env.iter().map(|(name, value)| (name, value)))
         .process_group(0);
     assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert_eq!(
+        command.get_args().nth(2 + SESSION_SHIM.len()),
+        Some(program.as_os_str())
+    );
     assert_eq!(command.get_envs().count(), env.len());
     Ok(command)
 }
@@ -669,14 +687,14 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         text.push_str(&self.git_link_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
         }
         text.push_str(
-            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(deny file-read* file-write*\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
+            "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
         let network = text.len();
         match &self.network {
@@ -709,6 +727,7 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
         assert!(
             MACH_SERVICES

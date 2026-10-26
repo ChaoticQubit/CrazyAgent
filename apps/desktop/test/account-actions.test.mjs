@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { AccountsView, accountActions, deletePlan, deleteAccounts, deleteSummary, signInPolling } = await import("../src/screens/settings/accounts.tsx");
+const { AccountsView, accountActions, deletePlan, deleteAccounts, deleteSummary, linkedSignIn, signInPolling } = await import("../src/screens/settings/accounts.tsx");
 const { removeBody } = await import("../src/screens/settings/account-drawer.tsx");
 const { cancelSignIn, cancelError, discardAccount } = await import("../src/screens/settings/sign-in.tsx");
 
@@ -28,6 +28,16 @@ test("each account offers the actions its state allows: sign in, cancel a runnin
   assert.deepEqual(accountActions(keyed("d")), ["details", "delete"]);
   assert.equal(signInPolling([account("a"), keyed("d")]), false);
   assert.equal(signInPolling([account("a"), signing("b")]), true);
+});
+
+test("a Sign in again link opens that account with its sign-in, or its details once it needs none", () => {
+  const ok = (value) => ({ kind: "ok", value });
+  const list = [account("a"), account("b", { status: "signed_in", status_label: "Signed in" }), signing("c")];
+  assert.deepEqual(linkedSignIn(ok(list), "a"), { account: list[0], signIn: true });
+  assert.deepEqual(linkedSignIn(ok(list), "b"), { account: list[1], signIn: false });
+  assert.deepEqual(linkedSignIn(ok(list), "c"), { account: list[2], signIn: false });
+  assert.equal(linkedSignIn(ok(list), "gone"), undefined);
+  assert.equal(linkedSignIn({ kind: "loading" }, "a"), undefined);
 });
 
 test("delete leaves out accounts a pool uses and names the pools, since the engine refuses them", () => {

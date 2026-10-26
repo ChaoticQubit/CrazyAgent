@@ -14,6 +14,10 @@ test("bridge refusals map to plain copy and never echo raw codes or unknown text
   const limit = api.classifyFailure({ code: "pool_member_limit" });
   assert.deepEqual(limit, { kind: "error", code: "pool_member_limit", message: "A pool can hold up to 15 accounts." });
   assert.equal(api.classifyFailure({ code: "pool_in_use" }).message, "Can't delete this pool. A project uses it. Choose another pool for it first.");
+  assert.equal(api.classifyFailure({ code: "approved_accounts_limit" }).message,
+    "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.");
+  assert.equal(api.classifyFailure({ code: "allowed_destinations_limit" }).message,
+    "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.");
   assert.equal(api.classifyFailure({ code: "not_connected" }).code, "engine_unreachable");
   assert.equal(api.classifyFailure(new TypeError("Cannot read properties of undefined (reading 'invoke')")).code, "engine_unreachable");
   const unknown = api.classifyFailure({ code: "native_profile_custody_unsafe <b>" });

@@ -452,6 +452,39 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     );
     assert!(shown.contains("From Competitor research"), "{shown}");
     assert!(drawn.help.contains(&("y", "Save to memory")));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Handled,
+        "y must show the whole memory before it saves"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("# Competitors"), "{shown}");
+    assert!(!drawn.help.contains(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(text(&drawn.rows).contains("word word"));
+    assert!(drawn.help.contains(&("y", "Save to memory")));
+    let kept = screen.key(key(KeyCode::Char('y')));
+    assert!(
+        matches!(
+            kept,
+            ProjectReply::Review {
+                decision: ReviewDecision::Keep,
+                ..
+            }
+        ),
+        "{kept:?}"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
 
     screen.width = 80;
     screen.read(&research);
@@ -462,6 +495,12 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert!(shown.contains("Suggested memory"), "{shown}");
     assert!(shown.contains("y Save to memory   n Dismiss   e Edit first"));
     assert_eq!(drawn.help.first(), Some(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("# Competitors"));
+    assert!(drawn.rows.iter().all(|row| row.width() == 80));
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.reading);
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
     screen.edit = None;

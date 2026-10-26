@@ -289,9 +289,17 @@ async fn cli_kill_restart_same_database_rediscovery() {
         panic!("actual owner application required")
     };
     assert_eq!(original.current_revision.value(), 2);
+    let killed = root
+        .path()
+        .join(locator(root.path())["generation"].as_str().unwrap());
+    assert!(killed.join("owner.sock").exists());
     drop(first);
     let mut second = Process::launch(root.path(), "second.sock");
     second.ready();
+    assert!(
+        !killed.exists(),
+        "the second engine sweeps the generation the killed one left"
+    );
     let old_error = client
         .request(owner_request(
             "stale",
@@ -302,7 +310,10 @@ async fn cli_kill_restart_same_database_rediscovery() {
         ))
         .await
         .unwrap_err();
-    assert!(old_error.0.contains("Connection refused"), "{old_error}");
+    assert!(
+        old_error.0.contains("No such file or directory"),
+        "{old_error}"
+    );
     let (current, next) =
         OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(2))
             .await

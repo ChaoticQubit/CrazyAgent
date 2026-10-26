@@ -337,11 +337,11 @@ fn rows_never_carry_terminal_escapes_or_control_characters() {
     let text = row.text();
     assert_eq!(
         printable(hostile.to_owned()),
-        "report.md nexttxt.exe    tab"
+        "report.md next\\u202etxt.exe    tab"
     );
     assert_eq!(
         text,
-        "report.md nexttxt.exe    tabreport.md nexttxt.exe    tab"
+        "report.md next\\u202etxt.exe    tabreport.md next\\u202etxt.exe    tab"
     );
     assert!(!text.chars().any(char::is_control));
     assert_eq!(printable("plain".into()), "plain");

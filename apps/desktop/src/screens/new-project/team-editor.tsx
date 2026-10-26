@@ -65,7 +65,6 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
   const notes = teamNotes(team, harnesses);
   const master = harnesses?.find((harness) => harness.id === team.master);
   const fixed = (id: string) => harnesses?.find((harness) => harness.id === id)?.tools.kind === "limited";
-  const accounts = pool?.pool.members.length ?? 0;
   const researchHarnesses = [...new Set((team.sub_harnesses.length ? team.sub_harnesses.map((slot) => slot.harness) : [team.master]).map((id) => harnessName(harnesses, id)))];
   return <div className="pj-stack">
     <section className="pj-stack-s" aria-labelledby={`${prefix}-master`}>
@@ -123,8 +122,6 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
         <span>agents, counting the master.</span>
       </div>
       {errors.range && <p className="pj-error" id={`${prefix}-range-error`} role="alert">{errors.range}</p>}
-      {pool && accounts > 0 && team.max_agents > accounts &&
-        <p className="pj-note">{displayText(poolName(pool.pool))} has {accounts} {accounts === 1 ? "account" : "accounts"}. Agents beyond {accounts} wait for a free account.</p>}
       <p className="pj-help">This team has {totalAgents(team)} {totalAgents(team) === 1 ? "agent" : "agents"}.</p>
     </section>
     {research.length > 0 && <section className="pj-stack-s"><h3>Research</h3>

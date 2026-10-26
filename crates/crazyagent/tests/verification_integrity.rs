@@ -100,6 +100,13 @@ impl Harness {
         reply.outcome
     }
 
+    async fn try_call(&mut self, command: Command) -> Result<Outcome, String> {
+        let request = self.request(command);
+        let reply = self.engine.apply(request).await.map_err(|e| e.0)?;
+        self.revision = reply.revision.value();
+        Ok(reply.outcome)
+    }
+
     async fn owner(&mut self, action: OwnerVerification) -> Outcome {
         self.call(Command::OwnerVerification { action }).await
     }
@@ -511,6 +518,191 @@ async fn retained_attempt_history_remains_bounded_and_retrievable() {
         "verification_capacity"
     );
     assert_eq!(h.state().await.attempts_total, 128);
+    h.engine.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn verification_capacity_counts_live_records_not_superseded_history() {
+    let mut h = Harness::open().await;
+    let current = h.setup().await;
+    let mut revoked = draft();
+    revoked.requirements = "Revoked contract".into();
+    let revoked_id = revoked.identity().unwrap();
+    assert_eq!(
+        h.call(Command::ProposeBaseline {
+            draft: revoked.clone()
+        })
+        .await,
+        Outcome::Applied
+    );
+    assert_eq!(
+        h.owner(OwnerVerification::Revoke {
+            baseline_id: revoked_id.clone()
+        })
+        .await,
+        Outcome::Applied
+    );
+    let contract = |requirements: String| {
+        let mut contract = draft();
+        contract.requirements = requirements;
+        contract
+    };
+    assert_eq!(
+        h.call(Command::CreateProject {
+            project_id: ProjectId::new("other").unwrap(),
+            spec: ProjectSpec {
+                name: "other".into(),
+                repositories: vec![]
+            }
+        })
+        .await,
+        Outcome::Applied
+    );
+    let other = |requirements: &str| {
+        let mut other = contract(requirements.into());
+        other.project_id = ProjectId::new("other").unwrap();
+        other
+    };
+    let superseded = other("Superseded contract");
+    let latest = other("Latest contract");
+    for approved in [&superseded, &latest] {
+        assert_eq!(
+            h.call(Command::ProposeBaseline {
+                draft: approved.clone()
+            })
+            .await,
+            Outcome::Applied
+        );
+        assert_eq!(
+            h.owner(OwnerVerification::Approve {
+                baseline_id: approved.identity().unwrap()
+            })
+            .await,
+            Outcome::Applied
+        );
+    }
+    let pending = |n: usize| contract(format!("Pending contract {n}"));
+    for n in 4..128 {
+        assert_eq!(
+            h.call(Command::ProposeBaseline { draft: pending(n) }).await,
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        h.try_call(Command::ProposeBaseline {
+            draft: pending(128)
+        })
+        .await,
+        Ok(Outcome::Applied)
+    );
+    let database = h.root.path().join("db");
+    let count = |sql: &str| -> i64 {
+        rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count("SELECT COUNT(*) FROM verification_baselines"), 128);
+    let kept = |id: &BaselineId| {
+        format!(
+            "SELECT COUNT(*) FROM verification_baselines WHERE id='{}'",
+            id.as_str()
+        )
+    };
+    assert_eq!(count(&kept(&superseded.identity().unwrap())), 0);
+    assert_eq!(count(&kept(&current)), 1);
+    assert_eq!(count(&kept(&latest.identity().unwrap())), 1);
+    assert_eq!(count(&kept(&revoked_id)), 1);
+    assert_eq!(
+        h.try_call(Command::ProposeBaseline {
+            draft: pending(129)
+        })
+        .await,
+        Err("verification_capacity".into())
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM verification_baselines"), 128);
+    for n in 4..129 {
+        assert_eq!(count(&kept(&pending(n).identity().unwrap())), 1, "{n}");
+    }
+    assert_eq!(
+        h.call(Command::ProposeBaseline { draft: revoked }).await,
+        Outcome::Applied
+    );
+    assert_eq!(
+        h.owner(OwnerVerification::Approve {
+            baseline_id: revoked_id
+        })
+        .await,
+        Outcome::Rejected {
+            code: "baseline_revoked".into()
+        }
+    );
+    for n in 0..128 {
+        assert_eq!(
+            h.owner(OwnerVerification::Verify {
+                candidate_id: id("candidate"),
+                attempt_id: id(&format!("attempt-{n:03}"))
+            })
+            .await,
+            Outcome::Applied
+        );
+    }
+    let register = |candidate: String| OwnerVerification::Register {
+        id: id(&candidate),
+        task_id: TaskId::new("task").unwrap(),
+        snapshot: snapshot(),
+        environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+    };
+    assert_eq!(
+        h.owner(register("candidate-001".into())).await,
+        Outcome::Applied
+    );
+    assert_eq!(
+        h.try_call(Command::OwnerVerification {
+            action: OwnerVerification::Verify {
+                candidate_id: id("candidate-001"),
+                attempt_id: id("fresh"),
+            }
+        })
+        .await,
+        Ok(Outcome::Applied)
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM verification_attempts"), 128);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM verification_attempts WHERE candidate='candidate-001'"),
+        1
+    );
+    for n in 2..128 {
+        assert_eq!(
+            h.owner(register(format!("candidate-{n:03}"))).await,
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        h.try_call(Command::OwnerVerification {
+            action: register("candidate-128".into())
+        })
+        .await,
+        Ok(Outcome::Applied)
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM verification_candidates"), 128);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM verification_candidates WHERE id='candidate'"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM verification_attempts WHERE candidate='candidate'"),
+        0
+    );
+    match h
+        .owner(OwnerVerification::Inspect {
+            candidate_id: id("candidate-128"),
+        })
+        .await
+    {
+        Outcome::Verification { state } => assert_eq!(state.attempts_total, 0),
+        other => panic!("{other:?}"),
+    }
     h.engine.close().await.unwrap();
 }
 

@@ -2,7 +2,8 @@ import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
- * the bridge; such a refusal happens before any action, so repeating it is safe.
+ * the bridge; such a refusal happens before any action, so repeating it is safe. Each pause
+ * is spread at random so calls refused together do not all retry at the same moment again.
  * Inputs: the call and a base pause in milliseconds. Output: the call result or failure. */
 export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
@@ -11,7 +12,7 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
     } catch (failure) {
       const busy = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "busy";
       if (!busy || attempt >= 8) throw failure;
-      await new Promise((resolve) => setTimeout(resolve, pause * attempt));
+      await new Promise((resolve) => setTimeout(resolve, pause * attempt * (0.5 + Math.random())));
     }
   }
 }
@@ -255,7 +256,6 @@ export function errorMessage(error: unknown): string {
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
     setup_outcome_unknown: "The setup request did not finish. Refresh before continuing.",
     pack_unknown: "This entry is not in the default pack.",
-    pack_required: "This entry is always on and can't be removed.",
     pack_not_installed: "This entry is not installed yet. Run setup first.",
     pack_name_taken: "A skill or server with this name already exists.",
     agent_not_found: "This agent was not found. Refresh the list.",
@@ -801,7 +801,7 @@ export interface FolderSize {
 
 export type AddFolderMode = "move" | "copy";
 
-export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
+export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "failed"; reason: string };
 
 export interface MappingFacts {
   languages: string[];
@@ -905,7 +905,7 @@ export interface Dependency {
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
-export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
+export type PackGroup = "graph" | "workflow" | "design" | "reply_style" | "context" | "optional";
 
 export type PackState = { state: "available" } | { state: "installing" } | { state: "on" } | { state: "off" } | { state: "failed"; reason: string };
 

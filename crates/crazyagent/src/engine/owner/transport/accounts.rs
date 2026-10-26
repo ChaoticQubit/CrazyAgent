@@ -350,21 +350,26 @@ async fn handle(
             if let (Some(credential), Some(key)) = (&credential, key) {
                 store_key(root, credential, key)?;
             }
-            let added = actor(
-                engine,
-                admission,
-                Command::Add(Box::new(connection), details),
-            )
-            .await;
-            let added = match added {
-                Ok(ResultValue::Account(listed)) => listed,
-                Ok(_) => return Err(unknown()),
-                Err(error) => {
-                    if let Some(credential) = &credential {
-                        let _ = remove_key(root, credential);
-                    }
-                    return Err(error);
-                }
+            let keys = authority.clone();
+            let added = engine
+                .settled_job(
+                    |reply| {
+                        Job::Accounts(
+                            admission.clone(),
+                            Command::Add(Box::new(connection), details),
+                            reply,
+                        )
+                    },
+                    move |result| {
+                        if let (Err(_), Some(credential)) = (result, &credential) {
+                            let _ = remove_key(&keys.root, credential);
+                        }
+                        Ok(())
+                    },
+                )
+                .await?;
+            let ResultValue::Account(added) = added else {
+                return Err(unknown());
             };
             Reply::Account {
                 account: views(root, vec![*added]).await?.remove(0),

@@ -278,6 +278,7 @@ export function turnLine(turn: MasterTurn): string {
   if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return "Not signed in. Sign in again in Settings, Accounts, then send again.";
   if (turn.phase === "blocked" && turn.reason === "readiness_stale") return "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.";
   if (turn.phase === "blocked" && turn.reason === "connection_changed") return "Settings changed since the master started. End the conversation, then send again.";
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return "The master couldn't start: this project has no repository yet.";
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
     case "running": return "Thinking...";

@@ -449,6 +449,164 @@ async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
     assert_eq!(onboarding.name, "notes");
 }
 
+/// Serves the setup change and pool edit a confirmed onboarding review sends,
+/// until the review opens its project. Takes the shell and its engine connection.
+/// Returns the requests sent, in order.
+async fn serve_until_project(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+        }
+        if matches!(shell.place(), Some(Place::Project { .. })) {
+            return sent;
+        }
+        if !connection.busy()
+            && let Some(request) = shell.ctx.next_request()
+        {
+            match request {
+                Request::Setup(query) => {
+                    sent.push("setup");
+                    connection.project_setup(query).unwrap();
+                }
+                Request::EditPool { change } => {
+                    sent.push("edit pool");
+                    let generation = shell.ctx.next_generation();
+                    connection
+                        .shell(ShellRequest::EditPool { change, generation })
+                        .unwrap();
+                }
+                other => panic!("confirming a setup never sends {other:?}"),
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the confirmed setup never opened its project: {sent:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_confirmed_setup_gives_the_chosen_pool_to_the_project_master() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let folder = home.join("notes");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(
+        folder.join("Cargo.toml"),
+        "[package]\nname = \"notes\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let path: String = folder.to_str().unwrap().into();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(
+        &Place::Onboarding {
+            path: path.clone(),
+            name: "notes".into(),
+            project: None,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["pools"]);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let Some(Place::Onboarding {
+        project: Some(project),
+        ..
+    }) = shell.place()
+    else {
+        panic!("the started onboarding names its project");
+    };
+    drop(connection);
+    drop(shell);
+
+    let worker = crate::onboarding::service::start_for_engine(
+        engine.root.path(),
+        &engine.root.path().join("global.toml"),
+        &engine.root.path().join("project.toml"),
+        None,
+        None,
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let onboarding = engine.controller.onboarding(project.clone()).await.unwrap();
+        let done = |step: &Step| matches!(step, Step::Done | Step::Off | Step::Failed { .. });
+        if done(&onboarding.graph) && done(&onboarding.mapping) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the onboarding never settled: {onboarding:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    worker.stop();
+
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(
+        &Place::Onboarding {
+            path,
+            name: "notes".into(),
+            project: Some(project.clone()),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Confirm"), "{rows:#?}");
+    shell.key(Key::Tab);
+    keys(&mut shell, "Keeps notes.");
+    for _ in 0..3 {
+        shell.key(Key::Tab);
+    }
+    shell.key(Key::Enter);
+    let sent = serve_until_project(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["setup", "edit pool"], "{sent:?}");
+
+    let reply = engine
+        .controller
+        .read(crate::engine::owner::OwnerRead::ModelAccessPage {
+            collection: crate::engine::owner::ModelAccessCollection::Pools,
+            cursor: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let crate::engine::owner::OwnerData::ModelAccessPage { items, .. } = reply.data else {
+        panic!("the engine answers a pool page");
+    };
+    let pool = items
+        .iter()
+        .find_map(|item| match item {
+            crate::engine::owner::ModelAccessRecord::Pool { pool }
+                if pool.id.as_str() == "pool-a" =>
+            {
+                Some(pool)
+            }
+            _ => None,
+        })
+        .expect("the chosen pool is still there");
+    assert!(
+        pool.projects
+            .iter()
+            .any(|scope| scope.as_str() == project.as_str()),
+        "the chosen pool serves the set-up project: {pool:?}"
+    );
+    assert!(
+        pool.roles
+            .iter()
+            .any(|role| role.as_str() == "project_leader"),
+        "the chosen pool may lead the project as its master: {pool:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_run_setup_continues_without_installing_and_home_lists_what_is_missing() {
     let mut engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;
@@ -524,6 +682,25 @@ fn tools_found(status: &crate::setup::SetupStatus) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready() {
     let mut engine = Engine::start().await;
+    engine
+        .controller
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::AnthropicApi,
+                method: crate::accounts::SignInMethod::ApiKey,
+                name: "Team key".into(),
+                url: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    b"unit-placeholder-anthropic-key-0001".to_vec(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
     let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
@@ -535,10 +712,88 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
     assert_eq!(
         shows(&rows, "Get set up"),
         !found,
-        "the pool has a ready local account, so only tools decide; the engine reports {:?}: {rows:#?}",
+        "a pool exists and an account has a saved key, so only tools decide; the engine reports {:?}: {rows:#?}",
         status.dependencies
     );
     assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_an_account_is_done_only_when_an_engine_account_is_ready_for_agents() {
+    use crate::accounts::{AccountDraft, AccountStatus, Provider, SignInMethod};
+    use crate::engine::owner::AccountSecret;
+
+    let engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;
+    let draft = |provider, method, name: &str, model: Option<&str>| AccountDraft {
+        provider,
+        method,
+        name: name.into(),
+        url: None,
+        model: model.map(Into::into),
+    };
+    for _ in 0..2 {
+        let waiting = engine
+            .controller
+            .add_account(
+                draft(
+                    Provider::Claude,
+                    SignInMethod::Subscription,
+                    "ChaoticQubit",
+                    None,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.status, AccountStatus::NotSignedIn);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    for line in [
+        "No account is ready for",
+        "agents yet. Sign one in",
+        "or check its key or URL.",
+    ] {
+        assert!(shows(&rows, line), "{line}: {rows:#?}");
+    }
+    assert!(shows(&rows, "Enter opens Settings"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Settings(super::SettingsSection::Accounts))
+    );
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+
+    let saved = engine
+        .controller
+        .add_account(
+            draft(
+                Provider::AnthropicApi,
+                SignInMethod::ApiKey,
+                "Team key",
+                Some("claude-sonnet-4-5"),
+            ),
+            Some(AccountSecret::new(b"unit-placeholder-anthropic-key-0001".to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status, AccountStatus::KeySaved);
+    shell.refresh();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[x] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "Team key is ready for"), "{rows:#?}");
+    assert!(shows(&rows, "agents."), "{rows:#?}");
+    assert!(
+        rows.iter().all(|row| row.chars().count() <= 80),
+        "{rows:#?}"
+    );
 }
 
 fn waiting_review() -> (Shell, ProjectId) {
@@ -595,6 +850,26 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         Ok(IntakeView::Onboarding(Box::new(draft))),
     ));
     (shell, project)
+}
+
+#[test]
+fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Off;
+        view.mapping = Step::Running;
+    });
+    let rows = render(&mut shell, 80, 40);
+    let off = format!("{} Turned off", shell.ctx.glyphs.status(Status::Off));
+    assert!(shows(&rows, "Build the code graph"), "{rows:#?}");
+    assert!(shows(&rows, &off), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Running"), "{rows:#?}");
 }
 
 #[test]

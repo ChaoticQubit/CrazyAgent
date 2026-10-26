@@ -96,20 +96,46 @@ impl MasterFixture {
         }
     }
 
-    /// Acquires the execution lease of the profile for one operation.
+    /// Acquires the shared execution lease of the profile for one operation.
     /// Takes the operation id and its generation. Returns the lease, or the engine's refusal
-    /// while another lease still holds the profile.
+    /// while a sign-in, refresh or logout holds the profile.
     pub(in crate::engine) fn lease(
         &mut self,
         operation: &str,
         generation: u64,
+    ) -> Result<NativeProfileUse, EngineError> {
+        self.acquire(operation, generation, NativeProfileUsePurpose::Execution)
+    }
+
+    /// Acquires the exclusive sign-in lease of the profile, which no running agent shares.
+    /// Takes the operation id and its generation. Returns the lease, or
+    /// `native_profile_in_use` while any execution lease still holds the profile.
+    pub(in crate::engine) fn sign_in(
+        &mut self,
+        operation: &str,
+        generation: u64,
+    ) -> Result<NativeProfileUse, EngineError> {
+        self.acquire(
+            operation,
+            generation,
+            NativeProfileUsePurpose::Authentication,
+        )
+    }
+
+    /// Acquires one lease of the profile for one operation and purpose.
+    /// Takes the operation id, its generation and the purpose. Returns the custody's result.
+    fn acquire(
+        &mut self,
+        operation: &str,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
     ) -> Result<NativeProfileUse, EngineError> {
         self.custody.acquire_use(
             &self.host,
             &self.binding,
             &RequestId::new(operation).unwrap(),
             generation,
-            NativeProfileUsePurpose::Execution,
+            purpose,
         )
     }
 

@@ -7,7 +7,6 @@ use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::setup::SetupStatus;
 use serde::Serialize;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -109,7 +108,7 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 34] = [
+const SETUP_CODES: [&str; 33] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "setup_checksum_mismatch",
     "setup_download_failed",
@@ -137,7 +136,6 @@ const SETUP_CODES: [&str; 34] = [
     "pack_bundled_unavailable",
     "pack_unknown",
     "pack_name_taken",
-    "pack_required",
     "pack_not_installed",
     "pack_id_invalid",
     "pack_too_many",
@@ -174,6 +172,13 @@ pub fn intake_code(code: &str) -> Option<&'static str> {
     INTAKE_CODES.iter().copied().find(|item| *item == code)
 }
 
+/// Names a setup or pack refusal the window has a sentence for, so an owner receipt
+/// keeps the engine's reason instead of a general one.
+/// Input: an engine code. Output: the same code as a static name, or None.
+pub fn setup_code(code: &str) -> Option<&'static str> {
+    SETUP_CODES.iter().copied().find(|item| *item == code)
+}
+
 fn intake_failure(error: EngineError) -> BridgeError {
     known(&error.0, &INTAKE_CODES, "owner_read_failed")
 }
@@ -204,24 +209,6 @@ fn pack_ids(pack: Vec<String>) -> Result<Vec<String>, BridgeError> {
         return Err(failure("pack_id_invalid"));
     }
     Ok(pack)
-}
-
-fn plain_file(path: &Path, limit: u64) -> Option<String> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.file_type().is_file() || meta.len() > limit {
-        return None;
-    }
-    let file = std::fs::File::open(path).ok()?;
-    let opened = file.metadata().ok()?;
-    if !opened.is_file() || opened.len() > limit {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > limit {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
 }
 
 fn plain_dir(path: &Path) -> bool {
@@ -278,7 +265,7 @@ pub fn origin_on_github(folder: &Path) -> Option<String> {
     if !plain_dir(&git) {
         return None;
     }
-    let text = plain_file(&git.join("config"), GIT_CONFIG_BYTES_MAX)?;
+    let text = crazyagent::platform::read_plain_file(&git.join("config"), GIT_CONFIG_BYTES_MAX)?;
     let mut origin = false;
     for line in text.lines() {
         let line = line.trim();
@@ -662,6 +649,54 @@ mod tests {
         assert_eq!(origin_on_github(folder.path()), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_git_config_swapped_for_a_link_after_the_check_is_never_followed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let folder = tempfile::tempdir().unwrap();
+        let git = folder.path().join(".git");
+        fs::create_dir(&git).unwrap();
+        let elsewhere = folder.path().join("elsewhere.conf");
+        fs::write(
+            &elsewhere,
+            "[remote \"origin\"]\n\turl = https://github.com/other/secret.git\n",
+        )
+        .unwrap();
+        let plain = "[remote \"origin\"]\n\turl = https://github.com/mira/shop.git\n";
+        let config = git.join("config");
+        fs::write(&config, plain).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let stop = Arc::clone(&stop);
+            let (git, config, elsewhere) = (git.clone(), config.clone(), elsewhere.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let link = git.join("staged-link");
+                    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+                    fs::rename(&link, &config).unwrap();
+                    let file = git.join("staged-plain");
+                    fs::write(&file, plain).unwrap();
+                    fs::rename(&file, &config).unwrap();
+                }
+            })
+        };
+        let (mut read, mut followed) = (0, 0);
+        for _ in 0..20_000 {
+            match origin_on_github(folder.path()).as_deref() {
+                Some("mira/shop") => read += 1,
+                Some("other/secret") => followed += 1,
+                _ => {}
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        assert!(read > 0, "the plain config was read while the swap ran");
+        assert_eq!(
+            followed, 0,
+            "a link swapped in after the check is never followed ({read} plain reads)"
+        );
+    }
+
     #[test]
     fn a_started_onboarding_names_the_project_the_engine_registers() {
         assert_eq!(
@@ -741,5 +776,21 @@ mod tests {
             github_failure(EngineError("clone_destination_exists".into())).code,
             "clone_destination_exists"
         );
+    }
+
+    #[test]
+    fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
+        let refused = |code: &str| {
+            known(
+                super::super::rejection_code(code),
+                &SETUP_CODES,
+                "setup_failed",
+            )
+            .code
+        };
+        for code in SETUP_CODES {
+            assert_eq!(refused(code), code);
+        }
+        assert_eq!(refused("raw /Users/mira/token"), "setup_failed");
     }
 }

@@ -31,7 +31,6 @@ const REPLY_WAIT: Duration = Duration::from_secs(40);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const LSOF: &str = "/usr/sbin/lsof";
-#[cfg(unix)]
 const STOP_INCOMPLETE: &str = "agent_stop_incomplete";
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
@@ -485,6 +484,23 @@ impl Recorder {
         }
     }
 
+    /// Records how a stopped agent ended: the given state and reason once no process
+    /// holding its output log is left, otherwise Failed with `agent_stop_incomplete`.
+    /// Inputs: the state, exit code and reason, and whether the stop completed.
+    fn ended(
+        &self,
+        state: AgentState,
+        exit_code: Option<i32>,
+        reason: Option<&str>,
+        complete: bool,
+    ) {
+        if complete {
+            self.finish(state, exit_code, reason);
+        } else {
+            self.finish(AgentState::Failed, exit_code, Some(STOP_INCOMPLETE));
+        }
+    }
+
     fn text(&self, text: &str) {
         if let Ok(db) = self.db.lock() {
             let _ = db.execute(
@@ -634,19 +650,7 @@ impl Agents {
 
     #[cfg(unix)]
     fn probe(&self, id: &str) -> Option<File> {
-        let path = self.folder(id).join(launch::DURABLE_OUTPUT);
-        let file = rustix::fs::open(
-            &path,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .ok()
-        .map(File::from)?;
-        let metadata = file.metadata().ok()?;
-        (metadata.is_file()
-            && metadata.uid() == rustix::process::geteuid().as_raw()
-            && launch::holder_alive(&file))
-        .then_some(file)
+        log_probe(&self.folder(id).join(launch::DURABLE_OUTPUT)).filter(launch::holder_alive)
     }
 
     #[cfg(unix)]
@@ -675,12 +679,12 @@ impl Agents {
                             .metadata()
                             .is_ok_and(|metadata| metadata.len() > limit)
                         {
-                            let reason = if kill_holders(group, &output, &probe) {
-                                "launch_output_limit"
-                            } else {
-                                STOP_INCOMPLETE
-                            };
-                            recorder.finish(AgentState::Failed, None, Some(reason));
+                            recorder.ended(
+                                AgentState::Failed,
+                                None,
+                                Some("launch_output_limit"),
+                                kill_holders(group, &output, &probe),
+                            );
                             return;
                         }
                         std::thread::sleep(MONITOR_POLL);
@@ -769,9 +773,12 @@ impl Agents {
                 )
                 .map_err(database)
         });
+        let output = self
+            .folder(id)
+            .join(crate::harnesses::launch::DURABLE_OUTPUT);
         if let Err(error) = prepared {
-            let _ = session.stop();
-            recorder.finish(AgentState::Failed, None, Some(&error.0));
+            let (_, complete) = end_session(session, &output);
+            recorder.ended(AgentState::Failed, None, Some(&error.0), complete);
             return Err(error);
         }
         busy.store(spec.prompt.is_some(), Ordering::Release);
@@ -781,7 +788,7 @@ impl Agents {
             let busy = busy.clone();
             std::thread::Builder::new()
                 .name("agent".into())
-                .spawn(move || drive(session, inbox, busy, recorder))
+                .spawn(move || drive(session, &output, inbox, busy, recorder))
                 .map_err(|_| {
                     failed.finish(AgentState::Failed, None, Some("agent_thread_unavailable"));
                     failure("agent_thread_unavailable")
@@ -936,9 +943,9 @@ impl Agents {
     }
 
     /// Stops one agent: its whole process group gets TERM, then KILL after the grace
-    /// time; a reattached agent is reached through what holds its output log, and is
-    /// recorded Failed when that cannot be ended. Other agents are untouched.
-    /// Input: id. Output: the stopped agent.
+    /// time, and whatever still holds its output log, such as a child that left the
+    /// group, is ended too; the agent is recorded Failed when that cannot be done.
+    /// Other agents are untouched. Input: id. Output: the stopped agent.
     pub fn stop(&self, id: &str) -> Result<AgentView, LaunchError> {
         if let Some(control) = self.hosted(id)? {
             control.stop.store(true, Ordering::Release);
@@ -1261,17 +1268,46 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
             if let Some(thread) = thread.take() {
                 let _ = thread.join();
             }
-            if kill_holders(group, &output, &probe) {
-                recorder.finish(state, None, None);
-            } else {
-                recorder.finish(AgentState::Failed, None, Some(STOP_INCOMPLETE));
-            }
+            recorder.ended(state, None, None, kill_holders(group, &output, &probe));
         }
         Live::Hosted { control } => {
             control.stop.store(true, Ordering::Release);
             recorder.finish(state, None, None);
         }
     }
+}
+
+/// Stops an owned agent's session, then ends what still holds its output log, such as a
+/// child that left the agent's group with setsid. Inputs: the session and its log path.
+/// Output: the exit code, and true once no holder of the log is left.
+#[cfg(unix)]
+fn end_session(session: Session, output: &Path) -> (Option<i32>, bool) {
+    let group = session.process_group();
+    let code = session.stop();
+    let complete = log_probe(output).is_some_and(|probe| kill_holders(group, output, &probe));
+    (code, complete)
+}
+
+/// Stops an owned agent's session where no output log lock exists. Inputs: the session
+/// and the log path, unused. Output: the exit code and true.
+#[cfg(not(unix))]
+fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
+    (session.stop(), true)
+}
+
+/// Opens an agent output log read-only to probe its lock, refusing a link, anything but
+/// a regular file and a file another user owns. Input: the log path. Output: the open.
+#[cfg(unix)]
+fn log_probe(path: &Path) -> Option<File> {
+    let file = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()
+    .map(File::from)?;
+    let metadata = file.metadata().ok()?;
+    (metadata.is_file() && metadata.uid() == rustix::process::geteuid().as_raw()).then_some(file)
 }
 
 /// Ends what still holds a reattached agent's output log: TERM, then KILL after the
@@ -1429,6 +1465,7 @@ fn writers(_output: &Path, _probe: &File) -> Option<Vec<rustix::process::Pid>> {
 
 fn drive(
     mut session: Session,
+    output: &Path,
     inbox: Receiver<Command>,
     busy: Arc<AtomicBool>,
     recorder: Recorder,
@@ -1448,14 +1485,14 @@ fn drive(
                 let _ = reply.send(session.interrupt());
             }
             Ok(Command::Stop(state, reply)) => {
-                let code = session.stop();
-                recorder.finish(state, code, None);
+                let (code, complete) = end_session(session, output);
+                recorder.ended(state, code, None, complete);
                 let _ = reply.send(Ok(()));
                 return;
             }
             Err(TryRecvError::Disconnected) => {
-                let code = session.stop();
-                recorder.finish(AgentState::Closed, code, None);
+                let (code, complete) = end_session(session, output);
+                recorder.ended(AgentState::Closed, code, None, complete);
                 return;
             }
             Err(TryRecvError::Empty) => {}
@@ -1482,8 +1519,8 @@ fn drive(
             Ok(_) => {}
             Err(error) => {
                 busy.store(false, Ordering::Release);
-                let _ = session.stop();
-                recorder.finish(AgentState::Failed, None, Some(&error.0));
+                let (_, complete) = end_session(session, output);
+                recorder.ended(AgentState::Failed, None, Some(&error.0), complete);
                 return;
             }
         }

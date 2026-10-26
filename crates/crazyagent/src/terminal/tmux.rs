@@ -118,6 +118,29 @@ impl Tmux {
             .is_ok_and(|metadata| metadata.file_type().is_socket())
     }
 
+    /// Waits until the private server stops listening after kill-server, then
+    /// removes the socket file tmux leaves behind, so `running` reports no server
+    /// and a later `alive` starts none. Output: Ok once it is gone, or
+    /// `terminal_not_answering` when it still listens at the deadline.
+    fn forget_server(&self) -> Result<(), HostError> {
+        let socket = self.socket();
+        let deadline = Instant::now() + REPLY_TIME;
+        while crate::spawn_gate::connect_unix_std(&socket).is_ok() {
+            if Instant::now() >= deadline {
+                return Err(failure("terminal_not_answering"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !self.running() {
+            return Ok(());
+        }
+        match std::fs::remove_file(&socket) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(failure("terminal_folder_unsafe")),
+        }
+    }
+
     fn live_control(&self) -> Result<Arc<Control>, HostError> {
         if self.executable.is_none() {
             return Err(failure("terminal_unavailable"));
@@ -685,9 +708,24 @@ fn guard<'a>(line: &'a [u8], word: &[u8]) -> Option<&'a [u8]> {
     line.strip_prefix(word)?.strip_prefix(b" ")
 }
 
+/// How many screen rows the reply block opening now holds, when it is an attach's capture.
+/// capture-pane prints one line per pane row and the pane's own text can look like any
+/// control line, including the block's closing guard, so those rows are counted as data
+/// rather than searched for a guard. Takes the state. Returns the pane height the attach
+/// read just before, or none for every other reply.
+fn capture_rows(state: &State) -> Option<usize> {
+    match state.pending.front()? {
+        Pending::Attach {
+            located: Some(lines),
+            ..
+        } => located(lines).map(|found| usize::from(found.rows)),
+        _ => None,
+    }
+}
+
 fn read(output: ChildStdout, state: &Mutex<State>) {
     let mut output = BufReader::new(output);
-    let mut block: Option<(Vec<u8>, Lines, usize)> = None;
+    let mut block: Option<(Vec<u8>, Lines, usize, Option<usize>)> = None;
     loop {
         let mut line = Vec::new();
         match output
@@ -704,9 +742,11 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         let Ok(mut state) = state.lock() else {
             break;
         };
-        if let Some((opened, lines, bytes)) = &mut block {
-            let ended = guard(&line, b"%end").filter(|rest| *rest == opened.as_slice());
-            let failed = guard(&line, b"%error").filter(|rest| *rest == opened.as_slice());
+        if let Some((opened, lines, bytes, rows)) = &mut block {
+            let counted = rows.is_some_and(|rows| lines.len() < rows);
+            let ended = guard(&line, b"%end").filter(|rest| !counted && *rest == opened.as_slice());
+            let failed =
+                guard(&line, b"%error").filter(|rest| !counted && *rest == opened.as_slice());
             if ended.is_some() || failed.is_some() {
                 let lines = std::mem::take(lines);
                 let answer = if ended.is_some() {
@@ -719,14 +759,14 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
                 continue;
             }
             *bytes += line.len() + 1;
-            if *bytes > REPLY_BYTES_MAX {
+            if *bytes > REPLY_BYTES_MAX || (rows.is_some() && !counted) {
                 break;
             }
             lines.push(line);
             continue;
         }
         if let Some(opened) = guard(&line, b"%begin") {
-            block = Some((opened.to_vec(), Vec::new(), 0));
+            block = Some((opened.to_vec(), Vec::new(), 0, capture_rows(&state)));
         } else if let Some(rest) = guard(&line, b"%output") {
             let (pane, data) = rest
                 .iter()
@@ -798,7 +838,7 @@ impl Host for Tmux {
         let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
-            "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}}' ; capture-pane {} -t {target}",
+            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}}' ; capture-pane {} -t {target}",
             control.capture
         );
         let (reply, answer) = sync_channel(1);
@@ -874,13 +914,12 @@ impl Host for Tmux {
             return Ok(());
         }
         let control = self.control()?;
-        let (reply, _answer) = sync_channel(1);
-        let _ = control.send("kill-server", Pending::Reply(reply));
+        let _ = control.run("kill-server");
         control.close();
         if let Ok(mut slot) = self.control.lock() {
             *slot = None;
         }
-        Ok(())
+        self.forget_server()
     }
 }
 

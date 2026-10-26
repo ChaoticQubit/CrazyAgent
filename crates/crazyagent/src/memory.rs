@@ -615,8 +615,38 @@ fn memory_text_valid(text: &str, maximum: usize) -> bool {
 /// points, and line or paragraph separators. One emoji selector or joiner inside an emoji
 /// stays allowed. Input: the text. Output: true when the text holds any other one.
 pub(crate) fn hidden_text(text: &str) -> bool {
+    if !text.chars().any(hidden_char) {
+        return false;
+    }
     let chars: Vec<char> = text.chars().collect();
-    (0..chars.len()).any(|at| hidden_char(chars[at]) && !emoji_part(&chars, at))
+    (0..chars.len()).any(|at| hidden_at(&chars, at))
+}
+
+/// Shows every character hidden_text finds as a visible escape, `\uXXXX` or `\u{XXXXX}`,
+/// the same form the desktop shows. Input: the text. Output: the text with those characters
+/// escaped; line breaks, tabs and an emoji selector or joiner inside an emoji stay as they are.
+pub(crate) fn visible_text(text: &str) -> String {
+    if !hidden_text(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    for at in 0..chars.len() {
+        let point = u32::from(chars[at]);
+        if !hidden_at(&chars, at) {
+            out.push(chars[at]);
+        } else if point > 0xffff {
+            out.push_str(&format!("\\u{{{point:x}}}"));
+        } else {
+            out.push_str(&format!("\\u{point:04x}"));
+        }
+    }
+    assert!(!hidden_text(&out));
+    out
+}
+
+fn hidden_at(chars: &[char], at: usize) -> bool {
+    hidden_char(chars[at]) && !emoji_part(chars, at)
 }
 
 fn hidden_char(c: char) -> bool {

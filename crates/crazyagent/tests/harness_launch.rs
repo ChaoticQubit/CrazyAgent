@@ -112,14 +112,13 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
     }
     assert!(args.ends_with(&["app-server".into(), "--listen".into(), "stdio://".into()]));
     assert_eq!(built.get_program(), "/usr/bin/sandbox-exec");
-    assert_eq!(
-        args[..3],
-        [
-            "-f".to_owned(),
-            work.path().join("project.sb").to_str().unwrap().to_owned(),
-            installed("codex").to_str().unwrap().to_owned()
-        ]
-    );
+    let mut start = vec![
+        "-f".to_owned(),
+        work.path().join("project.sb").to_str().unwrap().to_owned(),
+    ];
+    start.extend(crazyagent::sandbox::SESSION_SHIM.map(str::to_owned));
+    start.push(installed("codex").to_str().unwrap().to_owned());
+    assert_eq!(args[..start.len()], start);
     let home_text = home.path().to_str().unwrap().to_owned();
     let mut expected = BTreeMap::from([
         ("CODEX_HOME".into(), home_text.clone()),
@@ -270,14 +269,10 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     let wrapped = command(&on).unwrap();
     assert_eq!(wrapped.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&wrapped);
-    assert_eq!(
-        args[..3],
-        [
-            "-f".to_owned(),
-            profile.to_str().unwrap().to_owned(),
-            on.executable.to_str().unwrap().to_owned()
-        ]
-    );
+    let mut start = vec!["-f".to_owned(), profile.to_str().unwrap().to_owned()];
+    start.extend(crazyagent::sandbox::SESSION_SHIM.map(str::to_owned));
+    start.push(on.executable.to_str().unwrap().to_owned());
+    assert_eq!(args[..start.len()], start);
     assert!(args.windows(2).any(|pair| pair == ["--tools", "default"]));
     assert!(
         args.windows(2)

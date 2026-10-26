@@ -478,6 +478,35 @@ impl Engine {
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
+    /// Runs one storage job for a record that refers to files written before it, and hands
+    /// storage's real answer to `settle` even when the owner stops waiting first, so a late
+    /// commit never loses a file its record refers to. Inputs: the job and the settle step.
+    /// Output: the job's result with any settle error, or the outcome-unknown error while
+    /// storage has not answered in time or went away without answering.
+    async fn settled_job<T: Send + 'static>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+        settle: impl FnOnce(&Result<T, EngineError>) -> Result<(), EngineError> + Send + 'static,
+    ) -> Result<T, EngineError> {
+        let (send, receive) = oneshot::channel();
+        if self.storage.sender.try_send(build(send)).is_err() {
+            let refused = Err(EngineError("owner_queue_not_submitted".into()));
+            settle(&refused)?;
+            return refused;
+        }
+        let answered = tokio::spawn(async move {
+            let result = receive
+                .await
+                .map_err(|_| owner::native_auth::outcome_unknown())?;
+            let settled = settle(&result);
+            result.and_then(|value| settled.map(|()| value))
+        });
+        tokio::time::timeout(self.timeout, answered)
+            .await
+            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| owner::native_auth::outcome_unknown())?
+    }
+
     pub async fn open_with_settings_sources(
         path: &Path,
         global: &Path,

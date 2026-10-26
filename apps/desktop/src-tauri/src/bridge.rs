@@ -627,16 +627,6 @@ impl NativeBridge {
                 ActionOutcome::Uncertain
             }
         };
-        if outcome == ActionOutcome::Rejected
-            && self
-                .controller()?
-                .pending()
-                .is_some_and(|pending| !pending.uncertain())
-        {
-            self.controller()?
-                .discard_refused()
-                .map_err(|_| failure("unexpected_pending_intent"))?;
-        }
         bounded(IntentReceipt {
             intent,
             outcome,
@@ -1017,12 +1007,8 @@ fn rejection_code(code: &str) -> &'static str {
         "research_job_missing" => "research_job_missing",
         "research_job_finished" => "research_job_finished",
         "research_job_not_retryable" => "research_job_not_retryable",
-        "setup_busy" => "setup_busy",
-        "pack_unknown" => "pack_unknown",
-        "pack_required" => "pack_required",
-        "pack_not_installed" => "pack_not_installed",
-        "pack_name_taken" => "pack_name_taken",
         _ => intake::intake_code(code)
+            .or_else(|| intake::setup_code(code))
             .or_else(|| crazyagent::memory::library::known_code(code))
             .or_else(|| TEAM_CODES.iter().copied().find(|known| *known == code))
             .unwrap_or("owner_rejected"),

@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(unix)]
 use crate::plugins::{Scope, ServerSpec};
-use crate::setup::pack::{PackGroup, PackManifest};
+use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{SetupAction, SetupStatus, progress};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS setup_trash (
     reference TEXT PRIMARY KEY CHECK(length(reference) BETWEEN 1 AND 128)
 );";
 const REMOVED: &str = ".removed-";
+const PRESENT: &str = "present";
 const SKILLS: [&str; 2] = ["skills", "global"];
 
 pub(crate) enum Command {
@@ -54,6 +55,85 @@ fn load_pack(tx: &Transaction<'_>, id: &str) -> Result<Option<PackRecord>, Engin
         .map_err(error)?;
     body.map(|body| serde_json::from_str(&body).map_err(|_| error("setup_record_invalid")))
         .transpose()
+}
+
+/// An entry the plugin store already holds with no pack row: a global skill or MCP server
+/// named like the entry, as when the owner added it before setup ran. Inputs: the
+/// transaction and the entry. Output: the row that adopts that item, on or off as the item
+/// is, or none.
+fn present(
+    tx: &Transaction<'_>,
+    entry: &PackManifestEntry,
+) -> Result<Option<PackRecord>, EngineError> {
+    let kind = match entry.kind {
+        PackKind::Skill => "skill",
+        PackKind::McpServer => "server",
+    };
+    let item: Option<(String, String)> = tx
+        .query_row(
+            "SELECT id, body FROM plugin_items WHERE kind=?1 AND scope='global' AND name=?2",
+            [kind, entry.id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((item, body)) = item else {
+        return Ok(None);
+    };
+    let enabled = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|body| body.get("enabled")?.as_bool())
+        .ok_or_else(|| error("setup_record_invalid"))?;
+    let (skills, server) = match entry.kind {
+        PackKind::Skill => (vec![item], None),
+        PackKind::McpServer => (Vec::new(), Some(item)),
+    };
+    Ok(Some(PackRecord {
+        id: entry.id.clone(),
+        source: PRESENT.into(),
+        skills,
+        server,
+        enabled,
+    }))
+}
+
+/// The pack row of an entry, adopting an item the plugin store already holds when the
+/// entry has no row yet. Inputs: the transaction and the entry. Output: the row, or none
+/// when nothing of the entry is installed.
+fn adopted(
+    tx: &Transaction<'_>,
+    entry: &PackManifestEntry,
+) -> Result<Option<PackRecord>, EngineError> {
+    if let Some(record) = load_pack(tx, &entry.id)? {
+        return Ok(Some(record));
+    }
+    let Some(record) = present(tx, entry)? else {
+        return Ok(None);
+    };
+    save_pack(tx, &record)?;
+    Ok(Some(record))
+}
+
+/// Tells whether a pack entry is installed and switched on, counting an item the plugin
+/// store already holds. Onboarding builds a code graph only while the graphify entry is.
+/// Inputs: the transaction and the entry id. Output: true when on.
+#[cfg(unix)]
+pub(crate) fn entry_on(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineError> {
+    if let Some(record) = load_pack(tx, id)? {
+        return Ok(record.enabled);
+    }
+    let manifest = manifest()?;
+    let Some(entry) = manifest.entries.iter().find(|entry| entry.id == id) else {
+        return Ok(false);
+    };
+    Ok(present(tx, entry)?.is_some_and(|record| record.enabled))
+}
+
+/// Tells whether a pack entry is on where setup cannot install packs: never.
+/// Inputs: the transaction and the entry id. Output: false.
+#[cfg(not(unix))]
+pub(crate) fn entry_on(_tx: &Transaction<'_>, _id: &str) -> Result<bool, EngineError> {
+    Ok(false)
 }
 
 fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineError> {
@@ -149,6 +229,14 @@ fn install(
             return Ok(());
         }
         remove_items(tx, root, &old, moved)?;
+    } else if let Some(entry) = manifest()?
+        .entries
+        .iter()
+        .find(|entry| entry.id == record.id)
+        && let Some(mut owned) = present(tx, entry)?
+    {
+        owned.source = record.source;
+        return save_pack(tx, &owned);
     }
     let mut record = record;
     for folder in folders {
@@ -232,7 +320,10 @@ fn set(
     save_pack(tx, record)
 }
 
-fn installed(tx: &Transaction<'_>) -> Result<Vec<(String, bool)>, EngineError> {
+fn installed(
+    tx: &Transaction<'_>,
+    manifest: &PackManifest,
+) -> Result<Vec<(String, bool)>, EngineError> {
     let mut statement = tx
         .prepare("SELECT body FROM setup_pack ORDER BY id")
         .map_err(error)?;
@@ -241,14 +332,23 @@ fn installed(tx: &Transaction<'_>) -> Result<Vec<(String, bool)>, EngineError> {
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    bodies
+    let mut rows = bodies
         .iter()
         .map(|body| {
             let record: PackRecord =
                 serde_json::from_str(body).map_err(|_| error("setup_record_invalid"))?;
             Ok((record.id, record.enabled))
         })
-        .collect()
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    for entry in &manifest.entries {
+        if rows.iter().any(|(id, _)| *id == entry.id) {
+            continue;
+        }
+        if let Some(record) = present(tx, entry)? {
+            rows.push((record.id, record.enabled));
+        }
+    }
+    Ok(rows)
 }
 
 fn manifest() -> Result<PackManifest, EngineError> {
@@ -265,10 +365,12 @@ fn rejected(code: &str) -> Outcome {
 }
 
 /// Applies one owner change to the default pack inside the owner transaction. A setup
-/// run is only admitted here (the engine starts it once this commits) and the ticked
-/// MCP servers in it count as approved by the owner. Switching or removing checks the
-/// entry is known, installed and not always-on before changing anything. Inputs: the
-/// transaction, the database path and the action. Output: applied or a plain refusal.
+/// run is only admitted here (the engine starts it once this commits), the ticked MCP
+/// servers in it count as approved by the owner, and it installs the graphify command only
+/// when the code graph entry is ticked or on. Switching or removing checks the entry is
+/// known and installed, adopting an item the plugin store already holds, before changing
+/// anything; no entry is forced on. Inputs: the transaction, the database path and the
+/// action. Output: applied or a plain refusal.
 pub(crate) fn apply_owner(
     tx: &Transaction<'_>,
     path: &Path,
@@ -288,16 +390,16 @@ pub(crate) fn apply_owner(
             if progress::snapshot(root).running {
                 return Ok(rejected("setup_busy"));
             }
+            let graph_tool =
+                pack.iter().any(|id| id.as_str() == GRAPH_ENTRY) || entry_on(tx, GRAPH_ENTRY)?;
+            progress::with(root, |state| state.graph_tool = graph_tool);
             Ok(Outcome::Applied)
         }
         SetupAction::Set { id, on } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
             };
-            if !on && known.group == PackGroup::Always {
-                return Ok(rejected("pack_required"));
-            }
-            let Some(mut record) = load_pack(tx, id)? else {
+            let Some(mut record) = adopted(tx, known)? else {
                 return Ok(rejected("pack_not_installed"));
             };
             set(tx, root, &mut record, *on)?;
@@ -307,10 +409,7 @@ pub(crate) fn apply_owner(
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
             };
-            if known.group == PackGroup::Always {
-                return Ok(rejected("pack_required"));
-            }
-            let Some(record) = load_pack(tx, id)? else {
+            let Some(record) = adopted(tx, known)? else {
                 return Ok(rejected("pack_not_installed"));
             };
             let mut moved = Vec::new();
@@ -331,7 +430,7 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
     let root = root_of(path)?;
     let progress = progress::snapshot(root);
     let manifest = manifest()?;
-    let installed = installed(tx)?;
+    let installed = installed(tx, &manifest)?;
     Ok(SetupStatus {
         dependencies: progress::dependency_rows(&progress),
         pack: progress::pack_rows(&manifest, &installed, &progress),
