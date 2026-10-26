@@ -664,7 +664,8 @@ impl ProjectSandbox {
 
     /// Paths inside the project folder no agent may write although the folder is writable:
     /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
-    /// and the git config with its lock file. Every platform boundary keeps these read-only.
+    /// and the git config with its lock file. Every platform boundary keeps these read-only,
+    /// except that Windows guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
     pub fn protected_paths(&self) -> [PathBuf; 5] {
         let git = self.project_root.join(".git");
         [

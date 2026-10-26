@@ -1,6 +1,6 @@
 use super::{BoundaryError, Words, wide, windows};
 use crate::dacl::{ALL_APPLICATION_PACKAGES, exceeds, holds, reads, without};
-use crate::plan::{Access, Ace, DENY_ALL, DENY_WRITE, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
+use crate::plan::{ANCHOR, Access, Ace, DENY_ALL, DENY_WRITE, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use std::io::ErrorKind;
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
@@ -36,6 +36,7 @@ const _: () = assert!(
             | WRITE_OWNER
 );
 const _: () = assert!(DENY_ALL == FILE_ALL_ACCESS);
+const _: () = assert!(ANCHOR == FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER);
 const _: () = assert!(
     KEEP_ENTRIES
         == FILE_ADD_FILE
@@ -53,8 +54,8 @@ const ACL_BYTES_MAX: usize = 64 * 1024;
 /// grant of the container's beyond the planned rights, such as modify left by an earlier
 /// profile where this one grants read and run, first loses the container's own entries. A
 /// granted root must exist and must not be a link or junction; a protected path that is
-/// missing, a link or a junction gets no entry, since the kept folder above it stops the
-/// container creating or swapping it. A read root the owner may not change is accepted only
+/// missing, a link or a junction gets no entry, since the plan keeps the entries of the
+/// present folder above it, which stops the container creating or swapping it. A read root the owner may not change is accepted only
 /// when every container can already read it, as with `C:\Program Files`. Inputs: the
 /// container SID and the plan. Output: Ok, or the refusal or failed step.
 pub(super) fn apply(container: &Words, aces: &[Ace]) -> Result<(), BoundaryError> {
@@ -106,6 +107,14 @@ pub(super) fn apply(container: &Words, aces: &[Ace]) -> Result<(), BoundaryError
         write_dacl(&path, &list).map_err(windows("change an access list"))?;
     }
     Ok(())
+}
+
+/// Whether a path is present as the boundary counts it for a plan: a real file or folder, not
+/// a link or junction, the only kind it puts entries on. Input: a plain drive path. Output:
+/// true when present.
+pub(super) fn present(path: &str) -> bool {
+    std::fs::symlink_metadata(Path::new(path))
+        .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
 }
 
 /// Takes back every entry the boundary put on `path` for the container: its own explicit allow

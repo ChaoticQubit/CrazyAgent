@@ -50,7 +50,7 @@ fn windows(step: &'static str) -> impl FnOnce(u32) -> BoundaryError {
 /// start.
 pub fn run(request: &Request) -> Result<u32, BoundaryError> {
     let profile = BoundaryProfile::load(&request.profile).map_err(BoundaryError::Profile)?;
-    let aces = plan(&profile).map_err(BoundaryError::Refused)?;
+    let aces = plan(&profile, acl::present).map_err(BoundaryError::Refused)?;
     let container = container::open(&profile.container)?;
     record::Record::open(&profile.grants, &profile.container)?.reconcile(&container, &aces)?;
     let capabilities = container::capabilities(&profile.capabilities)?;
@@ -64,7 +64,7 @@ pub fn run(request: &Request) -> Result<u32, BoundaryError> {
 /// retry withdraws what is left.
 pub fn release(profile: &Path) -> Result<(), BoundaryError> {
     let profile = BoundaryProfile::load(profile).map_err(BoundaryError::Profile)?;
-    plan(&profile).map_err(BoundaryError::Refused)?;
+    plan(&profile, |_| true).map_err(BoundaryError::Refused)?;
     let container = container::sid(&profile.container)?;
     record::Record::open(&profile.grants, &profile.container)?.release(&container)
 }
