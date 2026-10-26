@@ -497,14 +497,14 @@ const STALE_CANDIDATE: &str = "(NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=jso
     OR NOT EXISTS (SELECT 1 FROM verification_baselines b WHERE b.id=json_extract(c.body,'$.pinned_baseline_id') AND b.revoked=0)
     OR EXISTS (SELECT 1 FROM verification_candidates n WHERE n.rowid>c.rowid AND json_extract(n.body,'$.task_id')=json_extract(c.body,'$.task_id')))";
 
-/// Baselines (alias `b`) nothing depends on: not revoked (a revoked row blocks the same
-/// draft from being admitted again), not current, and pinned by no task or candidate.
-/// Superseded approved ones go before drafts still waiting for approval.
-const STALE_BASELINES: &str = "SELECT b.rowid FROM verification_baselines b WHERE b.revoked=0
+/// Baselines (alias `b`) nothing depends on: approved and since superseded, so not
+/// current, not revoked (a revoked row blocks the same draft from being admitted again)
+/// and pinned by no task or candidate. Drafts still waiting for the owner's approval stay.
+const STALE_BASELINES: &str = "SELECT b.rowid FROM verification_baselines b WHERE b.approved=1 AND b.revoked=0
     AND NOT EXISTS (SELECT 1 FROM verification_current v WHERE v.baseline=b.id)
     AND NOT EXISTS (SELECT 1 FROM tasks t WHERE json_extract(t.body,'$.baseline_id')=b.id)
     AND NOT EXISTS (SELECT 1 FROM verification_candidates c WHERE json_extract(c.body,'$.pinned_baseline_id')=b.id)
-    ORDER BY b.approved DESC, b.rowid";
+    ORDER BY b.rowid";
 
 /// Bounds persistent authority records before inserting new material. At the ceiling it
 /// first prunes the oldest records that can never be used again, in this transaction.
