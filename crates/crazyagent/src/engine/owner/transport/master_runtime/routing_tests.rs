@@ -2290,3 +2290,199 @@ async fn a_master_reply_observed_while_another_connection_holds_the_database_is_
     assert_eq!(persisted.phase, MasterTurnPhase::Succeeded);
     assert_eq!(persisted.reply, Some(reply));
 }
+
+async fn end_tools_turn(
+    case: &Fixture,
+    prepared: &PreparedMasterTurn,
+    edit: impl FnOnce(&Path),
+    ending: MasterRuntimeObservation,
+) -> MasterTurnView {
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let runtime = MasterRuntimeView {
+        runtime_ref: RequestId::new("landing-runtime").unwrap(),
+        artifact_sha256: "a".repeat(64),
+        native_session_id: None,
+    };
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Running { runtime },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    assert_eq!(running.changes, None);
+    edit(&prepared.cwd);
+    let ended = case
+        .runtime()
+        .observe_master_turn(prepared, &case.turn.id, ending)
+        .await
+        .unwrap();
+    drop(hold);
+    drop(profile);
+    ended
+}
+
+fn landing_reply(prepared: &PreparedMasterTurn) -> MasterRuntimeObservation {
+    MasterRuntimeObservation::Response {
+        reply: MasterReply {
+            text: "I wrote the notes.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: prepared.attempt.request.id.clone(),
+                runtime_ref: RequestId::new("landing-runtime").unwrap(),
+                capture_ref: RequestId::new("landing-capture").unwrap(),
+                capture_sequence: 2,
+            },
+        },
+        delegations: vec![],
+    }
+}
+
+async fn tools_case(tools: bool) -> (Fixture, Box<PreparedMasterTurn>) {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, tools);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.tools, tools);
+    assert!(prepared.cwd.join(".git").is_file());
+    (case, prepared)
+}
+
+#[tokio::test]
+async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set_and_a_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, write, reply).await;
+    let persisted = case.persisted_turn().await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    let session = case.session.session_id.clone();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Master);
+    assert_eq!(sets[0].agent.id, session.as_str());
+    assert_eq!(sets[0].files, 1);
+    assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+}
+
+#[tokio::test]
+async fn a_failed_tools_on_master_turn_still_keeps_its_edits_for_review() {
+    let (case, prepared) = tools_case(true).await;
+    let failed = MasterRuntimeObservation::Failed {
+        reason: MasterReason::CaptureIncomplete,
+        cause: "master_capture_incomplete".into(),
+    };
+    let write = |cwd: &Path| fs::write(cwd.join("half.txt"), "Half done.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, write, failed).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Failed);
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Failed);
+}
+
+#[tokio::test]
+async fn a_tools_on_master_turn_that_changed_nothing_and_a_tools_off_turn_leave_no_change_set() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let ended = end_tools_turn(&case, &prepared, |_| {}, reply).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes, None);
+    assert!(sets.is_empty(), "{sets:?}");
+
+    let (case, prepared) = tools_case(false).await;
+    let reply = landing_reply(&prepared);
+    let stray =
+        |cwd: &Path| fs::write(cwd.join("stray.txt"), "Not from a tools-on master.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, stray, reply).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes, None);
+    assert!(sets.is_empty(), "{sets:?}");
+}
+
+#[tokio::test]
+async fn a_master_worktree_commits_only_into_the_git_folder_its_lease_recorded() {
+    let (case, prepared) = tools_case(true).await;
+    let db = case.db();
+    let recorded = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    let pointer = fs::read(prepared.cwd.join(".git")).unwrap();
+    let elsewhere = case.root.path().join("elsewhere-git");
+    private_directory(&elsewhere);
+    fs::write(
+        prepared.cwd.join(".git"),
+        format!("gitdir: {}\n", elsewhere.display()),
+    )
+    .unwrap();
+    let repointed = crate::worktrees::lease_git_dir(&db, &prepared.lease);
+    let sibling = recorded.with_file_name("sibling-lease");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        sibling.join("gitdir"),
+        format!("{}/.git\n", prepared.lease.path),
+    )
+    .unwrap();
+    fs::write(
+        prepared.cwd.join(".git"),
+        format!("gitdir: {}\n", sibling.display()),
+    )
+    .unwrap();
+    let swapped = crate::worktrees::lease_git_dir(&db, &prepared.lease);
+    fs::write(prepared.cwd.join(".git"), pointer).unwrap();
+    let restored = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    drop(db);
+    let repository = prepared.repository.clone();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(
+        recorded.parent(),
+        Some(repository.join(".git/worktrees").as_path())
+    );
+    assert_eq!(
+        repointed.unwrap_err().0,
+        "worktree_metadata_escape",
+        "a folder outside the repository's worktrees is refused"
+    );
+    assert_eq!(
+        swapped.unwrap_err().0,
+        "worktree_identity_changed",
+        "another folder that links back is still not the one the lease recorded"
+    );
+    assert_eq!(restored, recorded);
+}

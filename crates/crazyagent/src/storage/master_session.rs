@@ -112,6 +112,13 @@ pub(crate) enum MasterRuntimeCommand {
         reason: MasterReason,
         cause: String,
     },
+    Changes {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        note: String,
+    },
     Checked {
         provisioned: Box<crate::worktrees::Provisioned>,
         prepare: Box<MasterRuntimeCommand>,
@@ -137,6 +144,7 @@ pub(crate) enum MasterRuntimeObservation {
 
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
+    pub(crate) message: String,
     pub(crate) instructions: String,
     pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
@@ -2222,6 +2230,7 @@ fn bundle(
     };
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
+        message: turn_message(tx, &session, turn)?,
         instructions,
         tools,
         session,
@@ -3442,6 +3451,13 @@ pub(super) fn runtime(
             session_id,
             turn_id,
             ..
+        }
+        | MasterRuntimeCommand::Changes {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
         } => (host, project_id, session_id, turn_id),
     };
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
@@ -3595,6 +3611,18 @@ pub(super) fn runtime(
                 persist_runtime(&tx, config, &mut session, &turn)?;
                 assert!(session.current_turn.is_none());
             }
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+        MasterRuntimeCommand::Changes { ref note, .. } => {
+            if turn.phase.outstanding() {
+                return Err(error("master_turn_not_ended"));
+            }
+            if note.trim().is_empty() || note.len() > crate::team::NOTE_BYTES_MAX {
+                return Err(error("master_changes_note_bounds"));
+            }
+            turn.changes = Some(note.clone());
+            persist_runtime(&tx, config, &mut session, &turn)?;
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }

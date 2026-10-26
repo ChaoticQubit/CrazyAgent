@@ -1106,6 +1106,28 @@ fn load(
         .transpose()
 }
 
+/// Finds the Git metadata folder of a lease worktree for an engine commit, trusting the
+/// worktree's own `.git` file only as far as `worktree_metadata` checks it and only while
+/// the folder is still the one recorded when the lease was made. Inputs: the connection
+/// and the lease. Output: the folder, or `lease_missing`, `lease_changed` or the
+/// worktree refusal code.
+pub(crate) fn lease_git_dir(
+    connection: &Connection,
+    lease: &WorktreeLease,
+) -> Result<PathBuf, EngineError> {
+    let record = load(connection, &lease.task_id, &lease.repository)?
+        .ok_or_else(|| error("lease_missing"))?;
+    if record.lease.path != lease.path || record.lease.branch != lease.branch {
+        return Err(error("lease_changed"));
+    }
+    let metadata = worktree_metadata(&record)?;
+    if record.metadata.is_none() || record.metadata != Some(identity(&metadata, true)?) {
+        return Err(error("worktree_identity_changed"));
+    }
+    assert!(metadata.starts_with(Path::new(&record.lease.repository).join(".git/worktrees")));
+    Ok(metadata)
+}
+
 fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError> {
     assert_record_consistent(record);
     let count = connection

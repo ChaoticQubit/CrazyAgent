@@ -659,7 +659,15 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     };
     let plan = |id: i64| {
         runtime
-            .prepare(&fixture.setup, id, AgentRole::Sub, "codex", true, &account)
+            .prepare(
+                &fixture.setup,
+                id,
+                AgentRole::Sub,
+                "codex",
+                true,
+                &account,
+                false,
+            )
             .unwrap()
             .1
     };
@@ -775,7 +783,7 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
     };
     for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
         let (_, plan, mode) = runtime
-            .prepare(&fixture.setup, id, role, "codex", true, &account)
+            .prepare(&fixture.setup, id, role, "codex", true, &account, false)
             .unwrap();
         let own = runtime.agent_folder(id).join("home");
         match mode {
@@ -1200,7 +1208,15 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     let runtime = open();
     assert!(
         runtime
-            .prepare(&fixture.setup, 1, AgentRole::Sub, "codex", true, &account)
+            .prepare(
+                &fixture.setup,
+                1,
+                AgentRole::Sub,
+                "codex",
+                true,
+                &account,
+                false
+            )
             .is_ok()
     );
     drop(runtime);
@@ -1215,13 +1231,22 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         "codex",
         true,
         &account,
+        false,
     ) else {
         panic!("a master was prepared with a delegate engine it can write");
     };
     assert!(refused.contains("team_delegate_writable"), "{refused}");
     assert!(
         runtime
-            .prepare(&fixture.setup, 3, AgentRole::Sub, "codex", true, &account)
+            .prepare(
+                &fixture.setup,
+                3,
+                AgentRole::Sub,
+                "codex",
+                true,
+                &account,
+                false
+            )
             .is_ok()
     );
 }
@@ -1255,5 +1280,241 @@ fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
     assert_eq!(agents[0].status, AgentStatus::Failed);
     assert_eq!(agents[0].problem.as_deref(), Some(line));
     assert!(!fixture.base.join("project").join(".git").exists());
+    assert!(team.shutdown().unwrap().is_empty());
+}
+
+/// A sub-agent edits a file in its worktree and the owner stops it before it finishes:
+/// the engine commits the edit into that worktree's change set at the task's end, the
+/// owner sees one pending change set for that sub-agent, and the team chat says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_note() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        "#!/bin/sh\necho 'Written by the sub-agent.' > page.md\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone())
+    .with_terminal(host.clone())
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let member = fixture.status().agents.remove(0);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_agents WHERE id=?1",
+            [member.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let page = fixture.base.join("project").join(&worktree).join("page.md");
+    let deadline = Instant::now() + WAIT;
+    while !page.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the sub-agent never wrote its page"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the stopped sub-agent's task ends", |f| {
+        f.agent_status(member.id).0 == AgentStatus::Stopped
+    });
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let waiting = format!(
+        "The edits from task {task} (codex, sub-agent {}) are waiting for you in Changes.",
+        member.id
+    );
+    assert!(fixture.note(&waiting), "{:#?}", fixture.status().messages);
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Sub);
+    assert_eq!(sets[0].agent.id, member.id.to_string());
+    assert_eq!(sets[0].files, 1);
+    assert_ne!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+    assert!(team.shutdown().unwrap().is_empty());
+}
+
+/// The owner asks a sub-agent that has stopped to update its change set: the resolve task
+/// is pinned to that agent's worktree, so the same agent comes back in the same worktree
+/// and works on it, and no other sub-agent or worktree is started for it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_resolve_task_runs_in_the_worktree_of_the_sub_agent_it_was_pinned_to() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        "#!/bin/sh\necho run >> runs.txt\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone())
+    .with_terminal(host.clone())
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let member = fixture.status().agents.remove(0);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_agents WHERE id=?1",
+            [member.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let runs = fixture
+        .base
+        .join("project")
+        .join(&worktree)
+        .join("runs.txt");
+    let ran = |times: usize| {
+        let deadline = Instant::now() + WAIT;
+        while std::fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            < times
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the sub-agent never ran {times} times"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    ran(1);
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the first task ends", |f| {
+        f.agent_status(member.id).0 == AgentStatus::Stopped
+    });
+
+    let tx = connection.transaction().unwrap();
+    let resolve = crate::team::admit_resolve(
+        &tx,
+        &fixture.setup.project_id,
+        member.id,
+        "Resolve the conflict markers in page.md",
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.until(
+        &mut team,
+        "the same sub-agent works on the resolve task",
+        |f| f.agent_status(member.id).0 == AgentStatus::Working,
+    );
+    ran(2);
+    let (agent, status): (Option<i64>, String) = fixture
+        .connection
+        .query_row(
+            "SELECT agent,status FROM team_tasks WHERE id=?1",
+            [resolve],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((agent, status.as_str()), (Some(member.id), "running"));
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1"
+        ),
+        1,
+        "no other sub-agent was started for the resolve task"
+    );
+    let worktrees = fixture
+        .base
+        .join("project")
+        .join(&worktree)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert_eq!(std::fs::read_dir(worktrees).unwrap().count(), 1);
     assert!(team.shutdown().unwrap().is_empty());
 }
