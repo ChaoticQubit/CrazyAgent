@@ -40,7 +40,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
     pub(super) home: std::path::PathBuf,
-    pub(super) credential: Option<crate::engine::bootstrap::AgentCredential>,
+    pub(super) credential: crate::engine::bootstrap::AgentCredential,
     pub(super) artifact_sha256: String,
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
