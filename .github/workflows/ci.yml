@@ -174,11 +174,19 @@ jobs:
 
   macos:
     name: macOS lint and tests
-    runs-on: macos-15
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal
     steps:
+      - name: Refuse to run under Rosetta
+        run: |
+          set -euo pipefail
+          if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+            echo "::error::this job runs as x86_64 under Rosetta; reinstall the runner with the macOS ARM64 package"
+            exit 1
+          fi
+          echo "native $(uname -m)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -219,7 +227,7 @@ jobs:
           done
           if [ -z "$found" ]; then
             if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
-              echo "::error::the engine looks for tmux 3.4 or later only in /opt/homebrew/bin, /usr/local/bin, /usr/bin and /bin and found none. Provision this runner once with: brew install tmux"
+              echo "::error::missing: tmux 3.4 or later in /opt/homebrew/bin, /usr/local/bin, /usr/bin or /bin. This runner is not provisioned for CrazyAgent CI; install tmux on it once (for example: brew install tmux)"
               exit 1
             fi
             brew install tmux
