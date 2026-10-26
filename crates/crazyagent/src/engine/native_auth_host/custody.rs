@@ -661,6 +661,15 @@ impl CustodySession {
             .profile_path()
     }
 
+    /// When the custodied Claude Code account's access token lapses. Input: none. Output:
+    /// the expiry since the epoch, or the refusal reading the account's record gave.
+    pub(in crate::engine) fn claude_expiry(&self) -> Result<std::time::Duration, EngineError> {
+        self.guard
+            .as_ref()
+            .expect("session retains its physical guard")
+            .claude_expiry()
+    }
+
     pub(in crate::engine) fn child_mut(&mut self) -> Result<&mut Child, EngineError> {
         let child = self
             .child

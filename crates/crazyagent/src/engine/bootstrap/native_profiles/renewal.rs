@@ -1,5 +1,6 @@
 use super::agent_copy::{Harness, Record, account_record, place};
 use super::{HeldLock, NativeProfileUse, failure};
+use crate::adapters::claude::{REFRESH_WINDOW, RENEWAL_TURN};
 use crate::adapters::codex::CodexProtocol;
 use crate::engine::EngineError;
 use rustix::fs::{FlockOperation, Mode, OFlags, flock};
@@ -14,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RUN_TIME: Duration = Duration::from_secs(30);
+const CLAUDE_RUN_TIME: Duration = Duration::from_secs(60);
 const LOCK_WAIT: Duration = Duration::from_secs(60);
 const RENEW_AHEAD: Duration = Duration::from_secs(4 * 60);
 const RETRY: Duration = Duration::from_secs(30);
@@ -104,16 +106,41 @@ impl NativeProfileUse {
 }
 
 impl Renewal {
+    /// Prepares a renewal of the managed profile folder at `profile` outside any lease, for
+    /// the live check run against a real account. Inputs: the harness, its absolute
+    /// executable and the profile folder that holds `home`. Output: the renewal.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn of_profile(harness: Harness, executable: &Path, profile: &Path) -> Self {
+        let open = |path: &Path| {
+            File::from(
+                rustix::fs::open(
+                    path,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .unwrap(),
+            )
+        };
+        Self {
+            harness,
+            executable: executable.to_path_buf(),
+            managed: profile.join("home"),
+            home: open(&profile.join("home")),
+            profile: open(profile),
+        }
+    }
+
     /// Reads the account's credential record as it is now. Output: the record.
     pub(super) fn record(&self) -> Result<Record, EngineError> {
         account_record(self.harness, &self.home, &self.managed)
     }
 
     /// Renews the account unless someone already did: under the renewal lock, a record
-    /// newer than `stale` is returned as it is; otherwise the harness runs once in the
-    /// managed home and the record is read again. A failed run is not an error here: the
-    /// record read afterwards decides. Input: the expiry the caller saw. Output: the
-    /// record after renewal.
+    /// newer than `stale` is returned as it is, and so is a Claude Code record outside
+    /// Claude Code's refresh window, which it would not renew yet; otherwise the harness
+    /// runs once in the managed home and the record is read again. A failed run is not an
+    /// error here: the record read afterwards decides. Input: the expiry the caller saw.
+    /// Output: the record after renewal, or `native_profile_sign_in_revoked`.
     pub(super) fn renew(&self, stale: Duration) -> Result<Record, EngineError> {
         let _lock = hold(&self.profile, LOCK_WAIT)?;
         let current = self.record()?;
@@ -122,7 +149,10 @@ impl Renewal {
         }
         let _ = match self.harness {
             Harness::Codex => codex_refresh(&self.executable, &self.managed),
-            Harness::Claude => claude_status(&self.executable, &self.managed),
+            Harness::Claude if current.expires > since_epoch()? + REFRESH_WINDOW => {
+                return Ok(current);
+            }
+            Harness::Claude => claude_turn(&self.executable, &self.managed),
         };
         self.record()
     }
@@ -171,17 +201,16 @@ fn settle(child: &mut Child, deadline: Instant) -> bool {
     }
 }
 
-/// Runs `claude auth status --json` in the managed home, which renews the account's OAuth
-/// token in place when it is within Claude Code's own refresh window. Its output is
-/// discarded. Inputs: the executable and the managed home. Output: whether it succeeded.
-fn claude_status(executable: &Path, managed: &Path) -> Result<bool, EngineError> {
+/// Runs the Claude Code renewal turn in the managed home: Claude Code renews the account's
+/// OAuth token in place, and waits for the refresh, before the turn's one Haiku request.
+/// Its output is discarded. Inputs: the executable and the managed home. Output: whether
+/// it succeeded within a minute, which outlasts Claude Code's own refresh request bound.
+fn claude_turn(executable: &Path, managed: &Path) -> Result<bool, EngineError> {
     let mut command = managed_command(executable, managed);
-    command
-        .args(["auth", "status", "--json"])
-        .env("CLAUDE_CONFIG_DIR", managed);
+    command.args(RENEWAL_TURN).env("CLAUDE_CONFIG_DIR", managed);
     let mut child = crate::spawn_gate::spawn(&mut command)
         .map_err(|_| failure("native_profile_renewal_failed"))?;
-    Ok(settle(&mut child, Instant::now() + RUN_TIME))
+    Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME))
 }
 
 /// Asks the managed home's Codex app-server to refresh its ChatGPT tokens with

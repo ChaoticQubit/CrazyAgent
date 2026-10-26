@@ -3,7 +3,7 @@ use crate::engine::owner::native_auth::Command;
 use crate::engine::owner::{NativeAuthMethod, NativeAuthQuery, NativeAuthStart, random_id};
 use crate::protocol::SessionId;
 
-const REPROOF_WAIT: Duration = Duration::from_secs(20);
+const REPROOF_WAIT: Duration = Duration::from_secs(90);
 const REPROOF_POLL: Duration = Duration::from_millis(100);
 
 impl OwnerRuntimeHandle {
