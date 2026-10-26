@@ -578,15 +578,23 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
                 .and_then(|()| match harnesses.codex.as_deref().filter(|_| writable) {
                     None => Ok(None),
-                    Some(executable) => crazyagent::research::service::start_for_engine(
-                        runtime_dir,
-                        &global,
-                        &project,
-                        executable,
-                        harnesses.claude.as_deref(),
-                        agent_terminal(&service),
-                    )
-                    .map(Some),
+                    Some(executable) => {
+                        let agents = service
+                            .owner_runtime()
+                            .map(|handle| handle.agents())
+                            .transpose()
+                            .map_err(|error| error.0)?;
+                        crazyagent::research::service::start_for_engine(
+                            runtime_dir,
+                            &global,
+                            &project,
+                            executable,
+                            harnesses.claude.as_deref(),
+                            agent_terminal(&service),
+                            agents,
+                        )
+                        .map(Some)
+                    }
                 })
                 .and_then(|research| {
                     if !writable {

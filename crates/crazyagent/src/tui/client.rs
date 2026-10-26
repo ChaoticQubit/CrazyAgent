@@ -1324,12 +1324,12 @@ impl NativeOwner {
                 .map(|reply| native_auth::Output::Inspected(Box::new(reply)))
                 .map_err(|_| "native_auth_inspection_unavailable".into()),
             native_auth::Command::Using => controller
-                .agents_using(job.context.connection.id.clone())
+                .account_use(job.context.connection.id.clone())
                 .await
                 .map(native_auth::Output::Using)
                 .map_err(|error| native_auth::public_problem(&error.0)),
-            native_auth::Command::StopUsing => controller
-                .stop_agents_using(job.context.connection.id.clone())
+            native_auth::Command::Release => controller
+                .release_account(job.context.connection.id.clone(), job.context.generation)
                 .await
                 .map(native_auth::Output::Using)
                 .map_err(|error| native_auth::public_problem(&error.0)),
@@ -1349,7 +1349,7 @@ impl NativeOwner {
                     }
                     native_auth::Command::Inspect
                     | native_auth::Command::Using
-                    | native_auth::Command::StopUsing => unreachable!(),
+                    | native_auth::Command::Release => unreachable!(),
                 };
                 reply
                     .map(|reply| native_auth::Output::Auth(Box::new(reply)))

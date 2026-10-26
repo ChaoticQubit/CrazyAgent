@@ -1086,6 +1086,85 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     engine.stop().await;
 }
 
+/// Releasing an account cancels the research job and closes the master conversation that
+/// hold it, does not fail on a holder whose conversation already ended, and reads the
+/// account free once the remaining holds end.
+#[tokio::test]
+async fn releasing_an_account_cancels_its_research_and_closes_its_master() {
+    use crate::agents::Holder;
+    use crate::protocol::{CredentialRef, SessionId};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let job = owner.research_jobs(project.clone()).await.unwrap()[0].id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let claimed = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, job);
+    let agents = engine
+        .service
+        .as_ref()
+        .unwrap()
+        .owner_runtime()
+        .unwrap()
+        .agents()
+        .unwrap();
+    let account = CredentialRef::new("a-codex").unwrap();
+    let research = Holder::Research {
+        project: project.clone(),
+        job,
+        title: "Market research".into(),
+    };
+    let ended = Holder::Master {
+        project: project.clone(),
+        session: SessionId::new("master-ended").unwrap(),
+    };
+    let held = agents.hold(account.clone(), research.clone());
+    let closed = agents.hold(account.clone(), ended.clone());
+
+    let used = owner.account_use(account.clone()).await.unwrap();
+    assert!(used.agents.is_empty());
+    assert_eq!(used.holders, vec![ended.clone(), research]);
+
+    let runner = std::thread::spawn(move || {
+        let asked = std::time::Instant::now();
+        while !store.heartbeat(&claimed, 0).unwrap() {
+            assert!(
+                asked.elapsed() < Duration::from_secs(10),
+                "no cancel reached the job"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(held);
+    });
+    let left = owner
+        .release_within(account.clone(), 2, Duration::from_secs(1))
+        .await
+        .unwrap();
+    runner.join().unwrap();
+    assert!(left.agents.is_empty());
+    assert_eq!(left.holders, vec![ended]);
+    drop(closed);
+    assert!(owner.account_use(account).await.unwrap().is_free());
+    let job = owner.research_jobs(project).await.unwrap().remove(0);
+    assert!(job.cancel_requested);
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn owner_removes_a_project_and_keeps_its_folder() {
     let engine = Engine::start().await;

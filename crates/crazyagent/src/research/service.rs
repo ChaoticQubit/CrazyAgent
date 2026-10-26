@@ -165,8 +165,9 @@ where
 /// Starts research for a running engine: jobs claimed from the engine
 /// database's `research_jobs` table that project creation fills, agent state
 /// in `<runtime>/research`, one folder per project in `<runtime>/projects`,
-/// pool assignment read live from the engine's settings files and, with a
-/// terminal host, every agent in its own pane.
+/// pool assignment read live from the engine's settings files, with a
+/// terminal host every agent in its own pane, and with the engine's agent
+/// register each running job named as a holder of the account it signs in with.
 #[cfg(unix)]
 pub fn start_for_engine(
     runtime: &Path,
@@ -175,6 +176,7 @@ pub fn start_for_engine(
     codex: &Path,
     claude: Option<&Path>,
     terminal: Option<Arc<dyn crate::terminal::Host>>,
+    agents: Option<Arc<crate::agents::Agents>>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -213,6 +215,9 @@ pub fn start_for_engine(
             .with_terminal(host)
             .map_err(|error| error.to_string())?;
     }
+    if let Some(agents) = agents {
+        runner = runner.with_agents(agents);
+    }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(ResearchService::start(
         Arc::new(runner),
@@ -222,8 +227,8 @@ pub fn start_for_engine(
 }
 
 /// Refuses engine research where its 0700 state folders and private database cannot be
-/// made or checked. Takes the runtime, settings files, harness paths and terminal host,
-/// all unused. Returns `research_runtime_unavailable`.
+/// made or checked. Takes the runtime, settings files, harness paths, terminal host and
+/// agent register, all unused. Returns `research_runtime_unavailable`.
 #[cfg(not(unix))]
 pub fn start_for_engine(
     _runtime: &Path,
@@ -232,6 +237,7 @@ pub fn start_for_engine(
     _codex: &Path,
     _claude: Option<&Path>,
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
+    _agents: Option<Arc<crate::agents::Agents>>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
 }

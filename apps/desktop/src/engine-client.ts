@@ -1428,6 +1428,19 @@ export interface AgentView {
   ended_ms: number | null;
 }
 
+/** Something other than an agent that holds an account's sign-in while it runs: a master
+ * conversation's turn, ended by closing that conversation, or a research job, ended by
+ * cancelling it. */
+export type Holder =
+  | { kind: "master"; project: string; session: string }
+  | { kind: "research"; project: string; job: number; title: string };
+
+/** Everything that holds one account's sign-in now: its running agents and other holders. */
+export interface AccountUse {
+  agents: AgentView[];
+  holders: Holder[];
+}
+
 /** Lists launched agents, newest first, for one project or for every project. */
 export function agents(projectId?: string): Promise<AgentView[]> {
   return invoke<AgentView[]>("desktop_agents", { projectId: projectId ?? null });

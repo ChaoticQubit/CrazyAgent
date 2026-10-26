@@ -901,6 +901,10 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
     .await;
     let ended = f.settled(&owner, &session, "turn").await;
     blocked(&ended, &session, "turn", MasterReason::RuntimeUnavailable);
+    assert_eq!(
+        ended.cause.as_deref(),
+        Some("rcli_profile_configuration_required")
+    );
     rejected(
         owner
             .request(mutation(
@@ -946,7 +950,11 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
     f.submit(&reader, "next-turn", &fresh, "Use the revised requirement.")
         .await;
     let next = f.settled(&reader, &fresh, "next-turn").await;
-    blocked(&next, &fresh, "next-turn", MasterReason::Unknown);
+    blocked(&next, &fresh, "next-turn", MasterReason::RuntimeUnavailable);
+    assert_eq!(
+        next.cause.as_deref(),
+        Some("rcli_profile_configuration_required")
+    );
     assert_eq!(next.ordinal, 1);
     assert_eq!(f.history(&reader, "p").await.entries.len(), 2);
     f.stop().await;

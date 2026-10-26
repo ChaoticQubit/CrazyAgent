@@ -1313,10 +1313,13 @@ async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_b
         state
             .apply(Event {
                 job: using,
-                result: Ok(Output::Using(vec![
-                    unit_agent("Team sub-agent 3", "alpha"),
-                    unit_agent("Team sub-agent 5", "beta"),
-                ])),
+                result: Ok(Output::Using(crate::agents::AccountUse {
+                    agents: vec![
+                        unit_agent("Team sub-agent 3", "alpha"),
+                        unit_agent("Team sub-agent 5", "beta"),
+                    ],
+                    holders: Vec::new(),
+                })),
             })
             .unwrap();
         let shown = state.render(false);
@@ -1333,12 +1336,12 @@ async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_b
         );
         state.reduce(&UiEvent::Submit).unwrap();
         let stop = state.request().unwrap();
-        assert!(matches!(stop.command, Command::StopUsing));
+        assert!(matches!(stop.command, Command::Release));
         assert_eq!(stop.context.connection.id.as_str(), "a-codex");
         state
             .apply(Event {
                 job: stop,
-                result: Ok(Output::Using(Vec::new())),
+                result: Ok(Output::Using(crate::agents::AccountUse::default())),
             })
             .unwrap();
         let again = state.request().unwrap();
@@ -1347,6 +1350,87 @@ async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_b
         };
         assert_ne!(second.request_id, first);
         assert!(!state.render(false).contains("In use by"));
+    })
+    .await;
+}
+
+/// Unit input: synthetic holder lists into the real reducer and label. A refused sign-out
+/// names a master conversation and a research job with their projects, and the one owner
+/// action is named by what it ends.
+#[tokio::test]
+async fn unit_refused_logout_names_a_master_conversation_and_a_research_job_and_ends_them() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = unit_inspected(basis, connection);
+        advance(&mut state, 4);
+        state.reduce(&UiEvent::Submit).unwrap();
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let logout = state.request().unwrap();
+        state
+            .apply(Event {
+                job: logout,
+                result: Err("native_profile_in_use".into()),
+            })
+            .unwrap();
+        let using = state.request().unwrap();
+        let project = |id: &str| crate::protocol::ProjectId::new(id).unwrap();
+        let master = crate::agents::Holder::Master {
+            project: project("alpha"),
+            session: crate::protocol::SessionId::new("master-1").unwrap(),
+        };
+        let research = crate::agents::Holder::Research {
+            project: project("beta"),
+            job: 7,
+            title: "Market research".into(),
+        };
+        state
+            .apply(Event {
+                job: using,
+                result: Ok(Output::Using(crate::agents::AccountUse {
+                    agents: Vec::new(),
+                    holders: vec![master.clone(), research.clone()],
+                })),
+            })
+            .unwrap();
+        let shown = state.render(false);
+        assert!(shown.contains(
+            "In use by: Master conversation (project alpha), Market research (project beta)"
+        ));
+        assert!(shown.contains("> Back |   Stop agents, end conversation and sign out"));
+
+        let only_master = crate::agents::AccountUse {
+            agents: Vec::new(),
+            holders: vec![master],
+        };
+        assert_eq!(
+            super::release_label(&only_master),
+            "End conversation and sign out"
+        );
+        let only_research = crate::agents::AccountUse {
+            agents: Vec::new(),
+            holders: vec![research],
+        };
+        assert_eq!(
+            super::release_label(&only_research),
+            "Stop agents and sign out"
+        );
+
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let release = state.request().unwrap();
+        assert!(matches!(release.command, Command::Release));
+        assert!(release.context.generation > 0);
+        state
+            .apply(Event {
+                job: release,
+                result: Ok(Output::Using(crate::agents::AccountUse::default())),
+            })
+            .unwrap();
+        assert!(matches!(
+            state.request().unwrap().command,
+            Command::Logout(_)
+        ));
     })
     .await;
 }

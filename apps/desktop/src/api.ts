@@ -1,11 +1,11 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent } from "./engine-client";
-import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
-export type { AgentRole, AgentState, AgentView } from "./engine-client";
+export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
@@ -663,17 +663,17 @@ export function restartAgent(id: string): Promise<Result<AgentView>> {
   return call<AgentView>("desktop_restart_agent", { id });
 }
 
-/** Lists the running agents that use one account, so a refused sign-out can name them.
- * Input: the account id. Output: the agents, newest first. */
-export function agentsUsing(accountId: string): Promise<Result<AgentView[]>> {
-  return call<AgentView[]>("desktop_agents_using", { accountId });
+/** Reads everything that uses one account's sign-in, so a refused sign-out can name it.
+ * Input: the account id. Output: its running agents and other holders, newest first. */
+export function accountUse(accountId: string): Promise<Result<AccountUse>> {
+  return call<AccountUse>("desktop_account_use", { accountId });
 }
 
-/** Stops every agent that uses one account and waits for them to end, so the account can
- * be signed out. Input: the account id. Output: the agents still using it, none once all
- * have stopped. */
-export function stopAgentsUsing(accountId: string): Promise<Result<AgentView[]>> {
-  return call<AgentView[]>("desktop_stop_agents_using", { accountId });
+/** Ends everything that uses one account's sign-in and waits for it to end, so the account
+ * can be signed out: agents and research jobs stop, master conversations end.
+ * Input: the account id. Output: what still uses it, nothing once all have ended. */
+export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
+  return call<AccountUse>("desktop_release_account", { accountId, generation: nextGeneration() });
 }
 
 /** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the

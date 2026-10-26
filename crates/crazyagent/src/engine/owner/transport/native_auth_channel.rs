@@ -2949,7 +2949,7 @@ fallback_allowed = false
             case.open_master().await;
             let prepared = admitted(case.prepare_next_turn("first-signed-in-turn").await);
             let host = case.service.owner_runtime().unwrap();
-            let profile = host
+            let (profile, _) = host
                 .acquire_master_profile(&prepared, &id("first-signed-in-turn"))
                 .await
                 .unwrap();
@@ -3009,6 +3009,44 @@ fallback_allowed = false
             );
             case.complete_sign_in().await;
             admitted(case.prepare_next_turn("turn-after-sign-in").await);
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A master turn names its conversation as a holder of its account while it holds the
+    /// profile, so a refused sign-out can name and close it, and no longer once it ends.
+    #[tokio::test]
+    async fn a_master_turn_names_its_conversation_while_it_holds_the_profile() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_with(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+            )
+            .await;
+            case.complete_sign_in().await;
+            case.open_master().await;
+            let prepared = admitted(case.prepare_next_turn("held-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let account = prepared.profile.binding().connection.id.clone();
+            let agents = host.agents().unwrap();
+            assert!(agents.holders(&account).is_empty());
+            let held = host
+                .acquire_master_profile(&prepared, &id("held-turn"))
+                .await
+                .unwrap();
+            assert_eq!(
+                agents.holders(&account),
+                vec![crate::agents::Holder::Master {
+                    project: prepared.session.project_id.clone(),
+                    session: prepared.session.session_id.clone(),
+                }]
+            );
+            drop(held);
+            assert!(agents.holders(&account).is_empty());
             case.close().await;
         })
         .await

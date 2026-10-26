@@ -3,18 +3,18 @@ use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
 };
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::{CredentialRef, ProjectId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -334,6 +334,58 @@ pub struct HostedRestart {
     pub reference: String,
 }
 
+/// Something other than a hosted agent that holds an account's native profile while it
+/// runs, so a refused sign-out can name it and the owner can end it: a master
+/// conversation's turn, ended by closing that conversation, or a research job, ended by
+/// cancelling it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Holder {
+    Master {
+        project: ProjectId,
+        session: SessionId,
+    },
+    Research {
+        project: ProjectId,
+        job: i64,
+        title: String,
+    },
+}
+
+/// What holds one account's native profile now: its running hosted agents and its other
+/// holders, so a refused sign-out can name them and the owner can end them all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountUse {
+    pub agents: Vec<AgentView>,
+    pub holders: Vec<Holder>,
+}
+
+impl AccountUse {
+    /// Whether nothing holds the account, so it can be signed out. Input: the use.
+    /// Output: true when no agent and no other holder is listed.
+    pub fn is_free(&self) -> bool {
+        self.agents.is_empty() && self.holders.is_empty()
+    }
+}
+
+type Holds = Arc<Mutex<BTreeMap<u64, (CredentialRef, Holder)>>>;
+
+/// One holder's place in the register, kept beside the profile lease it names. Dropping
+/// it, on every path that ends the lease, removes the holder.
+pub struct Hold {
+    holds: Holds,
+    key: u64,
+}
+
+impl Drop for Hold {
+    /// Removes this holder from the register. Input: the hold being dropped. Output: none.
+    fn drop(&mut self) {
+        let mut holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = holds.remove(&self.key);
+    }
+}
+
 #[derive(Default)]
 struct Control {
     stop: AtomicBool,
@@ -531,6 +583,8 @@ pub struct Agents {
     keys: Mutex<HashMap<String, Secret>>,
     restarts: Mutex<Vec<HostedRestart>>,
     hosts: Mutex<Vec<String>>,
+    holds: Holds,
+    next_hold: AtomicU64,
 }
 
 impl Agents {
@@ -571,6 +625,8 @@ impl Agents {
             keys: Mutex::new(HashMap::new()),
             restarts: Mutex::new(Vec::new()),
             hosts: Mutex::new(Vec::new()),
+            holds: Arc::default(),
+            next_hold: AtomicU64::new(0),
         };
         agents.recover()?;
         Ok(agents)
@@ -990,6 +1046,31 @@ impl Agents {
             self.await_host(id, control, deadline);
         }
         hosted.iter().map(|(id, _)| self.view(id)).collect()
+    }
+
+    /// Registers one holder of an account's profile until the returned hold is dropped.
+    /// Inputs: the account and the holder. Output: the hold to keep beside the lease.
+    pub fn hold(&self, account: CredentialRef, holder: Holder) -> Hold {
+        let key = self.next_hold.fetch_add(1, Ordering::Relaxed);
+        let mut holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds.insert(key, (account, holder));
+        Hold {
+            holds: self.holds.clone(),
+            key,
+        }
+    }
+
+    /// The holders of one account's profile other than hosted agents, newest first, at
+    /// most `LIST_MAX`. Input: the account. Output: the holders.
+    pub fn holders(&self, account: &CredentialRef) -> Vec<Holder> {
+        let holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds
+            .values()
+            .rev()
+            .filter(|(held, _)| held == account)
+            .map(|(_, holder)| holder.clone())
+            .take(LIST_MAX)
+            .collect()
     }
 
     fn hosted_using(
