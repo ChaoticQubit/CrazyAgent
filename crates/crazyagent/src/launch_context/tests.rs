@@ -400,3 +400,51 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
     assert!(!skills.join(STATE).exists(), "real copies were left behind");
     assert!(skills.is_dir() && marker.exists());
 }
+
+#[test]
+fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_agent() {
+    use crate::project_setup::HarnessSlot;
+    let folder = tempfile::tempdir().unwrap();
+    let mut setup = stored(folder.path());
+    setup.team.sub_harnesses = vec![
+        HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: true,
+        },
+        HarnessSlot {
+            harness: "claude-code".into(),
+            agents: 1,
+            tools: false,
+        },
+    ];
+
+    let text = master_tools_section(&setup);
+
+    assert!(text.contains("Your tools are on in this conversation"));
+    assert!(text.contains("`delegate` tool of the `crazyagent-team` MCP server"));
+    assert!(text.contains("- codex: up to 2 agents, tools on\n"));
+    assert!(text.contains("- claude-code: up to 1 agents, tools off\n"));
+    assert!(!text.contains("tools are off"));
+    assert!(!text.contains("no sub-agents"));
+
+    setup.team.sub_harnesses.clear();
+    let alone = master_tools_section(&setup);
+    assert!(alone.contains("Your tools are on in this conversation"));
+    assert!(alone.contains("This project's team plan has no sub-agents"));
+
+    setup.team.sub_harnesses = (0..200)
+        .map(|index| HarnessSlot {
+            harness: format!("{index}-{}", "h".repeat(250)),
+            agents: 1,
+            tools: true,
+        })
+        .collect();
+    let crowded = master_tools_section(&setup);
+    assert!(
+        crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK,
+        "{}",
+        crowded.len()
+    );
+    assert!(crowded.contains(" more\n"));
+}

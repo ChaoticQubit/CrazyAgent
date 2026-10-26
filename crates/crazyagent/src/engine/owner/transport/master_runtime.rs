@@ -45,6 +45,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) capture_ref: RequestId,
     pub(super) capture: File,
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
+    pub(super) tool_record: Option<std::path::PathBuf>,
 }
 
 pub(super) struct Capture {
@@ -529,6 +530,7 @@ impl OwnerRuntimeHandle {
         let launch = self.prepare_master_host(prepared, &profile)?;
         let _folder = launch.folder;
         let _credential = launch.credential;
+        let tool_record = launch.tool_record;
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -600,6 +602,15 @@ impl OwnerRuntimeHandle {
         active.host.close().await.map_err(|error| {
             EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0))
         })?;
+        let observed = match (observed, tool_record) {
+            (Ok(MasterRuntimeObservation::Response { reply, .. }), Some(record)) => {
+                Ok(MasterRuntimeObservation::Response {
+                    reply,
+                    delegations: crate::team::tool::take(&record),
+                })
+            }
+            (observed, _) => observed,
+        };
         match observed {
             Ok(observation) => {
                 self.observe_master_turn(prepared, turn_id, observation)
@@ -712,6 +723,17 @@ impl OwnerRuntimeHandle {
                 }
             }
             match event.kind {
+                EventKind::AssistantText {
+                    parent_tool_use_id: Some(_),
+                    ..
+                } if prepared.tools => {}
+                EventKind::ToolUse {
+                    parent_tool_use_id, ..
+                } if prepared.tools => {
+                    if parent_tool_use_id.is_none() {
+                        text.clear();
+                    }
+                }
                 EventKind::AssistantDelta { text: delta, .. }
                 | EventKind::AssistantText { text: delta, .. } => {
                     if text
@@ -743,6 +765,7 @@ impl OwnerRuntimeHandle {
                                 capture_sequence: active.capture.sequence,
                             },
                         },
+                        delegations: Vec::new(),
                     });
                 }
                 EventKind::TurnFinished { .. }

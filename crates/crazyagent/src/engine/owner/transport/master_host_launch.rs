@@ -108,6 +108,12 @@ impl OwnerRuntimeHandle {
             repository: &prepared.repository,
             worktree: &prepared.cwd,
         };
+        assert!(!prepared.tools || prepared.session.selection.backend == MasterBackend::Claude);
+        let engine = if prepared.tools {
+            Some(self.registered_engine_executable()?)
+        } else {
+            None
+        };
         let turn = if prepared.session.selection.backend == MasterBackend::Claude {
             claude_master_turn(
                 &place,
@@ -116,6 +122,10 @@ impl OwnerRuntimeHandle {
                 &prepared.attempt.connection,
                 &prepared.instructions,
                 Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms),
+                engine
+                    .as_ref()
+                    .map(|engine| engine.verified_path())
+                    .transpose()?,
             )?
         } else {
             MasterTurnLaunch {
@@ -131,6 +141,7 @@ impl OwnerRuntimeHandle {
                 )?,
                 home: home.clone(),
                 credential: None,
+                tool_record: None,
             }
         };
         let MasterTurnLaunch {
@@ -138,7 +149,9 @@ impl OwnerRuntimeHandle {
             sandbox,
             home,
             credential,
+            tool_record,
         } = turn;
+        assert_eq!(tool_record.is_some(), prepared.tools);
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
         Ok(MasterHostLaunch {
@@ -151,6 +164,7 @@ impl OwnerRuntimeHandle {
             capture_ref,
             capture,
             folder,
+            tool_record,
         })
     }
 }
@@ -164,22 +178,26 @@ pub(super) struct MasterTurnPlace<'a> {
     pub(super) worktree: &'a Path,
 }
 
-/// One master turn's command and Seatbelt boundary, the home both name, and the account
-/// credential copy that lives in that home until it is dropped at the end of the turn.
+/// One master turn's command and Seatbelt boundary, the home both name, the account
+/// credential copy that lives in that home until it is dropped at the end of the turn, and
+/// for a turn with tools on the drop file its `delegate` tool records proposals in.
 pub(super) struct MasterTurnLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
     pub(super) home: PathBuf,
     pub(super) credential: Option<AgentCredential>,
+    pub(super) tool_record: Option<PathBuf>,
 }
 
 /// Builds one Claude Code master turn: its startup instruction file, a private home in the
 /// turn folder holding a no-refresh copy of the account's credential (DEC-090), and the
-/// tools-off command and Seatbelt boundary on that home. The keychain stays denied and the
-/// managed home is never given to the master. Inputs: where the turn runs, the account
-/// lease, the registered executable, the attempt's connection, the instruction text and the
-/// turn's wall time. Output: the launch parts with the copy, or the refusal of the part that
-/// failed, `native_profile_credential_expiring` when the token lapses within the turn.
+/// command and Seatbelt boundary on that home: tools off, or with `engine` the tools-on
+/// command whose `delegate` tool that engine executable serves (DEC-093). The keychain stays
+/// denied and the managed home is never given to the master. Inputs: where the turn runs, the
+/// account lease, the registered executable, the attempt's connection, the instruction text,
+/// the turn's wall time and the engine executable for tools on. Output: the launch parts with
+/// the copy, or the refusal of the part that failed, `native_profile_credential_expiring`
+/// when the token lapses within the turn.
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -187,31 +205,67 @@ pub(super) fn claude_master_turn(
     connection: &ModelConnection,
     instructions: &str,
     wall_time: Duration,
+    engine: Option<&Path>,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_agent(&home, wall_time, executable)?;
-    let command = crate::engine::claude_host::launch_command(
-        executable,
-        place.worktree,
-        &home,
-        &connection.model.id,
-        Some(instructions.as_path()),
-    )?;
-    let sandbox = master_sandbox(
-        place.root,
-        place.runtime_ref,
-        place.repository,
-        place.worktree,
-        &home,
-        executable,
-        &connection.endpoint,
-    )?;
+    let (command, sandbox, tool_record) = match engine {
+        None => (
+            crate::engine::claude_host::launch_command(
+                executable,
+                place.worktree,
+                &home,
+                &connection.model.id,
+                Some(instructions.as_path()),
+            )?,
+            master_sandbox(
+                place.root,
+                place.runtime_ref,
+                place.repository,
+                place.worktree,
+                &home,
+                executable,
+                &connection.endpoint,
+            )?,
+            None,
+        ),
+        Some(engine) => {
+            let sandbox = master_tools_sandbox(
+                place.root,
+                place.runtime_ref,
+                place.repository,
+                place.worktree,
+                &home,
+                executable,
+                &connection.endpoint,
+                engine,
+            )?;
+            let drop = sandbox
+                .sandbox()
+                .agent_tmp()
+                .join(crate::team::tool::DROP_FILE);
+            let engine = std::fs::canonicalize(engine).map_err(io_error)?;
+            let command = crate::engine::claude_host::tools_launch_command(
+                executable,
+                place.worktree,
+                &home,
+                &connection.model.id,
+                Some(instructions.as_path()),
+                crate::engine::claude_host::MasterTools {
+                    engine: &engine,
+                    drop: &drop,
+                },
+            )?;
+            (command, sandbox, Some(drop))
+        }
+    };
     Ok(MasterTurnLaunch {
         command,
         sandbox,
         home,
         credential: Some(credential),
+        tool_record,
     })
 }
 
@@ -410,6 +464,59 @@ pub(super) fn master_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
 ) -> Result<InstalledSandbox, EngineError> {
+    turn_sandbox(
+        root,
+        runtime_ref,
+        repository,
+        worktree,
+        home,
+        executable,
+        endpoint,
+        None,
+    )
+}
+
+/// Builds and installs the Seatbelt boundary for one master turn with its tools on (DEC-093).
+/// The master writes only in its leased worktree, its turn home and the turn's temp folder;
+/// it reads the project repository, the harness install folder, the turn directory and the
+/// folder of the engine executable that serves its `delegate` tool, and reaches only its
+/// model endpoint. Output: the installed sandbox, or `master_sandbox_unavailable`.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn master_tools_sandbox(
+    root: &Root,
+    runtime_ref: &RequestId,
+    repository: &Path,
+    worktree: &Path,
+    home: &Path,
+    executable: &Path,
+    endpoint: &ModelEndpoint,
+    engine: &Path,
+) -> Result<InstalledSandbox, EngineError> {
+    turn_sandbox(
+        root,
+        runtime_ref,
+        repository,
+        worktree,
+        home,
+        executable,
+        endpoint,
+        Some(engine),
+    )
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn turn_sandbox(
+    root: &Root,
+    runtime_ref: &RequestId,
+    repository: &Path,
+    worktree: &Path,
+    home: &Path,
+    executable: &Path,
+    endpoint: &ModelEndpoint,
+    engine: Option<&Path>,
+) -> Result<InstalledSandbox, EngineError> {
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -429,12 +536,25 @@ pub(super) fn master_sandbox(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
-    let sandbox = ProjectSandbox::new(repository, &home, &tmp, SandboxNetwork::Only(vec![remote]))
-        .and_then(|sandbox| sandbox.allow_worktree(worktree))
-        .and_then(|sandbox| sandbox.allow_read(&install))
-        .and_then(|sandbox| sandbox.allow_read(&runtime.path))
-        .and_then(|sandbox| sandbox.guard_engine(&root.path))
-        .map_err(refused)?;
+    let network = SandboxNetwork::Only(vec![remote]);
+    let sandbox = match engine {
+        None => ProjectSandbox::new(repository, &home, &tmp, network)
+            .and_then(|sandbox| sandbox.allow_worktree(worktree)),
+        Some(engine) => {
+            let folder = std::fs::canonicalize(engine)
+                .map_err(io_error)?
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| failure("master_sandbox_unavailable"))?;
+            ProjectSandbox::new(worktree, &home, &tmp, network)
+                .and_then(|sandbox| sandbox.allow_read(repository))
+                .and_then(|sandbox| sandbox.allow_read(&folder))
+        }
+    }
+    .and_then(|sandbox| sandbox.allow_read(&install))
+    .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+    .and_then(|sandbox| sandbox.guard_engine(&root.path))
+    .map_err(refused)?;
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
     verify_master_runtime(root, &runtime, &name)?;
@@ -444,6 +564,13 @@ pub(super) fn master_sandbox(
             .sandbox()
             .writable_roots()
             .any(|writable| installed.profile().starts_with(writable))
+    );
+    assert!(
+        engine.is_none()
+            || installed
+                .sandbox()
+                .writable_roots()
+                .all(|writable| writable != repository)
     );
     Ok(installed)
 }
@@ -460,6 +587,24 @@ pub(super) fn master_sandbox(
     _home: &Path,
     _executable: &Path,
     _endpoint: &ModelEndpoint,
+) -> Result<InstalledSandbox, EngineError> {
+    Err(failure("master_sandbox_unavailable"))
+}
+
+/// Refuses the tools-on master turn boundary where the owner-only turn directory cannot be
+/// made. Takes the owner root, turn reference, repository, worktree, home, executable,
+/// endpoint and engine executable, all unused. Returns `master_sandbox_unavailable`.
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn master_tools_sandbox(
+    _root: &Root,
+    _runtime_ref: &RequestId,
+    _repository: &Path,
+    _worktree: &Path,
+    _home: &Path,
+    _executable: &Path,
+    _endpoint: &ModelEndpoint,
+    _engine: &Path,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1079,6 +1224,137 @@ mod tests {
         assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
         assert!(!text.contains("*:443"));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn a_tools_on_master_writes_only_in_its_worktree_and_own_folders_and_runs_the_engine() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let engine_bin = base.join("engine").join("bin");
+        let elsewhere = base.join("elsewhere");
+        for directory in [
+            &repository,
+            &worktree,
+            &home,
+            &install,
+            &engine_bin,
+            &elsewhere,
+        ] {
+            private_directory(directory);
+        }
+        let script = |path: &Path, body: &str| {
+            std::fs::write(
+                path,
+                format!("#!/bin/sh\n[ \"$1\" = first-exec ] && exit 3\n{body}"),
+            )
+            .unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let first = crate::spawn_gate::first_run(
+                Command::new(path).arg("first-exec").current_dir(&base),
+            );
+            assert_eq!(first.code(), Some(3));
+        };
+        let executable = install.join("claude");
+        script(&executable, "exit 0\n");
+        let engine = engine_bin.join("crazyagent");
+        script(
+            &engine,
+            "[ \"$1\" = team-mcp ] || exit 2\necho '{\"task\":\"probe\"}' >> \"$2\"\n",
+        );
+        let stray = elsewhere.join("tool");
+        script(&stray, "exit 0\n");
+        let main = repository.join("main.txt");
+        std::fs::write(&main, "owner\n").unwrap();
+        let (runtime_ref, capture_ref, capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_tools_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &engine,
+        )
+        .unwrap();
+        let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
+        let tmp = turn.join(MASTER_TMP);
+        assert_eq!(
+            sandbox
+                .sandbox()
+                .writable_roots()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
+            [worktree.as_path(), home.as_path(), tmp.as_path()]
+        );
+        let profile = sandbox.sandbox().profile();
+        let owner = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .canonicalize()
+            .unwrap();
+        for denied in [".claude", ".codex", "Library/Keychains"] {
+            assert!(
+                profile.contains(&format!("(subpath \"{}\")", owner.join(denied).display())),
+                "{denied}"
+            );
+        }
+        assert!(profile.contains("(global-name \"com.apple.SecurityServer\")"));
+        assert!(profile.contains("(allow network-outbound (remote ip \"*:443\"))"));
+        assert!(!profile.contains("(allow network*)"));
+        let run = |program: &Path, args: &[&Path]| {
+            let mut child = Command::new(program);
+            child.args(args).current_dir(&worktree);
+            let mut child = sandbox.wrap(&child).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::spawn_gate::status(&mut child).unwrap().success()
+        };
+        let write = |target: &Path| {
+            run(
+                Path::new("/bin/sh"),
+                &[
+                    Path::new("-c"),
+                    Path::new("echo agent >> \"$1\""),
+                    Path::new("sh"),
+                    target,
+                ],
+            )
+        };
+        for allowed in [
+            worktree.join("work.txt"),
+            home.join("account.txt"),
+            tmp.join("scratch.txt"),
+        ] {
+            assert!(write(&allowed), "{}", allowed.display());
+            assert_eq!(std::fs::read_to_string(&allowed).unwrap(), "agent\n");
+        }
+        for refused in [
+            main.clone(),
+            repository.join("new.txt"),
+            base.join("escape.txt"),
+            turn.join("escape.txt"),
+            turn.join(format!("capture-{}.jsonl", capture_ref.as_str())),
+            engine_bin.join("planted"),
+        ] {
+            assert!(!write(&refused), "{}", refused.display());
+        }
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "owner\n");
+        assert!(!repository.join("new.txt").exists());
+        assert_eq!(capture.metadata().unwrap().len(), 0);
+        let drop = tmp.join(crate::team::tool::DROP_FILE);
+        assert!(run(&engine, &[Path::new("team-mcp"), &drop]));
+        assert_eq!(
+            std::fs::read_to_string(&drop).unwrap(),
+            "{\"task\":\"probe\"}\n"
+        );
+        assert!(!run(&stray, &[]));
     }
 
     #[test]

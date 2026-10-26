@@ -49,6 +49,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         &connection,
         "You are a test. Follow the user's instruction exactly.",
         Duration::from_millis(budget.wall_time_ms),
+        None,
     )
     .unwrap();
     let MasterTurnLaunch {
@@ -56,6 +57,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         sandbox,
         home,
         credential,
+        ..
     } = launch;
     let writable: Vec<PathBuf> = sandbox.sandbox().writable_roots().cloned().collect();
     let copy = home.join(".credentials.json");
@@ -111,4 +113,146 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
     assert!(!copy.exists());
     drop(folder);
     assert!(!home.exists());
+}
+
+/// The built engine executable that serves the `delegate` tool: `CRAZYAGENT_ENGINE`, or the
+/// `crazyagent` binary beside this test's build folder. Output: its canonical path, or a
+/// panic with the plain BLOCKED message when it was not built.
+fn engine_executable() -> PathBuf {
+    std::env::var_os("CRAZYAGENT_ENGINE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let deps = std::env::current_exe().ok()?;
+            Some(deps.parent()?.parent()?.join("crazyagent"))
+        })
+        .and_then(|path| path.canonicalize().ok())
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "BLOCKED: the engine executable is not built; run cargo build -p crazyagent --bin crazyagent"
+            )
+        })
+}
+
+/// Qualifies a real Claude master turn with its tools on (DEC-093) inside the tools-on master
+/// sandbox: it writes a file in its worktree with its own tools, calls the engine's real
+/// `delegate` tool served by the built engine executable, and replies; the engine then takes
+/// the recorded task. The turn is bounded by a 240 s wall time.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates() {
+    let engine = engine_executable();
+    let mut signed_in = SignedIn::claude();
+    let connection = signed_in.connection.clone();
+    let turn = RequestId::new("claude-live-tools-turn").unwrap();
+    let profile = signed_in.acquire(turn.as_str());
+    let temporary = tempfile::Builder::new()
+        .prefix("ca-live-tools-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let root = Root::open(&base).unwrap();
+    let repository = base.join("repository");
+    let worktree = base.join("worktrees").join("lease");
+    private_directory(&repository);
+    private_directory(&worktree);
+    let claude = crate::team::runtime::managed_agent::claude();
+    let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &runtime_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let budget = ResourceBudget {
+        wall_time_ms: 240_000,
+        ..ResourceBudget::unit()
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        tool_record,
+    } = claude_master_turn(
+        &place,
+        &profile,
+        &claude,
+        &connection,
+        "You are a test. Follow the user's steps exactly and use your tools for them.",
+        Duration::from_millis(budget.wall_time_ms),
+        Some(&engine),
+    )
+    .unwrap();
+    let record = tool_record.unwrap();
+    let mut master = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: SessionId::new("claude-live-tools-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: signed_in.profile_ref(),
+            worktree_lease: RequestId::new("claude-live-tools-lease").unwrap(),
+        },
+        connection.account_ref.clone(),
+        budget,
+    )
+    .await
+    .unwrap();
+    master
+        .start_turn(
+            turn.clone(),
+            "Do these steps in order. 1. With your file tools, create the file note.txt in your working folder containing exactly the word HERON. 2. Call the delegate tool once with the task \"Write the README\". 3. Reply with exactly the word DONE.",
+        )
+        .await
+        .unwrap();
+    let mut errors = Vec::new();
+    let mut tools = Vec::new();
+    let mut text = String::new();
+    let outcome = loop {
+        let event = master.next_event().await.unwrap();
+        match event.kind {
+            EventKind::AssistantError { code } => errors.push(code),
+            EventKind::ToolUse {
+                name,
+                parent_tool_use_id: None,
+                ..
+            } => {
+                tools.push(name);
+                text.clear();
+            }
+            EventKind::AssistantText {
+                text: part,
+                parent_tool_use_id: None,
+                ..
+            } => text.push_str(&part),
+            EventKind::TurnFinished { outcome, .. } => break outcome,
+            _ => {}
+        }
+    };
+    master.close().await.unwrap();
+    let delegations = crate::team::tool::take(&record);
+    let note = std::fs::read_to_string(worktree.join("note.txt")).unwrap_or_default();
+    println!(
+        "real claude tools-on master turn: outcome={outcome:?} errors={errors:?} tools={tools:?} delegations={delegations:?} note={note:?} reply={text:?}"
+    );
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(outcome, TurnOutcome::Success);
+    assert!(text.contains("DONE"), "{text}");
+    assert_eq!(note.trim(), "HERON");
+    assert!(
+        tools
+            .iter()
+            .any(|name| name == "mcp__crazyagent-team__delegate"),
+        "{tools:?}"
+    );
+    assert_eq!(delegations.len(), 1, "{delegations:?}");
+    assert_eq!(delegations[0].prompt, "Write the README");
+    assert_eq!(std::fs::read_dir(&repository).unwrap().count(), 0);
+    drop(credential);
+    drop(folder);
 }

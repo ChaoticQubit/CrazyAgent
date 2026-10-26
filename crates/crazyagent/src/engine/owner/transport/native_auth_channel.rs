@@ -521,6 +521,34 @@ impl OwnerRuntimeHandle {
         Ok(executable)
     }
 
+    /// Names the engine's own registered executable, which serves a tools-on master its
+    /// `delegate` tool. Input: the runtime handle. Output: the executable while its identity
+    /// holds, or `native_auth_host_unavailable` before it is registered.
+    pub(crate) fn registered_engine_executable(
+        &self,
+    ) -> Result<Arc<RegisteredNativeAuthHost>, EngineError> {
+        if !self.authority.usable.load(Ordering::SeqCst) {
+            return Err(failure("owner_runtime_stale"));
+        }
+        self.native_auth_owner_runtime_dir()?;
+        let executable = {
+            let registration = self
+                .authority
+                .native_auth_host
+                .lock()
+                .map_err(|_| failure("native_auth_recovery_required"))?;
+            if registration.disabled {
+                return Err(failure("native_auth_host_unavailable"));
+            }
+            registration
+                .executable
+                .clone()
+                .ok_or_else(|| failure("native_auth_host_unavailable"))?
+        };
+        executable.verified_path()?;
+        Ok(executable)
+    }
+
     pub(crate) fn registered_rcli_master_executable(
         &self,
     ) -> Result<Arc<RegisteredNativeAuthHost>, EngineError> {

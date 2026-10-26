@@ -119,9 +119,17 @@ pub(crate) enum MasterRuntimeCommand {
 }
 
 pub(crate) enum MasterRuntimeObservation {
-    Running { runtime: MasterRuntimeView },
-    Response { reply: MasterReply },
-    Failed { reason: MasterReason, cause: String },
+    Running {
+        runtime: MasterRuntimeView,
+    },
+    Response {
+        reply: MasterReply,
+        delegations: Vec<crate::team::Delegation>,
+    },
+    Failed {
+        reason: MasterReason,
+        cause: String,
+    },
     Cancelled,
     Disconnected,
 }
@@ -129,6 +137,7 @@ pub(crate) enum MasterRuntimeObservation {
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
     pub(crate) instructions: String,
+    pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
     pub(crate) attempt: Attempt,
     pub(crate) profile: PreparedNativeProfile,
@@ -2136,16 +2145,20 @@ fn bundle(
         .attempt
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
+    let tools = session.selection.backend == MasterBackend::Claude
+        && crate::launch_context::master_tools(tx, &session.project_id)
+            .map_err(|problem| EngineError(problem.0))?;
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => {
-            crate::launch_context::for_master(tx, &session.project_id)
+            crate::launch_context::for_master(tx, &session.project_id, tools)
                 .map_err(|problem| EngineError(problem.0))?
         }
     };
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         instructions,
+        tools,
         session,
         attempt,
         profile: PreparedNativeProfile::from_binding(record.auth.binding()),
@@ -2429,7 +2442,7 @@ fn observe_turn(
             turn.runtime = Some(runtime);
             turn.phase = MasterTurnPhase::Running;
         }
-        MasterRuntimeObservation::Response { reply } => {
+        MasterRuntimeObservation::Response { reply, delegations } => {
             if turn.phase == MasterTurnPhase::Succeeded && turn.reply.as_ref() == Some(&reply) {
                 return Ok(());
             }
@@ -2463,6 +2476,17 @@ fn observe_turn(
             turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
             turn.reply = Some(reply);
             turn.phase = MasterTurnPhase::Succeeded;
+            if !delegations.is_empty() {
+                let access = config.settings.model_access.clone().unwrap_or_default();
+                let now = i64::try_from(now_ms()?).map_err(error)?;
+                crate::team::admit_conversation(
+                    tx,
+                    &access,
+                    &session.project_id,
+                    &delegations,
+                    now,
+                )?;
+            }
         }
         MasterRuntimeObservation::Failed { reason, cause } => {
             if turn.phase == MasterTurnPhase::Failed && turn.reason == Some(reason) {
@@ -5177,6 +5201,153 @@ fallback_allowed = false
             .unwrap();
         assert_eq!(projects, 0, "the project is removed in the same action");
         drop(tx);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_master_reply_hands_its_delegate_calls_to_the_team_once() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let setup = crate::project_setup::StoredSetup {
+            project_id: case.session.project_id.clone(),
+            name: "Tools".into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "claude-code".into(),
+                master_tools: true,
+                sub_harnesses: vec![crate::project_setup::HarnessSlot {
+                    harness: "codex".into(),
+                    agents: 1,
+                    tools: true,
+                }],
+                min_agents: 1,
+                max_agents: 2,
+            },
+            documents: vec![],
+            folder: case.repository.display().to_string(),
+            created_ms: 1,
+            revision: 1,
+        };
+        let writer = Connection::open(&case.path).unwrap();
+        writer
+            .busy_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        writer
+            .execute(
+                "INSERT OR REPLACE INTO project_setups VALUES (?1,?2)",
+                params![
+                    setup.project_id.as_str(),
+                    serde_json::to_string(&setup).unwrap()
+                ],
+            )
+            .unwrap();
+        drop(writer);
+        let MasterRuntimeResult::Prepared(prepared) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("registered local RCLI must prepare the actual turn");
+        };
+        assert!(!prepared.tools, "only a Claude Code master runs with tools");
+        let command = |observation| MasterRuntimeCommand::Observe {
+            host: case.started.host.clone(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: prepared.attempt.request.id.clone(),
+            observation,
+        };
+        let MasterRuntimeResult::Profile(guard) = case
+            .runtime(MasterRuntimeCommand::AcquireProfile {
+                host: case.started.host.clone(),
+                project_id: case.session.project_id.clone(),
+                session_id: case.session.session_id.clone(),
+                turn_id: case.turn.id.clone(),
+                attempt_id: prepared.attempt.request.id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("actual configured RCLI Execution guard missing");
+        };
+        let runtime = MasterRuntimeView {
+            runtime_ref: RequestId::new("tools-runtime").unwrap(),
+            artifact_sha256: "a".repeat(64),
+            native_session_id: Some("tools-native".into()),
+        };
+        case.runtime(command(MasterRuntimeObservation::Running {
+            runtime: runtime.clone(),
+        }))
+        .await
+        .unwrap();
+        let reply = MasterReply {
+            text: "I handed the README to a sub-agent.".into(),
+            provenance: crate::master_session::MasterReplyProvenance {
+                attempt_id: prepared.attempt.request.id.clone(),
+                runtime_ref: runtime.runtime_ref.clone(),
+                capture_ref: RequestId::new("tools-capture").unwrap(),
+                capture_sequence: 3,
+            },
+        };
+        let delegations = vec![
+            crate::team::Delegation {
+                harness: None,
+                prompt: "Write the README".into(),
+            },
+            crate::team::Delegation {
+                harness: Some("claude-code".into()),
+                prompt: "Check the tests".into(),
+            },
+        ];
+        for _ in 0..2 {
+            let MasterRuntimeResult::Turn(turn) = case
+                .runtime(command(MasterRuntimeObservation::Response {
+                    reply: reply.clone(),
+                    delegations: delegations.clone(),
+                }))
+                .await
+                .unwrap()
+            else {
+                panic!("an observed reply returns the turn");
+            };
+            assert_eq!(turn.phase, MasterTurnPhase::Succeeded);
+            assert_eq!(turn.reply.as_ref(), Some(&reply));
+        }
+        drop(guard);
+        let db = case.db();
+        let tasks: Vec<(String, String, String)> = db
+            .prepare("SELECT source,harness,prompt FROM team_tasks WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([setup.project_id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tasks,
+            [(
+                "owner".to_owned(),
+                "codex".to_owned(),
+                "Write the README".to_owned()
+            )]
+        );
+        let notes: Vec<String> = db
+            .prepare("SELECT text FROM team_messages WHERE project=?1 AND author='engine'")
+            .unwrap()
+            .query_map([setup.project_id.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            notes,
+            [
+                "The conversation master's tasks were not handed off:\n- Check the tests: that harness is not in the team plan"
+            ]
+        );
+        drop(db);
         case.close().await;
     }
 }

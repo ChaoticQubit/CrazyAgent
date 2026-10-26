@@ -185,6 +185,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &connection,
         "Unit master instructions.",
         Duration::from_secs(3600),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -227,6 +228,65 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     assert!(!copy.exists());
     assert!(home.is_dir());
     drop(folder);
+    assert!(!home.exists());
+
+    let engine = install.join("crazyagent");
+    std::fs::write(&engine, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (tools_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let tools_folder = MasterRuntimeFolder::new(&root, &tools_ref);
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &tools_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        tool_record,
+    } = claude_master_turn(
+        &place,
+        &profile,
+        &claude,
+        &connection,
+        "Unit master instructions.",
+        Duration::from_secs(3600),
+        Some(&engine),
+    )
+    .unwrap();
+    let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
+    let record = turn.join("tmp").join(crate::team::tool::DROP_FILE);
+    assert_eq!(tool_record.as_deref(), Some(record.as_path()));
+    let args: Vec<&str> = command
+        .get_args()
+        .map(|arg| arg.to_str().unwrap())
+        .collect();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--permission-mode", "bypassPermissions"])
+    );
+    let config = args[args.iter().position(|arg| *arg == "--mcp-config").unwrap() + 1];
+    let config: Value = serde_json::from_str(config).unwrap();
+    assert_eq!(
+        config,
+        json!({"mcpServers": {"crazyagent-team": {
+            "type": "stdio",
+            "command": engine.to_str().unwrap(),
+            "args": ["team-mcp", record.to_str().unwrap()],
+        }}})
+    );
+    assert_eq!(
+        sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
+        [&worktree, &home, &turn.join("tmp")]
+    );
+    assert!(sandbox.sandbox().read_roots().contains(&install));
+    assert!(sandbox.sandbox().read_roots().contains(&repository));
+    assert!(home.join(".credentials.json").is_file());
+    drop(credential);
+    drop(tools_folder);
     assert!(!home.exists());
     drop(profile);
 }

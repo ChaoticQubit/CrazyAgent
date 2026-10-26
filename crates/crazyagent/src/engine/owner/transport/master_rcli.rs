@@ -361,6 +361,7 @@ impl OwnerRuntimeHandle {
                                 capture_sequence: active.capture.sequence(),
                             },
                         },
+                        delegations: Vec::new(),
                     });
                 }
                 RcliMasterStatus::Cancelled => return Ok(MasterRuntimeObservation::Cancelled),
