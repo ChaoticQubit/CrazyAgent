@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-test("actual project profile requires a pinned service that forbids app replacement", async () => {
+test("actual project profile requires a pinned service that forbids app replacement", async (t) => {
+  const evidence = mkdtempSync(join(tmpdir(), "ca-zero-retry-unit-"));
+  t.after(() => rmSync(evidence, { recursive: true }));
+  process.env.CRAZYAGENT_DESKTOP_TEST_APP = process.execPath;
+  process.env.CRAZYAGENT_DESKTOP_TEST_PORT = "19259";
+  process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = evidence;
   const { config } = await import("./projects.wdio.conf.mjs");
   assert.equal(
     typeof config.services?.[0]?.[0],
