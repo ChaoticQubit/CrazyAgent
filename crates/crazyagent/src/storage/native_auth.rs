@@ -171,12 +171,13 @@ pub(crate) fn dispatch_native_auth(
     let guard = custody
         .as_mut()
         .map_err(|error| error.clone())?
-        .acquire_use(
+        .acquire_use_within(
             &host,
             &fact.binding,
             &fact.operation_id,
             fact.generation,
             purpose,
+            None,
         )?;
     guard.revalidate(
         &host,
@@ -287,10 +288,12 @@ fn validate_dispatch(
     Ok(fact)
 }
 
-/// Settles the sign-in that holds the native fence once no process holds its profile, so
-/// a crash, a killed custodian or an old engine run never blocks every later sign-in.
-/// Inputs: the database, the profile custody, this engine's host and, after one dispatch
-/// ended, its fact. Output: the settled fact, or `None` when nothing was released.
+/// Settles the sign-in that holds the native fence once no custodian holds its profile, so
+/// a crash, a killed custodian or an old engine run never blocks every later sign-in. A
+/// fence of this engine run is settled only for a dispatch known to have ended, which the
+/// caller names again on later calls while a renewal still held the profile.
+/// Inputs: the database, the profile custody, this engine's host and the fact of the
+/// last dispatch that ended. Output: the settled fact, or `None` when nothing was released.
 pub(crate) fn recover_native_auth(
     db: &mut Connection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
@@ -321,12 +324,10 @@ pub(crate) fn recover_native_auth(
     {
         return Err(error("native_auth_fact_invalid"));
     }
-    let eligible = match ended {
-        Some(ended) => {
+    let eligible = epoch != host.engine_epoch
+        || ended.is_some_and(|ended| {
             ended.operation_id == fact.operation_id && ended.generation == fact.generation
-        }
-        None => epoch != host.engine_epoch,
-    };
+        });
     if !eligible {
         return Ok(None);
     }
@@ -519,14 +520,21 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     .map_err(error)
 }
 
+/// Runs one owner sign-in command, first settling a stale fence: one of an old engine run,
+/// or the one of `ended`, the last dispatch whose custodian this run saw end.
+/// Inputs: the database, settings, profile custody, that dispatch, the owner and the
+/// command. Output: the reply and, for a new operation, its work.
 pub(crate) fn execute(
     db: &mut Connection,
     config: &EffectiveConfig,
     sources: Option<&settings::SettingsSources>,
     custody: &mut Result<NativeProfileCustody, EngineError>,
+    ended: Option<&NativeAuthFact>,
     admission: &Admission,
     command: Command,
 ) -> Result<NativeAuthBegin, EngineError> {
+    #[cfg(not(unix))]
+    let _ = ended;
     let reply = match command {
         Command::Read(request) => {
             #[cfg(unix)]
@@ -537,7 +545,7 @@ pub(crate) fn execute(
                     db_instance: admission.db_instance.clone(),
                     engine_epoch: admission.engine_epoch.clone(),
                 },
-                None,
+                ended,
             )?;
             read_native_auth(db, config, sources, admission, &request)?
         }
@@ -556,6 +564,18 @@ pub(crate) fn execute(
             cancel_native_auth(db, config, sources, admission, &request, &observed.fact)?
         }
         command @ (Command::Start(_) | Command::Logout(_)) => {
+            #[cfg(unix)]
+            if ended.is_some() {
+                recover_native_auth(
+                    db,
+                    custody,
+                    &HostStamp {
+                        db_instance: admission.db_instance.clone(),
+                        engine_epoch: admission.engine_epoch.clone(),
+                    },
+                    ended,
+                )?;
+            }
             return begin_native_auth(db, config, sources, custody, admission, command);
         }
     };
@@ -612,12 +632,13 @@ pub(crate) fn begin_native_auth(
     let guard = custody
         .as_mut()
         .map_err(|error| error.clone())?
-        .acquire_use(
+        .acquire_use_within(
             &host,
             prepared.binding(),
             command.operation_id(),
             generation,
             purpose,
+            None,
         )?;
     let fact = record(&tx, &key, prepared, &command, generation)?;
     let inserted = tx.execute(

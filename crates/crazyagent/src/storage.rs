@@ -282,6 +282,7 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
+                let mut ended_custody: Option<NativeAuthFact> = None;
                 let mut model_access_snapshot = None;
                 let mut home_watch = projects_home::WatchSlot::default();
                 if !readonly {
@@ -375,6 +376,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
                             } else {
+                                ended_custody = Some(dispatch.fact().clone());
                                 native_auth::recover_native_auth(
                                     &mut connection,
                                     custody.as_mut().unwrap(),
@@ -393,6 +395,7 @@ impl Storage {
                                     &config,
                                     sources.as_ref(),
                                     custody.as_mut().unwrap(),
+                                    ended_custody.as_ref(),
                                     &admission,
                                     command,
                                 )

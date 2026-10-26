@@ -910,6 +910,49 @@ async fn an_owner_check_of_an_account_an_agent_is_using_runs_beside_the_agent() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_check_during_a_renewal_of_an_account_in_use_waits_for_it_and_leaves_sign_in_free()
+{
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let run = restart.start().await;
+        let signed = run.sign_in(&restart).await;
+        let agent = restart.agent(&run, &signed, "renewing-agent");
+        let renewal = agent.hold_renewal(Duration::ZERO).unwrap();
+        let renewed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(renewal);
+        });
+        let checked = run
+            .authenticate(
+                &restart,
+                connection(),
+                "check-during-renewal",
+                NativeAuthMethod::ClaudeExisting,
+            )
+            .await;
+        renewed.await.unwrap();
+        assert_eq!(
+            checked.action,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::ClaudeExisting
+            }
+        );
+        run.authenticate(
+            &restart,
+            connection(),
+            "check-after-renewal",
+            NativeAuthMethod::ClaudeExisting,
+        )
+        .await;
+        assert_eq!(run.status().await, AccountStatus::SignedIn);
+        drop(agent);
+        run.stop().await;
+    })
+    .await
+    .expect("the check-during-renewal case exceeded 90 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_whose_credential_the_engine_could_not_use_is_checked_before_its_next_use() {
     let restart = Restart::new();
     tokio::time::timeout(Duration::from_secs(60), async {

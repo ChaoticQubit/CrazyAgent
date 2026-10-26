@@ -313,7 +313,7 @@ fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> 
 /// another thread is starting, and that briefly shares the description, cannot keep it.
 /// Holds the duplicate. Dropping it ends the lock for every descriptor of the file.
 #[must_use = "the lock ends as soon as this guard is dropped"]
-struct HeldLock(File);
+pub(crate) struct HeldLock(File);
 
 impl Drop for HeldLock {
     /// Unlocks the open file description through the guard's duplicate, ending the lock
@@ -323,17 +323,19 @@ impl Drop for HeldLock {
     }
 }
 
-/// The sign-in lock of one native profile, taken while a stale sign-in is settled so no
-/// custodian can start on that profile meanwhile. Holds no file when the profile does not
-/// exist. Dropping it unlocks the open file description.
-pub(crate) struct NativeProfileRelease(Option<File>);
+/// The locks that show no custodian holds one native profile, taken while a stale sign-in
+/// is settled: a shared lock on its manifest, which every sign-in and logout excludes, and
+/// its renewal lock, which every check holds, so agents keep their shared leases and no
+/// custodian can start meanwhile. Holds nothing when the profile does not exist. Dropping
+/// it unlocks both.
+pub(crate) struct NativeProfileRelease(Option<(File, HeldLock)>);
 
 impl Drop for NativeProfileRelease {
-    /// Releases the profile lock on its open file description when the settlement ends,
-    /// so a process that shares it can never keep the profile busy afterwards.
-    /// Input: the release being dropped. Output: none.
+    /// Releases the manifest lock on its open file description when the settlement ends,
+    /// so a process that shares it can never keep the profile busy afterwards; the renewal
+    /// lock ends with its own guard. Input: the release being dropped. Output: none.
     fn drop(&mut self) {
-        if let Some(file) = &self.0 {
+        if let Some((file, _)) = &self.0 {
             let _ = flock(file, FlockOperation::Unlock);
         }
     }
@@ -553,6 +555,30 @@ impl NativeProfileCustody {
         generation: u64,
         purpose: NativeProfileUsePurpose,
     ) -> Result<NativeProfileUse, EngineError> {
+        self.acquire_use_within(
+            host,
+            binding,
+            operation_id,
+            generation,
+            purpose,
+            Some(std::time::Duration::ZERO),
+        )
+    }
+
+    /// Takes one use of a native profile like [`Self::acquire_use`], with a chosen hold on
+    /// the account's renewal lock for a check: `None` takes none, for the engine admitting a
+    /// check that only its custodian runs, and `Some(wait)` waits up to `wait` for a running
+    /// renewal to end. Inputs: the host, binding, operation, generation, purpose and that
+    /// choice. Output: the use, or `native_profile_in_use` while the lock stays busy.
+    pub(crate) fn acquire_use_within(
+        &mut self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
+        renewal_wait: Option<std::time::Duration>,
+    ) -> Result<NativeProfileUse, EngineError> {
         assert!(generation > 0);
         assert_eq!(host.db_instance, binding.database_instance);
         assert_eq!(host.engine_epoch, binding.engine_epoch);
@@ -589,14 +615,15 @@ impl NativeProfileCustody {
         };
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
         purpose.lock(&guard.manifest.file)?;
-        if purpose == NativeProfileUsePurpose::Check {
-            let held =
-                renewal::hold(&guard.profile.file, std::time::Duration::ZERO).map_err(|error| {
-                    match error.0.as_str() {
-                        "native_profile_renewal_busy" => failure("native_profile_in_use"),
-                        _ => error,
-                    }
-                })?;
+        if purpose == NativeProfileUsePurpose::Check
+            && let Some(wait) = renewal_wait
+        {
+            let held = renewal::hold(&guard.profile.file, wait).map_err(|error| {
+                match error.0.as_str() {
+                    "native_profile_renewal_busy" => failure("native_profile_in_use"),
+                    _ => error,
+                }
+            })?;
             guard.renewal = Some(held);
         }
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
@@ -605,10 +632,11 @@ impl NativeProfileCustody {
         Ok(guard)
     }
 
-    /// Takes the sign-in lock of one native profile when no process holds it, so a stale
-    /// sign-in can be settled while no custodian can start on that profile.
-    /// Inputs: this engine's host and the profile key. Output: the held lock, an empty
-    /// one when the profile does not exist, or `None` while another process holds it.
+    /// Takes the locks that show no custodian holds one native profile, so a stale sign-in
+    /// can be settled while agents keep using the account and no custodian can start on it.
+    /// Inputs: this engine's host and the profile key. Output: the held locks, an empty
+    /// release when the profile does not exist, or `None` while a sign-in, a logout, a
+    /// check or a renewal holds the profile.
     pub(crate) fn hold_released_profile(
         &self,
         host: &HostStamp,
@@ -641,7 +669,12 @@ impl NativeProfileCustody {
             Ok(manifest) => manifest,
             Err(error) => return absent(error),
         };
-        match flock(&manifest.file, FlockOperation::NonBlockingLockExclusive) {
+        let renewal = match renewal::hold(&profile.file, std::time::Duration::ZERO) {
+            Ok(held) => held,
+            Err(error) if error.0 == "native_profile_renewal_busy" => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match flock(&manifest.file, FlockOperation::NonBlockingLockShared) {
             Ok(()) => {}
             Err(error)
                 if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN =>
@@ -650,7 +683,7 @@ impl NativeProfileCustody {
             }
             Err(_) => return Err(failure("native_profile_lock_unavailable")),
         }
-        let release = NativeProfileRelease(Some(manifest.file));
+        let release = NativeProfileRelease(Some((manifest.file, renewal)));
         profile.verify(&root.file, OsStr::new(key))?;
         self.verify()?;
         Ok(Some(release))
