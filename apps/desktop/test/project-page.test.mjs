@@ -397,6 +397,28 @@ test("removing a project says its folder stays on disk", async () => {
   assert.equal(settings.removeLine(null), "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
 });
 
+test("a project set up in an existing folder shows that folder, not the .crazyagent folder inside it", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const settings = await import("../src/screens/project/settings.tsx");
+  const setup = { kind: "ok", value: {
+    project_id: "p-1", name: "Harbor Notes", about: "", tech_stack: [], platforms: [], research: [],
+    pool: null, team: { master: "codex", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 }, documents: [], folder: "/Users/mira/Code/harbor-notes/.crazyagent", created_ms: 0, revision: 1,
+  } };
+  const data = { ...tabData([]), setup };
+  const pages = [
+    renderToStaticMarkup(createElement(overview.OverviewTab, { data })),
+    renderToStaticMarkup(createElement(settings.SettingsTab, { data, section: "general" })),
+    renderToStaticMarkup(createElement(settings.SettingsTab, { data, section: "remove" })),
+  ];
+  for (const markup of pages) {
+    assert.match(markup, /~\/Code\/harbor-notes(?!\/)/);
+    assert.doesNotMatch(markup, /\.crazyagent/);
+  }
+  assert.equal(overview.projectFolder("C:\\Code\\harbor-notes\\.crazyagent"), "C:\\Code\\harbor-notes");
+  assert.equal(overview.projectFolder("/Users/mira/CrazyAgent/projects/harbor-notes"), "/Users/mira/CrazyAgent/projects/harbor-notes");
+  assert.equal(overview.projectFolder("/Users/mira/Code/.crazyagent-notes"), "/Users/mira/Code/.crazyagent-notes");
+});
+
 test("project Settings, General edits the saved details with the New Project controls", async () => {
   const settings = await import("../src/screens/project/settings.tsx");
   const setup = { kind: "ok", value: {
