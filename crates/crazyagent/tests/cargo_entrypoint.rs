@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn documented_cargo_run_selects_main_binary_with_probe_present() {
@@ -18,8 +18,9 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
     {
         let copy = root.path().join(member);
         let member_source = workspace.join(member);
-        std::fs::create_dir_all(&copy).unwrap();
-        copy_source(&member_source, &copy, 0);
+        for file in kept_files(workspace, member) {
+            copy_file(&workspace.join(&file), &root.path().join(&file));
+        }
         assert_eq!(
             std::fs::read(copy.join("Cargo.toml")).unwrap(),
             std::fs::read(member_source.join("Cargo.toml")).unwrap()
@@ -28,18 +29,12 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
     let mut manifest = std::fs::read_to_string(source.join("Cargo.toml")).unwrap();
     manifest.push_str("\n[[bin]]\nname = 'crazyagent-boundary-child'\npath = 'src/bin/crazyagent-boundary-child.rs'\n");
     std::fs::write(package.join("Cargo.toml"), manifest).unwrap();
-    for entry in std::fs::read_dir(source).unwrap() {
-        let name = entry.unwrap().file_name();
-        if name == "Cargo.toml" || name == "tests" {
+    for file in kept_files(workspace, "crates/crazyagent") {
+        let inside = file.strip_prefix("crates/crazyagent").unwrap();
+        if inside == Path::new("Cargo.toml") || inside.starts_with("tests") {
             continue;
         }
-        let copy = package.join(&name);
-        if source.join(&name).is_dir() {
-            std::fs::create_dir_all(&copy).unwrap();
-            copy_source(&source.join(&name), &copy, 0);
-        } else {
-            std::fs::copy(source.join(&name), copy).unwrap();
-        }
+        copy_file(&workspace.join(&file), &package.join(inside));
     }
     assert!(package.join("src/lib.rs").is_file() && package.join("assets").is_dir());
     let probe = package.join("src/bin/crazyagent-boundary-child.rs");
@@ -95,19 +90,45 @@ fn workspace_members(workspace: &Path) -> Vec<String> {
     members
 }
 
-fn copy_source(source: &Path, target: &Path, depth: usize) {
-    assert!(depth < 8);
-    let entries: Vec<_> = std::fs::read_dir(source).unwrap().collect();
-    assert!(entries.len() <= 128);
-    for entry in entries {
-        let entry = entry.unwrap();
-        let path = target.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            std::fs::create_dir_all(&path).unwrap();
-            copy_source(&entry.path(), &path, depth + 1);
-        } else {
-            assert!(entry.file_type().unwrap().is_file());
-            std::fs::copy(entry.path(), path).unwrap();
-        }
-    }
+/// Lists the files git keeps in one workspace folder, tracked or new but never ignored,
+/// so the copy holds what a checkout of this working tree holds and no build output.
+/// Inputs: the workspace root and a folder relative to it. Output: the files that exist,
+/// relative to the workspace root.
+fn kept_files(workspace: &Path, folder: &str) -> Vec<PathBuf> {
+    let output = crazyagent::spawn_gate::output(
+        std::process::Command::new("git")
+            .current_dir(workspace)
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                folder,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "UNAVAILABLE: the entrypoint check copies the files git keeps and needs a git checkout: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let files: Vec<PathBuf> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| PathBuf::from(String::from_utf8(name.to_vec()).unwrap()))
+        .filter(|file| workspace.join(file).is_file())
+        .collect();
+    assert!(!files.is_empty() && files.len() <= 4096, "{}", files.len());
+    files
+}
+
+fn copy_file(source: &Path, target: &Path) {
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::copy(source, target).unwrap();
 }
