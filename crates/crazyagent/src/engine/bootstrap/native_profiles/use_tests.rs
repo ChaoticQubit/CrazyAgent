@@ -834,8 +834,11 @@ fn substituted_retained_manifest_descriptor_is_rejected() {
     assert_busy(&case.manifest());
     drop(guard);
     assert_busy(&case.manifest());
+    let forked_alias = retained.try_clone().unwrap();
+    flock(&retained, FlockOperation::Unlock).unwrap();
     drop(retained);
     assert_free(&case.manifest());
+    drop(forked_alias);
 }
 
 struct ExecProbe {

@@ -248,14 +248,16 @@ fn staging_directory_held_by_a_live_creator_is_left_alone() {
         .unwrap();
     let live = case.root().join(format!(".staging-{}", "1".repeat(32)));
     private_dir(&live);
-    let held = File::open(&live).unwrap();
-    flock(&held, FlockOperation::NonBlockingLockExclusive).unwrap();
+    let creator = File::open(&live).unwrap();
+    let held = configured_rcli::lock(&creator).unwrap();
+    let forked_alias = creator.try_clone().unwrap();
     case.usable(&mut case.custody(), &native_connection("second-profile"));
     assert!(live.is_dir());
     case.usable(&mut case.custody(), &case.connection);
     drop(held);
     case.usable(&mut case.custody(), &native_connection("third-profile"));
     assert!(!live.exists());
+    drop(forked_alias);
 }
 
 #[test]
@@ -360,7 +362,8 @@ fn generated_home_is_not_left_behind_when_the_root_lock_is_busy() {
     connection.id = reference("second-generated-connection");
     let root_manifest =
         File::open(case.root.path().join("state").join(ROOT).join(MANIFEST)).unwrap();
-    flock(&root_manifest, FlockOperation::NonBlockingLockExclusive).unwrap();
+    let held = configured_rcli::lock(&root_manifest).unwrap();
+    let forked_alias = root_manifest.try_clone().unwrap();
     assert_eq!(
         case.custody
             .prepare_configured_rcli_profile(&case.host, &connection, &second, None)
@@ -371,12 +374,13 @@ fn generated_home_is_not_left_behind_when_the_root_lock_is_busy() {
     );
     let home = case.custody.generated_configured_home(&second);
     assert!(!home.exists());
-    drop(root_manifest);
+    drop(held);
     let metadata = case
         .custody
         .prepare_configured_rcli_profile(&case.host, &connection, &second, None)
         .unwrap();
     assert_eq!(metadata.profile_generation, 1);
+    drop(forked_alias);
 }
 
 #[test]
