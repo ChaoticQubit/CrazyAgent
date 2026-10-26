@@ -687,7 +687,7 @@ async function main() {
       const sent = await send("Are you still there?", null, false);
       return realSend("Still there? Reply with one short sentence and use no tools.", false, sent.text);
     });
-    await step("3c", "a tools-on master starts a sub-agent through the engine: it shows in the team status and the Agents tab with its task and project (LB-43)", async () => {
+    await step("3c", "a tools-on master starts a sub-agent through the engine: it shows in the team status and the Agents tab with its task and project, from the master (LB-43)", async () => {
       if (!real) throw new Blocked("needs_real_signed_in_profile: a stand-in master cannot run a turn");
       if (real.problem) throw new Blocked(real.problem);
       if (!real.bridge) throw new Blocked("blocked_by_3: the real engine was not reached");
@@ -703,7 +703,8 @@ async function main() {
         const view = member && (await value("desktop_agents", { projectId: real.project }, real.bridge)).find((item) => item.label === `Team sub-agent ${member.id}`);
         if (member?.status === "working" && view?.state === "running") {
           const stopped = await value("desktop_stop_agent", { id: view.id }, real.bridge);
-          return `${sent}; task ${task.id} "${task.prompt.split("\n")[0].slice(0, 80)}" in project ${real.project}, team ${member.status}, agents view ${view.state}, then stopped (${stopped.state})`;
+          if (task.source !== "master") throw new Refused(`team_task_from_${task.source}`, "a conversation master's task must read as the master's");
+          return `${sent}; task ${task.id} "${task.prompt.split("\n")[0].slice(0, 80)}" from the ${task.source} in project ${real.project}, team ${member.status}, agents view ${view.state}, then stopped (${stopped.state})`;
         }
         if (Date.now() > deadline) throw new Refused(task ? `team_task_${task.status}_agent_${member?.status ?? "missing"}` : "master_started_no_team_task", teamNote(current));
       }
