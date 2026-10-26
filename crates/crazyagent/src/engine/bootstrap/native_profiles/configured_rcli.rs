@@ -4,6 +4,7 @@ use std::path::{Component, PathBuf};
 
 const CONFIG_BYTES_MAX: u64 = 65_536;
 const CONFIGURATION_REQUIRED: &str = "rcli_profile_configuration_required";
+const GENERATION_MAX: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConfiguredRcliProfileMetadata {
@@ -54,10 +55,10 @@ struct ConfiguredHomeIdentity {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConfiguredProfileIdentity {
+pub(super) struct ConfiguredProfileIdentity {
     version: u8,
     root: RootIdentity,
-    connection: ModelConnection,
+    pub(super) connection: ModelConnection,
     profile_ref: CredentialRef,
     directory: Identity,
     manifest: Identity,
@@ -120,7 +121,7 @@ pub(super) fn lock(file: &File) -> Result<(), EngineError> {
 }
 
 impl ConfiguredRcliUse {
-    fn capture(
+    pub(super) fn capture(
         path: &Path,
         connection: &ModelConnection,
     ) -> Result<(Directory, Self), EngineError> {
@@ -294,7 +295,59 @@ pub(super) fn require_entries(profile: &File) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Tells whether a configured home differs from its pin only in file times, as after a
+/// touch, a chmod back to 0600 or an extended attribute. Inputs: the pinned and the
+/// current identity. Output: true when the path, every identity and the bytes match.
+fn times_only(pinned: &ConfiguredHomeIdentity, current: &ConfiguredHomeIdentity) -> bool {
+    pinned.path == current.path
+        && pinned.home == current.home
+        && pinned.sdk == current.sdk
+        && pinned.config_sha256 == current.config_sha256
+        && pinned.config.identity == current.config.identity
+        && pinned.config.owner == current.config.owner
+        && pinned.config.mode == current.config.mode
+        && pinned.config.links == current.config.links
+        && pinned.config.length == current.config.length
+}
+
+/// The profile root, its manifest and its identity while a registration holds the lock.
+pub(super) struct LockedRoot<'a> {
+    pub(super) root: &'a Directory,
+    pub(super) manifest: &'a Manifest,
+    pub(super) identity: &'a RootIdentity,
+}
+
 impl NativeProfileCustody {
+    pub(super) fn read_configured_slot(
+        &self,
+        root: &Directory,
+        root_identity: &RootIdentity,
+        slots: &BTreeMap<String, Identity>,
+        key: &str,
+        target_profile_ref: &CredentialRef,
+    ) -> Result<(Directory, Manifest, ConfiguredProfileIdentity), EngineError> {
+        let profile =
+            Directory::open(&root.file, OsStr::new(key)).map_err(configuration_missing)?;
+        let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
+        let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
+            .map_err(|_| failure("rcli_profile_binding_conflict"))?;
+        if actual.version != 2
+            || actual.root != *root_identity
+            || actual.profile_ref != *target_profile_ref
+            || actual.directory != profile.identity
+            || actual.manifest != manifest.identity
+            || actual.generation == 0
+            || slots.get(key) != Some(&profile.identity)
+            || self
+                .profiles
+                .get(key)
+                .is_some_and(|hash| hash != &digest(&manifest.bytes))
+        {
+            return Err(failure("rcli_profile_binding_conflict"));
+        }
+        Ok((profile, manifest, actual))
+    }
+
     fn load_configured_rcli(
         &self,
         host: &HostStamp,
@@ -310,24 +363,9 @@ impl NativeProfileCustody {
             return Err(failure("native_profile_identity_changed"));
         }
         let key = digest(target_profile_ref.as_str().as_bytes());
-        let profile =
-            Directory::open(&root.file, OsStr::new(&key)).map_err(configuration_missing)?;
-        let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
-        let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
-            .map_err(|_| failure("rcli_profile_binding_conflict"))?;
-        if actual.version != 2
-            || actual.root != root_identity
-            || actual.connection != *connection
-            || actual.profile_ref != *target_profile_ref
-            || actual.directory != profile.identity
-            || actual.manifest != manifest.identity
-            || actual.generation == 0
-            || slots.get(&key) != Some(&profile.identity)
-            || self
-                .profiles
-                .get(&key)
-                .is_some_and(|hash| hash != &digest(&manifest.bytes))
-        {
+        let (profile, manifest, actual) =
+            self.read_configured_slot(&root, &root_identity, &slots, &key, target_profile_ref)?;
+        if actual.connection != *connection {
             return Err(failure("rcli_profile_binding_conflict"));
         }
         self.validate_configured_home_path(&actual.configured.path)?;
@@ -361,6 +399,11 @@ impl NativeProfileCustody {
         Ok(())
     }
 
+    /// Registers a configured RCLI home for an owner request: creates its slot, or
+    /// re-pins an existing slot when the owner changed the connection or the home path,
+    /// or when only the config file times changed. Inputs: host, connection, profile
+    /// reference and home. Output: the slot metadata; a swapped config or home under an
+    /// unchanged connection is still refused.
     pub(crate) fn register_configured_rcli_profile(
         &mut self,
         host: &HostStamp,
@@ -370,50 +413,109 @@ impl NativeProfileCustody {
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
         self.verify()?;
         self.validate_configured_home_path(configured_home)?;
-        let (home, configured) = ConfiguredRcliUse::capture(configured_home, connection)?;
+        let captured = ConfiguredRcliUse::capture(configured_home, connection)?;
         let (root, root_manifest, root_identity) = self.root(host)?;
         lock(&root_manifest.file)?;
+        let locked = LockedRoot {
+            root: &root,
+            manifest: &root_manifest,
+            identity: &root_identity,
+        };
+        self.register_locked(host, connection, target_profile_ref, captured, &locked)
+    }
+
+    pub(super) fn register_locked(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+        target_profile_ref: &CredentialRef,
+        (home, configured): (Directory, ConfiguredRcliUse),
+        locked: &LockedRoot<'_>,
+    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
+        let root = locked.root;
+        staging::sweep(&root.file, STAGING)?;
         let slots = scan_slots(&root.file)?;
         if self.profiles.keys().any(|key| !slots.contains_key(key)) {
             return Err(failure("native_profile_identity_changed"));
         }
         let key = digest(target_profile_ref.as_str().as_bytes());
-        if slots.contains_key(&key) {
-            let loaded = self.load_configured_rcli(host, connection, target_profile_ref)?;
-            if loaded.configured.identity != configured.identity {
-                return Err(failure("rcli_profile_binding_conflict"));
+        let (profile, manifest, previous) = if slots.contains_key(&key) {
+            let (profile, manifest, actual) =
+                self.read_configured_slot(root, locked.identity, &slots, &key, target_profile_ref)?;
+            if actual.connection == *connection && actual.configured == configured.identity {
+                let loaded = self.load_configured_rcli(host, connection, target_profile_ref)?;
+                if loaded.configured.identity != configured.identity {
+                    return Err(failure("rcli_profile_binding_conflict"));
+                }
+                let metadata = loaded.metadata();
+                remember_profile(&mut self.profiles, key, metadata.custody_id.clone());
+                return Ok(metadata);
             }
-            let metadata = loaded.metadata();
-            remember_profile(&mut self.profiles, key, metadata.custody_id.clone());
-            return Ok(metadata);
-        }
-        if slots.len() >= MAX_PROFILES {
-            return Err(failure("native_profile_capacity"));
-        }
+            if actual.connection == *connection
+                && actual.configured.path == configured.identity.path
+                && !times_only(&actual.configured, &configured.identity)
+            {
+                return Err(failure(
+                    if actual.configured.config_sha256 != configured.identity.config_sha256 {
+                        "rcli_profile_config_changed"
+                    } else {
+                        "rcli_profile_identity_changed"
+                    },
+                ));
+            }
+            lock(&manifest.file)?;
+            (Some(profile), Some(manifest), Some(actual))
+        } else {
+            if slots.len() >= MAX_PROFILES {
+                return Err(failure("native_profile_capacity"));
+            }
+            (None, None, None)
+        };
         lock(&home.file)?;
         configured.verify(&home, connection)?;
-        let profile = Directory::create(&root.file, OsStr::new(&key))?;
-        let mut manifest = Manifest::open(&profile.file, true)?;
+        let generation = match &previous {
+            Some(actual) => actual
+                .generation
+                .checked_add(1)
+                .filter(|next| *next <= GENERATION_MAX)
+                .ok_or_else(|| failure("rcli_profile_generation_exhausted"))?,
+            None => 1,
+        };
+        let staged = Staging::create(&root.file, STAGING)?;
+        let mut written = Manifest::open(&staged.directory.file, true)?;
+        step()?;
         let identity = ConfiguredProfileIdentity {
             version: 2,
-            root: root_identity,
+            root: locked.identity.clone(),
             connection: connection.clone(),
             profile_ref: target_profile_ref.clone(),
-            directory: profile.identity,
-            manifest: manifest.identity,
+            directory: profile
+                .as_ref()
+                .map_or(staged.directory.identity, |profile| profile.identity),
+            manifest: written.identity,
             configured: configured.identity.clone(),
-            generation: 1,
+            generation,
         };
-        manifest.write(
-            &profile.file,
+        written.write(
+            &staged.directory.file,
             serde_json::to_vec(&identity)
                 .map_err(|_| failure("native_profile_identity_invalid"))?,
         )?;
+        step()?;
+        let profile = match profile {
+            Some(profile) => {
+                staged.replace_into(&root.file, MANIFEST, &profile.file)?;
+                profile
+            }
+            None => staged.commit(&root.file, &key)?,
+        };
+        drop(manifest);
+        assert_eq!(profile.identity, identity.directory);
         configured.verify(&home, connection)?;
         require_entries(&profile.file)?;
-        manifest.verify(&profile.file)?;
+        written.verify(&profile.file)?;
         profile.verify(&root.file, OsStr::new(&key))?;
-        root_manifest.verify(&root.file)?;
+        locked.manifest.verify(&root.file)?;
         root.verify(&self.anchor.directory, OsStr::new(ROOT))?;
         let current_slots = scan_slots(&root.file)?;
         if current_slots.get(&key) != Some(&profile.identity)
@@ -426,7 +528,7 @@ impl NativeProfileCustody {
         self.verify()?;
         let metadata = ConfiguredRcliProfileMetadata {
             profile_ref: target_profile_ref.clone(),
-            custody_id: digest(&manifest.bytes),
+            custody_id: digest(&written.bytes),
             profile_config_sha256: configured.identity.config_sha256.clone(),
             profile_generation: identity.generation,
         };

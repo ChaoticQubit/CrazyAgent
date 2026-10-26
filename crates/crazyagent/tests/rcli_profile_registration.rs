@@ -16,7 +16,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
 
 const CATALOG: &str = r#"version = 1
@@ -216,6 +216,15 @@ impl Fixture {
             applied(controller.send_pending().await.unwrap()).result,
             OwnerResult::Applied
         );
+        let (session, connection) = self.open_master(&mut controller, 2).await;
+        (controller, session, connection)
+    }
+
+    async fn open_master(
+        &self,
+        controller: &mut OwnerController,
+        generation: u64,
+    ) -> (MasterSessionView, ModelConnection) {
         let catalog = controller
             .read(OwnerRead::ModelAccessRecord {
                 collection: ModelAccessCollection::Connections,
@@ -254,7 +263,7 @@ impl Fixture {
                         }),
                     },
                 },
-                2,
+                generation,
             )
             .unwrap();
         let opened = applied(controller.send_pending().await.unwrap());
@@ -277,7 +286,7 @@ impl Fixture {
         assert_eq!(session.current_turn, None);
         assert_eq!(session.config_id, state.config_id);
         assert_eq!(session.selection.route.account_ref, connection.account_ref);
-        (controller, session, connection)
+        (session, connection)
     }
 
     fn intent(
@@ -734,6 +743,78 @@ async fn rcli_profile_registration_rejects_stale_scope_and_physical_replacement(
         original_body
     );
     assert_eq!(std::fs::read(config_path).unwrap(), original_config);
+    fixture.assert_no_execution();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn touched_config_is_repinned_only_by_a_new_owner_registration() {
+    let fixture = Fixture::start(false).await;
+    let (mut controller, session, connection) = fixture.open().await;
+    controller
+        .begin_mutation(
+            registration_mutation(fixture.intent(&session, &connection)),
+            3,
+        )
+        .unwrap();
+    let first = applied(controller.send_pending().await.unwrap());
+    assert_eq!(metadata(&first).generation, 1);
+    let config = fixture.home.join(".backboard/config.json");
+    let bytes = std::fs::read(&config).unwrap();
+    let inode = std::fs::metadata(&config).unwrap().ino();
+    std::fs::File::options()
+        .write(true)
+        .open(&config)
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let owner = fixture.owner(OwnerClientKind::Tui).await;
+    let request = fixture
+        .request(
+            &owner,
+            "same-session-after-touch",
+            fixture.intent(&session, &connection),
+        )
+        .await;
+    rejected(owner.request(request).await.unwrap());
+    assert_eq!(fixture.registration_count(), 1);
+    controller
+        .read(OwnerRead::ProjectMaster {
+            project_id: project(),
+        })
+        .await
+        .unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Close {
+                    project_id: project(),
+                    session_id: session.session_id.clone(),
+                },
+            },
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        applied(controller.send_pending().await.unwrap()).result,
+        OwnerResult::Applied
+    );
+    let (reopened, connection) = fixture.open_master(&mut controller, 5).await;
+    assert_ne!(reopened.session_id, session.session_id);
+    controller
+        .begin_mutation(
+            registration_mutation(fixture.intent(&reopened, &connection)),
+            6,
+        )
+        .unwrap();
+    let second = applied(controller.send_pending().await.unwrap());
+    assert_eq!(metadata(&second).generation, 2);
+    assert_eq!(metadata(&second).session_id, reopened.session_id);
+    assert_eq!(fixture.registration_count(), 2);
+    assert_eq!(std::fs::read(&config).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(&config).unwrap().ino(), inode);
     fixture.assert_no_execution();
     fixture.close().await;
 }
