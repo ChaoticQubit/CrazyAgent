@@ -173,6 +173,13 @@ pub fn intake_code(code: &str) -> Option<&'static str> {
     INTAKE_CODES.iter().copied().find(|item| *item == code)
 }
 
+/// Names a setup or pack refusal the window has a sentence for, so an owner receipt
+/// keeps the engine's reason instead of a general one.
+/// Input: an engine code. Output: the same code as a static name, or None.
+pub fn setup_code(code: &str) -> Option<&'static str> {
+    SETUP_CODES.iter().copied().find(|item| *item == code)
+}
+
 fn intake_failure(error: EngineError) -> BridgeError {
     known(&error.0, &INTAKE_CODES, "owner_read_failed")
 }
@@ -740,5 +747,21 @@ mod tests {
             github_failure(EngineError("clone_destination_exists".into())).code,
             "clone_destination_exists"
         );
+    }
+
+    #[test]
+    fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
+        let refused = |code: &str| {
+            known(
+                super::super::rejection_code(code),
+                &SETUP_CODES,
+                "setup_failed",
+            )
+            .code
+        };
+        for code in SETUP_CODES {
+            assert_eq!(refused(code), code);
+        }
+        assert_eq!(refused("raw /Users/mira/token"), "setup_failed");
     }
 }
