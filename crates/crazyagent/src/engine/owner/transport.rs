@@ -7,6 +7,8 @@ mod master_dispatch_tests;
 mod master_host_launch;
 mod master_rcli;
 mod master_rcli_launch;
+#[cfg(all(test, unix))]
+mod master_rebind_tests;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};

@@ -789,7 +789,7 @@ pub fn configured_profile_ref(connection: &ModelConnection) -> Option<Credential
 
 /// The allowed master target a connection gets when its pool is assigned: the connection
 /// itself when signed in, or its own profile reference for an RCLI HTTP endpoint.
-fn connection_destination(connection: &ModelConnection) -> Option<CredentialRef> {
+pub(crate) fn connection_destination(connection: &ModelConnection) -> Option<CredentialRef> {
     match connection.auth {
         ModelAuthentication::NativeManaged { .. } => Some(connection.id.clone()),
         _ if connection.harness.as_str() == "rcli"
