@@ -732,8 +732,8 @@ impl Agents {
                 .collect::<Result<_, _>>()
                 .map_err(database)?
         };
-        let entries = std::fs::read_dir(self.root.join(AGENTS))
-            .map_err(|_| failure("agent_root_unsafe"))?;
+        let entries =
+            std::fs::read_dir(self.root.join(AGENTS)).map_err(|_| failure("agent_root_unsafe"))?;
         for entry in entries {
             let entry = entry.map_err(|_| failure("agent_root_unsafe"))?;
             let name = entry.file_name();
