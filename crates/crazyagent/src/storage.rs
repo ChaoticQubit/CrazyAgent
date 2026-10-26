@@ -554,11 +554,12 @@ impl Storage {
                             } else {
                                 projects_home::settle_pending(&mut connection, &path, Some(exchange), ran)
                             };
-                            if matches!(result, Ok(true)) {
+                            let restart = matches!(result, Ok(true));
+                            let _ = reply.send(result.map(|_| ()));
+                            if restart {
                                 drop(home_watch.take());
                                 home_watch = projects_home::watch_saved(&connection);
                             }
-                            let _ = reply.send(result.map(|_| ()));
                         }
                         Job::HomeRecord(admission, request, effect, reply) => {
                             let moved_home = matches!(
@@ -570,11 +571,12 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Home(&effect)))
                             });
-                            if moved_home && result.is_ok() {
+                            let restart = moved_home && result.is_ok();
+                            let _ = reply.send(result);
+                            if restart {
                                 drop(home_watch.take());
                                 home_watch = projects_home::watch_saved(&connection);
                             }
-                            let _ = reply.send(result);
                         }
                         Job::SetupPlan(admission, request, reply) => {
                             let result = if readonly {
@@ -663,11 +665,12 @@ impl Storage {
                             );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
-                            if set_home && result.is_ok() {
+                            let restart = set_home && result.is_ok();
+                            let _ = reply.send(result);
+                            if restart {
                                 drop(home_watch.take());
                                 home_watch = projects_home::watch_saved(&connection);
                             }
-                            let _ = reply.send(result);
                         }
                         Job::OwnerRead(admission, query, reply) => {
                             if matches!(

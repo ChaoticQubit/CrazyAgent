@@ -600,6 +600,10 @@ impl NativeBridge {
         self.deliver_intent(false).await
     }
 
+    /// Sends or reconciles the kept owner change and reports what the engine settled.
+    /// A send the engine answers with an unknown outcome is checked once right away by the
+    /// same identity, as the TUI does; a check that settles nothing keeps the unknown answer.
+    /// Input: whether to reconcile instead of send. Output: the receipt for the kept change.
     async fn deliver_intent(&mut self, reconcile: bool) -> Result<IntentReceipt, BridgeError> {
         let intent = self
             .pending_intent()?
@@ -609,11 +613,20 @@ impl NativeBridge {
         self.model_access = None;
         self.model_access_next = None;
         self.projects_next = None;
-        let response = if reconcile {
+        let mut response = if reconcile {
             self.controller()?.reconcile_pending().await
         } else {
             self.controller()?.retry_pending().await
         };
+        if !reconcile && matches!(response, Ok(OwnerResponse::OutcomeUnknown { .. })) {
+            let checked = self.controller()?.reconcile_pending().await;
+            if !matches!(
+                checked,
+                Ok(OwnerResponse::Rejected { .. } | OwnerResponse::OutcomeUnknown { .. })
+            ) {
+                response = checked;
+            }
+        }
         let mut rejection = None;
         let outcome = match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {

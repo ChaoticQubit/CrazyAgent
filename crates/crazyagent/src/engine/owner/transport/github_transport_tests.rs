@@ -101,6 +101,31 @@ mod slow_remote {
         git(&["update-server-info"], bare);
     }
 
+    async fn set_home(controller: &mut OwnerController, home: &Path) {
+        let sent = controller
+            .set_projects_home(home.to_str().unwrap().into(), 1)
+            .await
+            .unwrap();
+        if matches!(sent, OwnerResponse::OutcomeUnknown { .. }) {
+            let checked = controller.reconcile_pending().await.unwrap();
+            assert!(
+                matches!(
+                    &checked,
+                    OwnerResponse::Committed { operation } if operation.result == OwnerResult::Applied
+                ),
+                "{checked:?}"
+            );
+            return;
+        }
+        assert!(
+            matches!(
+                &sent,
+                OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
+            ),
+            "{sent:?}"
+        );
+    }
+
     fn names(folder: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(folder)
             .unwrap()
@@ -184,17 +209,7 @@ mod slow_remote {
                 OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(10))
                     .await
                     .unwrap();
-            let response = controller
-                .set_projects_home(home.to_str().unwrap().into(), 1)
-                .await
-                .unwrap();
-            assert!(
-                matches!(
-                    &response,
-                    OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
-                ),
-                "{response:?}"
-            );
+            set_home(&mut controller, &home).await;
             controller.detach();
 
             let (client, _) =
@@ -349,17 +364,7 @@ mod slow_remote {
                 OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(10))
                     .await
                     .unwrap();
-            let response = controller
-                .set_projects_home(home.to_str().unwrap().into(), 1)
-                .await
-                .unwrap();
-            assert!(
-                matches!(
-                    &response,
-                    OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied
-                ),
-                "{response:?}"
-            );
+            set_home(&mut controller, &home).await;
             controller.detach();
 
             let (client, _) =

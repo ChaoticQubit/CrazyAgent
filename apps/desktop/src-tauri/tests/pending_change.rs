@@ -125,7 +125,7 @@ async fn desktop_change_the_engine_never_recorded_is_kept_for_retry_and_the_next
             .bridge
             .save_owner_profile(profile("Sent again"), 1)
             .await?;
-        assert_eq!(sent.outcome, ActionOutcome::Unknown);
+        assert_eq!(sent.outcome, ActionOutcome::NotRecordedAtBarrier);
         assert!(sent.pending);
         case.sqlite("DROP TRIGGER lb9_abort;")?;
         let checked = case.bridge.reconcile_intent().await?;
@@ -149,6 +149,47 @@ async fn desktop_change_the_engine_never_recorded_is_kept_for_retry_and_the_next
         assert_eq!(
             case.bridge.owner_profile().await?.map(|saved| saved.name),
             Some("Sent again".to_owned())
+        );
+        Ok(())
+    }
+    .await;
+    case.close().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_projects_home_answered_outcome_unknown_is_checked_once_without_the_owner_asking() {
+    let mut case = Case::start().await.unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("ca-dpc-home-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let result: TestResult<()> = async {
+        let picked = home
+            .path()
+            .canonicalize()?
+            .to_str()
+            .ok_or("home path")?
+            .to_owned();
+        case.sqlite(
+            "CREATE TRIGGER lb9_abort BEFORE INSERT ON owner_operations \
+             BEGIN SELECT RAISE(ABORT, 'lb9_abort'); END;",
+        )?;
+        let sent = case.bridge.set_projects_home(picked.clone(), 1).await?;
+        assert_eq!(
+            sent.outcome,
+            ActionOutcome::NotRecordedAtBarrier,
+            "the engine's unknown answer is checked once before the owner sees it"
+        );
+        assert!(sent.pending);
+        case.sqlite("DROP TRIGGER lb9_abort;")?;
+        let retried = case.bridge.retry_intent().await?;
+        assert_eq!(retried.outcome, ActionOutcome::Applied);
+        assert!(!retried.pending);
+        assert_eq!(
+            case.bridge.projects_home().await?.path.as_deref(),
+            Some(picked.as_str())
         );
         Ok(())
     }
@@ -235,8 +276,9 @@ async fn desktop_change_saved_after_its_reply_was_lost_settles_on_the_next_check
                 sent.outcome,
                 ActionOutcome::Unknown | ActionOutcome::Uncertain
             ),
-            "the reply was lost while the engine kept saving: {:?}",
-            sent.outcome
+            "the reply was lost while the engine kept saving: {:?} {:?}",
+            sent.outcome,
+            sent.rejection
         );
         assert!(sent.pending);
         let mut committed = false;
