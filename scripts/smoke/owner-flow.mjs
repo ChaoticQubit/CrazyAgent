@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,11 @@ const TEAM_MS = 90000;
 const POLL_MS = 250;
 const MERGE_BASE_KEYS = 50;
 const LINKED_WORKTREES = 41;
+const TREE_FOLDERS = 16;
+const TREE_SUBFOLDERS = 8;
+const TREE_FILES = 16;
+const LARGE_BYTES = 50 * 1024 * 1024;
+const LFS_POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
 const REPO = "owner-shaped";
 const ACTIVE_AUTH = new Set(["starting", "awaiting_owner", "checking_account", "cancelling"]);
 const ACTIVE_TURN = new Set(["queued", "prepared", "delivering", "running"]);
@@ -61,8 +66,10 @@ function git(cwd, ...args) {
 }
 
 /** Builds a repository shaped like the owner's: 50 vscode merge-base branch keys, per-worktree
- * config on, 41 linked worktrees (one with a codex config.worktree) and dirty files.
- * Input: the repository folder and the folder for the linked worktrees. Output: none. */
+ * config on, 41 linked worktrees (one with a codex config.worktree), then a real-size commit
+ * (2,048 files in nested folders, a CLAUDE.md symlink to AGENTS.md, a 50 MiB file and an LFS
+ * pointer) and dirty files. Input: the repository folder and the linked worktrees' folder.
+ * Output: none. */
 function ownerRepo(repo, linked) {
   git(repo, "init", "-q", "-b", "main");
   git(repo, "config", "user.name", "Owner Flow");
@@ -75,8 +82,46 @@ function ownerRepo(repo, linked) {
   git(repo, "config", "extensions.worktreeconfig", "true");
   for (let index = 0; index < LINKED_WORKTREES; index += 1) git(repo, "worktree", "add", "-q", "-b", `wt-${index}`, join(linked, `wt-${index}`));
   git(join(linked, "wt-0"), "config", "--worktree", "codex.localEnvironmentConfigPath", "__none__");
+  for (let folder = 0; folder < TREE_FOLDERS; folder += 1) {
+    for (let sub = 0; sub < TREE_SUBFOLDERS; sub += 1) {
+      const path = join(repo, "src", `pkg-${folder}`, `mod-${sub}`);
+      mkdirSync(path, { recursive: true });
+      for (let file = 0; file < TREE_FILES; file += 1) writeFileSync(join(path, `file-${file}.js`), `export const id = "${folder}-${sub}-${file}";\n`);
+    }
+  }
+  writeFileSync(join(repo, "AGENTS.md"), "# Agent rules\n");
+  symlinkSync("AGENTS.md", join(repo, "CLAUDE.md"));
+  mkdirSync(join(repo, "assets"));
+  const large = Buffer.alloc(LARGE_BYTES);
+  for (let index = 0; index < LARGE_BYTES; index += 1) large[index] = (index * 31) % 251;
+  writeFileSync(join(repo, "assets", "model.bin"), large);
+  writeFileSync(join(repo, ".gitattributes"), "*.psd filter=lfs diff=lfs merge=lfs -text\n");
+  writeFileSync(join(repo, "assets", "cover.psd"), LFS_POINTER);
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "real size");
   writeFileSync(join(repo, "app.js"), "export const answer = 43;\n");
   writeFileSync(join(repo, "notes.txt"), "work in progress\n");
+}
+
+/** Checks that the master's Ready lease holds the whole commit: Git sees no change or missing
+ * file, CLAUDE.md is the in-tree symlink and the large file has every byte. Input: the engine
+ * database and the repository. Output: a summary, or a Refused naming what differs. */
+function leaseCopy(database, repo) {
+  const db = new DatabaseSync(database, { readOnly: true });
+  let lease;
+  try {
+    lease = db.prepare("SELECT body FROM worktree_leases").all().map((row) => JSON.parse(row.body).lease).find((item) => item.repository === repo && item.state === "Ready");
+  } finally {
+    db.close();
+  }
+  if (!lease) throw new Refused("lease_not_ready");
+  const changed = git(lease.path, "--no-optional-locks", "status", "--porcelain");
+  if (changed !== "") throw new Refused("lease_differs_from_commit", changed.slice(0, 200));
+  if (readlinkSync(join(lease.path, "CLAUDE.md")) !== "AGENTS.md") throw new Refused("lease_symlink_differs");
+  if (statSync(join(lease.path, "assets", "model.bin")).size !== LARGE_BYTES) throw new Refused("lease_large_file_differs");
+  if (readFileSync(join(lease.path, "assets", "cover.psd"), "utf8") !== LFS_POINTER) throw new Refused("lease_lfs_pointer_differs");
+  const tracked = git(lease.path, "ls-files", "-z").split("\0").filter(Boolean).length;
+  return `lease holds ${tracked} tracked files, the CLAUDE.md symlink and the 50 MiB file`;
 }
 
 /** Starts a child with its output kept as evidence and waits for its ready line.
@@ -469,7 +514,7 @@ async function main() {
       return "applied";
     });
     await step("2c", "assign the pool to the project", async () => assignPool(needs(state.project, "1"), needs(state.pool, "2b"), false));
-    await step("3", "open the conversation and send (readiness and worktree admission)", () => send("Hello master, what is in this repository?"));
+    await step("3", "open the conversation and send (readiness and worktree admission)", async () => `${await send("Hello master, what is in this repository?")}; ${leaseCopy(join(crazyHome, "engine.db"), repo)}`);
     await step("3b", "send again after a turn the harness could not finish, with no extra owner action", () => send("Are you still there?", null, false));
     await step("4a", "change project settings (details and pool), send again (LB-14)", async () => {
       const project = needs(state.project, "1");
