@@ -302,6 +302,7 @@ export function stopCode(turn: MasterTurn): string {
  * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
   const code = ` (${stopCode(turn)})`;
+  if (turn.phase === "blocked" && (turn.accounts ?? []).length > 0) return `No account in this master's pool can run it now.${code}`;
   if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return `Not signed in. Sign in again in Settings, Accounts, then send again.${code}`;
   if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;
   if (turn.phase === "blocked" && turn.reason === "connection_changed") return `Settings changed since the master started. End the conversation, then send again.${code}`;
@@ -318,6 +319,29 @@ export function turnLine(turn: MasterTurn): string {
       return `The master stopped${why ? `: ${why}` : ""}.${code}`;
     }
   }
+}
+
+const accountReasons: Record<string, string> = {
+  readiness_unknown: "not signed in",
+  readiness_stale: "sign-in is out of date",
+  invalid_authentication: "sign-in was rejected",
+  quota_exhausted: "usage limit reached",
+  rate_limited: "rate limited, paused for a few minutes",
+  cooldown_active: "paused for a few minutes",
+  profile_busy: "busy with a sign-in or sign-out",
+  scope_revoked: "not allowed by settings",
+  connection_changed: "settings changed",
+};
+
+/** The account a master turn runs on or, for a turn no account could run, each account
+ * of the pool with why, and other harnesses that are ready. Input: the turn. Output: the
+ * lines, empty when the turn has not reached an account yet. */
+export function accountLines(turn: MasterTurn): string[] {
+  const account = turn.attempt?.connection.account_ref;
+  if (account) return [`On account ${account}`];
+  return (turn.accounts ?? []).map((item) => item.reason === null
+    ? `${item.account_ref} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
+    : `${item.account_ref}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
 }
 
 /** The Thinking line for a master turn, with the time since this window sent the message.

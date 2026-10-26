@@ -581,7 +581,8 @@ async fn a_send_after_the_sandbox_changes_asks_for_a_new_conversation() {
 }
 
 #[tokio::test]
-async fn a_send_after_a_restart_without_an_unpooled_account_or_its_approval_continues() {
+async fn a_send_after_a_restart_asks_for_a_new_conversation_even_when_only_settings_outside_it_changed()
+ {
     let mut case = RebindCase::start().await;
     let session = case.open("approval-open").await;
     let added = case
@@ -599,26 +600,11 @@ async fn a_send_after_a_restart_without_an_unpooled_account_or_its_approval_cont
     assert_eq!(added, OwnerResult::Applied);
     assert_eq!(
         sent,
-        OwnerResult::Applied,
-        "an approval for an account outside the master's pool is not the master's"
+        conflict(),
+        "a conversation opened before a restart never continues, even when the master's settings match"
     );
     assert_eq!(current.session_id, session.session_id);
-    assert_eq!(current.rebound.len(), 1);
-}
-
-#[tokio::test]
-async fn a_send_after_a_hand_edit_and_restart_asks_for_a_new_conversation_without_the_old_settings()
-{
-    let mut case = RebindCase::start().await;
-    let session = case.open("unstored-open").await;
-    case.restart(&settings(false, &SANDBOX)).await;
-    let sent = case.submit(&session, "unstored-send").await;
-    case.stop().await.unwrap();
-    assert_eq!(
-        sent,
-        conflict(),
-        "settings the engine never stored cannot be compared, so the conversation restarts"
-    );
+    assert!(current.rebound.is_empty());
 }
 
 #[tokio::test]

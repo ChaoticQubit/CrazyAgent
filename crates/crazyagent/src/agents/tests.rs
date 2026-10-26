@@ -756,6 +756,7 @@ fn wiring_a_hosted_agent_is_listed_and_obeys_the_owners_stop_interrupt_and_resta
         harness: "claude-code".into(),
         host: "team",
         reference: "7".into(),
+        account: None,
     };
     let start = |hosted: Hosted| {
         let request = base.request(None).unwrap();
@@ -840,4 +841,134 @@ fn wiring_a_hosted_agent_is_listed_and_obeys_the_owners_stop_interrupt_and_resta
     assert_eq!(closed.status, "Stopped when CrazyAgent closed");
     assert!(closed.can_restart);
     drop(prompts);
+}
+
+/// The owner's stop and restart reach a hosted agent whose host ends it later. Until the
+/// host has ended it the agent reads "Stopping" or "Restarting" and offers no second
+/// stop; once ended it reads "Stopped".
+#[test]
+fn a_hosted_agent_reads_stopping_until_its_host_ends_it() {
+    let case = Case::new();
+    let agents = Arc::new(case.agents());
+    let agent = HostedAgent {
+        project: ProjectId::new("controls").unwrap(),
+        role: AgentRole::SubAgent,
+        label: "Team sub-agent 3".into(),
+        harness: "codex".into(),
+        host: "team",
+        reference: "3".into(),
+        account: None,
+    };
+    let ask = |action: fn(&Agents, &str) -> Result<AgentView, LaunchError>, id: &str| {
+        let (agents, id) = (agents.clone(), id.to_owned());
+        std::thread::spawn(move || action(&agents, &id))
+    };
+
+    let hosted = agents.host(agent.clone(), None).unwrap();
+    let id = hosted.id().to_owned();
+    let stop = ask(Agents::stop, &id);
+    until("the stop to reach the host", || {
+        hosted.requested() == Some(HostedRequest::Stop)
+    });
+    let stopping = agents.view(&id).unwrap();
+    assert_eq!(
+        (stopping.state, stopping.status.as_str()),
+        (AgentState::Running, "Stopping")
+    );
+    assert!(!stopping.can_stop);
+    hosted.finish(AgentState::Stopped, None);
+    let stopped = stop.join().unwrap().unwrap();
+    assert_eq!(
+        (stopped.state, stopped.status.as_str()),
+        (AgentState::Stopped, "Stopped")
+    );
+    assert!(!stopped.can_stop);
+
+    let again = agents.host(agent, Some(&id)).unwrap();
+    let restart = ask(Agents::restart, &id);
+    until("the restart to reach the host", || {
+        again.requested() == Some(HostedRequest::Restart)
+    });
+    let restarting = agents.view(&id).unwrap();
+    assert_eq!(
+        (restarting.state, restarting.status.as_str()),
+        (AgentState::Running, "Restarting")
+    );
+    assert!(!restarting.can_stop);
+    again.finish(AgentState::Stopped, None);
+    assert_eq!(restart.join().unwrap().unwrap().state, AgentState::Stopped);
+}
+
+/// A refused sign-out names the agents that use the account: the running hosted agents
+/// recorded with it, from every project, and none of another account's. Stopping them asks
+/// each of their hosts at once and returns once all have ended.
+#[test]
+fn the_agents_using_an_account_are_named_and_stopped_together() {
+    let case = Case::new();
+    let agents = Arc::new(case.agents());
+    let account = |name: &str| CredentialRef::new(name).unwrap();
+    let agent = |project: &str, reference: &str, used: Option<CredentialRef>| HostedAgent {
+        project: ProjectId::new(project).unwrap(),
+        role: AgentRole::SubAgent,
+        label: format!("Team sub-agent {reference}"),
+        harness: "claude-code".into(),
+        host: "team",
+        reference: reference.into(),
+        account: used,
+    };
+    let claude_c = account("claude-account-c");
+    let alpha = agents
+        .host(agent("alpha", "1", Some(claude_c.clone())), None)
+        .unwrap();
+    let beta = agents
+        .host(agent("beta", "2", Some(claude_c.clone())), None)
+        .unwrap();
+    let other = agents
+        .host(agent("alpha", "3", Some(account("claude-account-d"))), None)
+        .unwrap();
+    let keyless = agents.host(agent("alpha", "4", None), None).unwrap();
+
+    let mut named: Vec<(String, String)> = agents
+        .using(&claude_c)
+        .unwrap()
+        .into_iter()
+        .map(|view| (view.project.as_str().to_owned(), view.label))
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        vec![
+            ("alpha".to_owned(), "Team sub-agent 1".to_owned()),
+            ("beta".to_owned(), "Team sub-agent 2".to_owned())
+        ]
+    );
+    assert!(
+        agents
+            .using(&account("claude-account-e"))
+            .unwrap()
+            .is_empty()
+    );
+
+    let stop = {
+        let (agents, account) = (agents.clone(), claude_c.clone());
+        std::thread::spawn(move || agents.stop_using(&account))
+    };
+    until("both stops to reach their hosts", || {
+        alpha.requested() == Some(HostedRequest::Stop)
+            && beta.requested() == Some(HostedRequest::Stop)
+    });
+    assert_eq!(other.requested(), None);
+    assert_eq!(keyless.requested(), None);
+    alpha.finish(AgentState::Stopped, None);
+    beta.finish(AgentState::Stopped, None);
+    let stopped = stop.join().unwrap().unwrap();
+    assert_eq!(stopped.len(), 2);
+    assert!(
+        stopped
+            .iter()
+            .all(|view| view.state == AgentState::Stopped && !view.can_stop)
+    );
+    assert!(agents.using(&claude_c).unwrap().is_empty());
+    assert_eq!(agents.using(&account("claude-account-d")).unwrap().len(), 1);
+    drop((other, keyless));
 }

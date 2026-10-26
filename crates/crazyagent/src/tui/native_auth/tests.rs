@@ -1256,3 +1256,97 @@ mod pool_assignment;
 mod claude_code;
 mod managed_setup;
 mod preview;
+
+fn unit_agent(label: &str, project: &str) -> crate::agents::AgentView {
+    crate::agents::AgentView {
+        id: "a".repeat(32),
+        project: crate::protocol::ProjectId::new(project).unwrap(),
+        role: crate::agents::AgentRole::SubAgent,
+        label: label.into(),
+        harness: "codex".into(),
+        state: crate::agents::AgentState::Running,
+        status: "Working".into(),
+        reattached: false,
+        busy: true,
+        attempt: 1,
+        can_stop: true,
+        can_interrupt: true,
+        can_restart: true,
+        exit_code: None,
+        reason: None,
+        last_text: None,
+        started_ms: 1,
+        ended_ms: None,
+    }
+}
+
+/// Unit input: the refusal and agent lists below are synthetic; the engine's own listing
+/// and stop are covered over a real owner connection in client_controller::agents.
+#[tokio::test]
+async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_before_signing_out()
+{
+    run(|case| async move {
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = unit_inspected(basis, connection);
+        advance(&mut state, 4);
+        state.reduce(&UiEvent::Submit).unwrap();
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let logout = state.request().unwrap();
+        let Command::Logout(first) = &logout.command else {
+            panic!("logout required")
+        };
+        let first = first.request_id.clone();
+        state
+            .apply(Event {
+                job: logout,
+                result: Err("native_profile_in_use".into()),
+            })
+            .unwrap();
+        assert!(
+            !state.has_pending(),
+            "a refused logout leaves nothing pending"
+        );
+
+        let using = state.request().unwrap();
+        assert!(matches!(using.command, Command::Using));
+        state
+            .apply(Event {
+                job: using,
+                result: Ok(Output::Using(vec![
+                    unit_agent("Team sub-agent 3", "alpha"),
+                    unit_agent("Team sub-agent 5", "beta"),
+                ])),
+            })
+            .unwrap();
+        let shown = state.render(false);
+        assert!(shown.contains(
+            "In use by: Team sub-agent 3 (project alpha), Team sub-agent 5 (project beta)"
+        ));
+        assert!(shown.contains("> Back |   Stop agents and sign out"));
+
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        assert!(
+            state
+                .render(false)
+                .contains("  Back | > Stop agents and sign out")
+        );
+        state.reduce(&UiEvent::Submit).unwrap();
+        let stop = state.request().unwrap();
+        assert!(matches!(stop.command, Command::StopUsing));
+        assert_eq!(stop.context.connection.id.as_str(), "a-codex");
+        state
+            .apply(Event {
+                job: stop,
+                result: Ok(Output::Using(Vec::new())),
+            })
+            .unwrap();
+        let again = state.request().unwrap();
+        let Command::Logout(second) = &again.command else {
+            panic!("logout again required")
+        };
+        assert_ne!(second.request_id, first);
+        assert!(!state.render(false).contains("In use by"));
+    })
+    .await;
+}

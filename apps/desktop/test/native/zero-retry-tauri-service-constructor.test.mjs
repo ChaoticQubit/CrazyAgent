@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { after } from "node:test";
 import NoRespawnService, { launcher as NoRespawnLauncher } from "./zero-retry-tauri-service.mjs";
-import { config } from "./projects.wdio.conf.mjs";
 import { default as InstalledWorker, launcher as InstalledLauncher } from "@wdio/tauri-service";
 import { initializeLauncherService, initializeWorkerService } from "@wdio/utils";
 import { SevereServiceError } from "webdriverio";
 
+const evidence = mkdtempSync(join(tmpdir(), "ca-zero-retry-unit-"));
+process.env.CRAZYAGENT_DESKTOP_TEST_APP = process.execPath;
+process.env.CRAZYAGENT_DESKTOP_TEST_PORT = "19259";
+process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = evidence;
+after(() => rmSync(evidence, { recursive: true }));
+const { config } = await import("./projects.wdio.conf.mjs");
 const options = config.services[0][1];
 const unchangedInputs = {
   ...config,

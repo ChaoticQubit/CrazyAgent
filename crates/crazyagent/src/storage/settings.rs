@@ -213,6 +213,16 @@ pub(crate) struct SettingsSources {
     source_id: String,
 }
 
+#[cfg(unix)]
+impl Drop for SettingsSources {
+    /// Ends the settings writer lease on its open file description when the sources are
+    /// dropped, so a child that another thread is starting, and that briefly shares the
+    /// description, cannot keep the next writer out. Input: the sources. Output: none.
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.lease, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
 impl SettingsSources {
     /// Refuses to hold the writable settings sources without a Unix file lease.
     /// Takes the global and project paths, unused.

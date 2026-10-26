@@ -53,7 +53,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
     <ol className="in-list" aria-label="Setup steps">{STEPS.map((step) => {
       const shown = stepView(value[step.key], value.finished);
       return <li className="in-row" key={step.key}>
-        <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className="pj-small pj-error">{shown.line}</span>}</span>
+        <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className={`pj-small ${shown.tone === "danger" ? "pj-error" : "pj-secondary"}`}>{shown.line}</span>}</span>
         <StatusBadge word={shown.word} tone={shown.tone} />
       </li>;
     })}</ol>

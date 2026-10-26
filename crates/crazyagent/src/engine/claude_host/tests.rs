@@ -554,3 +554,23 @@ async fn closing_a_claude_master_is_not_failed_by_the_exit_its_closed_input_caus
     assert!(closed.is_ok(), "{closed:?}");
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
+
+#[test]
+fn claude_host_faults_become_plain_codes_a_log_can_name() {
+    assert_eq!(
+        Fault::Exit(Some(64)).error().0,
+        "claude_host_native_exit_64"
+    );
+    assert_eq!(
+        Fault::Exit(None).error().0,
+        "claude_host_native_exit_signal"
+    );
+    assert_eq!(
+        Fault::Protocol(ProtocolError::StaleMessage).error().0,
+        "claude_host_protocol_stale_message"
+    );
+    assert_eq!(
+        Fault::Protocol(ProtocolError::Disconnected).error().0,
+        "claude_host_protocol_disconnected"
+    );
+}

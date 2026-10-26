@@ -128,6 +128,27 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
   }
 });
 
+test("a master turn names its account, and a turn no account could run names each one and why", () => {
+  const running = { id: "t2", ordinal: 2, phase: "running", reason: null, reply: null, attempt: { connection: { account_ref: "work-claude" } } };
+  assert.deepEqual(research.accountLines(running), ["On account work-claude"]);
+  assert.deepEqual(research.accountLines({ id: "t1", ordinal: 1, phase: "queued", reason: null, reply: null }), []);
+  const blocked = {
+    id: "t3", ordinal: 3, phase: "blocked", reason: "readiness_unknown", reply: null, attempt: null,
+    accounts: [
+      { account_ref: "work-claude", connection: "claude-a", harness: "claude", reason: "readiness_unknown" },
+      { account_ref: "home-claude", connection: "claude-b", harness: "claude", reason: "rate_limited" },
+      { account_ref: "work-codex", connection: "codex-c", harness: "codex", reason: null },
+    ],
+  };
+  assert.equal(research.turnLine(blocked), "No account in this master's pool can run it now. (readiness_unknown)");
+  assert.deepEqual(research.accountLines(blocked), [
+    "work-claude: not signed in",
+    "home-claude: rate limited, paused for a few minutes",
+    "work-codex is ready on codex: change the master to codex to use it.",
+  ]);
+  assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [blocked]), "Not signed in");
+});
+
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
   const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));

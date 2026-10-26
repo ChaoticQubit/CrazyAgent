@@ -1669,13 +1669,36 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
         MasterTurnPhase::Uncertain => "Outcome unclear",
     };
     let mut line = match &turn.reason {
+        Some(_) if !turn.accounts.is_empty() => format!(
+            "Turn {}: {phase} | No account in this master's pool can run it now:",
+            turn.ordinal
+        ),
         Some(reason) => format!("Turn {}: {phase} | {}", turn.ordinal, reason_text(reason)),
         None => format!("Turn {}: {phase}", turn.ordinal),
     };
     if let Some(cause) = &turn.cause {
         line.push_str(&format!(" ({cause})"));
     }
+    if let Some(attempt) = &turn.attempt {
+        line.push_str(" | on account ");
+        line.push_str(attempt.connection.account_ref.as_str());
+    }
     lines.push(line);
+    for account in &turn.accounts {
+        lines.push(match &account.reason {
+            Some(reason) => format!(
+                "  {}: {}",
+                account.account_ref.as_str(),
+                reason_text(reason)
+            ),
+            None => format!(
+                "  {} is ready on {}: open a {} master to use it",
+                account.account_ref.as_str(),
+                account.harness.as_str(),
+                account.harness.as_str()
+            ),
+        });
+    }
     if let Some(detail) = &turn.detail {
         lines.push(super::views::safe_text(detail, 8192));
     }
@@ -2217,7 +2240,8 @@ fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
 /// Builds the master Open action the TUI submits with its default choices for a project.
 /// Inputs: a connected owner controller and the project. Output: an Open action using the
 /// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
-/// account, the first allowed sandbox and the unit allowance; or a plain-language reason.
+/// account as the one tried first (the engine runs each turn on a ready account of that
+/// pool), the first allowed sandbox and the unit allowance; or a plain-language reason.
 pub async fn default_master_open(
     controller: &mut OwnerController,
     project_id: &ProjectId,
@@ -2568,8 +2592,10 @@ fn reason_text(reason: &MasterReason) -> &'static str {
 #[cfg(test)]
 mod turn_line_tests {
     use super::{turn_holds, turn_lines};
-    use crate::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
-    use crate::protocol::{Cursor, RequestId, SessionId};
+    use crate::master_session::{
+        MasterAccountState, MasterReason, MasterTurnPhase, MasterTurnView,
+    };
+    use crate::protocol::{CredentialRef, Cursor, RequestId, SessionId};
 
     #[test]
     fn only_a_live_current_turn_holds_the_conversation() {
@@ -2585,6 +2611,7 @@ mod turn_line_tests {
             attempt: None,
             runtime: None,
             reply: None,
+            accounts: Vec::new(),
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -2630,6 +2657,7 @@ mod turn_line_tests {
             attempt: None,
             runtime: None,
             reply: None,
+            accounts: Vec::new(),
         };
         for (reason, cause, expected) in [
             (
@@ -2661,6 +2689,7 @@ mod turn_line_tests {
             attempt: None,
             runtime: None,
             reply: None,
+            accounts: Vec::new(),
             detail: None,
             cause: None,
         };
@@ -2684,6 +2713,101 @@ mod turn_line_tests {
             vec![
                 "Turn 1: Blocked | Settings or engine changed since this master opened: close it (F4), open it again (F2, Enter), then send again"
                     .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_shows_its_account_and_a_full_block_names_each_account_and_why() {
+        let attempt: crate::model_gateway::Attempt = serde_json::from_value(serde_json::json!({
+            "request": {
+                "id": "attempt-1",
+                "task_id": "master-turn-1",
+                "project_id": "project-1",
+                "role": "ProjectLeader",
+                "pool_ref": "shared-pool",
+                "target_profile_ref": "claude-b",
+                "route": {
+                    "preferred_target": "claude-b",
+                    "required_target": "claude-b",
+                    "required_capabilities": [],
+                    "account_ref": "claude-account-b",
+                    "budget_ref": "conversation-budget",
+                    "resources": crate::routing::ResourceBudget::unit()
+                },
+                "previous_attempt": null
+            },
+            "config_id": "a".repeat(64),
+            "connection": {
+                "id": "claude-b",
+                "provider": "anthropic",
+                "harness": "claude",
+                "protocol": "native",
+                "account_ref": "claude-account-b",
+                "endpoint": { "kind": "native" },
+                "model": { "id": "configured-claude-model", "author": "anthropic" },
+                "auth": { "method": "native_managed", "profile_ref": "claude-profile-b" }
+            },
+            "connection_revision": "b".repeat(64),
+            "selected_at_ms": 1,
+            "reasons": [],
+            "completion": null
+        }))
+        .unwrap();
+        let running = MasterTurnView {
+            id: RequestId::new("turn-2").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 2,
+            input_cursor: Cursor::new(2),
+            phase: MasterTurnPhase::Running,
+            reason: None,
+            attempt: Some(attempt),
+            runtime: None,
+            reply: None,
+            accounts: Vec::new(),
+            detail: None,
+            cause: None,
+        };
+        let mut lines = Vec::new();
+        turn_lines(&running, &mut lines);
+        assert_eq!(
+            lines,
+            vec!["Turn 2: Running | on account claude-account-b".to_string()]
+        );
+        let state = |account: &str, harness: &str, reason| MasterAccountState {
+            account_ref: CredentialRef::new(account).unwrap(),
+            connection: CredentialRef::new(account).unwrap(),
+            harness: CredentialRef::new(harness).unwrap(),
+            reason,
+        };
+        let blocked = MasterTurnView {
+            phase: MasterTurnPhase::Blocked,
+            reason: Some(MasterReason::ReadinessUnknown),
+            attempt: None,
+            accounts: vec![
+                state(
+                    "claude-account-a",
+                    "claude",
+                    Some(MasterReason::ReadinessUnknown),
+                ),
+                state(
+                    "claude-account-b",
+                    "claude",
+                    Some(MasterReason::RateLimited),
+                ),
+                state("codex-account-c", "codex", None),
+            ],
+            ..running
+        };
+        let mut lines = Vec::new();
+        turn_lines(&blocked, &mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "Turn 2: Blocked | No account in this master's pool can run it now:".to_string(),
+                "  claude-account-a: Not signed in: sign in to this account (Settings, 2 Connections, F2), then send again".to_string(),
+                "  claude-account-b: Rate limited; try again shortly".to_string(),
+                "  codex-account-c is ready on codex: open a codex master to use it".to_string(),
             ]
         );
     }

@@ -1960,11 +1960,7 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
-            Protocol::Agents => {
-                return agents::serve(stream, engine, authority, auth, &a, body)
-                    .await
-                    .map(|()| None);
-            }
+            Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2090,6 +2086,10 @@ async fn serve_admitted(
         Ok(Ok(Some(Deferred::Accounts(a)))) => {
             let _ = accounts::serve(stream, engine, authority, auth, &a, body).await;
         }
+        Ok(Ok(Some(Deferred::Agents(a)))) => {
+            let served = agents::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+        }
         _ => {}
     }
 }
@@ -2106,12 +2106,14 @@ struct Tasks {
 
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
-/// clones, and account checks that reach the network. Each carries the admission, and
-/// the projects home its validated request; the others read the request frame.
+/// clones, account checks that reach the network, and agent controls, which wait for an
+/// agent's process group or its host to end it. Each carries the admission, and the
+/// projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
+    Agents(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
