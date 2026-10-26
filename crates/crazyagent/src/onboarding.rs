@@ -20,19 +20,26 @@ const PROJECT_ID_BYTES_MAX: usize = 64;
 const REASON_BYTES_MAX: usize = 256;
 const GRAPHIFY_NOT_INSTALLED: &str = "graphify_not_installed";
 
-/// Where one onboarding step stands: not started, running, finished, off
-/// (the graph step only, while the Graphify entry is switched off in Setup),
-/// not installed (the graph step only, while Setup never installed the
-/// Graphify skill), or failed with a plain reason the owner can act on.
+/// Where one onboarding step stands: not started (with `until_ms`, the pause
+/// end in ms since the epoch, while every pool account that fits is paused
+/// after a limit; clients that predate it read a plain wait), running,
+/// finished, off (the graph step only, while the Graphify entry is switched
+/// off in Setup), not installed (the graph step only, while Setup never
+/// installed the Graphify skill), or failed with a plain reason the owner can act on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Step {
-    Waiting,
+    Waiting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until_ms: Option<i64>,
+    },
     Running,
     Done,
     Off,
     NotInstalled,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 /// What the manifest scan and the mapping agent found that has no field in
@@ -94,24 +101,33 @@ impl OnboardingAction {
 }
 
 impl Step {
+    /// A step that has not started and waits on no pause.
+    pub const WAITING: Step = Step::Waiting { until_ms: None };
+
     /// The stored state name and reason of this step. A step that is not
     /// installed is stored as off with its own reason, so every query that
-    /// counts an off graph as settled counts it too.
-    pub(crate) fn columns(&self) -> (&'static str, Option<&str>) {
+    /// counts an off graph as settled counts it too; a paused wait stores
+    /// its end as the reason.
+    pub(crate) fn columns(&self) -> (&'static str, Option<String>) {
         match self {
-            Self::Waiting => ("waiting", None),
+            Self::Waiting { until_ms } => ("waiting", until_ms.map(|until| until.to_string())),
             Self::Running => ("running", None),
             Self::Done => ("done", None),
             Self::Off => ("off", None),
-            Self::NotInstalled => ("off", Some(GRAPHIFY_NOT_INSTALLED)),
-            Self::Failed { reason } => ("failed", Some(reason.as_str())),
+            Self::NotInstalled => ("off", Some(GRAPHIFY_NOT_INSTALLED.to_owned())),
+            Self::Failed { reason } => ("failed", Some(reason.clone())),
         }
     }
 
     /// Rebuilds a step from its stored state name and reason.
     fn from_columns(state: &str, reason: Option<String>) -> Result<Self, EngineError> {
         Ok(match state {
-            "waiting" => Self::Waiting,
+            "waiting" => Self::Waiting {
+                until_ms: reason
+                    .map(|until| until.parse())
+                    .transpose()
+                    .map_err(|_| failure("onboarding_step_invalid"))?,
+            },
             "running" => Self::Running,
             "done" => Self::Done,
             "off" => match reason.as_deref() {
@@ -393,7 +409,7 @@ pub(crate) fn execute(
 fn graph_step(tx: &Transaction<'_>) -> Result<Step, EngineError> {
     let switch = crate::storage::setup::entry_switch(tx, crate::setup::pack::GRAPH_ENTRY)?;
     Ok(match switch {
-        Some(true) => Step::Waiting,
+        Some(true) => Step::WAITING,
         Some(false) => Step::Off,
         None => Step::NotInstalled,
     })
@@ -411,7 +427,7 @@ fn restart(
 ) -> Result<(), EngineError> {
     assert!(matches!(
         graph,
-        Step::Waiting | Step::Off | Step::NotInstalled
+        Step::Waiting { until_ms: None } | Step::Off | Step::NotInstalled
     ));
     let changed = tx
         .execute(

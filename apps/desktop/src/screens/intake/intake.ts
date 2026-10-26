@@ -8,6 +8,7 @@ import type { IconName, Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
+import { localClock } from "../project/research";
 
 export const COPY_WARN_BYTES = 1024 ** 3;
 export const FOUND_POLL_MS = 3000;
@@ -162,9 +163,10 @@ export function repoMeta(repo: GitHubRepo): string {
   return `${repo.private ? "Private" : "Public"}, ${formatBytes(repo.size_kb * 1024)}, branch ${displayText(repo.default_branch)}`;
 }
 
-/** Badge word, tone and failure line for one onboarding step.
- * Inputs: the step and whether the setup is already saved, when a step that never started was
- * skipped. Output: the fixed status word, its tone and the reason when it failed. */
+/** Badge word, tone and failure line for one onboarding step; a step waiting out a paused pool
+ * names when the pause ends in local time. Inputs: the step and whether the setup is already saved,
+ * when a step that never started was skipped. Output: the status word, its tone and the reason when
+ * it failed. */
 export function stepView(step: OnboardingStep, finished = false): { word: string; tone: Tone; line: string | null } {
   switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
@@ -172,7 +174,10 @@ export function stepView(step: OnboardingStep, finished = false): { word: string
     case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." };
     case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
-    default: return { word: finished ? "Skipped" : "Waiting", tone: "neutral", line: null };
+    default:
+      if (finished) return { word: "Skipped", tone: "neutral", line: null };
+      if (step.until_ms !== undefined) return { word: `Rate limited until ${localClock(step.until_ms)}`, tone: "warn", line: null };
+      return { word: "Waiting", tone: "neutral", line: null };
   }
 }
 

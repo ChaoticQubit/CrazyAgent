@@ -41,16 +41,16 @@ fn project_ids_are_the_folder_name_as_a_slug() {
 #[test]
 fn steps_round_trip_through_their_columns_and_wire_tag() {
     for step in [
-        Step::Waiting,
+        Step::WAITING,
+        Step::Waiting {
+            until_ms: Some(1_792_729_920_000),
+        },
         Step::Running,
         Step::Done,
         Step::failed("graphify not installed"),
     ] {
         let (state, reason) = step.columns();
-        assert_eq!(
-            Step::from_columns(state, reason.map(str::to_owned)).unwrap(),
-            step
-        );
+        assert_eq!(Step::from_columns(state, reason).unwrap(), step);
     }
     assert!(Step::from_columns("lost", None).is_err());
     assert_eq!(

@@ -379,7 +379,7 @@ fn run_step(
             (step, Some(drafted))
         }
     };
-    let waits = step == Step::Waiting;
+    let waits = matches!(step, Step::Waiting { .. });
     let _ = finish(database, &work.claimer, claimed, &step, drafted.as_ref());
     waits
 }
@@ -402,7 +402,7 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         #[cfg(unix)]
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
         #[cfg(unix)]
-        Ok(GraphEnding::Stopped) => Step::Waiting,
+        Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(_) => Step::failed(GRAPH_NOT_STARTED),
     }
 }
@@ -438,7 +438,14 @@ fn mapping_step(
     }
     let account = match (work.accounts)(&claimed.pool, &harnesses) {
         AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => *account,
-        AccountPick::Paused { .. } => return (Step::Waiting, base),
+        AccountPick::Paused { until_ms } => {
+            return (
+                Step::Waiting {
+                    until_ms: Some(until_ms),
+                },
+                base,
+            );
+        }
         _ => return (Step::failed(NO_ACCOUNT), base),
     };
     let name = run_name(claimed);
@@ -461,8 +468,8 @@ fn mapping_step(
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
         #[cfg(unix)]
-        Ok(ReadOnlyEnding::Stopped) => (Step::Waiting, base),
-        Err(RunError::Busy) => (Step::Waiting, base),
+        Ok(ReadOnlyEnding::Stopped) => (Step::WAITING, base),
+        Err(RunError::Busy) => (Step::WAITING, base),
         Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
         Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
     }

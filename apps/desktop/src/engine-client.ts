@@ -814,7 +814,7 @@ export interface FolderSize {
 
 export type AddFolderMode = "move" | "copy";
 
-export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
+export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
 export interface MappingFacts {
   languages: string[];

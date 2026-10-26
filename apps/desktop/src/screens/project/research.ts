@@ -45,7 +45,7 @@ export function rateLimit(job: Pick<ResearchJob, "status" | "error">): { until: 
 }
 
 /** Names the owner's local clock time of a moment. Input: milliseconds. Output: for example "4:32 PM". */
-function localClock(ms: number): string {
+export function localClock(ms: number): string {
   return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
