@@ -243,12 +243,34 @@ fn accepted(ruleset: &RulesetStatus, no_new_privs: bool) -> bool {
     matches!(ruleset, RulesetStatus::FullyEnforced) && no_new_privs
 }
 
+/// Makes the helper lead a session of its own before it starts the harness, so the agent
+/// has no controlling terminal: it cannot push input into the engine's terminal (TIOCSTI)
+/// or get that terminal's signals. A helper already leading its session, as the first
+/// process of a terminal pane, keeps it. A process group leader, which `setsid` refuses,
+/// first rejoins its parent's group. Output: Ok once session, group and pid are equal.
+fn own_session() -> Result<(), String> {
+    let helper = rustix::process::getpid();
+    if rustix::process::getsid(None) == Ok(helper) {
+        return Ok(());
+    }
+    let session = |error: rustix::io::Errno| format!("session: {error}");
+    if rustix::process::getpgrp() == helper {
+        let parent = rustix::process::getppid().ok_or("session: the engine has exited")?;
+        let group = rustix::process::getpgid(Some(parent)).map_err(session)?;
+        rustix::process::setpgid(None, Some(group)).map_err(session)?;
+    }
+    rustix::process::setsid().map_err(session)?;
+    assert_eq!(rustix::process::getsid(None), Ok(helper));
+    assert_eq!(rustix::process::getpgrp(), helper);
+    Ok(())
+}
+
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
 /// A probe applies an empty ruleset and the Unix-socket filter to itself and exits 0 when
-/// this kernel holds both; a run applies the policy and the filter to itself and then
-/// replaces itself with the harness. Output: the exit
-/// code, 2 for refused arguments, 3 when the kernel cannot hold the policy, 126 when the
-/// harness cannot start.
+/// this kernel holds both; a run applies the policy and the filter to itself, moves into a
+/// session of its own and then replaces itself with the harness. Output: the exit code, 2
+/// for refused arguments, 3 when the kernel cannot hold the policy or the session, 126 when
+/// the harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
         Ok(request) => request,
@@ -292,6 +314,10 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let Some((program, args)) = launch else {
         return ExitCode::SUCCESS;
     };
+    if let Err(reason) = own_session() {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     let error = Command::new(&program).args(args).exec();
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
@@ -576,6 +602,7 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
+        "--new-session",
         "--unshare-ipc",
         "--unshare-pid",
         "--unshare-uts",
@@ -611,5 +638,15 @@ mod tests {
         assert!(!accepted(&RulesetStatus::NotEnforced, true));
         assert!(!accepted(&RulesetStatus::FullyEnforced, false));
         assert!(!accepted(&RulesetStatus::PartiallyEnforced, false));
+    }
+
+    #[test]
+    fn bubblewrap_starts_the_agent_in_a_new_session() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let command = bwrap_command(Path::new(BWRAP_PATHS[0]), &grants, Path::new("/tmp"));
+        assert!(command.get_args().any(|arg| arg == "--new-session"));
     }
 }

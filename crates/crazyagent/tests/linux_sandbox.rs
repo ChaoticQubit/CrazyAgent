@@ -236,6 +236,97 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
     }
 }
 
+const SESSION: &str = "read -r stat < /proc/$$/stat; set -- ${stat##*\") \"}; echo \"$$ $3 $4 $5\"";
+
+fn assert_own_session(command: &mut Command) {
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(fields.len(), 4, "{text}");
+    assert_eq!(
+        fields[1], fields[0],
+        "the agent leads its process group: {text}"
+    );
+    assert_eq!(
+        fields[2], fields[0],
+        "the agent leads its own session: {text}"
+    );
+    assert_eq!(
+        fields[3], "0",
+        "the agent has no controlling terminal: {text}"
+    );
+}
+
+#[test]
+fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
+    let case = case();
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", SESSION])
+        .current_dir(case.project.join("worktrees"));
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    let wrapped = landlock.wrap(&harness).unwrap();
+    assert_own_session(&mut landlock.wrap(&harness).unwrap());
+    let mut ungrouped = Command::new(wrapped.get_program());
+    ungrouped
+        .args(wrapped.get_args())
+        .env_clear()
+        .envs(
+            wrapped
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .current_dir(wrapped.get_current_dir().unwrap());
+    assert_own_session(&mut ungrouped);
+    let setsid = Path::new("/usr/bin/setsid");
+    assert!(
+        setsid.is_file(),
+        "Linux test machines need util-linux setsid"
+    );
+    let mut leader = Command::new(setsid);
+    leader
+        .arg(wrapped.get_program())
+        .args(wrapped.get_args())
+        .env_clear()
+        .envs(
+            wrapped
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .current_dir(wrapped.get_current_dir().unwrap());
+    assert_own_session(&mut leader);
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_own_session(&mut bubblewrap.wrap(&harness).unwrap());
+}
+
 #[test]
 fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
     let case = case();
