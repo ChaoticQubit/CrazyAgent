@@ -715,6 +715,44 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
 }
 
 #[test]
+fn the_review_still_says_whether_a_code_graph_was_built() {
+    let graph_row = |rows: &[String], state: &str| {
+        rows.iter()
+            .any(|row| row.contains("Build the code graph") && row.contains(state))
+    };
+    let (mut shell, _) = review_with(|view| view.graph = Step::Off);
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Turned off"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "Mapping failed: No model answered."),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Failed {
+            reason: "graphify not installed".into(),
+        }
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Failed"), "{rows:#?}");
+    assert!(shows(&rows, "graphify not installed"), "{rows:#?}");
+
+    let (mut shell, _) = waiting_review();
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Done"), "{rows:#?}");
+}
+
+#[test]
 fn the_review_marks_what_is_missing_and_clears_it_as_the_owner_fills_it() {
     let (mut shell, project) = waiting_review();
     let Some(Request::Setup(SetupQuery::Setup { project: read })) = shell.ctx.next_request() else {
