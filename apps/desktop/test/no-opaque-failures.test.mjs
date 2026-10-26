@@ -37,9 +37,30 @@ function literals(text, pattern) {
   return [...text.matchAll(pattern)].map((match) => match[1]);
 }
 
+/**
+ * Reads every code literal a call can pass, including each branch of an if or match argument.
+ * Takes the source text and a global pattern that ends at the call's opening parenthesis.
+ * Returns the code literals found between that parenthesis and its matching close.
+ */
+function callLiterals(text, call) {
+  return [...text.matchAll(call)].flatMap((match) => {
+    const start = match.index + match[0].length;
+    let depth = 1;
+    let index = start;
+    while (depth > 0 && index < text.length) {
+      if (text[index] === "(") depth += 1;
+      if (text[index] === ")") depth -= 1;
+      index += 1;
+    }
+    assert.equal(depth, 0, `unclosed call at ${start}`);
+    return literals(text.slice(start, index - 1), /"([a-z][a-z0-9_]*)"/g);
+  });
+}
+
+const REJECT = /\breject(?:ed)?\(/g;
 const engineFiles = sources(ENGINE).map((path) => ({ path: path.slice(ENGINE.length), text: production(path) }));
 const refusals = new Set(engineFiles.flatMap(({ text }) => [
-  ...literals(text, /\breject(?:ed)?\(\s*"([a-z][a-z0-9_]*)"/g),
+  ...callLiterals(text, REJECT),
   ...literals(text, /Rejected\s*\{\s*code:\s*"([a-z][a-z0-9_]*)"/g),
 ]));
 const masterStorage = production(join(ENGINE, "storage/master_session.rs"));
@@ -48,7 +69,7 @@ const validate = selection.slice(selection.indexOf("pub(crate) fn validate_selec
 const transport = readFileSync(join(ENGINE, "engine/owner/transport.rs"), "utf8");
 const replyFrame = transport.slice(transport.indexOf("fn owner_reply_frame("), transport.indexOf("let response", transport.indexOf("fn owner_reply_frame(")));
 const sendCodes = new Set([
-  ...literals(masterStorage, /\breject(?:ed)?\(\s*"([a-z][a-z0-9_]*)"/g),
+  ...callLiterals(masterStorage, REJECT),
   ...literals(validate, /\berror\(\s*"([a-z][a-z0-9_]*)"/g),
   ...literals(replyFrame, /"([a-z][a-z0-9_]*)"/g),
 ]);
