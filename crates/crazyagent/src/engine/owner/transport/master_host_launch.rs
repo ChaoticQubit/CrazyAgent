@@ -190,7 +190,7 @@ pub(super) fn claude_master_turn(
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
-    let credential = profile.hand_to_agent(&home, wall_time)?;
+    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
     let command = crate::engine::claude_host::launch_command(
         executable,
         place.worktree,
