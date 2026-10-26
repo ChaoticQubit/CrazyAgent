@@ -1,5 +1,6 @@
 use crate::engine::owner::{OwnerClient, OwnerClientKind};
-use crate::paths::{Layout, Platform};
+use crate::paths::{Layout, Platform, RootEnvironment};
+use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -94,10 +95,60 @@ pub fn service_path(current: Option<&OsStr>, home: Option<&Path>) -> OsString {
     std::env::join_paths(folders).unwrap_or_default()
 }
 
+fn canonical(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(found) = std::fs::canonicalize(current) {
+            return missing
+                .iter()
+                .rev()
+                .fold(found, |path, part| path.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(part)) => {
+                missing.push(part.to_owned());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// The login service name for one engine data root: the standard name for the platform's
+/// default root, else the standard name with the first 12 hex digits of the SHA-256 of the
+/// canonical root, so an engine run with another `CRAZYAGENT_HOME` never shares the default
+/// service. Inputs: the platform, the root and the default root when known. Output: the name.
+pub fn service_name(platform: Platform, root: &Path, default_root: Option<&Path>) -> String {
+    let root = canonical(root);
+    if default_root.is_some_and(|default| canonical(default) == root) {
+        return match platform {
+            Platform::MacOs => LAUNCHD_LABEL,
+            Platform::Linux => SYSTEMD_UNIT,
+            Platform::Windows => WINDOWS_TASK,
+        }
+        .to_owned();
+    }
+    let short: String = Sha256::digest(root.as_os_str().as_encoded_bytes())
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(short.len(), 12);
+    match platform {
+        Platform::MacOs => format!("{LAUNCHD_LABEL}.{short}"),
+        Platform::Linux => format!(
+            "{}-{short}.service",
+            SYSTEMD_UNIT.trim_end_matches(".service")
+        ),
+        Platform::Windows => format!("{WINDOWS_TASK} {short}"),
+    }
+}
+
 impl Service {
-    /// The default engine service for the current user on one platform. Inputs: the
-    /// platform, the absolute executable the service runs and the engine's layout.
-    /// Output: the service with its standard name and definition path.
+    /// The engine service for the current user on one platform, named for the layout's data
+    /// root by [`service_name`]. Inputs: the platform, the absolute executable the service
+    /// runs and the engine's layout. Output: the service with its name and definition path.
     pub fn current_user(
         platform: Platform,
         executable: PathBuf,
@@ -106,32 +157,33 @@ impl Service {
         let home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from);
-        let (name, definition) = match platform {
-            Platform::MacOs => (
-                LAUNCHD_LABEL,
-                home.as_ref()
+        let default_root = crate::paths::data_root(
+            platform,
+            &RootEnvironment {
+                home_override: None,
+                ..RootEnvironment::current()
+            },
+        )
+        .ok();
+        let name = service_name(platform, layout.root(), default_root.as_deref());
+        let definition = match platform {
+            Platform::MacOs => home
+                .as_ref()
+                .ok_or_else(|| failure("HOME is not set"))?
+                .join("Library")
+                .join("LaunchAgents")
+                .join(format!("{name}.plist")),
+            Platform::Linux => match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+                Some(config) if config.is_absolute() => config,
+                _ => home
+                    .as_ref()
                     .ok_or_else(|| failure("HOME is not set"))?
-                    .join("Library")
-                    .join("LaunchAgents")
-                    .join(format!("{LAUNCHD_LABEL}.plist")),
-            ),
-            Platform::Linux => (
-                SYSTEMD_UNIT,
-                match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-                    Some(config) if config.is_absolute() => config,
-                    _ => home
-                        .as_ref()
-                        .ok_or_else(|| failure("HOME is not set"))?
-                        .join(".config"),
-                }
-                .join("systemd")
-                .join("user")
-                .join(SYSTEMD_UNIT),
-            ),
-            Platform::Windows => (
-                WINDOWS_TASK,
-                layout.root().join("crazyagent-engine-task.xml"),
-            ),
+                    .join(".config"),
+            }
+            .join("systemd")
+            .join("user")
+            .join(&name),
+            Platform::Windows => layout.root().join("crazyagent-engine-task.xml"),
         };
         let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
             (Ok(domain), Ok(user)) if !domain.is_empty() && !user.is_empty() => {
@@ -141,7 +193,7 @@ impl Service {
         };
         Ok(Self {
             platform,
-            name: name.to_owned(),
+            name,
             executable,
             root: layout.root().to_path_buf(),
             path: service_path(std::env::var_os("PATH").as_deref(), home.as_deref()),

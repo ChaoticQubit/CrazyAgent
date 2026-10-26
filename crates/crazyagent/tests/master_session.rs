@@ -130,6 +130,23 @@ fn rejected(reply: OwnerReply) {
     }
 }
 
+/// Checks that a real owner reply refused the request for one exact reason.
+/// Takes the reply and the expected code. Panics on any other reply or code.
+fn rejected_with(reply: OwnerReply, expected: &str) {
+    let code = match reply.response {
+        OwnerResponse::Rejected { code } => code,
+        OwnerResponse::Applied {
+            operation:
+                OwnerApplied {
+                    result: OwnerResult::Rejected { code },
+                    ..
+                },
+        } => code,
+        response => panic!("expected real rejection, received {response:?}"),
+    };
+    assert_eq!(code, expected);
+}
+
 fn blocked(turn: &MasterTurnView, session: &MasterSessionView, id: &str, reason: MasterReason) {
     assert_eq!(turn.id, RequestId::new(id).unwrap());
     assert_eq!(turn.session_id, session.session_id);
@@ -806,7 +823,7 @@ async fn master_one_outstanding_turn_survives_competing_owner_requests() {
     for reply in replies {
         if !matches!(&reply.response, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
         {
-            rejected(reply);
+            rejected_with(reply, "stale_revision");
         }
     }
     let page = f.page(&tui, &session).await;
@@ -1290,6 +1307,20 @@ fn master_submit_text_and_page_limits_validate_utf8_bytes_before_admission() {
     )
     .validate()
     .unwrap();
+    let ascii = |text: String| {
+        mutation(
+            "ascii",
+            0,
+            MasterOwnerAction::Submit {
+                project_id: project("p"),
+                session_id: SessionId::new("session").unwrap(),
+                text,
+            },
+        )
+        .validate()
+    };
+    ascii("a".repeat(8192)).unwrap();
+    assert_eq!(ascii("a".repeat(8193)).unwrap_err().0, "master_text_bounds");
     for limit in [0, 33, u8::MAX] {
         assert!(
             request(

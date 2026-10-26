@@ -200,7 +200,7 @@ export function UpdatesSettings() {
     reloadEngine();
     session.showToast("The engine restarted.");
   });
-  const phase = useSyncExternalStore(updateStore.subscribe, updateStore.get);
+  const phase = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   const [channelBusy, setChannelBusy] = useState(false);
   const [channelProblem, setChannelProblem] = useState("");
   const [cli, setCli] = useState<CliState>({ kind: "idle" });

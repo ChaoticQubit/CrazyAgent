@@ -449,6 +449,164 @@ async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
     assert_eq!(onboarding.name, "notes");
 }
 
+/// Serves the setup change and pool edit a confirmed onboarding review sends,
+/// until the review opens its project. Takes the shell and its engine connection.
+/// Returns the requests sent, in order.
+async fn serve_until_project(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+        }
+        if matches!(shell.place(), Some(Place::Project { .. })) {
+            return sent;
+        }
+        if !connection.busy()
+            && let Some(request) = shell.ctx.next_request()
+        {
+            match request {
+                Request::Setup(query) => {
+                    sent.push("setup");
+                    connection.project_setup(query).unwrap();
+                }
+                Request::EditPool { change } => {
+                    sent.push("edit pool");
+                    let generation = shell.ctx.next_generation();
+                    connection
+                        .shell(ShellRequest::EditPool { change, generation })
+                        .unwrap();
+                }
+                other => panic!("confirming a setup never sends {other:?}"),
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the confirmed setup never opened its project: {sent:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_confirmed_setup_gives_the_chosen_pool_to_the_project_master() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let folder = home.join("notes");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(
+        folder.join("Cargo.toml"),
+        "[package]\nname = \"notes\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let path: String = folder.to_str().unwrap().into();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(
+        &Place::Onboarding {
+            path: path.clone(),
+            name: "notes".into(),
+            project: None,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["pools"]);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let Some(Place::Onboarding {
+        project: Some(project),
+        ..
+    }) = shell.place()
+    else {
+        panic!("the started onboarding names its project");
+    };
+    drop(connection);
+    drop(shell);
+
+    let worker = crate::onboarding::service::start_for_engine(
+        engine.root.path(),
+        &engine.root.path().join("global.toml"),
+        &engine.root.path().join("project.toml"),
+        None,
+        None,
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let onboarding = engine.controller.onboarding(project.clone()).await.unwrap();
+        let done = |step: &Step| matches!(step, Step::Done | Step::Off | Step::Failed { .. });
+        if done(&onboarding.graph) && done(&onboarding.mapping) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the onboarding never settled: {onboarding:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    worker.stop();
+
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(
+        &Place::Onboarding {
+            path,
+            name: "notes".into(),
+            project: Some(project.clone()),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Confirm"), "{rows:#?}");
+    shell.key(Key::Tab);
+    keys(&mut shell, "Keeps notes.");
+    for _ in 0..3 {
+        shell.key(Key::Tab);
+    }
+    shell.key(Key::Enter);
+    let sent = serve_until_project(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["setup", "edit pool"], "{sent:?}");
+
+    let reply = engine
+        .controller
+        .read(crate::engine::owner::OwnerRead::ModelAccessPage {
+            collection: crate::engine::owner::ModelAccessCollection::Pools,
+            cursor: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let crate::engine::owner::OwnerData::ModelAccessPage { items, .. } = reply.data else {
+        panic!("the engine answers a pool page");
+    };
+    let pool = items
+        .iter()
+        .find_map(|item| match item {
+            crate::engine::owner::ModelAccessRecord::Pool { pool }
+                if pool.id.as_str() == "pool-a" =>
+            {
+                Some(pool)
+            }
+            _ => None,
+        })
+        .expect("the chosen pool is still there");
+    assert!(
+        pool.projects
+            .iter()
+            .any(|scope| scope.as_str() == project.as_str()),
+        "the chosen pool serves the set-up project: {pool:?}"
+    );
+    assert!(
+        pool.roles
+            .iter()
+            .any(|role| role.as_str() == "project_leader"),
+        "the chosen pool may lead the project as its master: {pool:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_run_setup_continues_without_installing_and_home_lists_what_is_missing() {
     let mut engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;

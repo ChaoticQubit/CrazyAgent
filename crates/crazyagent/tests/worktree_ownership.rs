@@ -211,6 +211,12 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     engine.close().await.unwrap();
 }
 
+/// Builds the refusal outcome the engine returns for one reason code.
+/// Takes the code. Returns `Outcome::Rejected` carrying it.
+fn rejected(code: &str) -> Outcome {
+    Outcome::Rejected { code: code.into() }
+}
+
 async fn admit(engine: &Engine, repo: &Path) {
     assert_eq!(
         apply(
@@ -250,6 +256,17 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
             .filter(|r| r.outcome == Outcome::Applied)
             .count(),
         1
+    );
+    let loser = results
+        .iter()
+        .find(|r| r.outcome != Outcome::Applied)
+        .unwrap();
+    assert_eq!(loser.outcome, rejected("stale_revision"));
+    assert_eq!(
+        apply(&engine, "third", 4, allocate(&repo, "owner-three", None))
+            .await
+            .outcome,
+        rejected("writer_already_owned")
     );
     assert_eq!(leases(&engine).await.len(), 1);
     assert_eq!(
@@ -297,10 +314,20 @@ async fn hostile_config_filters_and_attributes_never_execute() {
         match hostile {
             "filter" => {
                 git(&repo, &["config", "filter.hostile.smudge", &command]);
-                std::fs::write(repo.join(".gitattributes"), "* filter=hostile\n").unwrap();
+                std::fs::write(repo.join(".git/info/attributes"), "* filter=hostile\n").unwrap();
             }
             "include" => {
-                git(&repo, &["config", "include.path", "/outside/config"]);
+                let included = root.join("included");
+                std::fs::write(
+                    &included,
+                    format!("[filter \"hostile\"]\n\tsmudge = {command}\n"),
+                )
+                .unwrap();
+                std::fs::write(repo.join(".git/info/attributes"), "* filter=hostile\n").unwrap();
+                git(
+                    &repo,
+                    &["config", "include.path", included.to_str().unwrap()],
+                );
             }
             "fsmonitor" => {
                 git(&repo, &["config", "core.fsmonitor", &command]);
@@ -341,13 +368,27 @@ async fn hostile_config_filters_and_attributes_never_execute() {
             },
         )
         .await;
-        if admission.outcome == Outcome::Applied {
-            let allocation = apply(&engine, "allocate", 3, allocate(&repo, "owner", None)).await;
-            assert!(matches!(allocation.outcome, Outcome::Rejected { .. }));
+        let refusal = if admission.outcome == Outcome::Applied {
+            (
+                "allocation",
+                apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
+                    .await
+                    .outcome,
+            )
         } else {
-            assert!(matches!(admission.outcome, Outcome::Rejected { .. }));
-        }
+            ("admission", admission.outcome)
+        };
         assert!(!marker.exists(), "hostile {hostile} executed");
+        let expected = match hostile {
+            "attributes" => ("allocation", "unsupported_or_unsafe_tree_entry"),
+            "alternate" => ("admission", "unsupported_shared_or_partial_git_metadata"),
+            _ => ("admission", "unsupported_repository_config"),
+        };
+        assert_eq!(
+            refusal,
+            (expected.0, rejected(expected.1)),
+            "hostile {hostile}"
+        );
         engine.close().await.unwrap();
     }
 }
@@ -408,17 +449,18 @@ async fn outside_paths_symlinks_and_metadata_swaps_fail_closed() {
         },
     )
     .await;
-    assert!(matches!(admission.outcome, Outcome::Rejected { .. }));
+    assert_eq!(admission.outcome, rejected("repository_not_in_project"));
+    admit(&engine, &repo).await;
     std::os::unix::fs::symlink(&repo, root.join("alias")).unwrap();
     let allocation = apply(
         &engine,
         "alias",
-        2,
+        3,
         allocate(&root.join("alias"), "owner", None),
     )
     .await;
-    assert!(matches!(allocation.outcome, Outcome::Rejected { .. }));
-    admit(&engine, &repo).await;
+    assert_eq!(allocation.outcome, rejected("repository_not_admitted"));
+    assert!(leases(&engine).await.is_empty());
     assert_eq!(
         apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
             .await

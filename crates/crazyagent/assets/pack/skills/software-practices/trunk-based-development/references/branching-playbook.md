@@ -4,23 +4,22 @@ Concrete patterns to apply the trunk-based rules with plain git. Adapt names to 
 
 ## Daily loop
 
+1. Start from a fresh trunk every time.
+2. Cut a short-lived local branch (hours, not weeks). It is optional but convenient.
+3. Make ONE small, self-contained change (aim ~200 lines) and commit it.
+4. Rebase on the latest trunk right before review to avoid a stale merge.
+5. Open a small PR; after one approval, squash-merge to main.
+
 ```bash
-# Start from a fresh trunk every time
 git checkout main
 git pull --rebase origin main
 
-# Short-lived local branch (hours, not weeks) — optional but convenient
 git checkout -b work/short-descriptive-name
-
-# ... make ONE small, self-contained change (aim ~200 lines) ...
 
 git add -p
 git commit -m "component: what changed and why"
 
-# Rebase on latest trunk right before review to avoid a stale merge
 git fetch origin && git rebase origin/main
-
-# Open a small PR; after one approval, squash-merge to main
 ```
 
 Keep the branch alive only until the change lands. Delete it after merge. Do not accumulate a stack of unrelated work on one branch.
@@ -31,8 +30,10 @@ Keep the branch alive only until the change lands. Delete it after merge. Do not
 - Configure branch protection so a change cannot merge unless CI is green and it has the required approval(s).
 - Prefer **rollback over roll-forward** when a landed change breaks trunk: revert first, diagnose second.
 
+`git revert` cleanly undoes a bad change; re-land the fixed change later.
+
 ```bash
-git revert <sha>        # cleanly undo a bad change; re-land fixed later
+git revert <sha>
 ```
 
 ## Migrating a team OFF a feature-branch / gitflow model
