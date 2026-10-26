@@ -235,13 +235,13 @@ fn unix_domain() -> Result<Vec<SeccompRule>, String> {
     Ok(vec![rule])
 }
 
-fn accepted(status: &RestrictionStatus, limit_network: bool) -> bool {
-    let held = match status.ruleset {
-        RulesetStatus::FullyEnforced => true,
-        RulesetStatus::PartiallyEnforced => !limit_network,
-        RulesetStatus::NotEnforced => false,
-    };
-    held && status.no_new_privs
+/// Whether the kernel holds the whole boundary: every filesystem right of `FS_ABI`, and the
+/// network rules when asked, with no_new_privs set. A partly enforced ruleset is refused, so
+/// a kernel below Landlock ABI 3 (no truncate right) falls back to bubblewrap. Input: the
+/// ruleset status and no_new_privs flag `restrict_self` returned. Output: true only for a
+/// fully enforced ruleset.
+fn accepted(ruleset: &RulesetStatus, no_new_privs: bool) -> bool {
+    matches!(ruleset, RulesetStatus::FullyEnforced) && no_new_privs
 }
 
 /// Moves the helper into a new session before it starts the harness, so the agent keeps no
@@ -289,7 +289,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         } => (policy, Some((program, args))),
     };
     match enforce(&policy) {
-        Ok(status) if accepted(&status, policy.limit_network) => {}
+        Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
             eprintln!(
                 "crazyagent-landlock: this kernel cannot hold the boundary ({:?})",
@@ -618,4 +618,17 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     }
     command.arg("--chdir").arg(cwd);
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_fully_enforced_ruleset_with_no_new_privs_holds_the_boundary() {
+        assert!(accepted(&RulesetStatus::FullyEnforced, true));
+        assert!(!accepted(&RulesetStatus::PartiallyEnforced, true));
+        assert!(!accepted(&RulesetStatus::NotEnforced, true));
+        assert!(!accepted(&RulesetStatus::FullyEnforced, false));
+    }
 }
