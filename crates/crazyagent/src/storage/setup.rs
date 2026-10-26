@@ -555,6 +555,9 @@ pub(crate) fn execute(
     sweep(connection, root)
 }
 
+#[cfg(test)]
+#[path = "setup_switch_tests.rs"]
+mod switch_tests;
 #[cfg(all(test, unix))]
 #[path = "setup_tests.rs"]
 mod tests;

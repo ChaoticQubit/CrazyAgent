@@ -11,6 +11,8 @@ pub(crate) mod draft;
 pub(crate) mod graph;
 pub mod service;
 
+#[cfg(test)]
+mod step_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
