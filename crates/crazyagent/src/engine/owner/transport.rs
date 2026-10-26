@@ -3256,10 +3256,15 @@ fallback_allowed = false
         std::fs::create_dir(&long).unwrap();
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = long.join(SOCKET);
+        let address = crate::socket_address::address(&path).unwrap();
+        let link = address.parent().unwrap();
+        std::fs::remove_file(link).unwrap();
+        std::fs::create_dir(link).unwrap();
         let expected = crate::spawn_gate::bind_unix(&path)
             .err()
             .unwrap()
             .to_string();
+        assert_eq!(expected, "socket_alias_unsafe");
         let config =
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Arc::new(
@@ -3273,6 +3278,7 @@ fallback_allowed = false
             .unwrap();
         assert_eq!(error.0, expected);
         assert_eq!(std::fs::read_dir(&long).unwrap().count(), 0);
+        std::fs::remove_dir(link).unwrap();
         let (server, _) = OwnerServer::bind(root.path(), engine.clone(), &config)
             .await
             .unwrap();

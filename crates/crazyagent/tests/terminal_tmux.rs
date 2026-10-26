@@ -304,7 +304,11 @@ fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
     assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
     let metadata = std::fs::symlink_metadata(&socket).unwrap();
     assert!(metadata.file_type().is_socket());
-    assert_eq!(metadata.mode() & 0o077, 0, "only the owner can reach the server");
+    assert_eq!(
+        metadata.mode() & 0o077,
+        0,
+        "only the owner can reach the server"
+    );
     let again = Tmux::open(Some(tmux), &deep);
     assert_eq!(
         again.alive().unwrap(),

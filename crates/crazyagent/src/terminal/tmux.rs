@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
-pub const SOCKET_PATH_BYTES_MAX: usize = 100;
 const HOLDER: &str = "_crazyagent";
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
@@ -173,10 +172,13 @@ impl Tmux {
             .as_deref()
             .ok_or_else(|| failure("terminal_unavailable"))?;
         private_folder(&self.folder)?;
-        let socket = self.socket();
-        if socket.as_os_str().len() > SOCKET_PATH_BYTES_MAX {
-            return Err(failure("terminal_socket_path_long"));
-        }
+        let socket = crate::socket_address::address(&self.socket()).map_err(|error| {
+            failure(if error.kind() == std::io::ErrorKind::InvalidInput {
+                "terminal_socket_path_long"
+            } else {
+                "terminal_folder_unsafe"
+            })
+        })?;
         if let Ok(metadata) = std::fs::symlink_metadata(&socket)
             && (!metadata.file_type().is_socket() || metadata.uid() != user())
         {

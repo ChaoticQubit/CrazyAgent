@@ -560,7 +560,10 @@ async fn cli_starts_where_the_owner_socket_would_be_120_bytes_and_recovers_after
     );
 
     drop(first);
-    assert!(root.join("engine.sock").exists(), "a kill leaves the socket");
+    assert!(
+        root.join("engine.sock").exists(),
+        "a kill leaves the socket"
+    );
     let mut second = Process::launch(&root, "engine.sock");
     second.ready();
     assert!(

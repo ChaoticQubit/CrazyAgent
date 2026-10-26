@@ -566,11 +566,21 @@ fn cancelled(shutdown: &watch::Receiver<bool>) -> Result<(), EngineError> {
     }
 }
 
+/// Refuses, before anything is created, a socket path that has no socket address even
+/// through its short address. Input: the socket path. Output: Ok, or
+/// `owner_socket_path_too_long`.
+#[cfg(unix)]
 fn check_path_length(path: &Path) -> Result<(), EngineError> {
-    let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
-    if path.as_os_str().as_encoded_bytes().len() >= limit {
+    if !crate::socket_address::fits(path) {
         return Err(fail("owner_socket_path_too_long"));
     }
+    Ok(())
+}
+
+/// Accepts every path where the engine binds no Unix socket. Input: the path, unused.
+/// Output: Ok.
+#[cfg(not(unix))]
+fn check_path_length(_path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 

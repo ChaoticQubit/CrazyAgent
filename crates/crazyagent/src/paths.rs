@@ -530,6 +530,17 @@ mod tests {
         assert!(!deep.exists());
     }
 
+    /// A data root too long for a socket address prepares: the engine reaches its sockets
+    /// through a short address, so a long account name needs no shorter root.
+    #[test]
+    fn a_data_root_too_long_for_a_socket_address_still_prepares() {
+        let temp = tempfile::tempdir().unwrap();
+        let deep = temp.path().join("d".repeat(100));
+        Layout::new(deep.clone()).unwrap().prepare().unwrap();
+        assert!(deep.join("logs").is_dir());
+        assert!(deep.join("global.toml").is_file());
+    }
+
     /// The default macOS data root leaves room for the engine's owner socket for account
     /// names up to 29 bytes; a longer home is refused with the clear error that names
     /// CRAZYAGENT_HOME as the fix, never a truncated socket path.
