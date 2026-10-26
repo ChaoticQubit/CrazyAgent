@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { SessionContext, useSession, type Session } from "./state";
 import { unconfirmedLine } from "./api";
 import { Home } from "./screens/dashboard";
@@ -9,7 +9,8 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { useUpdateWatch } from "./screens/settings/updates";
+import { UpdatesSettings, useUpdateWatch } from "./screens/settings/updates";
+import { updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
@@ -20,8 +21,11 @@ export function supportDetails(width: number, height: number, now: Date): string
   return `CrazyAgent desktop\nEngine: not running\nProblem: engine_unreachable\nWindow: ${Math.round(width)}x${Math.round(height)}\nTime: ${now.toISOString()}\n`;
 }
 
+const UPDATES_ROUTE: Route = { name: "settings", tab: "updates" };
+
 function EngineDown({ onRetry }: { onRetry: () => void }) {
   const [copied, setCopied] = useState<"idle" | "copied" | { failed: string }>("idle");
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   async function copy() {
     const details = supportDetails(window.innerWidth, window.innerHeight, new Date());
     try {
@@ -39,11 +43,30 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
       <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
       <span className="row"><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button>
         <Button icon="copy" onClick={() => void copy()}>Copy details for support</Button></span>
+      {update.kind === "available" && <p>CrazyAgent {update.update.version} is available.</p>}
+      <span><Button variant="quiet" icon="refresh-cw" onClick={() => navigate(UPDATES_ROUTE)}>Check for updates</Button></span>
       {copied === "copied" && <p className="secondary" role="status">Copied. Paste it into your message to support.</p>}
       {typeof copied === "object" && <><p className="secondary" role="alert">Couldn't copy. Select the details below and copy them.</p>
         <pre className="support-details">{copied.failed}</pre></>}
     </div>
   </main>;
+}
+
+/** Settings, Updates on its own, for when the engine is down, still starting, or first-run
+ * setup is unfinished, so the owner can always check for and install an update. Input: the
+ * session. Output: the full-window page with Back. */
+function UpdatesAlone({ session }: { session: Session }) {
+  return <SessionContext.Provider value={session}>
+    <main id="main" className="full-state">
+      <div className="box wide">
+        <BrandMark />
+        <h1>Updates</h1>
+        <UpdatesSettings />
+        <span><Button icon="arrow-left" onClick={() => navigate({ name: "home" })}>Back</Button></span>
+      </div>
+    </main>
+    <Toast message={session.toast} />
+  </SessionContext.Provider>;
 }
 
 function Launching() {
@@ -71,11 +94,14 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
 
 /** The whole app for one session and route: the engine-down state, the launch skeleton, the
  * first-run Welcome page while the profile is empty, or the shell with the routed screen.
- * Inputs: the session and the current route. */
+ * Settings, Updates opens on its own in place of the first three. Inputs: the session and the
+ * current route. */
 export function AppView({ session, route }: { session: Session; route: Route }) {
-  if (session.engine === "down") return <EngineDown onRetry={session.retry} />;
-  if (session.engine === "connecting" || session.profile.kind === "loading") return <Launching />;
+  const updates = route.name === "settings" && route.tab === "updates";
+  if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
+  if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
+  if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
   if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
       <Welcome onSaved={(_, next) => { void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}

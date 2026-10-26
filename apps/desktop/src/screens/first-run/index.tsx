@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { saveProfile, type OwnerProfile } from "../../api";
-import { BrandMark, Button, ChipInput, Notice, Segmented, TextArea, TextField, type Route } from "../../ui";
+import { BrandMark, Button, ChipInput, Notice, Segmented, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
 import "../intake/intake.css";
@@ -159,6 +159,7 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
         <li key={item.id} aria-current={item.id === step ? "step" : undefined}>{item.label}</li>)}</ol>
       <h1>{current.title}</h1>
       <p>{current.intro}</p>
+      <span><Button variant="quiet" icon="refresh-cw" onClick={() => navigate({ name: "settings", tab: "updates" })}>Check for updates</Button></span>
     </div>
     {step === "profile" && <form className="form" aria-label="Your profile" noValidate onSubmit={(event) => void submit(event)}>
       <ProfileFields draft={draft} onDraft={setDraft} errors={errors} />

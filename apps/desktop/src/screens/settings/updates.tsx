@@ -150,7 +150,7 @@ export function useUpdateWatch(announce: (message: string) => void) {
 export function UpdatesSettings() {
   const session = useAppSession();
   const [settings, reload] = useLoad(loadUpdateSettings);
-  const phase = useSyncExternalStore(updateStore.subscribe, updateStore.get);
+  const phase = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   const [channelBusy, setChannelBusy] = useState(false);
   const [channelProblem, setChannelProblem] = useState("");
   const [cli, setCli] = useState<CliState>({ kind: "idle" });
