@@ -397,10 +397,12 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         |screen| screen.contains("Confirm setup"),
     );
     let status = runtime.block_on(setup_status(&engine));
-    let graph_on = status
+    let graph_state = status
         .pack
         .iter()
-        .any(|entry| entry.id == "graphify" && entry.state == PackState::On);
+        .find(|entry| entry.id == "graphify")
+        .map(|entry| entry.state.clone());
+    let graph_on = graph_state == Some(PackState::On);
     let graphify_found = status.dependencies.iter().any(|tool| {
         tool.name == Dependency::Graphify
             && matches!(
@@ -418,10 +420,15 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
             graphify_found || !graph.contains("Done"),
             "Graphify is missing, so the graph step cannot claim done:\n{review}"
         );
-    } else {
+    } else if graph_state == Some(PackState::Off) {
         assert!(
             graph.contains("Turned off") && review.contains("Graphify is off in Setup"),
-            "Graphify is not on in Setup, so the setup says no code graph is built:\n{review}"
+            "Graphify is off in Setup, so the setup says no code graph is built:\n{review}"
+        );
+    } else {
+        assert!(
+            graph.contains("Not installed") && review.contains("Graphify isn't installed"),
+            "Setup never installed Graphify, so the setup says so:\n{review}"
         );
     }
     let mapping_failed = review.contains("Mapping failed:");
