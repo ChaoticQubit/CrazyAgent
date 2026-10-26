@@ -31,6 +31,16 @@ pub(super) fn open(name: &str) -> Result<Words, BoundaryError> {
     }
 }
 
+/// The SID of the AppContainer named `name`, derived from the name as Windows does, whether or
+/// not its profile exists. Input: a name `check_container` accepted. Output: the SID, or the
+/// failed step.
+pub(super) fn sid(name: &str) -> Result<Words, BoundaryError> {
+    derive_sid(&wide(name)).map_err(|code| BoundaryError::Windows {
+        step: "derive the agent's container SID",
+        code: code as u32,
+    })
+}
+
 /// The SIDs of the capabilities the agent starts with. Input: the profile's capabilities.
 /// Output: one SID each, or the failed step.
 pub(super) fn capabilities(list: &[Capability]) -> Result<Vec<Words>, BoundaryError> {

@@ -2,11 +2,13 @@ mod acl;
 mod container;
 mod job;
 mod launch;
+mod record;
 
 use crate::plan::plan;
 use crate::profile::{BoundaryProfile, ProfileError};
 use crate::request::Request;
 use std::fmt;
+use std::path::Path;
 use windows_sys::Win32::Foundation::GetLastError;
 
 /// Why the boundary did not start the agent: a refused profile, a refused launch with a plain
@@ -40,18 +42,31 @@ fn windows(step: &'static str) -> impl FnOnce(u32) -> BoundaryError {
 }
 
 /// Starts one agent inside its boundary and waits for it: reads the profile, opens the agent's
-/// AppContainer, puts the planned access entries on its roots and protected paths, starts the
-/// program suspended in that container with the profile's capabilities, places it in a job that
-/// kills every process left when the helper exits, then resumes it. Nothing starts when any
-/// step fails. Input: the request. Output: the agent's exit code, or why it did not start.
+/// AppContainer, takes back the access entries an earlier profile of that container granted
+/// and this one does not, puts the planned entries on its roots and protected paths, starts
+/// the program suspended in that container with the profile's capabilities, places it in a
+/// job that kills every process left when the helper exits, then resumes it. Nothing starts
+/// when any step fails. Input: the request. Output: the agent's exit code, or why it did not
+/// start.
 pub fn run(request: &Request) -> Result<u32, BoundaryError> {
     let profile = BoundaryProfile::load(&request.profile).map_err(BoundaryError::Profile)?;
     let aces = plan(&profile).map_err(BoundaryError::Refused)?;
     let container = container::open(&profile.container)?;
-    acl::apply(&container, &aces)?;
+    record::Record::open(&profile.grants, &profile.container)?.reconcile(&container, &aces)?;
     let capabilities = container::capabilities(&profile.capabilities)?;
     let job = job::Job::new(profile.active_processes)?;
     launch::start(request, &container, &capabilities, &job)
+}
+
+/// Takes back every access entry the boundary recorded for the profile's container and removes
+/// the record, as when the agent's profile is removed; a later launch of that container grants
+/// afresh. Input: the profile file. Output: Ok, or why it stopped, with the record kept so a
+/// retry withdraws what is left.
+pub fn release(profile: &Path) -> Result<(), BoundaryError> {
+    let profile = BoundaryProfile::load(profile).map_err(BoundaryError::Profile)?;
+    plan(&profile).map_err(BoundaryError::Refused)?;
+    let container = container::sid(&profile.container)?;
+    record::Record::open(&profile.grants, &profile.container)?.release(&container)
 }
 
 /// Bytes Windows wrote, such as a SID or an access list, kept in 4-byte words so they stay

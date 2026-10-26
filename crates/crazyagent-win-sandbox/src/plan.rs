@@ -77,10 +77,18 @@ pub fn within(child: &str, parent: &str) -> bool {
 /// writable root down to each read-only path, so the path is neither vacated by renaming a
 /// folder above it nor created while missing. A protected path outside every grant needs no
 /// entry, since the container reaches nothing it was not granted. Input: the profile. Output:
-/// the entries, or a refusal when a writable root sits in a protected path or a read root sits
-/// in a hidden one.
+/// the entries, or a refusal when a writable root sits in a protected path, a read root sits
+/// in a hidden one, or the grants folder sits in a writable root, where the agent could
+/// rewrite the record of its own grants.
 pub fn plan(profile: &BoundaryProfile) -> Result<Vec<Ace>, &'static str> {
     profile.validate().map_err(|error| error.reason)?;
+    if profile
+        .write_roots
+        .iter()
+        .any(|root| within(&profile.grants, root))
+    {
+        return Err("the grants folder sits in a writable root");
+    }
     for item in &profile.guarded {
         if profile
             .write_roots
@@ -206,6 +214,7 @@ mod tests {
                 })
                 .collect(),
             active_processes: 64,
+            grants: r"C:\Users\mira\AppData\Local\CrazyAgent\engine\boundary-grants".into(),
         }
     }
 
@@ -367,6 +376,28 @@ mod tests {
         let mut invalid = profile(&[], &[PROJECT], &[]);
         invalid.write_roots[0] = r"Projects\shop".into();
         assert!(plan(&invalid).is_err());
+    }
+
+    #[test]
+    fn a_grants_folder_an_agent_could_write_is_refused() {
+        let mut inside = profile(&[], &[PROJECT, HOME, TMP], &[]);
+        for grants in [
+            HOME.to_owned(),
+            format!(r"{HOME}\grants"),
+            PROJECT.to_lowercase(),
+        ] {
+            inside.grants = grants;
+            assert_eq!(
+                plan(&inside),
+                Err("the grants folder sits in a writable root"),
+                "{}",
+                inside.grants
+            );
+        }
+        let read = r"C:\Users\mira\AppData\Local\CrazyAgent\engine";
+        let mut readable = profile(&[read], &[PROJECT, HOME, TMP], &[]);
+        readable.grants = format!(r"{read}\boundary-grants");
+        assert!(plan(&readable).is_ok(), "an agent may read its own record");
     }
 
     #[test]
