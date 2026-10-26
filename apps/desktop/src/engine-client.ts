@@ -1483,6 +1483,13 @@ export interface MasterTurn {
   accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;
+  tasks?: MasterTask[];
+}
+
+/** One task a master turn handed to the project's team, with the engine's note once it ended. */
+export interface MasterTask {
+  task: number;
+  note: string | null;
 }
 
 export interface MasterState {
