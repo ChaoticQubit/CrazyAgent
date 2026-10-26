@@ -972,3 +972,43 @@ fn the_agents_using_an_account_are_named_and_stopped_together() {
     assert_eq!(agents.using(&account("claude-account-d")).unwrap().len(), 1);
     drop((other, keyless));
 }
+
+/// A master turn or research job that holds an account's profile is named for that account
+/// while its hold lives, newest first, and no longer once the hold is dropped.
+#[test]
+fn holders_of_an_account_are_named_until_their_hold_ends() {
+    let case = Case::new();
+    let agents = case.agents();
+    let account = |name: &str| CredentialRef::new(name).unwrap();
+    let claude_c = account("claude-account-c");
+    let master = Holder::Master {
+        project: ProjectId::new("alpha").unwrap(),
+        session: SessionId::new("master-1").unwrap(),
+    };
+    let research = Holder::Research {
+        project: ProjectId::new("beta").unwrap(),
+        job: 7,
+        title: "Market research".into(),
+    };
+    let held_master = agents.hold(claude_c.clone(), master.clone());
+    let held_research = agents.hold(claude_c.clone(), research.clone());
+    let elsewhere = agents.hold(account("claude-account-d"), research.clone());
+
+    assert_eq!(
+        agents.holders(&claude_c),
+        vec![research.clone(), master.clone()]
+    );
+    assert_eq!(
+        agents.holders(&account("claude-account-d")),
+        vec![research.clone()]
+    );
+    assert!(agents.holders(&account("claude-account-e")).is_empty());
+
+    drop(held_research);
+    assert_eq!(agents.holders(&claude_c), vec![master]);
+    drop(held_master);
+    assert!(agents.holders(&claude_c).is_empty());
+    assert_eq!(agents.holders(&account("claude-account-d")).len(), 1);
+    drop(elsewhere);
+    assert!(agents.holders(&account("claude-account-d")).is_empty());
+}

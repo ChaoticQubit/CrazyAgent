@@ -1,6 +1,7 @@
 use super::*;
-use crate::agents::{AgentView, LIST_MAX};
-use crate::engine::owner::{AGENTS_PAGE, AgentPage};
+use crate::agents::{AccountUse, AgentView, Holder, LIST_MAX};
+use crate::engine::owner::{AGENTS_PAGE, AgentPage, RELEASE_WAIT};
+use crate::master_session::MasterOwnerAction;
 use crate::protocol::{CredentialRef, ProjectId};
 
 const PAGES_MAX: usize = LIST_MAX.div_ceil(AGENTS_PAGE);
@@ -55,22 +56,76 @@ impl OwnerController {
         self.agents_client()?.restart_agent(id).await
     }
 
-    /// Reads every running agent that signs in with one account, so a refused sign-out
-    /// can name them. Input: the account. Output: the agents, newest first.
-    pub async fn agents_using(
-        &self,
-        account: CredentialRef,
-    ) -> Result<Vec<AgentView>, EngineError> {
-        self.agents_client()?.agents_using(account).await
+    /// Reads everything that holds one account's profile, so a refused sign-out can name
+    /// it. Input: the account. Output: its running agents and other holders, newest first.
+    pub async fn account_use(&self, account: CredentialRef) -> Result<AccountUse, EngineError> {
+        self.agents_client()?.account_use(account).await
     }
 
-    /// Stops every running agent that signs in with one account, so it can be signed out.
-    /// Input: the account. Output: the agents still using it, none once all have stopped.
-    pub async fn stop_agents_using(
-        &self,
+    /// Ends each holder through its own owner action: a research job is cancelled and a
+    /// master conversation is closed. A holder that already ended is refused, which is not
+    /// an error. Inputs: the holders and the client generation. Output: Ok once each was
+    /// answered, or `controller_pending_uncertain` when one may still be recorded.
+    pub async fn end_holders(
+        &mut self,
+        holders: &[Holder],
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        for holder in holders {
+            let response = match holder {
+                Holder::Research { project, job, .. } => {
+                    self.cancel_research(project.clone(), *job, generation)
+                        .await?
+                }
+                Holder::Master { project, session } => {
+                    self.read(OwnerRead::ProjectMaster {
+                        project_id: project.clone(),
+                    })
+                    .await?;
+                    self.begin_mutation(
+                        OwnerMutation::ProjectMaster {
+                            action: MasterOwnerAction::Close {
+                                project_id: project.clone(),
+                                session_id: session.clone(),
+                            },
+                        },
+                        generation,
+                    )?;
+                    self.send_pending().await?
+                }
+            };
+            if matches!(response, OwnerResponse::OutcomeUnknown { .. }) {
+                return Err(EngineError("controller_pending_uncertain".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends everything that holds one account's profile, so it can be signed out: stops its
+    /// agents, cancels its research jobs and closes its master conversations, then waits,
+    /// at most `RELEASE_WAIT`, until nothing holds it. Inputs: the account and the client
+    /// generation. Output: what still holds it, nothing once all have ended.
+    pub async fn release_account(
+        &mut self,
         account: CredentialRef,
-    ) -> Result<Vec<AgentView>, EngineError> {
-        self.agents_client()?.stop_agents_using(account).await
+        generation: u64,
+    ) -> Result<AccountUse, EngineError> {
+        self.release_within(account, generation, RELEASE_WAIT).await
+    }
+
+    /// `release_account` with its wait given. Inputs: the account, the client generation
+    /// and the wait. Output: what still holds the account after the wait.
+    pub(crate) async fn release_within(
+        &mut self,
+        account: CredentialRef,
+        generation: u64,
+        wait: Duration,
+    ) -> Result<AccountUse, EngineError> {
+        let client = self.shared_client()?;
+        client.stop_agents_using(account.clone()).await?;
+        let holders = client.account_holders(account.clone()).await?;
+        self.end_holders(&holders, generation).await?;
+        client.await_account_free(account, wait).await
     }
 }
 
@@ -249,7 +304,7 @@ mod tests {
     /// another's, and the stop returns once its host has ended it, leaving none using it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agents_using_an_account_are_named_and_stopped_over_the_owner_connection() {
-        let (_root, _stop, _service, agents, controller) =
+        let (_root, _stop, _service, agents, mut controller) =
             engine_with_one_second_deadline("ca-cusing-").await;
         let project = ProjectId::new("sign-out").unwrap();
         let account = CredentialRef::new("claude-account-c").unwrap();
@@ -268,14 +323,16 @@ mod tests {
             )
             .unwrap();
 
-        let using = controller.agents_using(account.clone()).await.unwrap();
+        let used = controller.account_use(account.clone()).await.unwrap();
+        assert!(used.holders.is_empty());
+        let using = used.agents;
         assert_eq!(using.len(), 1);
         assert_eq!(
             (using[0].project.clone(), using[0].label.as_str()),
             (project.clone(), "Team sub-agent 4")
         );
         let other = CredentialRef::new("claude-account-d").unwrap();
-        assert!(controller.agents_using(other).await.unwrap().is_empty());
+        assert!(controller.account_use(other).await.unwrap().is_free());
 
         let host = std::thread::spawn(move || {
             let asked = std::time::Instant::now();
@@ -286,9 +343,9 @@ mod tests {
             assert_eq!(hosted.requested(), Some(crate::agents::HostedRequest::Stop));
             hosted.finish(AgentState::Stopped, None);
         });
-        let left = controller.stop_agents_using(account).await.unwrap();
+        let left = controller.release_account(account, 1).await.unwrap();
         host.join().unwrap();
-        assert!(left.is_empty());
+        assert!(left.is_free());
         let listed = controller.agents(Some(project)).await.unwrap();
         assert_eq!(listed[0].state, AgentState::Stopped);
     }
