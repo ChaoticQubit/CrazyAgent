@@ -610,7 +610,8 @@ WantedBy=default.target\n",
         run_checked(&self.start_command(current_uid(), loaded))
     }
 
-    /// Stops the engine and keeps the service installed. A stopped engine is left as it is.
+    /// Stops the engine and keeps the service installed. A stopped engine, and a service
+    /// that is neither installed nor known to the manager, are left as they are.
     pub fn stop(&self) -> Result<(), ServiceError> {
         if self.platform == Platform::MacOs {
             return if self.loaded()? {
@@ -618,6 +619,9 @@ WantedBy=default.target\n",
             } else {
                 Ok(())
             };
+        }
+        if !self.definition.is_file() && !self.loaded()? {
+            return Ok(());
         }
         run_checked(&self.stop_command(current_uid()))
     }
@@ -704,18 +708,26 @@ fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), S
     std::fs::rename(&staged, path).map_err(fail)
 }
 
+/// Runs a service manager query. A manager that is not on this computer, such as `systemctl`
+/// on a host without systemd, has nothing installed or running, so it reads as a failed
+/// query. Input: the command. Output: whether it succeeded and its standard output.
 fn run_quiet(command: &[OsString]) -> Result<(bool, String), ServiceError> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| failure("empty service command"))?;
-    let output = crate::spawn_gate::output(
+    let output = match crate::spawn_gate::output(
         std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
-    )
-    .map_err(|error| failure(format!("{}: {error}", program.to_string_lossy())))?;
+    ) {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((false, String::new()));
+        }
+        Err(error) => return Err(failure(format!("{}: {error}", program.to_string_lossy()))),
+    };
     Ok((
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -859,6 +871,72 @@ fn spawn_detached(
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     crate::spawn_gate::spawn(&mut command)
         .map_err(|error| failure(format!("{}: {error}", executable.display())))
+}
+
+/// Stops an engine that runs without the service, such as one a client started detached:
+/// it sends SIGTERM to the process that serves the engine socket, then waits until the
+/// socket is silent and the engine has let go of its database, so a new engine can start on
+/// the same data folder. Input: the layout. Output: the stopped engine's pid, none when no
+/// engine answers, or an error naming the pid and the engine log after the bound.
+#[cfg(unix)]
+pub fn stop_detached(layout: &Layout) -> Result<Option<u32>, ServiceError> {
+    let Ok(stream) = crate::spawn_gate::connect_unix_std(layout.socket()) else {
+        return Ok(None);
+    };
+    let pid = serving_pid(&stream)?;
+    drop(stream);
+    let target = rustix::process::Pid::from_raw(pid)
+        .ok_or_else(|| failure("the engine socket names no process"))?;
+    rustix::process::kill_process(target, rustix::process::Signal::TERM)
+        .map_err(|error| failure(format!("the engine (pid {pid}) can't be stopped: {error}")))?;
+    let deadline = Instant::now() + UNLOAD_TIMEOUT;
+    while answering(&layout.socket()) || !crate::storage::engine_lock_released(layout.root()) {
+        if Instant::now() >= deadline {
+            return Err(failure(format!(
+                "the engine (pid {pid}) still ran {} s after it was asked to stop; see {}",
+                UNLOAD_TIMEOUT.as_secs(),
+                layout.engine_log().display()
+            )));
+        }
+        std::thread::sleep(POLL);
+    }
+    Ok(Some(pid.unsigned_abs()))
+}
+
+/// Finds no engine to stop where the Unix socket transport does not exist. Input unused.
+/// Output: none.
+#[cfg(not(unix))]
+pub fn stop_detached(_layout: &Layout) -> Result<Option<u32>, ServiceError> {
+    Ok(None)
+}
+
+/// The process that serves a connected engine socket, which must belong to this user and
+/// not be this process. Input: the connected stream. Output: its pid.
+#[cfg(unix)]
+fn serving_pid(stream: &std::os::unix::net::UnixStream) -> Result<i32, ServiceError> {
+    let unknown =
+        |error: nix::Error| failure(format!("the engine socket's process is unknown: {error}"));
+    #[cfg(target_os = "macos")]
+    let (uid, pid) = (
+        nix::unistd::getpeereid(stream).map_err(unknown)?.0.as_raw(),
+        nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::LocalPeerPid)
+            .map_err(unknown)?,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (uid, pid) = {
+        let peer = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+            .map_err(unknown)?;
+        (peer.uid(), peer.pid())
+    };
+    if uid != rustix::process::getuid().as_raw()
+        || pid <= 0
+        || pid.unsigned_abs() == std::process::id()
+    {
+        return Err(failure(
+            "the engine socket is served by another user's process",
+        ));
+    }
+    Ok(pid)
 }
 
 /// The engine log's length now, taken before a start so `wait_ready` reads only the
