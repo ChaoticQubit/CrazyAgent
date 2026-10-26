@@ -914,20 +914,44 @@ fn require_profile_entries(profile: &File) -> Result<(), EngineError> {
     let entries = Dir::read_from(profile).map_err(unsafe_custody)?;
     let mut identity = false;
     let mut home = false;
+    let mut lock = false;
     for (index, entry) in entries.enumerate() {
         let entry = entry.map_err(unsafe_custody)?;
-        if index > 3 {
+        if index > 4 {
             return Err(failure("native_profile_custody_unsafe"));
         }
         match entry.file_name().to_bytes() {
             b"." | b".." => {}
             b"identity.json" if !identity => identity = true,
             b"home" if !home => home = true,
+            b"home.lock" if !lock => {
+                require_config_lock(profile)?;
+                lock = true;
+            }
             _ => return Err(failure("native_profile_custody_unsafe")),
         }
     }
     if !identity || !home {
         return Err(failure("native_profile_incomplete"));
+    }
+    Ok(())
+}
+
+/// Checks `home.lock`, the folder Claude Code makes beside its configuration folder while it
+/// renews an access token and leaves behind when it is stopped mid-renewal, for the next run to
+/// reclaim. Input: the profile folder. Output: done when the entry is a folder of this user that
+/// no one else can write or when it is already gone, else `native_profile_custody_unsafe`.
+fn require_config_lock(profile: &File) -> Result<(), EngineError> {
+    let metadata = match rustix::fs::statat(profile, "home.lock", AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(unsafe_custody(error)),
+    };
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
+        || metadata.st_uid != rustix::process::getuid().as_raw()
+        || metadata.st_mode & 0o022 != 0
+    {
+        return Err(failure("native_profile_custody_unsafe"));
     }
     Ok(())
 }

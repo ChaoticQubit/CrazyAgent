@@ -2,7 +2,7 @@ use super::super::RegisteredNativeAuthHost;
 use super::super::custody::{CustodySession, cleanup_direct_child, cleanup_owned_group};
 use super::transcript::Transcript;
 use super::types::{ClaudeAuthObservation, completion_bytes};
-use super::{ClaudeAuthCommand, auth_command};
+use super::{ClaudeAuthCommand, RENEWAL_TIME, auth_command};
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl,
 };
@@ -77,19 +77,20 @@ fn nonblocking(fd: &OwnedFd) -> Result<(), EngineError> {
 }
 
 struct Pipes {
-    input: OwnedFd,
+    input: Option<OwnedFd>,
     output: Pipe,
     errors: Pipe,
 }
 
 impl Pipes {
-    fn take(child: &mut Child) -> Result<Self, EngineError> {
-        let input: OwnedFd = child
-            .stdin
-            .take()
-            .ok_or_else(|| failure("native_auth_claude_pipe_missing"))?
-            .into();
-        nonblocking(&input)?;
+    fn take(child: &mut Child, action: ClaudeAuthCommand) -> Result<Self, EngineError> {
+        let input: Option<OwnedFd> = child.stdin.take().map(Into::into);
+        if input.is_none() != (action == ClaudeAuthCommand::Renew) {
+            return Err(failure("native_auth_claude_pipe_missing"));
+        }
+        if let Some(input) = &input {
+            nonblocking(input)?;
+        }
         let output = Pipe::new(
             child
                 .stdout
@@ -192,7 +193,10 @@ async fn drive(
             if Instant::now() >= pending.deadline {
                 return Err(failure("native_auth_claude_input_invalid"));
             }
-            match rustix::io::write(&pipes.input, &pending.bytes[pending.sent..]) {
+            let Some(target) = pipes.input.as_ref() else {
+                return Err(failure("native_auth_claude_input_invalid"));
+            };
+            match rustix::io::write(target, &pending.bytes[pending.sent..]) {
                 Ok(0) => return Err(failure("native_auth_claude_input_invalid")),
                 Ok(size) => {
                     pending.sent += size;
@@ -256,13 +260,13 @@ pub(super) async fn run_child(
         .ok()
         .and_then(Pid::from_raw)
         .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
-    let bound = if action == ClaudeAuthCommand::Login {
-        Duration::from_secs(575)
-    } else {
-        Duration::from_secs(2)
+    let bound = match action {
+        ClaudeAuthCommand::Login => Duration::from_secs(575),
+        ClaudeAuthCommand::Renew => RENEWAL_TIME,
+        ClaudeAuthCommand::Status | ClaudeAuthCommand::Logout => Duration::from_secs(2),
     };
     let deadline = operation_deadline.min(Instant::now() + bound);
-    let result = match Pipes::take(session.child_mut()?) {
+    let result = match Pipes::take(session.child_mut()?, action) {
         Ok(mut pipes) => tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
             drive(session, channel, &mut pipes, action, deadline),

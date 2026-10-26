@@ -236,6 +236,11 @@ fn claude_record(expires_ms: u64) -> Value {
     })
 }
 
+/// The keychain account Claude Code 2.1.309 files a sign-in under when it runs, as every
+/// managed Claude child does, with no USER in its environment.
+#[cfg(target_os = "macos")]
+const CLAUDE_ACCOUNT: &str = "unknown";
+
 #[cfg(target_os = "macos")]
 fn claude_keychain(home: &Path, record: &Value) -> (TestKeychain, String) {
     let keychain = TestKeychain::create(home);
@@ -243,7 +248,7 @@ fn claude_keychain(home: &Path, record: &Value) -> (TestKeychain, String) {
         "Claude Code-credentials-{}",
         &digest(home.to_str().unwrap().as_bytes())[..8]
     );
-    keychain.add("unit", &service, &record.to_string());
+    keychain.add(CLAUDE_ACCOUNT, &service, &record.to_string());
     (keychain, service)
 }
 
@@ -316,7 +321,7 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
             "add-generic-password",
             "-U",
             "-a",
-            "unit",
+            CLAUDE_ACCOUNT,
             "-s",
             &service,
             "-X",

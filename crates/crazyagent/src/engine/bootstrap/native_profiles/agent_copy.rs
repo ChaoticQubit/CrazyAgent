@@ -26,6 +26,10 @@ fn expiring() -> EngineError {
     failure("native_profile_credential_expiring")
 }
 
+fn revoked() -> EngineError {
+    failure("native_profile_sign_in_revoked")
+}
+
 fn unsafe_home() -> EngineError {
     failure("native_profile_agent_home_unsafe")
 }
@@ -103,8 +107,10 @@ impl NativeProfileUse {
     /// managed home, and a keeper renews it again and replaces the copy while the turn runs.
     /// Inputs: the agent's private home, the turn's time bound and the harness executable.
     /// Output: the copy, removed when dropped; `native_profile_credential_expiring` when the
-    /// token still lapses within a minute; `native_profile_credential_unavailable`,
-    /// `native_profile_renewal_busy` or `native_profile_agent_home_unsafe`.
+    /// token still lapses within a minute; `native_profile_sign_in_revoked` when Claude Code
+    /// ended the sign-in after its provider refused a refresh;
+    /// `native_profile_credential_unavailable`, `native_profile_renewal_busy` or
+    /// `native_profile_agent_home_unsafe`.
     pub(crate) fn hand_to_agent(
         &self,
         agent_home: &Path,
@@ -150,6 +156,15 @@ impl NativeProfileUse {
             credential.keeper = Some(Keeper::start(renewal, agent, name, record.expires)?);
         }
         Ok(credential)
+    }
+
+    /// When this Claude Code account's access token lapses, read from the record exactly as
+    /// the agent handoff reads it, for the sign-in check to renew a lapsing token first.
+    /// Input: none. Output: the expiry since the epoch; `native_profile_sign_in_revoked`
+    /// for a sign-in Claude Code ended, or the unavailable refusal.
+    pub(crate) fn claude_expiry(&self) -> Result<Duration, EngineError> {
+        account_record(Harness::Claude, &self.home.file, &self.profile_path()?)
+            .map(|record| record.expires)
     }
 }
 
@@ -280,9 +295,10 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
 }
 
 /// Builds the agent's Claude Code `.credentials.json`: the account's OAuth record alone,
-/// with no refresh token and none of the other records the account keeps. Input: the
-/// account's credential record. Output: the copy with its access token's expiry, or the
-/// unavailable refusal.
+/// with no refresh token and none of the other records the account keeps. Claude Code
+/// empties both tokens when its provider refuses a refresh. Input: the account's record.
+/// Output: the copy with its access token's expiry, `native_profile_sign_in_revoked` for
+/// emptied tokens, or the unavailable refusal.
 fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
     let mut oauth: Map<String, Value> = record
@@ -290,11 +306,11 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
         .and_then(Value::as_object)
         .cloned()
         .ok_or_else(unavailable)?;
-    if !oauth
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .is_some_and(|token| !token.is_empty())
-    {
+    let token = |name: &str| oauth.get(name).and_then(Value::as_str);
+    if token("accessToken") == Some("") && token("refreshToken") == Some("") {
+        return Err(revoked());
+    }
+    if !token("accessToken").is_some_and(|token| !token.is_empty()) {
         return Err(unavailable());
     }
     let expires = Duration::from_millis(
