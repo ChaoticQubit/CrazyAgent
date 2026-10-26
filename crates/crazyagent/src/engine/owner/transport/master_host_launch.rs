@@ -61,7 +61,7 @@ const MASTER_CONFIG: [&str; 15] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
-const MASTER_TOOLS_CONFIG: [&str; 7] = [
+const MASTER_TOOLS_CONFIG: [&str; 9] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"danger-full-access\"",
@@ -69,6 +69,8 @@ const MASTER_TOOLS_CONFIG: [&str; 7] = [
     "features.apps=false",
     "features.plugins=false",
     "features.goals=false",
+    "features.multi_agent=false",
+    "features.multi_agent_v2=false",
 ];
 const DELEGATE_SERVERS: &str = "mcp_servers=";
 
@@ -396,10 +398,10 @@ impl Drop for MasterRuntimeFolder {
 
 /// Confirms a Codex master command keeps the policy of its tools switch. Tools off (DEC-076):
 /// read-only sandbox, approvals never granted, and no shell, patch, web, goal or MCP tools.
-/// Tools on (DEC-093): approvals never granted, no apps, plugins or goals, Codex's own sandbox
-/// off inside the master's, and exactly one MCP server, the engine's `delegate` server served
-/// by exactly the expected engine executable on the turn's own drop file. Every `-c` setting
-/// must be one the switch allows. Input: the command and, for tools on, the expected delegate
+/// Tools on (DEC-093): approvals never granted, no apps, plugins, goals or Codex's own
+/// sub-agents, Codex's own sandbox off inside the master's, and exactly one MCP server, the
+/// engine's `delegate` server served by exactly the expected engine executable on the turn's
+/// own drop file. Every `-c` setting must be one the switch allows. Input: the command and, for tools on, the expected delegate
 /// server parts. Output: Ok, `master_delegate_unverified` for any other server, or the
 /// unsupported-backend refusal.
 fn require_master_tool_policy(
@@ -414,6 +416,8 @@ fn require_master_tool_policy(
             "features.apps=false",
             "features.plugins=false",
             "features.goals=false",
+            "features.multi_agent=false",
+            "features.multi_agent_v2=false",
         ]
     } else {
         &[
