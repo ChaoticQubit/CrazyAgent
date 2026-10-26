@@ -568,6 +568,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             tokio::task::yield_now().await;
             let ready = std::env::current_exe()
+                .and_then(std::fs::canonicalize)
                 .map_err(|e| e.to_string())
                 .and_then(|executable| {
                     service

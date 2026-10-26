@@ -9,6 +9,26 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Command, Stdio};
 
+/// Copies a command with its MCP configuration replaced and arguments appended. Input: the
+/// command, the configuration text and the extra arguments. Output: the new command.
+fn configured(command: &Command, config: &str, extra: &[&str]) -> Command {
+    let mut args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_str().unwrap().to_owned())
+        .collect();
+    let index = args.iter().position(|arg| arg == "--mcp-config").unwrap();
+    args[index + 1] = config.to_owned();
+    args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+    let mut copy = Command::new(command.get_program());
+    copy.args(args)
+        .current_dir(command.get_current_dir().unwrap())
+        .env_clear();
+    for (key, value) in command.get_envs() {
+        copy.env(key, value.unwrap());
+    }
+    copy
+}
+
 fn reference(value: &str) -> CredentialRef {
     CredentialRef::new(value).unwrap()
 }
@@ -174,6 +194,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         worktree: &worktree,
     };
     let MasterTurnLaunch {
+        command: off_command,
         sandbox,
         home,
         credential,
@@ -278,6 +299,92 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             "args": ["team-mcp", record.to_str().unwrap()],
         }}})
     );
+    let tools = crate::engine::claude_host::MasterTools {
+        engine: &engine,
+        drop: &record,
+    };
+    let delegate = |command: &Command, tools| {
+        crate::engine::claude_host::require_delegate(command, tools).map_err(|error| error.0)
+    };
+    let unverified: Result<(), String> = Err("master_delegate_unverified".to_owned());
+    assert_eq!(delegate(&command, Some(tools)), Ok(()));
+    assert_eq!(delegate(&command, None), unverified);
+    assert_eq!(delegate(&off_command, None), Ok(()));
+    assert_eq!(delegate(&off_command, Some(tools)), unverified);
+    let link = install.join("crazyagent-link");
+    std::os::unix::fs::symlink(&engine, &link).unwrap();
+    let hard = install.join("crazyagent-hard");
+    std::fs::hard_link(&engine, &hard).unwrap();
+    let other_drop = runtime
+        .join("master-runtime-other")
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let served = |server: &Path, args: Value| {
+        json!({"mcpServers": {"crazyagent-team": {
+            "type": "stdio",
+            "command": server.to_str().unwrap(),
+            "args": args,
+        }}})
+        .to_string()
+    };
+    let legit = served(&engine, json!(["team-mcp", record.to_str().unwrap()]));
+    assert_eq!(
+        delegate(&configured(&command, &legit, &[]), Some(tools)),
+        Ok(())
+    );
+    let mut second = serde_json::from_str::<Value>(&legit).unwrap();
+    second["mcpServers"]["owner"] = json!({"type": "stdio", "command": "/usr/bin/true"});
+    for (name, config, extra) in [
+        (
+            "another executable",
+            served(
+                Path::new("/usr/bin/true"),
+                json!(["team-mcp", record.to_str().unwrap()]),
+            ),
+            vec![],
+        ),
+        (
+            "a link to the engine",
+            served(&link, json!(["team-mcp", record.to_str().unwrap()])),
+            vec![],
+        ),
+        (
+            "a hard link to the engine",
+            served(&hard, json!(["team-mcp", record.to_str().unwrap()])),
+            vec![],
+        ),
+        (
+            "another turn's drop file",
+            served(&engine, json!(["team-mcp", other_drop.to_str().unwrap()])),
+            vec![],
+        ),
+        (
+            "an extra argument",
+            served(
+                &engine,
+                json!(["team-mcp", record.to_str().unwrap(), "--verbose"]),
+            ),
+            vec![],
+        ),
+        ("a second server", second.to_string(), vec![]),
+        (
+            "a second configuration",
+            legit.clone(),
+            vec!["--mcp-config".to_owned(), legit.clone()],
+        ),
+        (
+            "an inline configuration",
+            legit.clone(),
+            vec![format!("--mcp-config={legit}")],
+        ),
+    ] {
+        let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+        assert_eq!(
+            delegate(&configured(&command, &config, &extra), Some(tools)),
+            unverified,
+            "{name}"
+        );
+    }
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
         [&worktree, &home, &turn.join("tmp")]
@@ -285,6 +392,44 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     assert!(sandbox.sandbox().read_roots().contains(&install));
     assert!(sandbox.sandbox().read_roots().contains(&repository));
     assert!(home.join(".credentials.json").is_file());
+    let registered = |path: &Path| {
+        crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(path).unwrap()
+    };
+    let turn = MasterTurnLaunch {
+        command,
+        sandbox,
+        home: home.clone(),
+        credential,
+        tool_record,
+    };
+    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+        let engine = engine.map(registered);
+        require_master_delegate(backend, turn, engine.as_ref()).map_err(|error| error.0)
+    };
+    let unverified: Result<(), String> = Err("master_delegate_unverified".to_owned());
+    assert_eq!(checked(MasterBackend::Claude, &turn, Some(&engine)), Ok(()));
+    assert_eq!(
+        checked(MasterBackend::Claude, &turn, Some(&hard)),
+        unverified
+    );
+    assert_eq!(
+        checked(MasterBackend::Codex, &turn, Some(&engine)),
+        Err("master_runtime_backend_unsupported".to_owned())
+    );
+    assert!(checked(MasterBackend::Claude, &turn, None).is_err());
+    assert_eq!(
+        checked(MasterBackend::Rcli, &turn, Some(&engine)),
+        Err("master_runtime_backend_unsupported".to_owned())
+    );
+    let mut turn = turn;
+    let record = turn.tool_record.replace(other_drop.clone());
+    assert_eq!(
+        checked(MasterBackend::Claude, &turn, Some(&engine)),
+        unverified
+    );
+    turn.tool_record = record;
+    assert_eq!(checked(MasterBackend::Claude, &turn, Some(&engine)), Ok(()));
+    let MasterTurnLaunch { credential, .. } = turn;
     drop(credential);
     drop(tools_folder);
     assert!(!home.exists());
