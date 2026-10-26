@@ -61,6 +61,16 @@ const MASTER_CONFIG: [&str; 15] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+const MASTER_TOOLS_CONFIG: [&str; 7] = [
+    "model_provider=\"openai\"",
+    "cli_auth_credentials_store=\"file\"",
+    "sandbox_mode=\"danger-full-access\"",
+    "approval_policy=\"never\"",
+    "features.apps=false",
+    "features.plugins=false",
+    "features.goals=false",
+];
+const DELEGATE_SERVERS: &str = "mcp_servers=";
 
 impl OwnerRuntimeHandle {
     pub(super) fn allocate_master_capture(
@@ -84,12 +94,8 @@ impl OwnerRuntimeHandle {
         }
         self.authority.root.verify()?;
         let home = profile.profile_path()?;
-        let model = &prepared.attempt.connection.model.id;
         let executable = match prepared.session.selection.backend {
-            MasterBackend::Codex => {
-                require_master_tool_policy()?;
-                self.registered_codex_executable()?
-            }
+            MasterBackend::Codex => self.registered_codex_executable()?,
             MasterBackend::Claude => self.registered_claude_executable()?,
             MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
         };
@@ -108,12 +114,17 @@ impl OwnerRuntimeHandle {
             repository: &prepared.repository,
             worktree: &prepared.cwd,
         };
-        assert!(!prepared.tools || prepared.session.selection.backend == MasterBackend::Claude);
         let engine = if prepared.tools {
             Some(self.registered_engine_executable()?)
         } else {
             None
         };
+        let wall_time =
+            Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms);
+        let engine = engine
+            .as_ref()
+            .map(|engine| engine.verified_path())
+            .transpose()?;
         let turn = if prepared.session.selection.backend == MasterBackend::Claude {
             claude_master_turn(
                 &place,
@@ -121,28 +132,18 @@ impl OwnerRuntimeHandle {
                 executable.verified_path()?,
                 &prepared.attempt.connection,
                 &prepared.instructions,
-                Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms),
-                engine
-                    .as_ref()
-                    .map(|engine| engine.verified_path())
-                    .transpose()?,
+                wall_time,
+                engine,
             )?
         } else {
-            MasterTurnLaunch {
-                command: master_command(executable.verified_path()?, &home, &prepared.cwd, model)?,
-                sandbox: master_sandbox(
-                    place.root,
-                    place.runtime_ref,
-                    place.repository,
-                    place.worktree,
-                    &home,
-                    executable.verified_path()?,
-                    &prepared.attempt.connection.endpoint,
-                )?,
-                home: home.clone(),
-                credential: None,
-                tool_record: None,
-            }
+            codex_master_turn(
+                &place,
+                profile,
+                executable.verified_path()?,
+                &prepared.attempt.connection,
+                wall_time,
+                engine,
+            )?
         };
         let MasterTurnLaunch {
             command,
@@ -151,6 +152,9 @@ impl OwnerRuntimeHandle {
             credential,
             tool_record,
         } = turn;
+        if prepared.session.selection.backend == MasterBackend::Codex {
+            require_master_tool_policy(&command, prepared.tools)?;
+        }
         assert_eq!(tool_record.is_some(), prepared.tools);
         assert_eq!(command.get_current_dir(), Some(prepared.cwd.as_path()));
         assert_ne!(runtime_ref, capture_ref);
@@ -269,8 +273,79 @@ pub(super) fn claude_master_turn(
     })
 }
 
-/// Makes the private home of one Claude master turn inside its turn folder, so everything
-/// Claude Code writes there goes with the folder. Input: the owner root and the turn's
+/// Builds one Codex master turn. With tools off it is today's read-only app-server on the
+/// account's managed home. With `engine` its tools are on (DEC-093): a private home in the
+/// turn folder holding a no-refresh copy of the account's credential (DEC-090), shell and
+/// patch tools with Codex's own sandbox off because macOS refuses a Seatbelt profile inside
+/// the master's, which keeps writes to the leased worktree and the turn's own folders, and
+/// only the engine's `delegate` server. Inputs: where the turn runs, the account lease, the
+/// registered executable, the attempt's connection, the turn's wall time and the engine
+/// executable for tools on. Output: the launch parts, or the refusal of the part that failed.
+pub(super) fn codex_master_turn(
+    place: &MasterTurnPlace<'_>,
+    profile: &NativeProfileUse,
+    executable: &Path,
+    connection: &ModelConnection,
+    wall_time: Duration,
+    engine: Option<&Path>,
+) -> Result<MasterTurnLaunch, EngineError> {
+    let model = &connection.model.id;
+    let Some(engine) = engine else {
+        let home = profile.profile_path()?;
+        return Ok(MasterTurnLaunch {
+            command: master_command(executable, &home, place.worktree, model, None)?,
+            sandbox: master_sandbox(
+                place.root,
+                place.runtime_ref,
+                place.repository,
+                place.worktree,
+                &home,
+                executable,
+                &connection.endpoint,
+            )?,
+            home,
+            credential: None,
+            tool_record: None,
+        });
+    };
+    let home = master_turn_home(place.root, place.runtime_ref)?;
+    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
+    let sandbox = master_tools_sandbox(
+        place.root,
+        place.runtime_ref,
+        place.repository,
+        place.worktree,
+        &home,
+        executable,
+        &connection.endpoint,
+        engine,
+    )?;
+    let drop = sandbox
+        .sandbox()
+        .agent_tmp()
+        .join(crate::team::tool::DROP_FILE);
+    let engine = std::fs::canonicalize(engine).map_err(io_error)?;
+    let command = master_command(
+        executable,
+        &home,
+        place.worktree,
+        model,
+        Some(crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &drop,
+        }),
+    )?;
+    Ok(MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential: Some(credential),
+        tool_record: Some(drop),
+    })
+}
+
+/// Makes the private home of one master turn inside its turn folder, so everything the
+/// harness writes there goes with the folder. Input: the owner root and the turn's
 /// runtime reference. Output: the new 0700 home, or a refusal when the folder is not the
 /// engine's or the home already exists.
 #[cfg(unix)]
@@ -326,29 +401,105 @@ impl Drop for MasterRuntimeFolder {
     }
 }
 
-/// Confirms the master launch keeps the subscription harness contained under DEC-076:
+/// Confirms a Codex master command keeps the policy of its tools switch. Tools off (DEC-076):
 /// read-only sandbox, approvals never granted, and no shell, patch, web, goal or MCP tools.
-/// Input: none, the policy is the fixed launch configuration. Output: Ok when every
-/// containment setting is present, otherwise the unsupported-backend refusal.
-fn require_master_tool_policy() -> Result<(), EngineError> {
-    let required = [
-        "sandbox_mode=\"read-only\"",
-        "approval_policy=\"never\"",
-        "features.shell_tool=false",
-        "features.apply_patch_freeform=false",
-        "features.unified_exec=false",
-        "features.goals=false",
-        "web_search=\"disabled\"",
-        "mcp_servers={}",
-    ];
-    if required
-        .iter()
-        .all(|setting| MASTER_CONFIG.contains(setting))
-    {
-        Ok(())
+/// Tools on (DEC-093): approvals never granted, no apps, plugins or goals, Codex's own sandbox
+/// off inside the master's, and exactly one MCP server, the engine's `delegate` server. Every
+/// `-c` setting must be one the switch allows. Input: the command and the switch. Output: Ok,
+/// or the unsupported-backend refusal.
+fn require_master_tool_policy(command: &Command, tools: bool) -> Result<(), EngineError> {
+    let refused = || failure("master_runtime_backend_unsupported");
+    let required: &[&str] = if tools {
+        &[
+            "sandbox_mode=\"danger-full-access\"",
+            "approval_policy=\"never\"",
+            "features.apps=false",
+            "features.plugins=false",
+            "features.goals=false",
+        ]
     } else {
-        Err(failure("master_runtime_backend_unsupported"))
+        &[
+            "sandbox_mode=\"read-only\"",
+            "approval_policy=\"never\"",
+            "features.shell_tool=false",
+            "features.apply_patch_freeform=false",
+            "features.unified_exec=false",
+            "features.goals=false",
+            "web_search=\"disabled\"",
+            "mcp_servers={}",
+        ]
+    };
+    let fixed: &[&str] = if tools {
+        &MASTER_TOOLS_CONFIG
+    } else {
+        &MASTER_CONFIG
+    };
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(refused)?;
+    let mut settings = Vec::new();
+    let mut rest = args.as_slice();
+    while let ["-c", setting, tail @ ..] = rest {
+        settings.push(*setting);
+        rest = tail;
     }
+    if rest != ["app-server", "--listen", "stdio://"] {
+        return Err(refused());
+    }
+    let mut servers = 0_usize;
+    for setting in &settings {
+        let allowed = if setting.starts_with(DELEGATE_SERVERS) && tools {
+            servers += 1;
+            delegate_only(setting)
+        } else {
+            fixed.contains(setting) || setting.starts_with("model=\"")
+        };
+        if !allowed {
+            return Err(refused());
+        }
+    }
+    if servers != usize::from(tools)
+        || required.iter().any(|setting| !fixed.contains(setting))
+        || fixed.iter().any(|setting| !settings.contains(setting))
+    {
+        return Err(refused());
+    }
+    assert!(settings.len() >= fixed.len());
+    Ok(())
+}
+
+/// Checks that a Codex `mcp_servers=` setting names only the engine's `delegate` server: one
+/// `crazyagent-team` entry whose command is an absolute path and whose arguments are the
+/// tool server command and an absolute drop file. Input: the setting. Output: whether it does.
+fn delegate_only(setting: &str) -> bool {
+    let Ok(parsed) = toml::from_str::<toml::Table>(setting) else {
+        return false;
+    };
+    let Some(servers) = parsed.get("mcp_servers").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    let Some(server) = servers
+        .get(crate::team::tool::SERVER_NAME)
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+    let absolute = |value: Option<&toml::Value>| {
+        value.and_then(toml::Value::as_str).is_some_and(|path| {
+            Path::new(path).is_absolute() && !path.chars().any(char::is_control)
+        })
+    };
+    let args = server.get("args").and_then(toml::Value::as_array);
+    servers.len() == 1
+        && server.len() == 2
+        && absolute(server.get("command"))
+        && args.is_some_and(|args| {
+            args.len() == 2
+                && args[0].as_str() == Some(crate::team::tool::SERVER_COMMAND)
+                && absolute(args.get(1))
+        })
 }
 
 fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
@@ -389,12 +540,17 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
     Ok(())
 }
 
+/// Builds the Codex master app-server command: tools off with the fixed read-only settings,
+/// or with `tools` the tools-on settings and one `mcp_servers` entry for the engine's
+/// `delegate` server. Inputs: the registered executable, the home, the working directory, the
+/// model and the tools-on parts. Output: the command, or `master_runtime_binding`.
 #[cfg(unix)]
 fn master_command(
     executable: &Path,
     home: &Path,
     cwd: &Path,
     model: &str,
+    tools: Option<crate::engine::claude_host::MasterTools<'_>>,
 ) -> Result<Command, EngineError> {
     if !executable.is_absolute()
         || !home.is_absolute()
@@ -414,8 +570,15 @@ fn master_command(
     if model != ACCOUNT_DEFAULT_MODEL {
         command.arg("-c").arg(format!("model=\"{model}\""));
     }
-    for config in MASTER_CONFIG {
+    let fixed: &[&str] = match tools {
+        None => &MASTER_CONFIG,
+        Some(_) => &MASTER_TOOLS_CONFIG,
+    };
+    for config in fixed {
         command.arg("-c").arg(config);
+    }
+    if let Some(tools) = tools {
+        command.arg("-c").arg(delegate_servers(&tools)?);
     }
     command
         .args(["app-server", "--listen", "stdio://"])
@@ -445,8 +608,33 @@ fn master_command(
     _home: &Path,
     _cwd: &Path,
     _model: &str,
+    _tools: Option<crate::engine::claude_host::MasterTools<'_>>,
 ) -> Result<Command, EngineError> {
     Err(failure("master_host_unavailable"))
+}
+
+/// Renders the one `mcp_servers` setting of a tools-on Codex master: the engine executable
+/// serving its `delegate` tool with the turn's drop file. Input: the tools-on parts. Output:
+/// the setting, or `master_runtime_binding` for a relative path or one that is not text.
+#[cfg(unix)]
+fn delegate_servers(
+    tools: &crate::engine::claude_host::MasterTools<'_>,
+) -> Result<String, EngineError> {
+    let text = |path: &Path| {
+        path.to_str()
+            .filter(|text| path.is_absolute() && !text.chars().any(char::is_control))
+            .map(|text| toml_edit::Value::from(text).to_string())
+            .ok_or_else(|| failure("master_runtime_binding"))
+    };
+    let setting = format!(
+        "{DELEGATE_SERVERS}{{{}={{command={},args=[{},{}]}}}}",
+        crate::team::tool::SERVER_NAME,
+        text(tools.engine)?,
+        toml_edit::Value::from(crate::team::tool::SERVER_COMMAND),
+        text(tools.drop)?
+    );
+    assert!(delegate_only(&setting));
+    Ok(setting)
 }
 
 /// Builds and installs the Seatbelt boundary for one master turn. The master writes only
@@ -768,6 +956,7 @@ mod tests {
             Path::new("/private/profile"),
             Path::new("/leased/worktree"),
             "admitted-model",
+            None,
         )
         .unwrap();
         assert_eq!(command.get_program(), "/registered/codex");
@@ -806,6 +995,7 @@ mod tests {
             Path::new("/private/profile"),
             Path::new("/leased/worktree"),
             ACCOUNT_DEFAULT_MODEL,
+            None,
         )
         .unwrap();
         let args = command
@@ -830,6 +1020,7 @@ mod tests {
             Path::new("/private/profile"),
             Path::new("/leased/worktree"),
             "admitted-model",
+            None,
         )
         .unwrap();
         let environment = command
@@ -861,7 +1052,8 @@ mod tests {
                     Path::new("/registered/codex"),
                     Path::new("/private/profile"),
                     Path::new("/leased/worktree"),
-                    model
+                    model,
+                    None
                 )
                 .is_err()
             );
@@ -876,7 +1068,8 @@ mod tests {
                     Path::new(executable),
                     Path::new(home),
                     Path::new(cwd),
-                    "model"
+                    "model",
+                    None
                 )
                 .is_err()
             );
@@ -1045,7 +1238,7 @@ mod tests {
         );
         assert!(!sandbox.sandbox().profile().contains("(allow network*)"));
 
-        let master = master_command(&executable, &home, &worktree, "admitted-model").unwrap();
+        let master = master_command(&executable, &home, &worktree, "admitted-model", None).unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
         assert_eq!(wrapped.get_program(), crate::sandbox::SANDBOX_EXEC);
         let args = wrapped
@@ -1437,3 +1630,7 @@ mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/claude_turn_tests.rs"]
 mod claude_turn_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/codex_turn_tests.rs"]
+mod codex_turn_tests;

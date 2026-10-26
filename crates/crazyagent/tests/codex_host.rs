@@ -164,7 +164,11 @@ fn codex_host_master_thread_carries_instructions_on_stdin_with_the_same_read_onl
     let project = Path::new("/unit/declared-project");
     let instructions = "# Project context from CrazyAgent\n\nThe codename is \"BLUE-HERON-77\".\n";
     let mut host = initialized();
-    let outgoing = message(&host.start_instructed_thread(project, instructions).unwrap());
+    let outgoing = message(
+        &host
+            .start_instructed_thread(project, instructions, false)
+            .unwrap(),
+    );
     assert_eq!(outgoing["method"], "thread/start");
     assert_eq!(outgoing["params"]["developerInstructions"], instructions);
     assert_eq!(outgoing["params"]["cwd"], "/unit/declared-project");
@@ -180,16 +184,86 @@ fn codex_host_master_thread_carries_instructions_on_stdin_with_the_same_read_onl
     let oversized = "x".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX + 1);
     for refused in ["", "  \n", "before\0after", oversized.as_str()] {
         let mut host = initialized();
-        assert!(host.start_instructed_thread(project, refused).is_err());
+        assert!(
+            host.start_instructed_thread(project, refused, false)
+                .is_err()
+        );
         assert_eq!(host.state(), State::Ready);
     }
     let largest = "x".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
     let mut host = initialized();
-    let outgoing = message(&host.start_instructed_thread(project, &largest).unwrap());
+    let outgoing = message(
+        &host
+            .start_instructed_thread(project, &largest, false)
+            .unwrap(),
+    );
     assert_eq!(
         outgoing["params"]["developerInstructions"],
         largest.as_str()
     );
+}
+
+#[test]
+fn codex_host_tools_on_master_thread_runs_tools_without_prompts_or_codex_s_own_sandbox() {
+    let project = Path::new("/unit/project");
+    let instructions = "# Project context from CrazyAgent\n\n## Your tools\n";
+    let thread = json!({
+        "id":"unit-native-thread", "cliVersion":"0.164.0", "createdAt":1,
+        "updatedAt":1, "cwd":"/unit/project", "ephemeral":false,
+        "modelProvider":"unit-provider-input", "preview":"", "projectId":null,
+        "sessionId":"unit-unprojected-session", "source":"appServer",
+        "status":{"type":"idle"}, "turns":[]
+    });
+    let started = |approval: &str, sandbox: Value| {
+        json!({
+            "thread":thread, "cwd":"/unit/project", "model":"unit-model-input",
+            "modelProvider":"unit-provider-input", "approvalPolicy":approval,
+            "approvalsReviewer":"user", "sandbox":sandbox
+        })
+    };
+
+    let mut host = initialized();
+    let outgoing = message(
+        &host
+            .start_instructed_thread(project, instructions, true)
+            .unwrap(),
+    );
+    assert_eq!(outgoing["method"], "thread/start");
+    assert_eq!(outgoing["params"]["developerInstructions"], instructions);
+    assert_eq!(outgoing["params"]["cwd"], "/unit/project");
+    assert_eq!(outgoing["params"]["approvalPolicy"], "never");
+    assert_eq!(outgoing["params"]["approvalsReviewer"], "user");
+    assert_eq!(outgoing["params"]["sandbox"], "danger-full-access");
+    let batch = reply(
+        &mut host,
+        outgoing["id"].as_i64().unwrap(),
+        started("never", json!({"type":"dangerFullAccess"})),
+    );
+    assert_eq!(batch.events.len(), 1);
+    assert_eq!(batch.events[0].kind, EventKind::ThreadStarted);
+    assert_eq!(host.state(), State::Idle);
+
+    let mut host = initialized();
+    let outgoing = message(
+        &host
+            .start_instructed_thread(project, instructions, true)
+            .unwrap(),
+    );
+    let refused = host.receive(&wire(json!({
+        "id": outgoing["id"],
+        "result": started("on-request", json!({"type":"readOnly","networkAccess":false}))
+    })));
+    assert!(refused.is_err());
+    assert_eq!(host.state(), State::Failed);
+
+    let mut host = initialized();
+    let outgoing = message(
+        &host
+            .start_instructed_thread(project, instructions, false)
+            .unwrap(),
+    );
+    assert_eq!(outgoing["params"]["approvalPolicy"], "on-request");
+    assert_eq!(outgoing["params"]["sandbox"], "read-only");
 }
 
 #[test]

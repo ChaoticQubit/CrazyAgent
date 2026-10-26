@@ -403,13 +403,29 @@ impl CodexProtocol {
         cwd: &Path,
         instructions: &str,
     ) -> Result<Vec<u8>, ProtocolError> {
-        if instructions.trim().is_empty()
-            || instructions.contains('\0')
-            || instructions.len() > DEVELOPER_INSTRUCTIONS_BYTES_MAX
-        {
-            return Err(ProtocolError::InvalidInput);
-        }
-        self.start_thread_with(cwd, "on-request", "read-only", Some(instructions))
+        self.start_thread_with(
+            cwd,
+            "on-request",
+            "read-only",
+            Some(instructed(instructions)?),
+        )
+    }
+
+    /// Starts the same tools thread as `start_tool_thread` with `instructions` as the thread's
+    /// developer instructions, for a tools-on master the caller confines in an OS sandbox.
+    /// Input: absolute working directory and non-blank text without NUL, at most
+    /// `DEVELOPER_INSTRUCTIONS_BYTES_MAX` bytes. Output: the encoded `thread/start` request.
+    pub fn start_instructed_tool_thread(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(
+            cwd,
+            "never",
+            "danger-full-access",
+            Some(instructed(instructions)?),
+        )
     }
 
     /// Starts a thread whose tools run without approval prompts and without Codex's
@@ -1383,6 +1399,18 @@ fn wire_id(value: Value) -> Result<WireId, ProtocolError> {
             .ok_or(ProtocolError::InvalidMessage),
         _ => Err(ProtocolError::InvalidMessage),
     }
+}
+
+/// Admits developer instructions for a thread: non-blank text without NUL, at most
+/// `DEVELOPER_INSTRUCTIONS_BYTES_MAX` bytes. Input: the text. Output: it, or invalid input.
+fn instructed(instructions: &str) -> Result<&str, ProtocolError> {
+    if instructions.trim().is_empty()
+        || instructions.contains('\0')
+        || instructions.len() > DEVELOPER_INSTRUCTIONS_BYTES_MAX
+    {
+        return Err(ProtocolError::InvalidInput);
+    }
+    Ok(instructions)
 }
 
 fn valid_path(path: &Path) -> Option<&str> {

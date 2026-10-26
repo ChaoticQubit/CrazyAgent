@@ -118,7 +118,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
 /// The built engine executable that serves the `delegate` tool: `CRAZYAGENT_ENGINE`, or the
 /// `crazyagent` binary beside this test's build folder. Output: its canonical path, or a
 /// panic with the plain BLOCKED message when it was not built.
-fn engine_executable() -> PathBuf {
+pub(super) fn engine_executable() -> PathBuf {
     std::env::var_os("CRAZYAGENT_ENGINE")
         .map(PathBuf::from)
         .or_else(|| {

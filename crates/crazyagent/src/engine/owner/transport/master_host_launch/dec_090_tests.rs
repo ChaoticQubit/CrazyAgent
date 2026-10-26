@@ -90,6 +90,7 @@ fn a_codex_master_loads_no_instructions_or_skills_from_where_a_tools_on_agent_wr
         &agent.profile_home,
         &agent.project,
         "native-default",
+        None,
     )
     .unwrap();
     command.stderr(Stdio::null());

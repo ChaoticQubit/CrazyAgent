@@ -6,6 +6,7 @@ engine::owner::transport::master_host_launch::live_claude_tests::a_real_claude_m
 team::runtime::live_claude_tests::a_real_claude_team_agent_turn_is_signed_in_inside_the_agent_sandbox
 research::runner::live_claude_tests::a_real_claude_research_run_on_a_fast_model_is_signed_in_inside_the_research_sandbox
 engine::owner::transport::master_host_launch::live_codex_tests::a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox
+engine::owner::transport::master_host_launch::live_codex_tests::a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates
 team::runtime::live_codex_tests::a_real_codex_team_agent_turn_is_signed_in_inside_the_agent_sandbox
 research::runner::live_codex_tests::a_real_codex_research_run_is_signed_in_inside_the_research_sandbox"
 log=$(mktemp -d "${TMPDIR:-/tmp}/crazyagent-qualify.XXXXXX") || exit 1

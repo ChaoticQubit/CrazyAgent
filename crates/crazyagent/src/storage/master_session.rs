@@ -2201,9 +2201,11 @@ fn bundle(
         .attempt
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
-    let tools = session.selection.backend == MasterBackend::Claude
-        && crate::launch_context::master_tools(tx, &session.project_id)
-            .map_err(|problem| EngineError(problem.0))?;
+    let tools = matches!(
+        session.selection.backend,
+        MasterBackend::Claude | MasterBackend::Codex
+    ) && crate::launch_context::master_tools(tx, &session.project_id)
+        .map_err(|problem| EngineError(problem.0))?;
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => {
@@ -5328,7 +5330,7 @@ fallback_allowed = false
             else {
                 panic!("registered local RCLI must prepare the actual turn");
             };
-            assert!(!prepared.tools, "only a Claude Code master runs with tools");
+            assert!(!prepared.tools, "an RCLI master runs without tools");
             let command = |observation| MasterRuntimeCommand::Observe {
                 host: self.started.host.clone(),
                 project_id: self.session.project_id.clone(),
