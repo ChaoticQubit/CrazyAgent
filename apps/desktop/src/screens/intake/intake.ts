@@ -161,7 +161,8 @@ export function stepView(step: OnboardingStep, finished = false): { word: string
   switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
-    case "off": return { word: "Off", tone: "neutral", line: "The Graphify skill isn't on in Setup, so no code graph is built." };
+    case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Setup, so no code graph is built." };
+    case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Setup." };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
     default: return { word: finished ? "Skipped" : "Waiting", tone: "neutral", line: null };
   }
@@ -219,7 +220,7 @@ export function confirmReady(view: OnboardingView): { ready: boolean; line: stri
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
   if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
-  if (view.graph.kind !== "done" && view.graph.kind !== "off") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
+  if (!["done", "off", "not_installed"].includes(view.graph.kind)) return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
 }
 

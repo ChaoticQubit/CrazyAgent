@@ -119,7 +119,10 @@ fn rust_repo(repo: &Path) {
 }
 
 fn settled(step: &Step) -> bool {
-    matches!(step, Step::Done | Step::Off | Step::Failed { .. })
+    matches!(
+        step,
+        Step::Done | Step::Off | Step::NotInstalled | Step::Failed { .. }
+    )
 }
 
 fn failed(reason: &str) -> Step {
@@ -807,8 +810,7 @@ async fn adding_a_repo_in_place_onboards_it_where_it_is_and_keeps_its_worktree_l
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unticking_graphify_in_setup_installs_nothing_for_it_and_onboarding_reports_the_graph_off()
-{
+async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_installed() {
     let mut bench = Bench::start_without_graphify(|_| {}).await;
     bench.generation += 1;
     let ran = bench
@@ -856,7 +858,7 @@ async fn unticking_graphify_in_setup_installs_nothing_for_it_and_onboarding_repo
     );
 
     let project = bench.start_onboarding().await;
-    assert_eq!(bench.view(&project).await.graph, Step::Off);
+    assert_eq!(bench.view(&project).await.graph, Step::NotInstalled);
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
@@ -867,15 +869,46 @@ async fn unticking_graphify_in_setup_installs_nothing_for_it_and_onboarding_repo
     );
     let view = bench.settle(&project, Duration::from_secs(60)).await;
     stop_service(service).await;
-    assert_eq!(view.graph, Step::Off, "{view:?}");
+    assert_eq!(view.graph, Step::NotInstalled, "{view:?}");
     assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
     assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
     assert!(!bench.repo.join("graphify-out").exists());
     let again = bench.start_onboarding().await;
     assert_eq!(again, project);
     let retried = bench.view(&project).await;
-    assert_eq!(retried.graph, Step::Off);
+    assert_eq!(retried.graph, Step::NotInstalled);
     assert_eq!(retried.mapping, Step::Waiting);
+    bench.graphify_skill().await;
+    assert_eq!(bench.start_onboarding().await, project);
+    assert_eq!(
+        bench.view(&project).await.graph,
+        Step::Waiting,
+        "a second start after the skill is installed builds the graph"
+    );
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_on_again() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.generation += 1;
+    let off = bench
+        .owner
+        .set_pack_entry("graphify".into(), false, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&off), None, "{off:?}");
+    let project = bench.start_onboarding().await;
+    assert_eq!(bench.view(&project).await.graph, Step::Off);
+    bench.generation += 1;
+    let on = bench
+        .owner
+        .set_pack_entry("graphify".into(), true, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&on), None, "{on:?}");
+    assert_eq!(bench.start_onboarding().await, project);
+    assert_eq!(bench.view(&project).await.graph, Step::Waiting);
     bench.stop().await;
 }
 
