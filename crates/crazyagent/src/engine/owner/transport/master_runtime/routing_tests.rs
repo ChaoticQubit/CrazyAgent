@@ -802,6 +802,32 @@ async fn rcli_route_preserves_queued_view_and_real_configuration_without_allocat
 }
 
 #[tokio::test]
+async fn a_turn_that_cannot_start_ends_blocked_with_its_reason_in_the_read() {
+    let case = Fixture::new(MasterBackend::Rcli, false).await;
+    case.register().await;
+    let returned = case.drive().await;
+    assert_eq!(
+        returned
+            .expect_err("a project without a repository cannot start a turn")
+            .0,
+        "master_repository_missing"
+    );
+    let failed = case.persisted_turn().await;
+    assert_eq!(failed.id, case.turn.id);
+    unallocated(
+        &failed,
+        MasterTurnPhase::Blocked,
+        Some(MasterReason::RepositoryMissing),
+    );
+    let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
+    assert_eq!(session.current_turn, None);
+    let before = case.snapshot();
+    assert_eq!(case.drive().await.unwrap(), failed);
+    assert_eq!(case.snapshot(), before);
+    case.finish().await;
+}
+
+#[tokio::test]
 async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_guard() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     let proof = case.register().await;
@@ -876,21 +902,30 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     assert_eq!(case.persisted_turn().await.phase, MasterTurnPhase::Prepared);
     assert_eq!(before.effects.each_ref().map(Vec::len), [1, 1, 0, 0, 1, 1]);
     assert!(before.captures.is_empty());
-    let returned = case.drive().await.unwrap();
-    assert_eq!(returned.phase, MasterTurnPhase::Delivering);
-    assert!(returned.reason.is_none());
-    assert!(returned.runtime.is_none());
-    assert!(returned.reply.is_none());
-    assert_eq!(returned.attempt.as_ref(), Some(&prepared.attempt));
-    assert_eq!(returned.id, case.turn.id);
-    assert_eq!(returned.session_id, case.session.session_id);
-    assert_eq!(returned, case.persisted_turn().await);
+    let returned = case.drive().await;
+    assert_eq!(
+        returned.expect_err("an account change holds the profile").0,
+        "native_profile_in_use"
+    );
+    let failed = case.persisted_turn().await;
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(failed.reason, Some(MasterReason::ProfileBusy));
+    assert!(failed.runtime.is_none());
+    assert!(failed.reply.is_none());
+    assert_eq!(failed.id, case.turn.id);
+    assert_eq!(failed.session_id, case.session.session_id);
+    let attempt = failed.attempt.as_ref().expect("prepared attempt kept");
+    assert_eq!(attempt.request, prepared.attempt.request);
+    assert!(attempt.completion.is_some());
     let after = case.snapshot();
-    assert_eq!(after.effects, before.effects);
+    assert_eq!(
+        after.effects.each_ref().map(Vec::len),
+        before.effects.each_ref().map(Vec::len)
+    );
     assert_eq!(after.registrations, before.registrations);
     assert_eq!(after.captures, before.captures);
-    assert_eq!(after.revision, before.revision + 1);
-    assert_eq!(after.events.len(), before.events.len() + 1);
+    assert_eq!(after.revision, before.revision + 2);
+    assert_eq!(after.events.len(), before.events.len() + 2);
     assert!(matches!(
         custody.acquire_configured_rcli_use(
             &case.runtime().identity(),
@@ -916,7 +951,6 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     drop(released);
     drop(custody);
     drop(prepared);
-    case.cancel().await;
     case.finish().await;
 }
 

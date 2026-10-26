@@ -174,6 +174,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::CaptureIncomplete) => "its reply was cut off.",
         Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
+        Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -251,6 +252,30 @@ mod tests {
             .iter()
             .map(|m| (m.speaker, m.text.as_str(), m.error))
             .collect()
+    }
+
+    #[test]
+    fn a_turn_that_could_not_start_names_the_missing_repository_and_offers_a_retry() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let turns = [turn(
+            1,
+            3,
+            MasterTurnPhase::Blocked,
+            Some(MasterReason::RepositoryMissing),
+        )];
+        let transcript = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Plan the dashboard.", false),
+                (
+                    Speaker::Notice,
+                    "Codex stopped: this project has no repository yet. Press r to try again.",
+                    true
+                ),
+            ]
+        );
+        assert_ne!(transcript.status, MasterStatus::Thinking { since_ms: None });
     }
 
     #[test]

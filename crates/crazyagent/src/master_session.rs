@@ -147,6 +147,7 @@ pub enum MasterReason {
     CaptureIncomplete,
     OutputLimit,
     UnsupportedCapability,
+    RepositoryMissing,
     Cancelled,
     Unknown,
 }

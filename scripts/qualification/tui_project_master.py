@@ -161,7 +161,7 @@ def wait_session(database, child, master, count, backend, phase):
 
 
 def wait_turn(database, child, master, phase):
-    assert phase in ("queued", "cancelled")
+    assert phase == "blocked"
     assert child.poll() is None
     deadline = time.monotonic() + 6
     while time.monotonic() < deadline:
@@ -170,6 +170,7 @@ def wait_turn(database, child, master, phase):
             turn = found[0]
             assert turn["attempt"] is None and turn["runtime"] is None and turn["reply"] is None
             tui_flow.expect(master, phase.capitalize(), child)
+            tui_flow.expect(master, "Reason unknown", child)
             tui_flow.expect(master, turn["id"], child)
             tui_flow.expect(master, str(turn["input_cursor"]), child)
             return turn
@@ -316,9 +317,9 @@ def ambiguous_submit(root, session, child, master):
     tui_flow.expect(master, "Original owner operation not recorded at actual barrier", child)
     conversation.draft_contains(master, child, NEWER)
     os.write(master, b"\x12")
-    turn = wait_turn(database, child, master, "queued")
+    turn = wait_turn(database, child, master, "blocked")
     assert turn["id"] == operation_id and turn["session_id"] == session["session_id"], turn
-    assert turn["reason"] is None and turn["ordinal"] == 1, turn
+    assert turn["reason"] == "unknown" and turn["ordinal"] == 1, turn
     conversation.draft_contains(master, child, NEWER)
     rows = creation.read_rows(database,
         "SELECT o.operation_id,lower(hex(o.request_hash)),o.event_cursor,o.result,"
@@ -362,15 +363,16 @@ def brief_cancel_close(database, session, turn, child, master):
     conversation.body_contains(master, child, NOTE)
     before = counts(database)
     os.write(master, F3)
-    cancelled = wait_turn(database, child, master, "cancelled")
-    assert cancelled["id"] == turn["id"] and cancelled["reason"] == "cancelled", cancelled
-    assert counts(database) == (1, 1, before[2] + 1, before[3] + 1)
+    tui_flow.expect(master, "No outstanding actual master turn to cancel", child)
+    assert turns(database) == [turn], turns(database)
+    assert counts(database) == before
     conversation.draft_contains(master, child, NEWER)
     os.write(master, F4)
     closed = wait_session(database, child, master, 1, "rcli", "closed")
     assert closed["session_id"] == session["session_id"]
     assert closed["current_turn"] is None
-    assert counts(database) == (1, 1, before[2] + 2, before[3] + 2)
+    assert turns(database) == [turn], turns(database)
+    assert counts(database) == (1, 1, before[2] + 1, before[3] + 1)
     conversation.draft_contains(master, child, NEWER)
     truthful(master)
 

@@ -2498,6 +2498,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::CaptureIncomplete => "Reply was incomplete",
         MasterReason::OutputLimit => "Reply was too long",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
+        MasterReason::RepositoryMissing => "This project has no repository yet",
         MasterReason::Cancelled => "Cancelled",
         MasterReason::Unknown => "Reason unknown",
     }

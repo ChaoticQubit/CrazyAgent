@@ -286,7 +286,57 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Settles a master turn whose dispatch failed before it ran, so it never stays queued.
+    /// Inputs: the turn's project, session and id, and the reason the owner sees.
+    /// Output: the turn as stored: blocked (never admitted) or failed (admitted) with the
+    /// reason when it was the session's queued or prepared current turn, else unchanged.
+    async fn fail_master_turn(
+        &self,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        turn_id: &RequestId,
+        reason: MasterReason,
+    ) -> Result<MasterTurnView, EngineError> {
+        match self
+            .master_runtime_command(MasterRuntimeCommand::Fail {
+                host: self.identity(),
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                reason,
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(turn) => Ok(*turn),
+            _ => Err(failure("master_runtime_result")),
+        }
+    }
+
+    /// Drives one committed master turn and, when the dispatch fails with a known outcome,
+    /// settles the turn failed with the reason so the owner sees it and can retry.
+    /// Inputs: the turn's project, session and id. Output: the turn view, or the dispatch
+    /// error after the turn was settled; an unknown outcome is returned for the caller to
+    /// drive the same turn again.
     pub async fn drive_master_turn(
+        &self,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        turn_id: &RequestId,
+    ) -> Result<MasterTurnView, EngineError> {
+        let result = self.drive_turn(project_id, session_id, turn_id).await;
+        if let Err(cause) = &result
+            && cause.0 != super::master_dispatch::UNKNOWN_OUTCOME
+        {
+            let settled = self
+                .fail_master_turn(project_id, session_id, turn_id, reason_for_error(cause))
+                .await?;
+            assert_eq!(&settled.id, turn_id);
+            assert_eq!(&settled.session_id, session_id);
+        }
+        result
+    }
+
+    async fn drive_turn(
         &self,
         project_id: &ProjectId,
         session_id: &SessionId,
@@ -328,12 +378,7 @@ impl OwnerRuntimeHandle {
         let result = self.launch_master_turn(&prepared, turn_id).await;
         match result {
             Ok(turn) => Ok(turn),
-            Err(error)
-                if matches!(
-                    error.0.as_str(),
-                    "native_profile_in_use" | "master_runtime_profile_not_acquired"
-                ) =>
-            {
+            Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
                 self.inspect_master_turn(project_id, session_id, turn_id)
                     .await
             }
@@ -654,6 +699,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "codex_host_approval_required" => MasterReason::ApprovalRequired,
         "codex_host_cancelled" => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
+        "master_repository_missing" => MasterReason::RepositoryMissing,
         "native_profile_lock_unavailable" | "master_runtime_host_unavailable" => {
             MasterReason::RuntimeUnavailable
         }

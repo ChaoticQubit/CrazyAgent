@@ -125,12 +125,7 @@ impl OwnerRuntimeHandle {
                 self.observe_master_turn(prepared, turn_id, observation)
                     .await
             }
-            Err(error)
-                if matches!(
-                    error.0.as_str(),
-                    "native_profile_in_use" | "master_runtime_profile_not_acquired"
-                ) =>
-            {
+            Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
                 self.inspect_master_turn(
                     &prepared.session.project_id,
                     &prepared.session.session_id,

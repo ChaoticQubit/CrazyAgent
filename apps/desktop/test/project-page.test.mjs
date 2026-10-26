@@ -101,6 +101,8 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [turn("failed", "provider_error")]), "Stopped");
   assert.equal(research.turnLine(turn("blocked", "readiness_stale")), "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.");
   assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped: provider error.");
+  assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet.");
+  assert.equal(research.resendText([{ ...turn("blocked", "repository_missing"), id: "t1", ordinal: 1 }], { t1: "first" }), "first");
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
 });
 
