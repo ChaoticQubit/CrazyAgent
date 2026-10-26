@@ -37,6 +37,7 @@ use tokio::time::Instant;
 mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
+pub(crate) mod changes;
 mod github;
 mod harness_catalog;
 mod native_auth;
@@ -1895,6 +1896,7 @@ enum Protocol {
     HarnessCatalog,
     Plugins,
     Agents,
+    Changes,
     NativeAuth,
     Owner,
     #[cfg(test)]
@@ -1918,6 +1920,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("harness_catalog", Protocol::HarnessCatalog),
         ("plugins", Protocol::Plugins),
         ("agents", Protocol::Agents),
+        ("changes", Protocol::Changes),
         ("native_auth", Protocol::NativeAuth),
     ];
     Ok(named
@@ -1976,6 +1979,7 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
+            Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2113,6 +2117,10 @@ async fn serve_admitted(
             let served = agents::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
         }
+        Deferred::Changes(a) => {
+            let served = changes::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2154,14 +2162,16 @@ struct Tasks {
 
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
-/// clones, account checks that reach the network, and agent controls, which wait for an
-/// agent's process group or its host to end it. Each carries the admission, and the
-/// projects home its validated request; the others read the request frame.
+/// clones, account checks that reach the network, agent controls, which wait for an
+/// agent's process group or its host to end it, and Changes requests, which run git on
+/// the owner's checkout. Each carries the admission, and the projects home its validated
+/// request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
+    Changes(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2197,6 +2207,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::HarnessCatalog => harness_catalog::refusal(code)?,
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
+        Protocol::Changes => changes::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
