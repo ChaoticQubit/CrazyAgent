@@ -194,7 +194,7 @@ pub(crate) fn update(
         }
         std::thread::sleep(POLL);
     };
-    running.stop();
+    running.stop().map_err(RunError::Uncertain)?;
     Ok(ending)
 }
 

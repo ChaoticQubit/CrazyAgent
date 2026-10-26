@@ -36,9 +36,9 @@ fn read_only_place(base: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
 }
 
 /// Makes a private folder under `/tmp` holding an engine database, its research state, a
-/// folder to read and a [`detaching_harness`]. Takes the harness's seconds and whether it
-/// stays. Returns the folder, removed when dropped.
-fn read_only_base(seconds: u32, stays: bool) -> tempfile::TempDir {
+/// folder to read and a harness running `script`, such as a [`detaching_harness`]. Takes
+/// the script. Returns the folder, removed when dropped.
+fn read_only_base(script: &str) -> tempfile::TempDir {
     let temp = tempfile::Builder::new()
         .prefix("ca-read-only-warden-")
         .tempdir_in(fs::canonicalize("/tmp").unwrap())
@@ -58,15 +58,15 @@ fn read_only_base(seconds: u32, stays: bool) -> tempfile::TempDir {
     sqlite.execute_batch("PRAGMA user_version=1").unwrap();
     sqlite.close().map_err(|(_, error)| error).unwrap();
     fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
-    fs::write(&harness, detaching_harness(seconds, stays)).unwrap();
+    fs::write(&harness, script).unwrap();
     fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
     temp
 }
 
 /// Runs the read-only run of the engine in `base` on a loopback endpoint the harness never
 /// calls, as onboarding's mapping step does. Takes the base and the stop poll. Returns how
-/// it ended.
-fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> ReadOnlyEnding {
+/// it ended, or the runner failure.
+fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding, RunError> {
     let (database, state, folder, harness) = read_only_place(base);
     let runner =
         ResearchRunner::new(&database, &state, &harness, ResearchLimits::default()).unwrap();
@@ -74,18 +74,16 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> ReadOnlyEnding {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "local-model".into(),
     };
-    runner
-        .run_read_only(
-            &ReadOnlyRun {
-                name: "onboarding-warden",
-                folder: &folder,
-                prompt: "Describe this repository.",
-                account: &account,
-                wall_time: Duration::from_secs(60),
-            },
-            stop,
-        )
-        .unwrap()
+    runner.run_read_only(
+        &ReadOnlyRun {
+            name: "onboarding-warden",
+            folder: &folder,
+            prompt: "Describe this repository.",
+            account: &account,
+            wall_time: Duration::from_secs(60),
+        },
+        stop,
+    )
 }
 
 /// Waits up to 30 s for at least `count` processes of this user to name `needle`. Takes the
@@ -105,10 +103,11 @@ fn running_naming(needle: &str, count: usize) -> Vec<(i32, String)> {
 #[test]
 fn a_stopped_read_only_run_leaves_nothing_its_harness_detached_into_its_own_session() {
     const SLEEP: &str = "sleep 3311";
-    let base = read_only_base(3311, true);
+    let base = read_only_base(&detaching_harness(3311, true));
     let stopping = AtomicBool::new(false);
     let ending = std::thread::scope(|scope| {
-        let run = scope.spawn(|| read_only_run(base.path(), &|| stopping.load(Ordering::Relaxed)));
+        let run = scope
+            .spawn(|| read_only_run(base.path(), &|| stopping.load(Ordering::Relaxed)).unwrap());
         running_naming(SLEEP, 2);
         stopping.store(true, Ordering::Relaxed);
         run.join().unwrap()
@@ -123,8 +122,8 @@ fn a_stopped_read_only_run_leaves_nothing_its_harness_detached_into_its_own_sess
 #[test]
 fn a_read_only_run_whose_harness_exits_leaves_nothing_it_detached() {
     const SLEEP: &str = "sleep 3312";
-    let base = read_only_base(3312, false);
-    let ending = read_only_run(base.path(), &|| false);
+    let base = read_only_base(&detaching_harness(3312, false));
+    let ending = read_only_run(base.path(), &|| false).unwrap();
     assert!(
         !matches!(ending, ReadOnlyEnding::TimedOut | ReadOnlyEnding::Stopped),
         "{ending:?}"
@@ -145,7 +144,7 @@ fn a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached() {
         let ending = read_only_run(Path::new(&base), &|| false);
         panic!("the engine under test was not killed: {ending:?}");
     }
-    let base = read_only_base(3313, true);
+    let base = read_only_base(&detaching_harness(3313, true));
     let module = module_path!().split_once("::").unwrap().1;
     let test =
         format!("{module}::a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached");
@@ -164,5 +163,32 @@ fn a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached() {
     assert_eq!(
         detached_survivors(Instant::now() + Duration::from_secs(5), &[SLEEP]),
         []
+    );
+}
+
+#[test]
+fn a_read_only_run_whose_warden_was_killed_fails_with_its_cleanup_uncertain_and_leaves_nothing() {
+    const SLEEP: &str = "sleep 3314";
+    let base = read_only_base(&detaching_harness(3314, true));
+    let (_, _, _, harness) = read_only_place(base.path());
+    let needle = harness.to_str().unwrap().to_owned();
+    let stopping = AtomicBool::new(false);
+    let ending = std::thread::scope(|scope| {
+        let run = scope.spawn(|| read_only_run(base.path(), &|| stopping.load(Ordering::Relaxed)));
+        running_naming(SLEEP, 2);
+        let killed = crate::sandbox::warden::fixture::kill_wardens_of(&needle);
+        assert_eq!(killed.len(), 1, "one warden per run");
+        stopping.store(true, Ordering::Relaxed);
+        run.join().unwrap()
+    });
+    let left = detached_survivors(Instant::now() + Duration::from_secs(2), &[SLEEP]);
+    assert!(
+        matches!(ending, Err(RunError::Uncertain("warden_unconfirmed"))),
+        "{ending:?}"
+    );
+    assert_eq!(
+        left.len(),
+        1,
+        "the detached process outlived the group: {left:?}"
     );
 }

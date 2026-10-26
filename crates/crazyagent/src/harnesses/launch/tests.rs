@@ -397,7 +397,7 @@ fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_nex
             LaunchEvent::TurnFinished { success: true }
         ]
     );
-    session.stop();
+    session.stop().unwrap();
 }
 
 fn codex_driver_in_a_turn() -> Driver {

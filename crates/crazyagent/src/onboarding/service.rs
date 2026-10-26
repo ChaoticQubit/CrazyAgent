@@ -403,6 +403,7 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
         #[cfg(unix)]
         Ok(GraphEnding::Stopped) => Step::WAITING,
+        Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
         Err(_) => Step::failed(GRAPH_NOT_STARTED),
     }
 }
@@ -471,6 +472,10 @@ fn mapping_step(
         Ok(ReadOnlyEnding::Stopped) => (Step::WAITING, base),
         Err(RunError::Busy) => (Step::WAITING, base),
         Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
+        Err(RunError::Uncertain(_)) => (
+            Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
+            base,
+        ),
         Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
     }
 }

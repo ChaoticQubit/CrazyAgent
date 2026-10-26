@@ -78,6 +78,14 @@ impl NativeProfileUse {
 /// Matches the Unix credential copy; no lease exists here, so no copy is ever made.
 pub(crate) enum AgentCredential {}
 
+impl AgentCredential {
+    /// Matches the Unix copy kept for an agent whose cleanup is uncertain.
+    /// No value is ever made, so this never runs.
+    pub(crate) fn retain(self) {
+        match self {}
+    }
+}
+
 impl Drop for AgentCredential {
     /// Matches the Unix copy, which leaves the agent's home when dropped, so the callers
     /// that end a copy at a chosen point mean the same on every target.
