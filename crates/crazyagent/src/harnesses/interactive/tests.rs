@@ -746,11 +746,11 @@ fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
     let case = Case::new();
     let project = case.path().join("work");
     let config = case.home().join(".claude.json");
-    let fifo = std::process::Command::new("/usr/bin/mkfifo")
-        .arg(&config)
-        .status()
-        .unwrap();
-    assert!(fifo.success());
+    assert!(
+        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&config))
+            .unwrap()
+            .success()
+    );
     assert_eq!(
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
         "launch_claude_config_unsafe"
