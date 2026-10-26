@@ -6,8 +6,10 @@ use std::path::Path;
 /// How many of the last raw stream bytes a Claude Code master host keeps for the engine log.
 pub(in crate::engine) const TAIL_BYTES: usize = 8192;
 /// How many lines after a turn's result a host names by kind; later ones are only counted.
+#[cfg(unix)]
 const LATE_KINDS_MAX: usize = 16;
 /// The longest stream type or subtype name a host copies into the engine log.
+#[cfg(unix)]
 const KIND_BYTES_MAX: usize = 64;
 /// The engine log of Claude Code master stream diagnostics, in the engine logs folder.
 pub(in crate::engine) const LOG_FILE: &str = "master-stream.log";
@@ -47,6 +49,7 @@ impl StreamDiagnostic {
 
     /// Counts one line that came after the turn's result and names its kind while fewer than
     /// `LATE_KINDS_MAX` are named. Input: the line. Output: none.
+    #[cfg(unix)]
     pub(in crate::engine) fn late(&mut self, line: &[u8]) {
         self.late_lines = self.late_lines.saturating_add(1);
         if self.late.len() < LATE_KINDS_MAX {
@@ -56,6 +59,7 @@ impl StreamDiagnostic {
     }
 
     /// Names the kind of the first line the protocol refused. Input: the line. Output: none.
+    #[cfg(unix)]
     pub(in crate::engine) fn failed(&mut self, line: &[u8]) {
         if self.message.is_none() {
             self.message = Some(kind(line));
@@ -111,6 +115,7 @@ fn credential_byte(byte: u8) -> bool {
 /// Names a stream line by its `type` and, when it has one, its `subtype`, such as
 /// `system/task_notification`. Input: the line. Output: the name, with `unreadable` for a
 /// line or field that is not a short lowercase JSON name.
+#[cfg(unix)]
 fn kind(line: &[u8]) -> String {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return "unreadable".to_owned();

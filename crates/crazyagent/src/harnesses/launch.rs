@@ -1211,10 +1211,13 @@ impl Session {
         }
         self.stopped = true;
         self.stdin = None;
+        if let Some(warden) = self.warden.take() {
+            match warden {}
+        }
         let code = self.reap(self.limits.stop_grace);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
-        assert!(self.stdin.is_none());
+        assert!(self.stdin.is_none() && self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))
     }
 

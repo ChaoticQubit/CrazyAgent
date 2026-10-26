@@ -172,12 +172,14 @@ fn claude_assistant_errors_other_than_rate_limits_are_not_rate_limited() {
     assert_eq!(turn_errors(&events), [false]);
 }
 
+#[cfg(unix)]
 struct TeamLaunch {
     _directory: tempfile::TempDir,
     request: LaunchRequest,
     work: PathBuf,
 }
 
+#[cfg(unix)]
 fn team_launch(harness: &str) -> TeamLaunch {
     use std::os::unix::fs::PermissionsExt;
     let entry = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
@@ -214,6 +216,7 @@ fn team_launch(harness: &str) -> TeamLaunch {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub_agent() {
     use std::io::{BufRead, BufReader, Write};
@@ -274,6 +277,7 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
     let launch = team_launch("codex");
@@ -313,6 +317,7 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
     assert_eq!(state("shell_tool"), Some("true"), "{text}");
 }
 
+#[cfg(unix)]
 const LATE_RESULT_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
@@ -327,6 +332,7 @@ printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-3","session_i
 /bin/cat > /dev/null
 "#;
 
+#[cfg(unix)]
 fn turn(session: &mut super::Session, prompt: &str) -> Vec<LaunchEvent> {
     session.send(prompt).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -346,6 +352,7 @@ fn turn(session: &mut super::Session, prompt: &str) -> Vec<LaunchEvent> {
     events
 }
 
+#[cfg(unix)]
 #[test]
 fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_next_turn() {
     use std::os::unix::fs::PermissionsExt;
