@@ -25,7 +25,7 @@ function standalone(markup) {
   assert.match(markup, /<h1>Updates<\/h1>/);
   assert.match(markup, /class="full-state"/);
   assert.match(markup, />Back<\/button>/);
-  assert.doesNotMatch(markup, /engine isn&#x27;t running|Tell CrazyAgent about you|class="sidebar"/);
+  assert.doesNotMatch(markup, /engine isn&#x27;t running|engine needs a restart|Tell CrazyAgent about you|class="sidebar"/);
 }
 
 test("the engine-down page offers Check for updates, and names a release a check already found", () => {
@@ -41,14 +41,29 @@ test("the engine-down page offers Check for updates, and names a release a check
   }
 });
 
+test("the engine-needs-a-restart page also offers Check for updates, and names a release a check already found", () => {
+  const outdated = render({ engine: "outdated" });
+  assert.match(outdated, /<h1>CrazyAgent&#x27;s engine needs a restart<\/h1>/);
+  assert.match(outdated, />Restart engine<\/button>/);
+  assert.match(outdated, />Check for updates<\/button>/);
+  assert.doesNotMatch(outdated, /is available/);
+  updateStore.dispatch({ kind: "check_done", update: { version: "0.3.0", current_version: "0.2.0", notes: null }, at: 1 });
+  try {
+    assert.match(render({ engine: "outdated" }), /CrazyAgent 0\.3\.0 is available\./);
+  } finally {
+    updateStore.dispatch({ kind: "channel_changed" });
+  }
+});
+
 test("first run offers Check for updates before the profile is saved", () => {
   const welcome = render({ profile: { kind: "ok", value: null } });
   assert.match(welcome, /<h1>Tell CrazyAgent about you<\/h1>/);
   assert.match(welcome, />Check for updates<\/button>/);
 });
 
-test("Settings, Updates opens on its own while the engine is down, launching, or before first run finishes", () => {
+test("Settings, Updates opens on its own while the engine is down, outdated, launching, or before first run finishes", () => {
   standalone(render({ engine: "down" }, UPDATES));
+  standalone(render({ engine: "outdated" }, UPDATES));
   standalone(render({ engine: "connecting" }, UPDATES));
   standalone(render({ profile: { kind: "loading" } }, UPDATES));
   standalone(render({ profile: { kind: "ok", value: null } }, UPDATES));

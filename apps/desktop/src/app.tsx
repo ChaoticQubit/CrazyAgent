@@ -24,9 +24,18 @@ export function supportDetails(width: number, height: number, now: Date): string
 
 const UPDATES_ROUTE: Route = { name: "settings", tab: "updates" };
 
+/** The way to Settings, Updates from a full-window state that needs no engine, naming a
+ * release a check already found. Output: the line and the Check for updates button. */
+function UpdateLink() {
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
+  return <>
+    {update.kind === "available" && <p>CrazyAgent {displayText(update.update.version)} is available.</p>}
+    <span><Button variant="quiet" icon="refresh-cw" onClick={() => navigate(UPDATES_ROUTE)}>Check for updates</Button></span>
+  </>;
+}
+
 function EngineDown({ onRetry }: { onRetry: () => void }) {
   const [copied, setCopied] = useState<"idle" | "copied" | { failed: string }>("idle");
-  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   async function copy() {
     const details = supportDetails(window.innerWidth, window.innerHeight, new Date());
     try {
@@ -44,8 +53,7 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
       <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
       <span className="row"><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button>
         <Button icon="copy" onClick={() => void copy()}>Copy details for support</Button></span>
-      {update.kind === "available" && <p>CrazyAgent {update.update.version} is available.</p>}
-      <span><Button variant="quiet" icon="refresh-cw" onClick={() => navigate(UPDATES_ROUTE)}>Check for updates</Button></span>
+      <UpdateLink />
       {copied === "copied" && <p className="secondary" role="status">Copied. Paste it into your message to support.</p>}
       {typeof copied === "object" && <><p className="secondary" role="alert">Couldn't copy. Select the details below and copy them.</p>
         <pre className="support-details">{copied.failed}</pre></>}
@@ -71,8 +79,9 @@ function UpdatesAlone({ session }: { session: Session }) {
 }
 
 /** The full-window state for an engine of another version than this app: the engine's own
- * message naming both versions, Restart engine on this app's version, and Try again.
- * Inputs: the version read, the restart state and the handlers. */
+ * message naming both versions, Restart engine on this app's version, Try again, and Check
+ * for updates, since a newer app can also end the mismatch. Inputs: the version read, the
+ * restart state and the handlers. */
 export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
   versions: Loaded<EngineVersions>;
   restart: EngineRestart;
@@ -88,6 +97,7 @@ export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
       <p className="secondary">{message}</p>
       <RestartEngine restart={restart} onRestart={onRestart} primary />
       <span><Button icon="refresh-cw" onClick={onRetry}>Try again</Button></span>
+      <UpdateLink />
     </div>
   </main>;
 }
@@ -123,12 +133,12 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
 
 /** The whole app for one session and route: the engine-down or engine-outdated state, the
  * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
- * routed screen. Settings, Updates opens on its own in place of the engine-down state, the
- * launch skeleton and Welcome. Inputs: the session and the current route. */
+ * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
+ * session and the current route. */
 export function AppView({ session, route }: { session: Session; route: Route }) {
   const updates = route.name === "settings" && route.tab === "updates";
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
-  if (session.engine === "outdated") return <EngineOutdated onRetry={session.retry} />;
+  if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
   if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
