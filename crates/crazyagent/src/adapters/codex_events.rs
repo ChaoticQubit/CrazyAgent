@@ -3,11 +3,16 @@ use super::events::{
     Approval, Capability, EventKind, NativeRequestId, ObservedEvent, Provenance, Support,
     TokenUsage, TurnOutcome,
 };
-use super::{NativeAction, NativeHarness};
+use super::{FIELD_BYTES_MAX, NativeAction, NativeHarness, summarize};
 use crate::protocol::{CredentialRef, RequestId};
 use std::io::{self, Write};
 
-const OUTPUT_BYTES_MAX: usize = 262_144;
+/// What one observation may serialize to. Its largest field is a clipped message of
+/// `FIELD_BYTES_MAX` bytes, which JSON escapes to at most six times its size, beside an
+/// envelope of identifiers well under the rest.
+pub const OUTPUT_BYTES_MAX: usize = 8 * FIELD_BYTES_MAX;
+/// The approval members an oversized approval request keeps: where it was asked.
+const APPROVAL_KEPT: [&str; 4] = ["threadId", "turnId", "itemId", "startedAtMs"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BridgeError {
@@ -178,7 +183,7 @@ impl CodexEventBridge {
                         ApprovalKind::FileChange => Approval::FileChange,
                         ApprovalKind::Permissions => Approval::Permissions,
                     },
-                    params,
+                    params: summarize(&params, &APPROVAL_KEPT),
                 }
             }
             Event::UnsupportedRequest { id, method } => {

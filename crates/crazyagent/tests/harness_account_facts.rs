@@ -4,7 +4,7 @@ use crazyagent::adapters::claude::{
 use crazyagent::adapters::codex::{
     CodexProtocol, Event, ProtocolError as CodexError, State as CodexState, TurnStatus,
 };
-use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge};
+use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge, OUTPUT_BYTES_MAX};
 use crazyagent::adapters::events::{
     Capability, EventKind, HarnessEvent, NativeRequestId, ObservedEvent, RateLimitStatus, Support,
     TurnOutcome,
@@ -505,7 +505,7 @@ fn codex_bridge_rejects_oversized_typed_account_fact() {
         bridge.translate(
             Event::AccountRateLimitsRead {
                 id: 17,
-                account_id: Some("a".repeat(262_145)),
+                account_id: Some("a".repeat(OUTPUT_BYTES_MAX + 1)),
                 ordinary_usage_allowed: Some(true)
             },
             None

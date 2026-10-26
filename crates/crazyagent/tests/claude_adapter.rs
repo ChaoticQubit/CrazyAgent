@@ -1,6 +1,7 @@
+use crazyagent::adapters::claude::NODES_MAX;
 use crazyagent::adapters::claude::{ClaudeProtocol, ProtocolError, State};
 use crazyagent::adapters::events::{Capability, EventKind, Support, TurnOutcome};
-use crazyagent::adapters::{LINE_BYTES_MAX, NativeAction, NativeHarness};
+use crazyagent::adapters::{FIELD_BYTES_MAX, LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId, SessionId};
 use serde_json::{Value, json};
 
@@ -491,4 +492,119 @@ fn invalid_prompt_and_output_expansion_leave_no_reserved_request() {
         p.start_turn(RequestId::new("same-request").unwrap(), "valid")
             .is_ok()
     );
+}
+
+const CAPTURED: &str = include_str!("fixtures/claude-stream-json-tools-only.jsonl");
+
+fn captured(index: usize) -> Value {
+    serde_json::from_str(CAPTURED.lines().nth(index).unwrap()).unwrap()
+}
+
+fn captured_turn() -> ClaudeProtocol {
+    let mut line = init();
+    line["session_id"] = captured(0)["session_id"].clone();
+    let mut p = protocol();
+    p.receive(&wire(line)).unwrap();
+    p.start_turn(RequestId::new("request-one").unwrap(), "Read note.txt")
+        .unwrap();
+    assert_eq!(p.state(), State::Active);
+    p
+}
+
+#[test]
+fn a_captured_tool_result_with_a_large_patch_does_not_fail_the_turn() {
+    let mut p = captured_turn();
+    let lines: Vec<String> = (0..20_000).map(|n| format!("+line {n}")).collect();
+    let mut line = captured(1);
+    line["tool_use_result"] = json!({
+        "filePath":"/worktree/note.txt", "oldString":"", "newString":"", "originalFile":"",
+        "structuredPatch":[{"oldStart":1,"oldLines":0,"newStart":1,"newLines":lines.len(),"lines":lines}],
+        "userModified":false, "replaceAll":false
+    });
+    let events = p.receive(&wire(line)).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].kind,
+        EventKind::Unsupported {
+            message_type: "user".into(),
+            subtype: None
+        }
+    );
+    let events = p.receive(&wire(captured(4))).unwrap();
+    assert!(matches!(
+        events[0].kind,
+        EventKind::TurnFinished {
+            outcome: TurnOutcome::Success,
+            ..
+        }
+    ));
+    assert_eq!(p.state(), State::Idle);
+}
+
+#[test]
+fn a_line_past_the_node_bound_is_refused_before_it_is_kept() {
+    let mut p = captured_turn();
+    let mut line = captured(1);
+    line["tool_use_result"] = json!(vec![0; NODES_MAX]);
+    assert_eq!(p.receive(&wire(line)), Err(ProtocolError::Capacity));
+}
+
+#[test]
+fn a_captured_tool_call_with_a_large_input_is_summarized_instead_of_failing_the_turn() {
+    let mut p = captured_turn();
+    let mut line = captured(0);
+    let id = line["message"]["content"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let command = format!(
+        "cat > note.txt <<'EOF'\n{}EOF",
+        "a line of the note\n".repeat(16_000)
+    );
+    line["message"]["content"][0]["input"]["command"] = json!(command);
+    line["wire_tool_inputs"][&id]["command"] = json!(command);
+    let size = serde_json::to_vec(&line["message"]["content"][0]["input"])
+        .unwrap()
+        .len();
+    assert!(size > FIELD_BYTES_MAX);
+    let events = p.receive(&wire(line)).unwrap();
+    assert!(matches!(
+        &events[0].kind,
+        EventKind::ToolUse { name, tool_use_id, input, .. }
+        if name == "Bash" && *tool_use_id == id && *input == json!({"omitted_bytes": size})
+    ));
+    let whole = captured(2)["message"]["content"][0]["input"].clone();
+    let events = p.receive(&wire(captured(2))).unwrap();
+    assert!(matches!(
+        &events[0].kind,
+        EventKind::ToolUse { input, .. } if *input == whole
+    ));
+    assert_eq!(p.state(), State::Active);
+}
+
+#[test]
+fn a_captured_result_with_a_long_answer_finishes_the_turn_whole() {
+    let mut p = captured_turn();
+    let answer = "The note says hello, then world.\n".repeat(12_000);
+    let mut line = captured(4);
+    line["result"] = json!(answer);
+    let events = p.receive(&wire(line)).unwrap();
+    assert!(matches!(
+        &events[0].kind,
+        EventKind::TurnFinished { outcome: TurnOutcome::Success, result: Some(result), .. }
+        if *result == answer
+    ));
+    assert_eq!(p.state(), State::Idle);
+}
+
+#[test]
+fn events_that_expand_past_their_line_are_still_bounded() {
+    let mut p = captured_turn();
+    let mut line = assistant(
+        "expanding",
+        json!(vec![json!({"type":"text","text":"t"}); 128]),
+    );
+    line["session_id"] = captured(0)["session_id"].clone();
+    line["user_message_uuid"] = json!("u".repeat(LINE_BYTES_MAX / 16));
+    assert_eq!(p.receive(&wire(line)), Err(ProtocolError::Capacity));
 }
