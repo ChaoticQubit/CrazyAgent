@@ -2382,6 +2382,38 @@ mod tests {
         }
     }
 
+    /// A research agent on a managed ChatGPT account gets neither the account's ChatGPT
+    /// apps nor its remote plugins, with tools on or off, as team agents and the master.
+    #[test]
+    fn a_managed_codex_research_agent_gets_no_chatgpt_apps_or_plugins() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        for tools in [false, true] {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                Path::new("/work"),
+                Path::new("/work/report.md"),
+                Path::new("/home"),
+                tools,
+                &account,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap())
+                .collect();
+            for setting in ["features.apps=false", "features.plugins=false"] {
+                assert!(
+                    args.windows(2).any(|pair| pair == ["-c", setting]),
+                    "{tools} {setting}: {args:?}"
+                );
+            }
+        }
+    }
+
     /// A research job's lease names the job as a holder of its account in the agent
     /// register while the lease lives, and no longer once it ends.
     #[test]
