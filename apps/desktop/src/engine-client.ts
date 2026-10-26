@@ -1441,12 +1441,21 @@ export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
   return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
 }
 
+export interface MasterAccount {
+  account_ref: string;
+  connection: string;
+  harness: string;
+  reason: string | null;
+}
+
 export interface MasterTurn {
   id: string;
   ordinal: number;
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
+  attempt?: { connection: { account_ref: string } } | null;
+  accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;
 }

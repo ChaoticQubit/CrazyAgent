@@ -236,6 +236,20 @@ pub struct MasterTurnView {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<MasterAccountState>,
+}
+
+/// One pool account named on a master turn that no account of its harness could run.
+/// Fields: the account, its connection, the connection's harness and why it cannot run
+/// the turn; a reason of None marks a ready account of another harness in the pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterAccountState {
+    pub account_ref: CredentialRef,
+    pub connection: CredentialRef,
+    pub harness: CredentialRef,
+    pub reason: Option<MasterReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,26 +422,33 @@ pub(crate) fn validate_selection(
     if !catalog.connections.iter().any(|connection| {
         connection.account_ref == selection.route.account_ref
             && pool.members.contains(&connection.id)
-            && match selection.backend {
-                MasterBackend::Rcli => {
-                    connection.harness.as_str() == "rcli"
-                        && matches!(connection.endpoint, ModelEndpoint::Http { .. })
-                }
-                MasterBackend::Codex => {
-                    connection.harness.as_str() == "codex"
-                        && connection.protocol.as_str() == "native"
-                        && matches!(connection.endpoint, ModelEndpoint::Native {})
-                }
-                MasterBackend::Claude => {
-                    matches!(connection.harness.as_str(), "claude" | "claude-code")
-                        && connection.protocol.as_str() == "native"
-                        && matches!(connection.endpoint, ModelEndpoint::Native {})
-                }
-            }
+            && backend_member(selection.backend, connection)
     }) {
         return Err(error("master_backend_account_denied"));
     }
     Ok(())
+}
+
+/// Tells whether a connection can run a master of this backend.
+/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
+/// for a native connection of the Codex or Claude harness the backend names.
+pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnection) -> bool {
+    match backend {
+        MasterBackend::Rcli => {
+            connection.harness.as_str() == "rcli"
+                && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+        }
+        MasterBackend::Codex => {
+            connection.harness.as_str() == "codex"
+                && connection.protocol.as_str() == "native"
+                && matches!(connection.endpoint, ModelEndpoint::Native {})
+        }
+        MasterBackend::Claude => {
+            matches!(connection.harness.as_str(), "claude" | "claude-code")
+                && connection.protocol.as_str() == "native"
+                && matches!(connection.endpoint, ModelEndpoint::Native {})
+        }
+    }
 }
 
 #[cfg(test)]

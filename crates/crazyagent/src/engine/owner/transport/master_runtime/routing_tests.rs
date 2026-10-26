@@ -2,17 +2,18 @@ use super::*;
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{
-    HostStamp, ModelAccessCollection, OwnerClient, OwnerClientKind, OwnerData, OwnerMutation,
-    OwnerOperation, OwnerRead, OwnerReadReply, OwnerReply, OwnerRequest, OwnerResponse,
-    OwnerResult,
+    HostStamp, ModelAccessCollection, NativeAuthAction, NativeAuthFact, NativeAuthLogout,
+    NativeAuthMethod, NativeAuthPhase, NativeAuthScope, NativeAuthStart, OwnerClient,
+    OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerRead, OwnerReadReply,
+    OwnerReply, OwnerRequest, OwnerResponse, OwnerResult,
 };
 use crate::master_session::{
-    MasterBootstrapAuth, MasterOwnerAction, MasterSelection, MasterSessionView,
+    MasterAccountState, MasterBootstrapAuth, MasterOwnerAction, MasterSelection, MasterSessionView,
     RcliConfiguredProfileProof,
 };
-use crate::protocol::{CredentialRef, Cursor, PROTOCOL_VERSION, ProjectSpec};
+use crate::protocol::{ConfigId, CredentialRef, Cursor, PROTOCOL_VERSION, ProjectSpec};
 use crate::routing::{ResourceBudget, RouteRequest};
-use rusqlite::{Connection, OpenFlags, Transaction, params, types::Value};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,50 @@ projects = ["p"]
 roles = ["project_leader"]
 fallback_allowed = false
 "#;
+const POOL_CATALOG: &str = r#"version = 1
+timeout_ms = 2000
+allowed_destinations = ["claude-a", "claude-b", "codex-c"]
+[routing]
+approved_accounts = ["claude-account-a", "claude-account-b", "codex-account-c"]
+global_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+project_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+task_capacity = { slots=1, cpu_millis=1000, memory_mib=512, processes=4, output_bytes=1048576, wall_time_ms=60000, spend_microunits=0 }
+[model_access]
+accounts = ["claude-account-a", "claude-account-b", "codex-account-c"]
+[[model_access.connections]]
+id = "claude-a"
+provider = "anthropic"
+harness = "claude"
+protocol = "native"
+account_ref = "claude-account-a"
+endpoint = { kind = "native" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "claude-profile-a" }
+[[model_access.connections]]
+id = "claude-b"
+provider = "anthropic"
+harness = "claude"
+protocol = "native"
+account_ref = "claude-account-b"
+endpoint = { kind = "native" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "claude-profile-b" }
+[[model_access.connections]]
+id = "codex-c"
+provider = "openai"
+harness = "codex"
+protocol = "native"
+account_ref = "codex-account-c"
+endpoint = { kind = "native" }
+model = { id = "configured-codex-model", author = "openai" }
+auth = { method = "native_managed", profile_ref = "codex-profile-c" }
+[[model_access.pools]]
+id = "shared-pool"
+members = ["claude-a", "claude-b", "codex-c"]
+projects = ["p"]
+roles = ["project_leader"]
+fallback_allowed = false
+"#;
 const LOCAL_CONFIG: &[u8] = br#"{
     "model": {"provider": "local-provider", "model": "local-model"},
     "providers": [{"id": "local-provider", "name": "Local provider",
@@ -125,6 +170,36 @@ fn selection(backend: MasterBackend) -> MasterSelection {
             budget_ref: reference("conversation-budget"),
             resources: ResourceBudget::unit(),
         },
+    }
+}
+
+fn pool_selection() -> MasterSelection {
+    MasterSelection {
+        backend: MasterBackend::Claude,
+        pool_ref: reference("shared-pool"),
+        target_profile_ref: reference("claude-a"),
+        route: RouteRequest {
+            preferred_target: Some(reference("claude-a")),
+            required_target: Some(reference("claude-a")),
+            required_capabilities: vec![],
+            account_ref: reference("claude-account-a"),
+            budget_ref: reference("conversation-budget"),
+            resources: ResourceBudget::unit(),
+        },
+    }
+}
+
+fn account(
+    account: &str,
+    connection: &str,
+    harness: &str,
+    reason: Option<MasterReason>,
+) -> MasterAccountState {
+    MasterAccountState {
+        account_ref: reference(account),
+        connection: reference(connection),
+        harness: reference(harness),
+        reason,
     }
 }
 
@@ -238,18 +313,25 @@ struct Fixture {
     submitted: OwnerRequest,
     repository: PathBuf,
     home: PathBuf,
+    config_id: ConfigId,
+    source_hash: String,
     _stop: watch::Sender<bool>,
 }
 
 impl Fixture {
     async fn new(backend: MasterBackend, with_repository: bool) -> Self {
+        Self::open(CATALOG, selection(backend), with_repository).await
+    }
+
+    async fn open(catalog: &str, selection: MasterSelection, with_repository: bool) -> Self {
+        let backend = selection.backend;
         let root = tempfile::Builder::new()
             .prefix("ca-mrt-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        private_file(&global, CATALOG.as_bytes());
+        private_file(&global, catalog.as_bytes());
         let home = root.path().join("configured-home");
         if backend == MasterBackend::Rcli {
             private_directory(&home);
@@ -327,6 +409,8 @@ impl Fixture {
         let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
             panic!("actual model source basis missing");
         };
+        let config_id = basis.config_id.clone();
+        let basis_hash = source_hash.clone();
         let open = request(
             "routing-open",
             basis.revision.value(),
@@ -336,7 +420,7 @@ impl Fixture {
                         project_id: project.clone(),
                         expected_config_id: basis.config_id,
                         expected_source_hash: source_hash,
-                        selection: Box::new(selection(backend)),
+                        selection: Box::new(selection),
                     },
                 },
             },
@@ -388,6 +472,8 @@ impl Fixture {
             submitted,
             repository,
             home,
+            config_id,
+            source_hash: basis_hash,
             _stop: stop,
         };
         fixture.snapshot().assert_no_effects();
@@ -479,6 +565,12 @@ impl Fixture {
     }
 
     async fn persisted_turn(&self) -> MasterTurnView {
+        let mut turns = self.turns().await;
+        assert_eq!(turns.len(), 1);
+        turns.remove(0)
+    }
+
+    async fn turns(&self) -> Vec<MasterTurnView> {
         let state = Self::read_owner(
             &self.owner,
             OwnerRead::ProjectMasterTurns {
@@ -489,11 +581,148 @@ impl Fixture {
             },
         )
         .await;
-        let OwnerData::ProjectMasterTurns { mut page } = state.data else {
+        let OwnerData::ProjectMasterTurns { page } = state.data else {
             panic!("actual persisted turn page missing");
         };
-        assert_eq!(page.turns.len(), 1);
-        page.turns.remove(0)
+        page.turns
+    }
+
+    async fn sign_in(&self, connection: &str, authenticated: bool) {
+        let method = if connection.starts_with("codex") {
+            NativeAuthMethod::CodexBrowser
+        } else {
+            NativeAuthMethod::ClaudeOfficial
+        };
+        let reply = self
+            .owner
+            .start_native_auth(NativeAuthStart {
+                request_id: RequestId::new(format!("routing-sign-in-{connection}")).unwrap(),
+                scope: self.auth_scope(connection),
+                method,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
+        assert!(reply.account.is_none());
+        if !authenticated {
+            return;
+        }
+        let observed = NativeAuthFact {
+            phase: NativeAuthPhase::AuthenticatedObserved,
+            code: None,
+            ..reply.fact
+        };
+        let db = Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(1)).unwrap();
+        let changed = db
+            .execute(
+                "UPDATE native_auth_operations SET fact=?1,phase='authenticated_observed'
+                 WHERE id=?2 AND generation=?3",
+                params![
+                    crate::engine::owner::native_auth::encode_fact(&observed).unwrap(),
+                    observed.operation_id.as_str(),
+                    i64::try_from(observed.generation).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    fn auth_scope(&self, connection: &str) -> NativeAuthScope {
+        NativeAuthScope {
+            expected_database_instance: self.runtime().identity().db_instance,
+            connection: reference(connection),
+            expected_config_id: self.config_id.clone(),
+            expected_source_hash: self.source_hash.clone(),
+        }
+    }
+
+    async fn sign_out(&self, connection: &str) {
+        let reply = self
+            .owner
+            .logout_native_auth(NativeAuthLogout {
+                request_id: RequestId::new(format!("routing-sign-out-{connection}")).unwrap(),
+                scope: self.auth_scope(connection),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.fact.action, NativeAuthAction::Logout);
+        assert_ne!(reply.fact.phase, NativeAuthPhase::AuthenticatedObserved);
+    }
+
+    async fn submit(&self, text: &str) -> RequestId {
+        let revision = Self::read_owner(&self.owner, OwnerRead::Capabilities)
+            .await
+            .revision
+            .value();
+        let submitted = request(
+            &format!("routing-turn-{revision}"),
+            revision,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Submit {
+                        project_id: self.session.project_id.clone(),
+                        session_id: self.session.session_id.clone(),
+                        text: text.into(),
+                    },
+                },
+            },
+        );
+        applied(&Self::commit_owner(&self.service, &self.owner, &submitted).await);
+        submitted.request_id
+    }
+
+    async fn prepared(&self, turn: &RequestId) -> Box<PreparedMasterTurn> {
+        let result = self
+            .command(MasterRuntimeCommand::Prepare {
+                host: self.runtime().identity(),
+                project_id: self.session.project_id.clone(),
+                session_id: self.session.session_id.clone(),
+                turn_id: turn.clone(),
+            })
+            .await
+            .unwrap();
+        match result {
+            MasterRuntimeResult::Prepared(prepared) => prepared,
+            MasterRuntimeResult::Turn(turn) => {
+                panic!("turn was not prepared: {:?} {:?}", turn.phase, turn.reason)
+            }
+            _ => panic!("actual preparation returned an unexpected result"),
+        }
+    }
+
+    async fn fail(&self, turn: &RequestId, attempt: &RequestId, reason: MasterReason) {
+        let result = self
+            .command(MasterRuntimeCommand::Observe {
+                host: self.runtime().identity(),
+                project_id: self.session.project_id.clone(),
+                session_id: self.session.session_id.clone(),
+                turn_id: turn.clone(),
+                attempt_id: attempt.clone(),
+                observation: MasterRuntimeObservation::Failed { reason },
+            })
+            .await
+            .unwrap();
+        let MasterRuntimeResult::Turn(failed) = result else {
+            panic!("failed turn did not settle");
+        };
+        assert_eq!(failed.phase, MasterTurnPhase::Failed);
+        assert_eq!(failed.reason, Some(reason));
+    }
+
+    fn paused_until(&self, connection: &str) -> Option<i64> {
+        self.db()
+            .query_row(
+                "SELECT until_ms FROM team_paused_accounts WHERE connection=?1",
+                [connection],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
     }
 
     fn db(&self) -> Connection {
@@ -1217,4 +1446,183 @@ async fn a_repository_whose_config_runs_a_command_is_refused_with_the_key_and_no
         assert_eq!(session.current_turn, None, "{key}");
         case.finish().await;
     }
+}
+
+#[tokio::test]
+async fn a_master_turn_runs_on_the_next_account_when_the_first_is_not_signed_in() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-b", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.attempt.connection.id, reference("claude-b"));
+    assert_eq!(
+        prepared.attempt.connection.account_ref,
+        reference("claude-account-b")
+    );
+    assert_eq!(
+        prepared.profile.binding().connection.id,
+        reference("claude-b")
+    );
+    let persisted = case.persisted_turn().await;
+    assert_eq!(persisted.phase, MasterTurnPhase::Prepared);
+    assert_eq!(
+        persisted
+            .attempt
+            .as_ref()
+            .map(|attempt| &attempt.connection.account_ref),
+        Some(&reference("claude-account-b"))
+    );
+    assert!(persisted.accounts.is_empty());
+    let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
+    assert_eq!(session.selection, pool_selection());
+    assert_eq!(case.paused_until("claude-a"), None);
+    drop(prepared);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_rate_limited_account_hands_the_next_turn_and_the_conversation_to_the_next_account() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let failed = case
+        .command(MasterRuntimeCommand::Observe {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: first.attempt.request.id.clone(),
+            observation: MasterRuntimeObservation::Failed {
+                reason: MasterReason::RateLimited,
+            },
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Turn(failed) = failed else {
+        panic!("rate-limited turn did not settle");
+    };
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(failed.reason, Some(MasterReason::RateLimited));
+    drop(first);
+    assert!(case.paused_until("claude-a").unwrap() > i64::try_from(before).unwrap());
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-b"));
+    assert_eq!(
+        next.attempt.connection.account_ref,
+        reference("claude-account-b")
+    );
+    assert!(
+        next.text
+            .contains("Describe this project in one sentence without using tools."),
+        "{}",
+        next.text
+    );
+    assert!(next.text.ends_with("Summarize what we discussed so far."));
+    let turns = case.turns().await;
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].id, case.turn.id);
+    assert_eq!(turns[0].phase, MasterTurnPhase::Failed);
+    assert_eq!(
+        turns[0]
+            .attempt
+            .as_ref()
+            .map(|attempt| &attempt.connection.id),
+        Some(&reference("claude-a"))
+    );
+    assert_eq!(turns[1].id, second);
+    assert_eq!(turns[1].phase, MasterTurnPhase::Prepared);
+    assert_eq!(
+        turns[1]
+            .attempt
+            .as_ref()
+            .map(|attempt| &attempt.connection.id),
+        Some(&reference("claude-b"))
+    );
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_master_turn_no_account_can_run_names_each_account_and_why() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), false).await;
+    case.sign_in("claude-b", false).await;
+    case.sign_in("codex-c", true).await;
+    let blocked = case.drive().await.unwrap();
+    unallocated(
+        &blocked,
+        MasterTurnPhase::Blocked,
+        Some(MasterReason::ReadinessUnknown),
+    );
+    assert_eq!(
+        blocked.accounts,
+        vec![
+            account(
+                "claude-account-a",
+                "claude-a",
+                "claude",
+                Some(MasterReason::ReadinessUnknown)
+            ),
+            account(
+                "claude-account-b",
+                "claude-b",
+                "claude",
+                Some(MasterReason::ReadinessUnknown)
+            ),
+            account("codex-account-c", "codex-c", "codex", None),
+        ]
+    );
+    assert_eq!(blocked, case.persisted_turn().await);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_master_turn_moves_past_an_account_that_signed_out() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_out("claude-a").await;
+    case.sign_in("claude-b", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.attempt.connection.id, reference("claude-b"));
+    drop(prepared);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn the_conversation_so_far_keeps_the_newest_turns_that_fit_the_prompt() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    let mut turn = case.turn.id.clone();
+    for round in 0..3 {
+        let prepared = case.prepared(&turn).await;
+        case.fail(
+            &turn,
+            &prepared.attempt.request.id,
+            MasterReason::RuntimeUnavailable,
+        )
+        .await;
+        drop(prepared);
+        turn = case
+            .submit(&format!("message {round} {}", "x".repeat(7000)))
+            .await;
+    }
+    let last = case.prepared(&turn).await;
+    assert!(last.text.len() <= 16384, "{}", last.text.len());
+    assert!(last.text.contains("(Earlier turns were left out to fit.)"));
+    assert!(last.text.contains("Owner: message 1 "));
+    assert!(last.text.contains("(No reply was received.)"));
+    assert!(!last.text.contains("Owner: message 0 "));
+    assert!(!last.text.contains("Describe this project in one sentence"));
+    assert!(
+        last.text
+            .ends_with(&format!("message 2 {}", "x".repeat(7000)))
+    );
+    assert_eq!(case.paused_until("claude-a"), None);
+    drop(last);
+    case.finish().await;
 }

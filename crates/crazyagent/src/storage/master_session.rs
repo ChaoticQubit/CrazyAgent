@@ -14,11 +14,11 @@ use crate::engine::owner::{
 };
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::master_session::{
-    METADATA_BYTES_MAX, MasterBackend, MasterBootstrapAuth, MasterCursor, MasterOwnerAction,
-    MasterReason, MasterReply, MasterRuntimeView, MasterSessionPhase, MasterSessionView,
-    MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX, RcliConfiguredProfileProof,
-    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code,
-    error, validate_action, validate_page, validate_selection,
+    METADATA_BYTES_MAX, MasterAccountState, MasterBackend, MasterBootstrapAuth, MasterCursor,
+    MasterOwnerAction, MasterReason, MasterReply, MasterRuntimeView, MasterSessionPhase,
+    MasterSessionView, MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX,
+    RcliConfiguredProfileProof, RcliProfileRegistration, RcliProfileRegistrationMetadata,
+    SESSIONS_MAX, TURNS_MAX, cause_code, error, validate_action, validate_page, validate_selection,
 };
 use crate::model_gateway::{
     self, Attempt, AttemptCompletion, AttemptOutcome, AttemptRequest,
@@ -715,7 +715,10 @@ fn validate_runtime_record(
         }
         MasterTurnPhase::WaitingApproval => false,
     };
-    if !valid {
+    if !valid
+        || turn.accounts.len() > crate::config::POOL_MEMBERS_MAX
+        || (!turn.accounts.is_empty() && turn.phase != MasterTurnPhase::Blocked)
+    {
         return Err(error("master_runtime_state_unqualified"));
     }
     if let Some(attempt) = &turn.attempt {
@@ -725,8 +728,10 @@ fn validate_runtime_record(
             || attempt.request.task_id != turn_task_id(&session.session_id, &turn.id)?
             || attempt.request.role != Role::ProjectLeader
             || attempt.request.pool_ref != session.selection.pool_ref
-            || attempt.request.target_profile_ref != session.selection.target_profile_ref
-            || attempt.request.route != session.selection.route
+            || (
+                attempt.request.target_profile_ref.clone(),
+                attempt.request.route.clone(),
+            ) != member_request(session, &attempt.connection)
             || attempt.request.previous_attempt.is_some()
             || (matches!(
                 turn.phase,
@@ -1163,7 +1168,10 @@ pub(super) fn validate_bootstrap_auth(
             if !matches!(fact.action, NativeAuthAction::SignIn { .. })
                 || fact.binding.engine_epoch != session.owner.engine_epoch
                 || fact.binding.at_revision.value() > owner_revision(tx)?
-                || fact.binding.connection.account_ref != session.selection.route.account_ref
+                || !crate::master_session::backend_member(
+                    session.selection.backend,
+                    &fact.binding.connection,
+                )
             {
                 return Err(error("master_bootstrap_authentication_stale"));
             }
@@ -1298,9 +1306,10 @@ fn authenticated(
     config: &EffectiveConfig,
     host: &HostStamp,
     session: &MasterSessionView,
+    member: &ModelConnection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
 ) -> Result<MasterBootstrapAuth, EngineError> {
-    let fact = current_auth(tx, config, host, session)?;
+    let fact = current_auth(tx, config, host, session, member)?;
     let custody = custody.as_mut().map_err(|error| error.clone())?;
     match &fact {
         MasterBootstrapAuth::NativeSignIn(fact) => {
@@ -1342,23 +1351,289 @@ fn sign_in_gap(phase: NativeAuthPhase) -> Option<&'static str> {
     }
 }
 
+/// Proves one member of the master's pool can authorize its turns now.
+/// Inputs: the transaction, settings, host, session and member connection. Output: the
+/// RCLI configured proof, or the member's sign-in while it is an allowed member of the
+/// pool; the missing, unknown, stale or in-use code otherwise.
 fn current_auth(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     host: &HostStamp,
     session: &MasterSessionView,
+    member: &ModelConnection,
 ) -> Result<MasterBootstrapAuth, EngineError> {
     if session.selection.backend == MasterBackend::Rcli {
         return configured_auth(tx, config, host, session).map(MasterBootstrapAuth::RcliConfigured);
     }
-    let connection = native_profile_connection(config, &session.selection.target_profile_ref)?;
-    native_sign_in(
-        tx,
-        host,
-        connection,
-        Some(&session.selection.route.account_ref),
+    if !master_members(config, session)
+        .into_iter()
+        .any(|(connection, gap, _)| connection == member && gap.is_none())
+    {
+        return Err(error("native_profile_connection_missing"));
+    }
+    let connection = native_profile_connection(config, &member.id)?;
+    native_sign_in(tx, host, connection, Some(&member.account_ref))
+        .map(MasterBootstrapAuth::NativeSignIn)
+}
+
+/// Lists the connections of a pool in pool order.
+/// Inputs: the settings and the pool. Output: each member connection the catalog defines,
+/// empty when the pool or catalog is gone.
+fn pool_connections<'a>(
+    config: &'a EffectiveConfig,
+    pool_ref: &crate::protocol::CredentialRef,
+) -> Vec<&'a ModelConnection> {
+    let Some(catalog) = config.settings.model_access.as_ref() else {
+        return Vec::new();
+    };
+    let Some(pool) = catalog.pools.iter().find(|pool| &pool.id == pool_ref) else {
+        return Vec::new();
+    };
+    let members: Vec<_> = pool
+        .members
+        .iter()
+        .filter_map(|id| catalog.connections.iter().find(|item| &item.id == id))
+        .collect();
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
+    members
+}
+
+fn allowed_destination(config: &EffectiveConfig, target: &crate::protocol::CredentialRef) -> bool {
+    config.settings.allowed_destinations.contains(target)
+        && !config.settings.revoked_destinations.contains(target)
+}
+
+/// One pool member a master turn may try: its connection, the settings gap that rules it
+/// out before any check (None when settings allow it) and whether the owner chose it.
+type Member<'a> = (&'a ModelConnection, Option<MasterReason>, bool);
+
+/// Lists the pool members that may run a native master's turns, the owner's chosen
+/// connection first and then in pool order. Inputs: the settings and the session.
+/// Output: each pool connection of the master harness, ScopeRevoked when settings do not
+/// allow its account or destination, and whether it is the owner's choice.
+fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) -> Vec<Member<'a>> {
+    let mut members: Vec<_> = pool_connections(config, &session.selection.pool_ref)
+        .into_iter()
+        .filter(|connection| {
+            crate::master_session::backend_member(session.selection.backend, connection)
+        })
+        .map(|connection| {
+            let allowed = allowed_destination(config, &connection.id)
+                && crate::routing::validate_pool_scope(
+                    config,
+                    &session.selection.pool_ref,
+                    &session.project_id,
+                    &Role::ProjectLeader,
+                    &connection.account_ref,
+                )
+                .is_ok();
+            let chosen = connection.id == session.selection.target_profile_ref;
+            (
+                connection,
+                (!allowed).then_some(MasterReason::ScopeRevoked),
+                chosen,
+            )
+        })
+        .collect();
+    members.sort_by_key(|(_, _, chosen)| !chosen);
+    assert!(members.iter().filter(|(_, _, chosen)| *chosen).count() <= 1);
+    members
+}
+
+/// Lists the members a turn may try, in order: the one configured RCLI profile, or the
+/// native pool members. Inputs: the settings and the session. Output: each member with
+/// its settings gap and whether the owner chose it, or the RCLI configuration code.
+fn candidates<'a>(
+    config: &'a EffectiveConfig,
+    session: &MasterSessionView,
+) -> Result<Vec<Member<'a>>, EngineError> {
+    if session.selection.backend == MasterBackend::Rcli {
+        return Ok(vec![(configured_connection(config, session)?, None, true)]);
+    }
+    Ok(master_members(config, session))
+}
+
+/// The target and route a turn's attempt uses on one member: the owner's selection for
+/// RCLI, and for a native master the member's connection and account in place of the
+/// chosen ones. Inputs: the session and the member. Output: the target and route.
+fn member_request(
+    session: &MasterSessionView,
+    member: &ModelConnection,
+) -> (crate::protocol::CredentialRef, crate::routing::RouteRequest) {
+    let route = &session.selection.route;
+    if session.selection.backend == MasterBackend::Rcli {
+        return (session.selection.target_profile_ref.clone(), route.clone());
+    }
+    let target = member.id.clone();
+    let request = crate::routing::RouteRequest {
+        preferred_target: route.preferred_target.as_ref().map(|_| target.clone()),
+        required_target: route.required_target.as_ref().map(|_| target.clone()),
+        account_ref: member.account_ref.clone(),
+        ..route.clone()
+    };
+    (target, request)
+}
+
+/// Names why one pool member cannot run a master turn now.
+/// Input: the failure of that member's launch check. Output: the reason for the turn's
+/// account list, or None when the failure is not about that member and stops the turn.
+fn member_gap(failure: &EngineError) -> Option<MasterReason> {
+    match failure.0.as_str() {
+        "master_authentication_unknown" => Some(MasterReason::ReadinessUnknown),
+        "master_authentication_stale" | "native_profile_identity_changed" => {
+            Some(MasterReason::ReadinessStale)
+        }
+        "native_profile_in_use" => Some(MasterReason::ProfileBusy),
+        "native_profile_connection_missing"
+        | "native_profile_not_managed"
+        | "native_profile_binding_conflict" => Some(MasterReason::ConnectionChanged),
+        _ => None,
+    }
+}
+
+fn fails_over(reason: MasterReason) -> bool {
+    matches!(
+        reason,
+        MasterReason::ReadinessUnknown
+            | MasterReason::ReadinessStale
+            | MasterReason::InvalidAuthentication
+            | MasterReason::QuotaExhausted
+            | MasterReason::RateLimited
+            | MasterReason::CooldownActive
     )
-    .map(MasterBootstrapAuth::NativeSignIn)
+}
+
+fn pauses(reason: MasterReason) -> bool {
+    matches!(
+        reason,
+        MasterReason::InvalidAuthentication
+            | MasterReason::QuotaExhausted
+            | MasterReason::RateLimited
+            | MasterReason::CooldownActive
+    )
+}
+
+/// Tells whether a pool account is paused after a limit, the pause sub-agents honour.
+/// Inputs: the transaction and the account's connection. Output: true while paused.
+fn paused(
+    tx: &Transaction<'_>,
+    connection: &crate::protocol::CredentialRef,
+) -> Result<bool, EngineError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_paused_accounts WHERE connection=?1 AND until_ms>?2)",
+        params![connection.as_str(), signed(now_ms()?)?],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Pauses a pool account whose turn hit a limit or a rejected sign-in, for as long as a
+/// sub-agent's account pauses. Inputs: the transaction and the account's connection.
+/// Output: the pause is stored; a longer pause already set is kept.
+fn pause_member(
+    tx: &Transaction<'_>,
+    connection: &crate::protocol::CredentialRef,
+) -> Result<(), EngineError> {
+    let pause = crate::team::runtime::TeamLimits::default().rate_limit_pause;
+    let until =
+        signed(now_ms()?)?.saturating_add(i64::try_from(pause.as_millis()).unwrap_or(i64::MAX));
+    let changed = tx
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
+             ON CONFLICT(connection) DO UPDATE SET until_ms=MAX(until_ms,excluded.until_ms)",
+            params![connection.as_str(), until],
+        )
+        .map_err(error)?;
+    assert_eq!(changed, 1);
+    Ok(())
+}
+
+/// Checks one member before a turn: settings, pause, then its launch check.
+/// Inputs: the transaction, settings, host, session, custody, member and settings gap.
+/// Output: the member's proof, or why it cannot run; other failures stop the turn.
+fn member_auth(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    member: &ModelConnection,
+    gap: Option<MasterReason>,
+) -> Result<Result<MasterBootstrapAuth, MasterReason>, EngineError> {
+    if let Some(reason) = gap {
+        return Ok(Err(reason));
+    }
+    if paused(tx, &member.id)? {
+        return Ok(Err(MasterReason::CooldownActive));
+    }
+    match authenticated(tx, config, host, session, member, custody) {
+        Ok(auth) => Ok(Ok(auth)),
+        Err(failure) => member_gap(&failure).map(Err).ok_or(failure),
+    }
+}
+
+/// Lists the accounts of other harnesses in the master's pool that could run now.
+/// Inputs: the transaction, settings, host and session. Output: each allowed, unpaused
+/// native member of another harness whose latest sign-in passes the launch check.
+fn other_ready(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+) -> Result<Vec<MasterAccountState>, EngineError> {
+    let mut ready = Vec::new();
+    for connection in pool_connections(config, &session.selection.pool_ref) {
+        if crate::master_session::backend_member(session.selection.backend, connection)
+            || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
+            || !allowed_destination(config, &connection.id)
+            || paused(tx, &connection.id)?
+        {
+            continue;
+        }
+        if native_sign_in(tx, host, connection, Some(&connection.account_ref)).is_ok() {
+            ready.push(MasterAccountState {
+                account_ref: connection.account_ref.clone(),
+                connection: connection.id.clone(),
+                harness: connection.harness.clone(),
+                reason: None,
+            });
+        }
+    }
+    Ok(ready)
+}
+
+/// Blocks a queued turn that no member of its harness can run, naming each member and
+/// why plus the ready accounts of other harnesses. Inputs: the transaction, settings,
+/// host, session, turn and the members' gaps in member order. Output: the blocked turn,
+/// persisted with the owner-chosen member's reason, or ConnectionChanged when it is gone.
+fn block_on_gaps(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+    gaps: &[(&ModelConnection, MasterReason, bool)],
+) -> Result<(), EngineError> {
+    assert_eq!(turn.phase, MasterTurnPhase::Queued);
+    let reason = gaps
+        .iter()
+        .find(|(_, _, chosen)| *chosen)
+        .map_or(MasterReason::ConnectionChanged, |(_, reason, _)| *reason);
+    let mut accounts: Vec<_> = gaps
+        .iter()
+        .map(|(connection, reason, _)| MasterAccountState {
+            account_ref: connection.account_ref.clone(),
+            connection: connection.id.clone(),
+            harness: connection.harness.clone(),
+            reason: Some(*reason),
+        })
+        .collect();
+    accounts.extend(other_ready(tx, config, host, session)?);
+    assert!(accounts.len() <= crate::config::POOL_MEMBERS_MAX);
+    turn.phase = MasterTurnPhase::Blocked;
+    turn.reason = Some(reason);
+    turn.accounts = accounts;
+    persist_runtime(tx, config, session, turn)
 }
 
 /// Names the native connection whose sign-in a master session's turns launch on.
@@ -1500,12 +1775,10 @@ fn checked_prompt(
     Ok(text)
 }
 
-fn current_prompt(
+fn prompt_context(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
-    turn_id: &RequestId,
-    message: &str,
-) -> Result<String, EngineError> {
+) -> Result<Option<String>, EngineError> {
     let brief: Option<String> = tx.query_row(
         "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND kind='brief' ORDER BY brief_version DESC LIMIT 1",
         [session.project_id.as_str()], |row| row.get(0),
@@ -1515,7 +1788,94 @@ fn current_prompt(
         (Some(profile), None) => Some(profile.preface()),
         (None, brief) => brief,
     };
+    Ok(context)
+}
+
+fn current_prompt(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn_id: &RequestId,
+    message: &str,
+) -> Result<String, EngineError> {
+    let context = prompt_context(tx, session)?;
     checked_prompt(&session.session_id, turn_id, message, context.as_deref())
+}
+
+fn turn_message(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<String, EngineError> {
+    tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)
+}
+
+const HISTORY_HEADER: &str = "Conversation so far, oldest first:";
+const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
+
+/// Reads the earlier turns of this conversation that reached a model, oldest first, as
+/// the entries the next prompt carries. Inputs: the transaction, session and current
+/// turn. Output: one "Owner:" entry per turn with its reply or a no-reply line.
+fn prior_turns(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Vec<String>, EngineError> {
+    let mut statement = tx
+        .prepare("SELECT CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM master_turns WHERE session=?1 AND ordinal<?2 ORDER BY ordinal LIMIT 1024")
+        .map_err(error)?;
+    let bodies = statement
+        .query_map(
+            params![session.session_id.as_str(), signed(turn.ordinal)?],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let mut entries = Vec::new();
+    for body in bodies {
+        let body = body.ok_or_else(|| error("master_turn_bounds"))?;
+        let earlier: MasterTurnView = serde_json::from_str(&body).map_err(error)?;
+        if earlier.session_id != session.session_id || earlier.ordinal >= turn.ordinal {
+            return Err(error("master_turn_order"));
+        }
+        if !matches!(
+            earlier.phase,
+            MasterTurnPhase::Succeeded | MasterTurnPhase::Failed | MasterTurnPhase::Uncertain
+        ) {
+            continue;
+        }
+        let message = turn_message(tx, session, &earlier)?;
+        entries.push(match &earlier.reply {
+            Some(reply) => format!("Owner: {message}\nYou: {}", reply.text),
+            None => format!("Owner: {message}\n(No reply was received.)"),
+        });
+    }
+    assert!(entries.len() < usize::try_from(turn.ordinal).map_err(error)?);
+    Ok(entries)
+}
+
+/// Joins the prompt context with the newest earlier turns from `start` on.
+/// Inputs: the context, the earlier entries oldest first and the first kept index.
+/// Output: the context the current message follows, or the bare context with no turns.
+fn with_history(context: Option<&str>, entries: &[String], start: usize) -> Option<String> {
+    if start >= entries.len() {
+        return context.map(str::to_owned);
+    }
+    let mut text = String::new();
+    if let Some(context) = context {
+        text.push_str(context);
+        text.push_str("\n\n");
+    }
+    text.push_str(HISTORY_HEADER);
+    if start > 0 {
+        text.push('\n');
+        text.push_str(HISTORY_OMITTED);
+    }
+    for entry in &entries[start..] {
+        text.push_str("\n\n");
+        text.push_str(entry);
+    }
+    Some(text)
 }
 
 fn prompt(
@@ -1523,8 +1883,30 @@ fn prompt(
     session: &MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
-    let message: String = tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)?;
-    current_prompt(tx, session, &turn.id, &message)
+    let message = turn_message(tx, session, turn)?;
+    let context = prompt_context(tx, session)?;
+    let entries = prior_turns(tx, session, turn)?;
+    let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
+        + HISTORY_HEADER.len()
+        + HISTORY_OMITTED.len()
+        + message.len()
+        + 3;
+    let budget = 16384usize.saturating_sub(fixed);
+    let mut start = entries.len();
+    let mut used = 0;
+    while start > 0 && used + entries[start - 1].len() + 2 <= budget {
+        used += entries[start - 1].len() + 2;
+        start -= 1;
+    }
+    loop {
+        let framed = with_history(context.as_deref(), &entries, start);
+        match checked_prompt(&session.session_id, &turn.id, &message, framed.as_deref()) {
+            Err(failure) if failure.0 == "master_input_too_large" && start < entries.len() => {
+                start += 1;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn preflight_turn(
@@ -1621,7 +2003,7 @@ fn verify_preparation(
     turn: &MasterTurnView,
 ) -> Result<Preparation, EngineError> {
     let record = preparation(tx, session, turn)?;
-    if current_auth(tx, config, host, session)? != record.auth {
+    if current_auth(tx, config, host, session, &record.auth.binding().connection)? != record.auth {
         return Err(error("master_authentication_stale"));
     }
     let (allocation, lease) = ready_lease(tx, session, &record.auth)?;
@@ -1681,30 +2063,88 @@ fn prepare_turn(
     if !preflight_turn(tx, config, session, turn)? {
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
     }
-    let auth = match authenticated(tx, config, host, session, custody) {
-        Ok(auth) => auth,
-        Err(failure) => {
-            if block_unready(tx, config, session, turn, &failure)? {
+    let mut gaps = Vec::new();
+    for (member, gap, chosen) in candidates(config, session)? {
+        let auth = match member_auth(tx, config, host, session, custody, member, gap)? {
+            Ok(auth) => auth,
+            Err(reason) => {
+                gaps.push((member, reason, chosen));
+                continue;
+            }
+        };
+        let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
+        let attempt = match admit(tx, config, session, turn, member, &auth)? {
+            Ok(attempt) => attempt,
+            Err(reason) if fails_over(reason) => {
+                if pauses(reason) {
+                    pause_member(tx, &member.id)?;
+                }
+                gaps.push((member, reason, chosen));
+                continue;
+            }
+            Err(reason) => {
+                turn.phase = MasterTurnPhase::Blocked;
+                turn.reason = Some(reason);
+                persist_runtime(tx, config, session, turn)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
             }
-            return Err(failure);
+        };
+        if attempt.connection != auth.binding().connection {
+            return Err(error("master_attempt_connection_conflict"));
         }
-    };
-    let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
+        let record = Preparation {
+            attempt_id: attempt.request.id.clone(),
+            auth,
+            worktree_lease,
+            lease,
+        };
+        let inserted = tx
+            .execute(
+                "INSERT INTO master_preparations(session,turn,body) VALUES (?1,?2,?3)",
+                params![
+                    session.session_id.as_str(),
+                    turn.id.as_str(),
+                    encode(&record)?
+                ],
+            )
+            .map_err(error)?;
+        assert_eq!(inserted, 1);
+        turn.attempt = Some(attempt);
+        turn.phase = MasterTurnPhase::Prepared;
+        persist_runtime(tx, config, session, turn)?;
+        current_scope(tx, config, sources, host, session, turn)?;
+        return bundle(tx, session.clone(), turn);
+    }
+    block_on_gaps(tx, config, host, session, turn, &gaps)?;
+    Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())))
+}
+
+/// Asks the model gateway to admit a turn on one member, in a savepoint rolled back when
+/// the gateway refuses. Inputs: the transaction, settings, session, turn, member and its
+/// proof. Output: the admitted attempt, or the reason the gateway refused it.
+fn admit(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+    member: &ModelConnection,
+    auth: &MasterBootstrapAuth,
+) -> Result<Result<Attempt, MasterReason>, EngineError> {
+    let (target_profile_ref, route) = member_request(session, member);
     let request = AttemptRequest {
         id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
         task_id: turn_task_id(&session.session_id, &turn.id)?,
         project_id: session.project_id.clone(),
         role: Role::ProjectLeader,
         pool_ref: session.selection.pool_ref.clone(),
-        target_profile_ref: session.selection.target_profile_ref.clone(),
-        route: session.selection.route.clone(),
+        target_profile_ref,
+        route,
         previous_attempt: None,
     };
     tx.execute_batch("SAVEPOINT master_admission")
         .map_err(error)?;
     let admitted = if request.route.required_capabilities.is_empty() {
-        match &auth {
+        match auth {
             MasterBootstrapAuth::NativeSignIn(fact) => {
                 model_gateway::begin_initial_conversation_attempt(
                     tx,
@@ -1737,46 +2177,18 @@ fn prepare_turn(
     } else {
         model_gateway::begin_attempt(tx, config, config, &request, now_ms()?)
     };
-    let attempt = match admitted {
+    match admitted {
         Ok(start) => {
             tx.execute_batch("RELEASE master_admission")
                 .map_err(error)?;
-            start.attempt
+            Ok(Ok(start.attempt))
         }
         Err(failure) => {
             tx.execute_batch("ROLLBACK TO master_admission; RELEASE master_admission")
                 .map_err(error)?;
-            turn.phase = MasterTurnPhase::Blocked;
-            turn.reason = Some(admission_reason(&failure.0));
-            persist_runtime(tx, config, session, turn)?;
-            return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+            Ok(Err(admission_reason(&failure.0)))
         }
-    };
-    if attempt.connection != auth.binding().connection {
-        return Err(error("master_attempt_connection_conflict"));
     }
-    let record = Preparation {
-        attempt_id: attempt.request.id.clone(),
-        auth,
-        worktree_lease,
-        lease,
-    };
-    let inserted = tx
-        .execute(
-            "INSERT INTO master_preparations(session,turn,body) VALUES (?1,?2,?3)",
-            params![
-                session.session_id.as_str(),
-                turn.id.as_str(),
-                encode(&record)?
-            ],
-        )
-        .map_err(error)?;
-    assert_eq!(inserted, 1);
-    turn.attempt = Some(attempt);
-    turn.phase = MasterTurnPhase::Prepared;
-    persist_runtime(tx, config, session, turn)?;
-    current_scope(tx, config, sources, host, session, turn)?;
-    bundle(tx, session.clone(), turn)
 }
 
 /// Names the gateway task of one owner turn, so every turn starts its own attempt chain
@@ -1896,6 +2308,11 @@ fn observe_turn(
             turn.phase = MasterTurnPhase::Failed;
             turn.reason = Some(reason);
             turn.cause = Some(cause_code(&cause));
+            if pauses(reason)
+                && let Some(attempt) = &turn.attempt
+            {
+                pause_member(tx, &attempt.connection.id)?;
+            }
         }
         MasterRuntimeObservation::Cancelled => {
             if !matches!(
@@ -1956,15 +2373,21 @@ fn provision_bootstrap(
         tx.commit().map_err(error)?;
         return Ok(());
     }
-    let auth = match authenticated(&tx, config, host, &session, custody) {
-        Ok(auth) => auth,
-        Err(failure) => {
-            if block_unready(&tx, config, &mut session, &mut turn, &failure)? {
-                tx.commit().map_err(error)?;
-                return Ok(());
+    let mut gaps = Vec::new();
+    let mut ready = None;
+    for (member, gap, chosen) in candidates(config, &session)? {
+        match member_auth(&tx, config, host, &session, custody, member, gap)? {
+            Ok(auth) => {
+                ready = Some(auth);
+                break;
             }
-            return Err(failure);
+            Err(reason) => gaps.push((member, reason, chosen)),
         }
+    }
+    let Some(auth) = ready else {
+        block_on_gaps(&tx, config, host, &mut session, &mut turn, &gaps)?;
+        tx.commit().map_err(error)?;
+        return Ok(());
     };
     match ready_lease(&tx, &session, &auth) {
         Ok(_) => return Ok(()),
@@ -2833,6 +3256,12 @@ pub(super) fn runtime(
                 };
                 turn.reason = Some(reason);
                 turn.cause = Some(cause_code(&cause));
+                if turn.phase == MasterTurnPhase::Failed
+                    && pauses(reason)
+                    && let Some(attempt) = &turn.attempt
+                {
+                    pause_member(&tx, &attempt.connection.id)?;
+                }
                 if reason == MasterReason::RepositoryConfigRefused {
                     let repository = master_repository(&tx, &session.project_id)?;
                     turn.detail = crate::worktrees::refused_config_line(&cause, &repository);
@@ -2998,6 +3427,7 @@ fn execute(
                 attempt: None,
                 runtime: None,
                 reply: None,
+                accounts: Vec::new(),
                 detail: None,
                 cause: None,
             };
