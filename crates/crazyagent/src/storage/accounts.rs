@@ -415,6 +415,12 @@ fn latest_sign_in(
         )
         .optional()
         .map_err(error)?;
-    row.map(|bytes| crate::engine::owner::native_auth::decode_fact(&bytes).map(|fact| fact.phase))
-        .transpose()
+    let Some(bytes) = row else {
+        return Ok(None);
+    };
+    let phase = crate::engine::owner::native_auth::decode_fact(&bytes)?.phase;
+    if super::native_auth::profile_fenced(tx, &key)? {
+        return Ok(Some(phase.releasing()));
+    }
+    Ok(Some(phase))
 }

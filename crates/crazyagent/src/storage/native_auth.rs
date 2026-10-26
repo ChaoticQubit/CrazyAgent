@@ -1149,6 +1149,19 @@ fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, En
     ))
 }
 
+/// Tells whether a native auth operation still holds the fence of a profile: its custodian
+/// has not yet retired, so launch and account status read it as still checking even after
+/// its outcome is stored. Inputs: the connection or transaction and the profile key.
+/// Output: true while the fence row exists.
+pub(super) fn profile_fenced(db: &Connection, key: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)",
+        [key],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
 /// Operations no request can still use: finished (observed or unavailable), not held by a
 /// fence and not the newest of their profile, whose fact is the profile's current state and
 /// whose generation the next one follows. Starting, waiting, checking, cancelling and
