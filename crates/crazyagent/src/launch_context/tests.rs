@@ -52,6 +52,31 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
 }
 
 #[test]
+fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
+    for length in [900, 1011] {
+        let base = tempfile::tempdir().unwrap();
+        let mut folder = base.path().canonicalize().unwrap();
+        while folder.as_os_str().len() + 100 < length - 50 {
+            folder.push("n".repeat(99));
+        }
+        let rest = length - folder.as_os_str().len() - 1;
+        folder.push("m".repeat(rest));
+        assert_eq!(folder.as_os_str().len(), length);
+        fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        let setup = stored(&folder);
+
+        let text = render(&setup.project_id, Some(&setup), "");
+
+        assert!(text.contains(&format!("Project folder: {}\n", folder.display())));
+        assert!(text.contains(&format!(
+            "Context folder: {}/.crazyagent\n",
+            folder.display()
+        )));
+        assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
+    }
+}
+
+#[test]
 fn a_project_without_a_setup_still_gets_a_plain_header() {
     let text = render(&ProjectId::new("bare").unwrap(), None, "");
     assert_eq!(
