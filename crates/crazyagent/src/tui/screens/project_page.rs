@@ -291,11 +291,14 @@ impl ProjectPage {
             return;
         }
         self.renewed = false;
-        let session = self
-            .master
-            .transcript()
-            .and_then(|(session, _, _)| session)
-            .map(|session| (session.phase, session.current_turn.is_some()));
+        let session = self.master.transcript().and_then(|(session, turns, _)| {
+            session.map(|session| {
+                (
+                    session.phase,
+                    crate::tui::master_session::turn_holds(session.current_turn.as_ref(), turns),
+                )
+            })
+        });
         match session {
             Some((crate::master_session::MasterSessionPhase::Configured, true)) => {
                 self.screen.input.set(&text);

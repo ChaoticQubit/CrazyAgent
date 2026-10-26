@@ -891,4 +891,175 @@ fallback_allowed = false
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn real_send_after_a_settings_change_says_why_and_a_new_conversation_takes_it() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-desktop-stale-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g.toml");
+        std::fs::write(&global, CATALOG).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let path = root.path().to_path_buf();
+        let mut body = tokio::spawn(async move { real_stale_send_flow(&path).await });
+        let result = tokio::time::timeout(Duration::from_secs(20), &mut body).await;
+        if result.is_err() {
+            body.abort();
+            let _ = body.await;
+        }
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "actual engine cleanup failed"
+        );
+        result
+            .expect("real stale send case exceeded 20 seconds")
+            .expect("real stale send assertion failed after engine cleanup")
+            .expect("real stale send setup or readback failed");
+    }
+
+    async fn real_stale_send_flow(root: &Path) -> Result<(), String> {
+        let mut observer =
+            OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .map_err(|error| error.to_string())?;
+        observer
+            .read(OwnerRead::Capabilities)
+            .await
+            .map_err(|error| error.to_string())?;
+        observer
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: ProjectId::new("p").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Stale master".into(),
+                        repositories: vec![
+                            root.join("p")
+                                .to_str()
+                                .ok_or("private path encoding")?
+                                .into(),
+                        ],
+                    },
+                },
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        let created = observer
+            .send_pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+        );
+        let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+        bridge.connect().await.map_err(|error| error.code)?;
+        let selected = bridge.open_project("p").await.map_err(|error| error.code)?;
+        let opened = bridge
+            .open_default_master(&selected.ticket, 1)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(opened.outcome, ActionOutcome::Applied);
+        let stale = bridge
+            .master_state(&selected.ticket)
+            .await
+            .map_err(|error| error.code)?
+            .session
+            .ok_or("Start master left no configured session")?;
+
+        let accounts = observer
+            .read(OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Accounts,
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let OwnerData::ModelAccessPage { source_hash, .. } = accounts.data else {
+            return Err("actual source hash required".into());
+        };
+        observer
+            .begin_mutation(
+                OwnerMutation::ModelAccess {
+                    expected_config_id: accounts.config_id,
+                    expected_source_hash: source_hash,
+                    edit: crazyagent::config::ModelAccessEdit::AddAccount {
+                        account_ref: CredentialRef::new("spare-account").unwrap(),
+                    },
+                },
+                2,
+            )
+            .map_err(|error| error.to_string())?;
+        let changed = observer
+            .send_pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            matches!(changed, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+            "an account outside the master's pool is added through the owner path"
+        );
+
+        let refused = bridge
+            .submit_master(
+                &selected.ticket,
+                stale.session_id.as_str(),
+                "Plan the release.",
+                2,
+            )
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(refused.outcome, ActionOutcome::Rejected);
+        assert_eq!(
+            refused.rejection,
+            Some("master_source_conflict"),
+            "the window learns the session predates the settings, not a bare refusal"
+        );
+
+        let ended = bridge
+            .close_master(&selected.ticket, stale.session_id.as_str(), 3)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(ended.outcome, ActionOutcome::Applied);
+        let started = bridge
+            .open_default_master(&selected.ticket, 4)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(started.outcome, ActionOutcome::Applied);
+        let fresh = bridge
+            .master_state(&selected.ticket)
+            .await
+            .map_err(|error| error.code)?
+            .session
+            .ok_or("the new conversation has no session")?;
+        assert_ne!(fresh.session_id, stale.session_id);
+        assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+        let sent = bridge
+            .submit_master(
+                &selected.ticket,
+                fresh.session_id.as_str(),
+                "Plan the release.",
+                5,
+            )
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(sent.outcome, ActionOutcome::Applied, "{:?}", sent.rejection);
+        let turns = bridge
+            .master_turns(&selected.ticket, fresh.session_id.as_str(), None)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(turns.page.turns.len(), 1);
+        assert_eq!(turns.page.turns[0].id.as_str(), sent.intent.operation_id);
+        Ok(())
+    }
 }

@@ -1,5 +1,5 @@
 use super::{BoundaryError, Words, wide, windows};
-use crate::dacl::{ALL_APPLICATION_PACKAGES, holds, reads};
+use crate::dacl::{ALL_APPLICATION_PACKAGES, exceeds, holds, reads, without};
 use crate::plan::{Access, Ace, DENY_ALL, DENY_WRITE, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use std::io::ErrorKind;
 use std::os::windows::fs::MetadataExt;
@@ -49,12 +49,14 @@ const _: () = assert!(
 const ACL_BYTES_MAX: usize = 64 * 1024;
 
 /// Puts each planned entry on its path for the container, skipping an entry the path already
-/// holds so later launches leave large folders alone. A granted root must exist and must not be
-/// a link or junction; a protected path that is missing, a link or a junction gets no entry,
-/// since the kept folder above it stops the container creating or swapping it. A read root the
-/// owner may not change is accepted only when every container can already read it, as with
-/// `C:\Program Files`. Inputs: the container SID and the plan. Output: Ok, or the refusal or
-/// failed step.
+/// holds so later launches leave large folders alone. A granted root that holds an explicit
+/// grant of the container's beyond the planned rights, such as modify left by an earlier
+/// profile where this one grants read and run, first loses the container's own entries. A
+/// granted root must exist and must not be a link or junction; a protected path that is
+/// missing, a link or a junction gets no entry, since the kept folder above it stops the
+/// container creating or swapping it. A read root the owner may not change is accepted only
+/// when every container can already read it, as with `C:\Program Files`. Inputs: the
+/// container SID and the plan. Output: Ok, or the refusal or failed step.
 pub(super) fn apply(container: &Words, aces: &[Ace]) -> Result<(), BoundaryError> {
     let sid = container.bytes();
     for ace in aces {
@@ -78,23 +80,57 @@ pub(super) fn apply(container: &Words, aces: &[Ace]) -> Result<(), BoundaryError
             .ok_or(BoundaryError::Refused(
                 "a granted folder has no access list",
             ))?;
-        let current = current.bytes();
-        if holds(&current, &sid, ace.access, folder) {
+        let mut current = current.bytes();
+        let narrowed = !ace.access.denies() && exceeds(&current, &sid, ace.access.mask());
+        if narrowed {
+            current = without(&current, &sid)
+                .map_err(BoundaryError::Refused)?
+                .expect("a grant beyond the plan is the container's own explicit entry");
+        }
+        let held = holds(&current, &sid, ace.access, folder)
+            || (ace.access == Access::ReadExecute && reads(&current, &ALL_APPLICATION_PACKAGES));
+        if held && !narrowed {
             continue;
         }
-        if ace.access == Access::ReadExecute && reads(&current, &ALL_APPLICATION_PACKAGES) {
-            continue;
-        }
-        let inheritance = if folder && ace.access.inherits() {
-            SUB_CONTAINERS_AND_OBJECTS_INHERIT
+        let list = if held {
+            Words::from_bytes(&current)
         } else {
-            NO_INHERITANCE
+            let inheritance = if folder && ace.access.inherits() {
+                SUB_CONTAINERS_AND_OBJECTS_INHERIT
+            } else {
+                NO_INHERITANCE
+            };
+            merge(&current, container, ace.access, inheritance)
+                .map_err(windows("build an access list"))?
         };
-        let merged = merge(&current, container, ace.access, inheritance)
-            .map_err(windows("build an access list"))?;
-        write_dacl(&path, &merged).map_err(windows("change an access list"))?;
+        write_dacl(&path, &list).map_err(windows("change an access list"))?;
     }
     Ok(())
+}
+
+/// Takes back every entry the boundary put on `path` for the container: its own explicit allow
+/// and deny entries go, every other entry stays, and Windows withdraws what files and folders
+/// below inherited from them. A path that is gone, or is now a link or junction, holds none of
+/// the boundary's entries, since the boundary never writes to a link. Inputs: the container SID
+/// and the path. Output: Ok, or the refusal or failed step.
+pub(super) fn revoke(container: &Words, path: &str) -> Result<(), BoundaryError> {
+    let sid = container.bytes();
+    let meta = match std::fs::symlink_metadata(Path::new(path)) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(BoundaryError::Refused("a withdrawn path cannot be read")),
+    };
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Ok(());
+    }
+    let path = wide(path);
+    let Some(current) = read_dacl(&path).map_err(windows("read an access list"))? else {
+        return Ok(());
+    };
+    let Some(kept) = without(&current.bytes(), &sid).map_err(BoundaryError::Refused)? else {
+        return Ok(());
+    };
+    write_dacl(&path, &Words::from_bytes(&kept)).map_err(windows("withdraw an access entry"))
 }
 
 /// Frees memory the system allocated with `LocalAlloc` for this caller when dropped.

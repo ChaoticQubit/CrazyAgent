@@ -2910,9 +2910,17 @@ fn execute(
             if let Err(reason) = validate_selection(config, project, &session.selection) {
                 return Ok(reject(&reason.0));
             }
-            if session.current_turn.is_some() {
-                return Ok(reject("master_turn_outstanding"));
-            }
+            let superseded = match &session.current_turn {
+                None => None,
+                Some(current) => {
+                    let turn = load_turn(tx, &session, current, revision)?
+                        .ok_or_else(|| error("master_current_turn_record"))?;
+                    if turn.phase != MasterTurnPhase::Uncertain {
+                        return Ok(reject("master_turn_outstanding"));
+                    }
+                    Some(turn)
+                }
+            };
             let (count, maximum): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(MAX(ordinal),0) FROM (SELECT ordinal FROM master_turns WHERE session=?1 ORDER BY ordinal LIMIT 1025)", [id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?;
             if count != maximum || count < 0 {
                 return Err(error("master_turn_order"));
@@ -2935,6 +2943,10 @@ fn execute(
             let result = crate::conversation::apply(tx, &input, revision)?;
             if result != Outcome::Applied {
                 return Ok(result);
+            }
+            if let Some(turn) = superseded {
+                cancel_turn(tx, turn)?;
+                session.current_turn = None;
             }
             let turn = MasterTurnView {
                 id: provenance.operation_id.clone(),

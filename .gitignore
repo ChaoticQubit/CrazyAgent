@@ -19,3 +19,4 @@ research_notes/
 reports/
 apps/desktop/src-tauri/binaries/
 !crates/crazyagent/assets/pack/**/*.md
+scripts/qualification/__pycache__/
