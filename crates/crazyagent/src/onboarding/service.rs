@@ -233,21 +233,23 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 }
 
 /// Claims the oldest waiting step: a graph build, or a mapping once its
-/// graph step has finished either way and while the owner has not saved
-/// the setup. Marks it running under `claimer` and counts the attempt.
-/// Returns `None` when nothing waits.
+/// graph step has finished either way, while the owner has not saved the
+/// setup and no account pause it waits on is still running. Marks it running
+/// under `claimer` and counts the attempt. Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
+    let now = now_ms();
     let row = tx
         .query_row(
             "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
                 OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
+                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2)
                     AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
                         AND json_extract(s.body,'$.revision')>?1)))
              ORDER BY created_ms,project LIMIT 1",
-            [crate::project_setup::FIRST_REVISION as i64],
+            params![crate::project_setup::FIRST_REVISION as i64, now],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -265,7 +267,6 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         return Ok(None);
     };
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
-    let now = now_ms();
     let changed = tx
         .execute(
             &format!(
@@ -612,3 +613,6 @@ pub fn start_for_engine(
 pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
     crate::setup::platform_installer(runtime).program(crate::setup::Dependency::Graphify.program())
 }
+
+#[cfg(test)]
+mod claim_tests;

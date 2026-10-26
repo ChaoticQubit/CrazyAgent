@@ -621,6 +621,108 @@ async fn a_home_move_whose_record_fails_still_lands_on_the_moved_folders() {
     engine.stop().await;
 }
 
+fn repositories(database: &Path, project: &ProjectId) -> Vec<String> {
+    let db = rusqlite::Connection::open(database).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT body FROM projects WHERE id=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: crazyagent::protocol::StoredProject = serde_json::from_str(&body).unwrap();
+    stored.spec.repositories
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_home_move_points_the_project_repository_at_the_moved_folder() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let first = place.join("first");
+    let second = place.join("second");
+    let elsewhere = place.join("elsewhere");
+    for folder in [&first, &second, &elsewhere] {
+        fs::create_dir(folder).unwrap();
+    }
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::SetProjectsHome {
+                path: first.to_str().unwrap().into(),
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    let setup = ProjectSetup {
+        about: "Tracks reading lists.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let mut set_up = async |id: &str, name: &str, repositories: Vec<String>| {
+        let project = ProjectId::new(id).unwrap();
+        owner.generation += 1;
+        let spec = ProjectSpec {
+            name: name.into(),
+            repositories,
+        };
+        match owner
+            .controller
+            .setup_project(project.clone(), spec, setup.clone(), owner.generation)
+            .await
+            .unwrap()
+        {
+            OwnerResponse::Applied { operation } => {
+                assert_eq!(operation.result, OwnerResult::Applied)
+            }
+            other => panic!("{other:?}"),
+        }
+        project
+    };
+    let reading = set_up("reading", "Reading list", vec![]).await;
+    let declared = set_up(
+        "declared",
+        "Declared repos",
+        vec![
+            first.join("declared-repos").join("api").to_str().unwrap().into(),
+            elsewhere.to_str().unwrap().into(),
+        ],
+    )
+    .await;
+    ready_at(&mut owner, &reading, &first.join("reading-list")).await;
+    let database = engine.root.path().join("engine.db");
+    assert_eq!(
+        repositories(&database, &reading),
+        [first.join("reading-list").to_str().unwrap()]
+    );
+
+    assert_eq!(owner.apply(move_home(&second)).await, OwnerResult::Applied);
+    ready_at(&mut owner, &reading, &second.join("reading-list")).await;
+
+    assert_eq!(
+        repositories(&database, &reading),
+        [second.join("reading-list").to_str().unwrap()],
+        "the master's workspace follows the moved project folder"
+    );
+    assert_eq!(
+        repositories(&database, &declared),
+        [
+            second.join("declared-repos").join("api").to_str().unwrap(),
+            elsewhere.to_str().unwrap(),
+        ],
+        "a repository inside the moved folder follows it, one outside stays"
+    );
+    engine.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_set_up_project_past_the_256th_keeps_its_folder_and_its_place_in_the_list() {
     let disk = tempfile::tempdir().unwrap();

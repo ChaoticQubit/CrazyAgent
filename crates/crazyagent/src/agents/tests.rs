@@ -555,6 +555,65 @@ fn wiring_restart_keeps_the_agent_and_starts_a_fresh_process_with_its_first_task
     );
 }
 
+#[test]
+fn an_agent_that_ends_leaves_no_runtime_folder_behind() {
+    let case = Case::new();
+    let root = case.path();
+    let agents = case.agents();
+    let leaving = agents
+        .launch(spec(&root, "gone", Some("exit 3")), None)
+        .unwrap();
+    let halted = agents
+        .launch(spec(&root, "halted", Some("echo hi")), None)
+        .unwrap();
+    until("the reply", || replied(&agents, &halted.id, "hi"));
+    assert!(root.join(AGENTS).join(&halted.id).is_dir());
+    until("the exit to be recorded", || {
+        agents.view(&leaving.id).unwrap().state == AgentState::Exited
+    });
+
+    agents.stop(&halted.id).unwrap();
+
+    for id in [&leaving.id, &halted.id] {
+        assert!(!root.join(AGENTS).join(id).exists(), "{id} kept its folder");
+    }
+    assert_eq!(
+        agents.restart(&halted.id).unwrap().state,
+        AgentState::Running
+    );
+    until("the restarted reply", || replied(&agents, &halted.id, "hi"));
+    assert!(root.join(AGENTS).join(&halted.id).is_dir());
+    agents.stop(&halted.id).unwrap();
+    assert!(!root.join(AGENTS).join(&halted.id).exists());
+}
+
+#[test]
+fn opening_the_register_removes_runtime_folders_of_agents_that_no_longer_run() {
+    let case = Case::new();
+    let root = case.path();
+    drop(case.agents());
+    let stale: Vec<PathBuf> = (0..1030_u32)
+        .map(|n| root.join(AGENTS).join(format!("{n:032x}")))
+        .collect();
+    for folder in &stale {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::write(folder.join(launch::DURABLE_OUTPUT), "old run").unwrap();
+    }
+    let foreign = root.join(AGENTS).join("not-an-agent");
+    std::fs::create_dir(&foreign).unwrap();
+
+    let agents = case.agents();
+
+    let left: Vec<&PathBuf> = stale.iter().filter(|folder| folder.exists()).collect();
+    assert!(left.is_empty(), "{} stale folders left", left.len());
+    assert!(foreign.is_dir(), "only agent folders are pruned");
+    let agent = agents
+        .launch(spec(&root, "after", Some("echo hi")), None)
+        .unwrap();
+    until("the reply", || replied(&agents, &agent.id, "hi"));
+    agents.stop(&agent.id).unwrap();
+}
+
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies and exit, so this checks only how the supervisor records an exit.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
