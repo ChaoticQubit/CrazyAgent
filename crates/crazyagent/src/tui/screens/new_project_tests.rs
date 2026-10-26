@@ -876,7 +876,7 @@ fn engine_failures_map_to_plain_copy_and_the_step_that_fixes_them() {
         ("team_agent_range_invalid", Step::Team),
         ("project_folder_exists", Step::Review),
         ("project_about_invalid", Step::About),
-        ("some_new_code", Step::Review),
+        ("home_new_project_failed", Step::Review),
     ] {
         wizard.failed(code);
         let Phase::Failed {
@@ -890,6 +890,15 @@ fn engine_failures_map_to_plain_copy_and_the_step_that_fixes_them() {
         assert_eq!(*shown, step, "{code}");
         assert!(!detail.contains('_'), "{detail}");
     }
+    wizard.failed("some_new_code");
+    assert_eq!(
+        wizard.phase,
+        Phase::Failed {
+            title: "Could not create the project.".into(),
+            detail: "Press Enter to go back, then try again. (code: some_new_code)".into(),
+            step: Step::Review
+        }
+    );
     assert_eq!(wizard.key(key(KeyCode::Esc)), Reply::Leave);
     assert_eq!(wizard.phase, Phase::Editing);
 }

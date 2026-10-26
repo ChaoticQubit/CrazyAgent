@@ -42,7 +42,8 @@ const WAYS: [(Way, &str); 3] = [
 /// The Existing folder page: sets up a folder on this computer where it is
 /// by default, or moves or copies it into the projects folder with the target
 /// shown first, a Move confirmed with a second Enter, and a Copy with its size
-/// shown first and a warning above 1 GB. The folder then opens its setup.
+/// shown first, a warning above 1 GB and the linked git worktrees it leaves with
+/// the original. The folder then opens its setup.
 pub struct AddFolder {
     field: TextField,
     way: Way,
@@ -50,6 +51,7 @@ pub struct AddFolder {
     focus: Focus,
     home: Option<String>,
     size: Option<(String, Load<u64>)>,
+    worktrees: usize,
     sent: Option<String>,
     problem: Option<String>,
 }
@@ -66,6 +68,7 @@ impl AddFolder {
             focus: Focus::Folder,
             home: None,
             size: None,
+            worktrees: 0,
             sent: None,
             problem: None,
         }
@@ -328,6 +331,7 @@ impl Screen for AddFolder {
                 if let Some((sized, size)) = &mut self.size
                     && sized.as_str() == path.as_str()
                 {
+                    self.worktrees = crate::projects_home::linked_worktrees(Path::new(path));
                     *size = match result {
                         Ok(IntakeView::FolderSize(bytes)) => Load::Ready(*bytes),
                         Ok(_) => Load::Failed("intake_change_outcome_unknown".into()),
@@ -343,11 +347,11 @@ impl Screen for AddFolder {
                 match result {
                     Ok(IntakeView::Changed(OwnerResult::Applied)) => self.added(source, *mode, ctx),
                     Ok(_) => {
-                        self.problem = Some(copy("intake_change_outcome_unknown").into());
+                        self.problem = Some(copy("intake_change_outcome_unknown"));
                         Flow::Handled
                     }
                     Err(code) => {
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         Flow::Handled
                     }
                 }
@@ -429,6 +433,13 @@ impl Screen for AddFolder {
             match size {
                 Some(Load::Ready(bytes)) => {
                     lines.push(Line::raw(format!("Size: {}", size_label(bytes))));
+                    if self.worktrees > 0 {
+                        lines.extend(
+                            wrap(&worktrees_line(self.worktrees), limit)
+                                .into_iter()
+                                .map(Line::raw),
+                        );
+                    }
                     if bytes > COPY_WARN_BYTES {
                         lines.extend(
                             wrap(
@@ -494,5 +505,18 @@ impl Screen for AddFolder {
 
     fn place(&self) -> Option<Place> {
         Some(Place::AddFolder)
+    }
+}
+
+/// Says that a Copy leaves the folder's linked git worktrees with the original.
+/// Takes how many linked worktrees the folder has.
+/// Returns the sentence.
+fn worktrees_line(count: usize) -> String {
+    if count == 1 {
+        "This folder has 1 linked git worktree. It stays with the original folder; the copy gets the main checkout and every branch.".into()
+    } else {
+        format!(
+            "This folder has {count} linked git worktrees. They stay with the original folder; the copy gets the main checkout and every branch."
+        )
     }
 }

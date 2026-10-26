@@ -669,7 +669,15 @@ fn report_paths_map_back_to_their_research() {
     );
     assert_eq!(
         plain_problem("anything_else"),
-        "That didn't work. Try again."
+        "That didn't work. Try again. (code: anything_else)"
+    );
+    assert_eq!(
+        plain_problem("disk I/O error at /Users/owner/notes"),
+        "That didn't work. Try again. (code: engine_error_unplain)"
+    );
+    assert_eq!(
+        plain_problem("project_folder_unwritable"),
+        "CrazyAgent can't write in the project folder. Check its permissions."
     );
 }
 
@@ -1335,6 +1343,11 @@ fn remove_asks_first_and_marks_the_project_removed_once_the_engine_forgets_it() 
     assert!(!screen.confirm_remove);
 
     screen.key(key(KeyCode::Char('x')));
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(
+        shown.contains("Its master conversation ends,"),
+        "the confirm says removing ends the master conversation: {shown}"
+    );
     let remove = SetupAction::Remove {
         project_id: project.clone(),
     };
@@ -1350,13 +1363,13 @@ fn remove_asks_first_and_marks_the_project_removed_once_the_engine_forgets_it() 
     screen.apply(
         &change,
         Ok(SetupView::Changed(OwnerResult::Rejected {
-            code: "project_master_open".into(),
+            code: "invalid_project".into(),
         })),
     );
     assert!(!screen.removed);
     assert_eq!(
         screen.problem.as_deref(),
-        Some("End this project's master conversation first, then remove the project.")
+        Some("This project no longer exists.")
     );
     screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
     assert!(screen.removed);

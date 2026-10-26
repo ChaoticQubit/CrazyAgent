@@ -1353,7 +1353,7 @@ impl NativeOwner {
                 };
                 reply
                     .map(|reply| native_auth::Output::Auth(Box::new(reply)))
-                    .map_err(|error| native_auth::public_problem(&error.0).into())
+                    .map_err(|error| native_auth::public_problem(&error.0))
             }
         }
     }

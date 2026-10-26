@@ -23,9 +23,14 @@ pub mod windows;
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
+/// grant whole roots and cannot keep a folder inside one out of reach.
+pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
+
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
+const HIDDEN_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
@@ -423,6 +428,7 @@ pub struct ProjectSandbox {
     agent_tmp: PathBuf,
     worktrees: Vec<PathBuf>,
     read_roots: Vec<PathBuf>,
+    hidden: Vec<PathBuf>,
     network: SandboxNetwork,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
@@ -468,6 +474,7 @@ impl ProjectSandbox {
             agent_tmp: agent_tmp.to_path_buf(),
             worktrees: Vec::new(),
             read_roots: Vec::new(),
+            hidden: Vec::new(),
             network,
             owner_home: owner,
             engine_secrets: Vec::new(),
@@ -583,6 +590,37 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
+    /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
+    /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
+    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
+        if self.hidden.len() >= HIDDEN_MAX {
+            return Err(invalid("too many hidden folders"));
+        }
+        let inside = self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .any(|root| folder.starts_with(root) && folder != root.as_path());
+        let parent = folder.parent().filter(|parent| {
+            parent
+                .canonicalize()
+                .is_ok_and(|real| real.as_path() == *parent)
+        });
+        let plain = fs::symlink_metadata(folder).map_or_else(
+            |error| error.kind() == io::ErrorKind::NotFound,
+            |metadata| metadata.is_dir() && !metadata.file_type().is_symlink(),
+        );
+        if !clean_absolute(folder) || !inside || parent.is_none() || !plain {
+            return Err(invalid(
+                "a hidden folder must be a plain folder path inside a granted root",
+            ));
+        }
+        self.hidden.push(folder.to_path_buf());
+        Ok(self)
+    }
+
     /// The project folder this sandbox confines writes to.
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -677,7 +715,7 @@ impl ProjectSandbox {
         }
         text.push_str(")\n");
         text.push_str("(deny file-read* file-write*");
-        for secret in self.secret_paths() {
+        for secret in self.secret_paths().into_iter().chain(self.hidden.clone()) {
             if clean_absolute(&secret) {
                 text.push_str(&format!("\n  (subpath \"{}\")", secret.display()));
             }
@@ -904,6 +942,10 @@ impl InstalledSandbox {
     /// [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that profile, the
     /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if !sandbox.hidden.is_empty() {
+            return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
         #[cfg(target_os = "windows")]
         {
             let helper = windows::existing_helper(

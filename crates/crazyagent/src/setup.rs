@@ -465,11 +465,16 @@ const REASONS: [(&str, &str); 25] = [
 /// Turns a setup code into the plain sentence the setup screen shows. Input: a code such
 /// as `setup_checksum_mismatch`. Output: its sentence, or a general one for other codes.
 pub fn plain_reason(code: &str) -> &'static str {
+    known_reason(code).unwrap_or("Something went wrong during setup.")
+}
+
+/// Finds the setup sentence for a code. Input: a code such as `setup_checksum_mismatch`.
+/// Output: its sentence, or none for a code setup has no sentence for.
+pub fn known_reason(code: &str) -> Option<&'static str> {
     REASONS
         .iter()
         .find(|(known, _)| *known == code)
         .map(|(_, sentence)| *sentence)
-        .unwrap_or("Something went wrong during setup.")
 }
 
 /// The installer for this Mac, installing into `<engine root>/setup`.

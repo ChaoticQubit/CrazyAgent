@@ -223,3 +223,56 @@ fn a_model_endpoint_becomes_one_loopback_or_remote_port() {
         assert!(SandboxRemote::for_endpoint(url).is_err(), "{url}");
     }
 }
+
+#[test]
+fn a_hidden_folder_in_a_root_can_be_neither_listed_read_nor_written() {
+    let case = case();
+    let hidden = case.project.join(".crazyagent");
+    fs::create_dir(&hidden).unwrap();
+    fs::write(hidden.join("draft.json"), "{}\n").unwrap();
+    fs::write(case.project.join("shown.txt"), "shown\n").unwrap();
+    let profile = case.profiles.join("hidden.sb");
+    let installed =
+        InstalledSandbox::install(sandbox(&case).hide(&hidden).unwrap(), &profile).unwrap();
+    let seen = shell(
+        &installed,
+        &case.project,
+        &format!(
+            "cat shown.txt; ls {h} || echo list-refused; cat {h}/draft.json || echo read-refused; touch {h}/new || echo write-refused",
+            h = quoted(&hidden)
+        ),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&seen.stdout),
+        "shown\nlist-refused\nread-refused\nwrite-refused\n",
+        "{seen:?}"
+    );
+    assert!(!hidden.join("new").exists());
+    assert_eq!(
+        fs::read_to_string(hidden.join("draft.json")).unwrap(),
+        "{}\n"
+    );
+
+    let link = case.project.join("engine-link");
+    std::os::unix::fs::symlink(&hidden, &link).unwrap();
+    for refused in [
+        case.outside.join("engine"),
+        case.project.clone(),
+        link,
+        PathBuf::from("relative/.crazyagent"),
+        case.project.join("a").join("..").join("b"),
+    ] {
+        assert!(
+            sandbox(&case).hide(&refused).is_err(),
+            "{}",
+            refused.display()
+        );
+    }
+    let mut bounded = sandbox(&case).hide(&case.project.join("not-yet")).unwrap();
+    for index in 1..4 {
+        bounded = bounded
+            .hide(&case.project.join(format!("hidden-{index}")))
+            .unwrap();
+    }
+    assert!(bounded.hide(&case.project.join("hidden-4")).is_err());
+}

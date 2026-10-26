@@ -10,6 +10,8 @@ use crate::engine::owner::{
     NativeAuthScope, NativeAuthStart, OwnerData, OwnerReadReply,
 };
 use crate::protocol::RequestId;
+use crate::tui::text::plain_code;
+use std::borrow::Cow;
 
 pub(super) mod claude_code;
 
@@ -74,7 +76,7 @@ pub(super) struct State {
     prior: Option<Retained>,
     using: Option<(Vec<AgentView>, bool)>,
     scroll: u16,
-    notice: &'static str,
+    notice: Cow<'static, str>,
     polled: Option<std::time::Instant>,
 }
 
@@ -96,7 +98,7 @@ impl Default for State {
             prior: None,
             using: None,
             scroll: 0,
-            notice: "Select a managed native connection",
+            notice: Cow::Borrowed("Select a managed native connection"),
             polled: None,
         }
     }
@@ -175,7 +177,7 @@ impl State {
         self.open = true;
         self.selected = 0;
         self.scroll = 0;
-        self.notice = "Reading the exact selected connection; no sign-in requested";
+        self.notice = Cow::Borrowed("Reading the exact selected connection; no sign-in requested");
         self.queue(Job {
             context,
             command: Command::Inspect,
@@ -191,7 +193,8 @@ impl State {
             self.connected = false;
         }
         if !self.connected {
-            self.notice = "Owner disconnected; original operation retained; Ctrl-R reconnects";
+            self.notice =
+                Cow::Borrowed("Owner disconnected; original operation retained; Ctrl-R reconnects");
             return;
         }
         let (Some(identity), Some(retained)) = (identity, self.retained.as_ref()) else {
@@ -200,19 +203,22 @@ impl State {
         if retained.original.context.basis.identity.database_instance()
             != identity.database_instance()
         {
-            self.notice = "Owner database changed; original operation cannot be rebound";
+            self.notice =
+                Cow::Borrowed("Owner database changed; original operation cannot be rebound");
             return;
         }
         let mut context = retained.original.context.clone();
         context.basis.identity = identity;
         context.generation = self.generation;
-        self.notice = match self
-            .query(false)
-            .and_then(|command| self.queue(Job { context, command }))
-        {
-            Ok(()) => "Reconnected; reading the exact original operation",
-            Err(_) => "Original operation retained; owner reconciliation unavailable",
-        };
+        self.notice = Cow::Borrowed(
+            match self
+                .query(false)
+                .and_then(|command| self.queue(Job { context, command }))
+            {
+                Ok(()) => "Reconnected; reading the exact original operation",
+                Err(_) => "Original operation retained; owner reconciliation unavailable",
+            },
+        );
     }
 
     pub(super) fn hide(&mut self) -> Result<(), String> {
@@ -466,7 +472,8 @@ impl State {
             uncertain: true,
         });
         self.presentation = None;
-        self.notice = "Owner request pending; retain its original identity until reconciled";
+        self.notice =
+            Cow::Borrowed("Owner request pending; retain its original identity until reconciled");
         self.assert_consistent();
         Ok(())
     }
@@ -538,11 +545,11 @@ impl State {
             }
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
-                self.notice = if self.inspected {
+                self.notice = Cow::Borrowed(if self.inspected {
                     "Choose an explicit authentication action"
                 } else {
                     "Selected connection or source changed; close and inspect again"
-                };
+                });
             }
             Ok(Output::Using(agents))
                 if matches!(event.job.command, Command::Using | Command::StopUsing)
@@ -550,19 +557,19 @@ impl State {
                     && self.context.as_ref() == Some(&event.job.context) =>
             {
                 sign_out = matches!(event.job.command, Command::StopUsing) && agents.is_empty();
-                self.notice = if sign_out {
+                self.notice = Cow::Borrowed(if sign_out {
                     "Agents stopped; signing out"
                 } else if agents.is_empty() {
                     "native_profile_in_use"
                 } else {
                     "The agents below use this account; stop them to sign out"
-                };
+                });
                 self.using = (!agents.is_empty()).then_some((agents, false));
             }
             Err(problem) => {
                 self.presentation = None;
                 self.claude_code.clear();
-                self.notice = public_problem(&problem);
+                self.notice = Cow::Owned(public_problem(&problem));
                 list_using = problem == "native_profile_in_use"
                     && matches!(event.job.command, Command::Logout(_));
                 if list_using {
@@ -581,7 +588,8 @@ impl State {
                 self.presentation = None;
                 self.claude_code.clear();
                 self.inspected = false;
-                self.notice = "Owner response context changed; close and inspect again";
+                self.notice =
+                    Cow::Borrowed("Owner response context changed; close and inspect again");
             }
         }
         self.flight = None;
@@ -652,11 +660,11 @@ impl State {
             .expect("matching reply retains its original operation");
         retained.uncertain = reply.fact.phase == NativeAuthPhase::Uncertain;
         retained.fact = Some(reply.fact.clone());
-        self.notice = if reply.fact.binding.engine_epoch == reply.engine_epoch {
+        self.notice = Cow::Borrowed(if reply.fact.binding.engine_epoch == reply.engine_epoch {
             phase_text(reply.fact.phase)
         } else {
             "Historical operation observed; current account presentation unavailable"
-        };
+        });
         let present = self.open
             && self.connected
             && self.context.as_ref() == Some(&job.context)
@@ -746,7 +754,7 @@ impl State {
                     "Codex"
                 }
             ),
-            self.notice.into(),
+            self.notice.to_string(),
             format!(
                 "Selected account reference: {}",
                 display_text(context.connection.account_ref.as_str(), FIELD_BYTES_MAX)
@@ -869,28 +877,17 @@ fn new_request_id() -> Result<RequestId, String> {
     RequestId::new(id).map_err(|_| "Authentication request identity invalid".into())
 }
 
-pub(super) fn public_problem(problem: &str) -> &'static str {
+/// Keeps a native authentication problem for the owner without raw error text.
+/// Input: the engine's problem. Output: a plain code as it is, so a code with no
+/// sentence still names itself, the expired sign-in sentence, or a fixed code that
+/// says to read the original operation again when the problem is not a plain code.
+pub(super) fn public_problem(problem: &str) -> String {
     match problem {
-        "native_auth_not_active" => "native_auth_not_active",
-        "native_auth_operation_missing" => "native_auth_operation_missing",
-        "native_auth_recovery_required" => "native_auth_recovery_required",
         "native_auth_sign_in_expired" => {
-            "Sign-in code expired before approval; start sign-in again"
+            "Sign-in code expired before approval; start sign-in again".to_owned()
         }
-        "native_auth_operation_conflict" => "native_auth_operation_conflict",
-        "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
-        "native_auth_operation_capacity" => "native_auth_operation_capacity",
-        "native_auth_database_mismatch" => "native_auth_database_mismatch",
-        "native_auth_readonly" => "native_auth_readonly",
-        "native_auth_host_unavailable" => "native_auth_host_unavailable",
-        "native_auth_method_mismatch" => "native_auth_method_mismatch",
-        "native_profile_source_conflict" => "native_profile_source_conflict",
-        "native_profile_in_use" => "native_profile_in_use",
-        "native_profile_not_managed" => "native_profile_not_managed",
-        "owner_grant_stale_or_revoked" => "owner_grant_stale_or_revoked",
-        "native_auth_owner_identity_changed" => "native_auth_owner_identity_changed",
-        "native_auth_inspection_unavailable" => "native_auth_inspection_unavailable",
-        _ => "native_auth_transport_unavailable_read_original_operation",
+        code if plain_code(code) => code.to_owned(),
+        _ => "native_auth_transport_unavailable_read_original_operation".to_owned(),
     }
 }
 

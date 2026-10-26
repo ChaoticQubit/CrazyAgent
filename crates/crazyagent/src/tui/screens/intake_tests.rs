@@ -405,6 +405,83 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let outside = engine.user().join("outside");
+    let source = outside.join("shop");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("README.md"), "shop\n").unwrap();
+    let git = |args: &[&str]| {
+        let done = crate::spawn_gate::output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args),
+        )
+        .unwrap();
+        assert!(done.status.success(), "{done:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "README.md"]);
+    git(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    for branch in ["side", "other"] {
+        let tree = outside.join(format!("shop-{branch}"));
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            tree.to_str().unwrap(),
+        ]);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Size: "), "{rows:#?}");
+    assert!(
+        shows(&rows, "This folder has 2 linked git worktrees. They stay"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "the copy gets the main checkout and every branch."),
+        "{rows:#?}"
+    );
+
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert!(home.join("shop").join("README.md").is_file());
+    assert!(!home.join("shop").join(".git").join("worktrees").exists());
+    assert!(
+        source
+            .join(".git")
+            .join("worktrees")
+            .join("shop-side")
+            .is_dir()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;
@@ -1081,4 +1158,55 @@ fn a_pasted_github_token_leaves_only_as_its_own_job_and_is_never_drawn() {
     assert!(matches!(*job, IntakeJob::GitHubToken(_)));
     assert_eq!(job.query(), IntakeQuery::GitHubStatus);
     assert!(shell.ctx.next_request().is_none());
+}
+
+/// Starts an engine whose GitHub settings file sets an empty client id, so the engine
+/// refuses a GitHub sign-in with `github_client_id_not_configured` before any network call.
+async fn engine_without_github_client_id() -> Engine {
+    let engine = Engine::start().await;
+    let file = engine.root.path().join("github.toml");
+    std::fs::write(&file, "client_id = \"\"\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    engine
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_github_sign_in_the_engine_refuses_says_why_on_the_clone_page() {
+    let engine = engine_without_github_client_id().await;
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::CloneRepo, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["github"]);
+    assert!(shows(&render(&mut shell, 100, 24), "Sign in with GitHub"));
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["github"]);
+    let rows = render(&mut shell, 100, 24);
+    assert!(
+        shows(&rows, "Sign in with GitHub isn't set up in this build yet."),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "Something went wrong"), "{rows:#?}");
+    assert!(
+        !shows(&rows, "github_client_id_not_configured"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_projects_home_the_engine_refuses_says_why_on_the_setup_page() {
+    let engine = Engine::start().await;
+    let file = engine.user().join("notes.txt");
+    std::fs::write(&file, "not a folder").unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Setup { first_run: false }, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('h'));
+    keys(&mut shell, file.to_str().unwrap());
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
+    let message = shell.ctx.message().expect("the refusal is shown");
+    assert_eq!(message.lead, "Pick a folder, not a file or a link.");
 }

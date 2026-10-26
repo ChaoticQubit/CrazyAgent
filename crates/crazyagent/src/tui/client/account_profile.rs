@@ -95,7 +95,7 @@ impl NativeOwner {
             .configure_account_profile(submission.request.clone(), secret, submission.generation)
             .await
             .map(Box::new)
-            .map_err(|error| public_problem(&error.0).into())
+            .map_err(|error| public_problem(&error.0))
     }
 
     pub(super) async fn account_profile_read(
@@ -109,7 +109,7 @@ impl NativeOwner {
                     .read_account_profile(submission.request.clone())
                     .await
                     .map(Box::new)
-                    .map_err(|error| public_problem(&error.0).into());
+                    .map_err(|error| public_problem(&error.0));
                 let still_pending = controller.pending_account_profile().is_some();
                 let retained = match &result {
                     Err(_) => true,
@@ -138,7 +138,7 @@ impl NativeOwner {
                 .read_account_auth_capabilities(submission.request.clone())
                 .await
                 .map(Box::new)
-                .map_err(|error| public_problem(&error.0).into()),
+                .map_err(|error| public_problem(&error.0)),
             Err(problem) => Err(problem),
         };
         model_access::Event::AccountProfileCapabilities { submission, result }
