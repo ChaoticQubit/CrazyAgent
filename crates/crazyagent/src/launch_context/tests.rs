@@ -52,6 +52,31 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
 }
 
 #[test]
+fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
+    for length in [900, 1011] {
+        let base = tempfile::tempdir().unwrap();
+        let mut folder = base.path().canonicalize().unwrap();
+        while folder.as_os_str().len() + 100 < length - 50 {
+            folder.push("n".repeat(99));
+        }
+        let rest = length - folder.as_os_str().len() - 1;
+        folder.push("m".repeat(rest));
+        assert_eq!(folder.as_os_str().len(), length);
+        fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        let setup = stored(&folder);
+
+        let text = render(&setup.project_id, Some(&setup), "");
+
+        assert!(text.contains(&format!("Project folder: {}\n", folder.display())));
+        assert!(text.contains(&format!(
+            "Context folder: {}/.crazyagent\n",
+            folder.display()
+        )));
+        assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
+    }
+}
+
+#[test]
 fn a_project_without_a_setup_still_gets_a_plain_header() {
     let text = render(&ProjectId::new("bare").unwrap(), None, "");
     assert_eq!(
@@ -159,6 +184,42 @@ fn the_team_index_stays_within_its_bound_with_many_plugins() {
     assert!(text.contains("- Skill skill-000-"));
     assert!(!text.contains("- MCP server server-099"));
     assert!(text.ends_with(" more\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+    };
+    let installed = context.install("codex", &home, false).unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(installed._lock.try_clone().unwrap())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(
+        context.install("codex", &home, false).unwrap_err().0,
+        "launch_home_busy"
+    );
+
+    drop(installed);
+    let again = context.install("codex", &home, false);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        again.is_ok(),
+        "the ended launch still kept its home busy: {:?}",
+        again.err()
+    );
 }
 
 #[test]
