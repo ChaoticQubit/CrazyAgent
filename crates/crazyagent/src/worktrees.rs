@@ -1171,10 +1171,59 @@ pub(crate) fn provision(
     task: &TaskId,
     repository: &str,
 ) -> Result<(), EngineError> {
-    let mut record = load(connection, task, repository)?.ok_or_else(|| error("lease_missing"))?;
+    let provisioning = begin_provision(connection, task, repository)?;
+    finish_provision(connection, provisioning.materialize())
+}
+
+/// A reserved lease taken out of the database so its worktree can be checked out on
+/// another thread while the database keeps serving (LB-28).
+pub(crate) struct Provisioning(LeaseRecord);
+
+/// A checked-out lease, or the refusal that stopped its checkout, waiting to be stored.
+pub(crate) struct Provisioned {
+    record: LeaseRecord,
+    result: Result<(), EngineError>,
+}
+
+/// Takes a reserved lease out of the database for checkout. Inputs: the connection, outside
+/// any transaction, the task and repository. Output: the lease to check out, or
+/// `lease_missing`.
+pub(crate) fn begin_provision(
+    connection: &Connection,
+    task: &TaskId,
+    repository: &str,
+) -> Result<Provisioning, EngineError> {
+    let record = load(connection, task, repository)?.ok_or_else(|| error("lease_missing"))?;
     assert_eq!(record.lease.state, LeaseState::Reserved);
     assert!(connection.is_autocommit());
-    let result = materialize(&mut record);
+    Ok(Provisioning(record))
+}
+
+impl Provisioning {
+    /// Checks the lease commit out into its worktree, touching only the filesystem and
+    /// Git. Input: the reserved lease. Output: the checked-out lease, or the refusal.
+    pub(crate) fn materialize(self) -> Provisioned {
+        let mut record = self.0;
+        let result = materialize(&mut record);
+        Provisioned { record, result }
+    }
+}
+
+/// Stores a checkout: the lease becomes Ready, or Uncertain when the checkout failed, but
+/// only while the database still holds it reserved as it was taken out. Inputs: the
+/// connection, outside any transaction, and the checkout. Output: the checkout's result,
+/// or `lease_changed_during_checkout`.
+pub(crate) fn finish_provision(
+    connection: &Connection,
+    provisioned: Provisioned,
+) -> Result<(), EngineError> {
+    let Provisioned { mut record, result } = provisioned;
+    assert_eq!(record.lease.state, LeaseState::Reserved);
+    assert!(connection.is_autocommit());
+    let stored = load(connection, &record.lease.task_id, &record.lease.repository)?;
+    if stored.map(|stored| stored.lease).as_ref() != Some(&record.lease) {
+        return Err(error("lease_changed_during_checkout"));
+    }
     record.lease.state = if result.is_ok() {
         LeaseState::Ready
     } else {

@@ -191,6 +191,7 @@ async fn prepare_actual(case: Fixture) -> (Fixture, PreparedMasterTurn) {
                     turn.ordinal, turn.phase, turn.reason, turn.attempt.is_some()),
                 Ok(MasterRuntimeResult::Profile(_)) => String::from("variant=Profile"),
                 Ok(MasterRuntimeResult::ConfiguredProfile(_)) => String::from("variant=ConfiguredProfile"),
+                Ok(MasterRuntimeResult::Checkout(_)) => String::from("variant=Checkout"),
                 Ok(MasterRuntimeResult::Prepared(_)) => unreachable!(),
                 Err(_) => String::from("variant=Err(EngineError)"),
             };

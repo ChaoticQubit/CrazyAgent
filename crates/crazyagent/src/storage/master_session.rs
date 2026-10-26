@@ -112,6 +112,10 @@ pub(crate) enum MasterRuntimeCommand {
         reason: MasterReason,
         cause: String,
     },
+    Checked {
+        provisioned: Box<crate::worktrees::Provisioned>,
+        prepare: Box<MasterRuntimeCommand>,
+    },
 }
 
 pub(crate) enum MasterRuntimeObservation {
@@ -152,6 +156,26 @@ pub(crate) enum MasterRuntimeResult {
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
     Profile(Box<NativeProfileUse>),
+    Checkout(Box<MasterCheckout>),
+}
+
+/// A conversation worktree reserved by a turn's preparation, to be checked out away from
+/// the database thread before the same preparation runs again (LB-28).
+pub(crate) struct MasterCheckout {
+    provisioning: crate::worktrees::Provisioning,
+    prepare: MasterRuntimeCommand,
+}
+
+impl MasterCheckout {
+    /// Checks the worktree out, touching only the filesystem and Git. Input: the reserved
+    /// worktree and its preparation. Output: the command that stores the checkout and then
+    /// prepares the turn again.
+    pub(crate) fn materialize(self) -> MasterRuntimeCommand {
+        MasterRuntimeCommand::Checked {
+            provisioned: Box::new(self.provisioning.materialize()),
+            prepare: Box::new(self.prepare),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -2513,6 +2537,10 @@ fn observe_turn(
     persist_runtime(tx, config, session, turn)
 }
 
+/// Reserves the conversation worktree on a turn's first preparation and takes it out for
+/// checkout, so the slow checkout runs off the database thread (LB-28). Inputs: the
+/// database, settings, custody, engine path and command. Output: the reserved worktree
+/// to check out, or none when the command needs no new worktree.
 fn provision_bootstrap(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2520,7 +2548,7 @@ fn provision_bootstrap(
     custody: &mut Result<NativeProfileCustody, EngineError>,
     path: &Path,
     command: &MasterRuntimeCommand,
-) -> Result<(), EngineError> {
+) -> Result<Option<crate::worktrees::Provisioning>, EngineError> {
     let MasterRuntimeCommand::Prepare {
         host,
         project_id,
@@ -2528,17 +2556,17 @@ fn provision_bootstrap(
         turn_id,
     } = command
     else {
-        return Ok(());
+        return Ok(None);
     };
     let tx = db.transaction().map_err(error)?;
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     current_scope(&tx, config, sources, host, &session, &turn)?;
     if turn.phase != MasterTurnPhase::Queued {
-        return Ok(());
+        return Ok(None);
     }
     if !preflight_turn(&tx, config, &mut session, &mut turn)? {
         tx.commit().map_err(error)?;
-        return Ok(());
+        return Ok(None);
     }
     let mut gaps = Vec::new();
     let mut ready = None;
@@ -2554,10 +2582,10 @@ fn provision_bootstrap(
     let Some(auth) = ready else {
         block_on_gaps(&tx, config, host, &mut session, &mut turn, &gaps)?;
         tx.commit().map_err(error)?;
-        return Ok(());
+        return Ok(None);
     };
     match ready_lease(&tx, &session, &auth) {
-        Ok(_) => return Ok(()),
+        Ok(_) => return Ok(None),
         Err(failure) if failure.0 == "master_bootstrap_receipt_missing" => {}
         Err(failure) => return Err(failure),
     }
@@ -2568,9 +2596,7 @@ fn provision_bootstrap(
     super::master_bootstrap::reserve(&tx, runtime_dir, &session, &repository, &auth)?;
     tx.commit().map_err(error)?;
     assert!(db.is_autocommit());
-    crate::worktrees::provision(db, &session.bootstrap_task_id, &repository)?;
-    assert!(db.is_autocommit());
-    Ok(())
+    crate::worktrees::begin_provision(db, &session.bootstrap_task_id, &repository).map(Some)
 }
 
 /// Reads the repository a project's master works in: the first one the project lists.
@@ -3227,6 +3253,16 @@ pub(super) fn runtime(
     path: &Path,
     command: MasterRuntimeCommand,
 ) -> Result<MasterRuntimeResult, EngineError> {
+    let command = match command {
+        MasterRuntimeCommand::Checked {
+            provisioned,
+            prepare,
+        } => {
+            crate::worktrees::finish_provision(db, *provisioned)?;
+            *prepare
+        }
+        command => command,
+    };
     #[cfg(all(test, unix))]
     if let MasterRuntimeCommand::RegisterRcliProfile {
         host,
@@ -3255,11 +3291,17 @@ pub(super) fn runtime(
             db, config, sources, custody, host, project_id, session_id,
         )?;
     }
-    provision_bootstrap(db, config, sources, custody, path, &command)?;
+    if let Some(provisioning) = provision_bootstrap(db, config, sources, custody, path, &command)? {
+        return Ok(MasterRuntimeResult::Checkout(Box::new(MasterCheckout {
+            provisioning,
+            prepare: command,
+        })));
+    }
     let tx = db.transaction().map_err(error)?;
     let (host, project_id, session_id, turn_id) = match &command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
+        MasterRuntimeCommand::Checked { .. } => unreachable!(),
         MasterRuntimeCommand::Route {
             host,
             project_id,
@@ -3311,6 +3353,7 @@ pub(super) fn runtime(
     match command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
+        MasterRuntimeCommand::Checked { .. } => unreachable!(),
         MasterRuntimeCommand::Route { ref host, .. } => {
             if let Err(failure) = current_scope(&tx, config, sources, host, &session, &turn) {
                 if turn.phase != MasterTurnPhase::Queued
@@ -4396,7 +4439,14 @@ fallback_allowed = false
                 .sender
                 .try_send(Job::MasterRuntime(Box::new(command), send))
                 .unwrap_or_else(|_| panic!("actual master runtime queue unavailable"));
-            receive.await.unwrap()
+            let checkout = match receive.await.unwrap() {
+                Ok(MasterRuntimeResult::Checkout(checkout)) => checkout,
+                result => return result,
+            };
+            let checked = tokio::task::spawn_blocking(move || checkout.materialize())
+                .await
+                .unwrap();
+            Box::pin(self.runtime(checked)).await
         }
 
         async fn register(&self) -> RcliConfiguredProfileProof {

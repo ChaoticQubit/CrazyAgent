@@ -29,6 +29,11 @@ const REPLY_BYTES_MAX: usize = 8192;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
+/// SQLite's refusal when another engine connection held the database write lock past the
+/// storage wait; the write was rolled back, so the turn is driven again (LB-28).
+const STORAGE_BUSY: &str = "database is locked";
+const BUSY_ATTEMPTS: u32 = 5;
+const BUSY_PAUSE: Duration = Duration::from_millis(250);
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
@@ -186,8 +191,53 @@ impl Capture {
 #[cfg(all(test, unix))]
 mod routing_tests;
 
+/// Runs one master turn step again while another engine connection holds the database
+/// write lock past the storage wait, which rolls the step's write back (LB-28). Input: the
+/// step. Output: its result, or `storage_busy` when the lock never freed.
+async fn when_storage_frees<T, F, Fut>(mut step: F) -> Result<T, EngineError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, EngineError>>,
+{
+    let mut attempt = 1;
+    loop {
+        assert!(attempt <= BUSY_ATTEMPTS);
+        match step().await {
+            Err(error) if error.0 == STORAGE_BUSY && attempt < BUSY_ATTEMPTS => {
+                tokio::time::sleep(BUSY_PAUSE * attempt).await;
+                attempt += 1;
+            }
+            Err(error) if error.0 == STORAGE_BUSY => return Err(failure("storage_busy")),
+            result => return result,
+        }
+    }
+}
+
 impl OwnerRuntimeHandle {
+    /// Runs one master runtime command in storage. A first preparation that reserves the
+    /// conversation worktree checks it out on a blocking thread without the owner barrier,
+    /// so owner reads and the database keep serving, then stores it and prepares again
+    /// (LB-28). Input: the command. Output: the storage result, never a checkout.
     async fn master_runtime_command(
+        &self,
+        command: MasterRuntimeCommand,
+    ) -> Result<MasterRuntimeResult, EngineError> {
+        let checkout = match self.master_runtime_job(command).await? {
+            MasterRuntimeResult::Checkout(checkout) => checkout,
+            result => return Ok(result),
+        };
+        let checked = tokio::task::spawn_blocking(move || checkout.materialize())
+            .await
+            .map_err(|_| failure("master_worktree_checkout_interrupted"))?;
+        match self.master_runtime_job(checked).await? {
+            MasterRuntimeResult::Checkout(_) => Err(failure("master_worktree_checkout_repeated")),
+            result => Ok(result),
+        }
+    }
+
+    /// Sends one master runtime command to storage under the owner barrier. Input: the
+    /// command. Output: the storage result.
+    async fn master_runtime_job(
         &self,
         command: MasterRuntimeCommand,
     ) -> Result<MasterRuntimeResult, EngineError> {
@@ -369,24 +419,25 @@ impl OwnerRuntimeHandle {
         }
     }
 
-    /// Drives one committed master turn and, when the dispatch fails with a known outcome,
-    /// settles the turn failed with the reason so the owner sees it and can retry.
-    /// Inputs: the turn's project, session and id. Output: the turn view, or the dispatch
-    /// error after the turn was settled; an unknown outcome is returned for the caller to
-    /// drive the same turn again.
+    /// Drives one committed master turn, again after a write another engine connection kept
+    /// locked, and when the dispatch fails with a known outcome settles the turn failed with
+    /// the reason so the owner sees it and can retry. Inputs: the turn's project, session and
+    /// id. Output: the turn view, or the dispatch error after the turn was settled; an
+    /// unknown outcome is returned for the caller to drive the same turn again.
     pub async fn drive_master_turn(
         &self,
         project_id: &ProjectId,
         session_id: &SessionId,
         turn_id: &RequestId,
     ) -> Result<MasterTurnView, EngineError> {
-        let result = self.drive_turn(project_id, session_id, turn_id).await;
+        let result = when_storage_frees(|| self.drive_turn(project_id, session_id, turn_id)).await;
         if let Err(cause) = &result
             && cause.0 != super::master_dispatch::UNKNOWN_OUTCOME
         {
-            let settled = self
-                .fail_master_turn(project_id, session_id, turn_id, cause)
-                .await?;
+            let settled = when_storage_frees(|| {
+                self.fail_master_turn(project_id, session_id, turn_id, cause)
+            })
+            .await?;
             assert_eq!(&settled.id, turn_id);
             assert_eq!(&settled.session_id, session_id);
         }
@@ -417,7 +468,9 @@ impl OwnerRuntimeHandle {
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) => return Err(failure("master_runtime_result")),
+            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::Checkout(_) => {
+                return Err(failure("master_runtime_result"));
+            }
             #[cfg(all(test, unix))]
             MasterRuntimeResult::ConfiguredProfile(_) => {
                 return Err(failure("master_runtime_result"));
