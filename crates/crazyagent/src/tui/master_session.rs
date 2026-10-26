@@ -1668,10 +1668,14 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
         MasterTurnPhase::Cancelled => "Cancelled",
         MasterTurnPhase::Uncertain => "Outcome unclear",
     };
-    lines.push(match &turn.reason {
+    let mut line = match &turn.reason {
         Some(reason) => format!("Turn {}: {phase} | {}", turn.ordinal, reason_text(reason)),
         None => format!("Turn {}: {phase}", turn.ordinal),
-    });
+    };
+    if let Some(cause) = &turn.cause {
+        line.push_str(&format!(" ({cause})"));
+    }
+    lines.push(line);
     if let Some(detail) = &turn.detail {
         lines.push(super::views::safe_text(detail, 8192));
     }
@@ -2557,7 +2561,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
             "A Git setting in this project's repository runs commands or redirects Git"
         }
         MasterReason::Cancelled => "Cancelled",
-        MasterReason::Unknown => "Reason unknown",
+        MasterReason::Unknown => "Something went wrong",
     }
 }
 
@@ -2577,6 +2581,7 @@ mod turn_line_tests {
             phase,
             reason: None,
             detail: None,
+            cause: None,
             attempt: None,
             runtime: None,
             reply: None,
@@ -2612,6 +2617,39 @@ mod turn_line_tests {
     }
 
     #[test]
+    fn a_stopped_turn_line_ends_with_the_cause_the_engine_stored() {
+        let turn = |reason, cause: &str| MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Blocked,
+            reason: Some(reason),
+            detail: None,
+            cause: Some(cause.to_owned()),
+            attempt: None,
+            runtime: None,
+            reply: None,
+        };
+        for (reason, cause, expected) in [
+            (
+                MasterReason::RuntimeUnavailable,
+                "rcli_profile_configuration_required",
+                "Turn 1: Blocked | Model runtime unavailable (rcli_profile_configuration_required)",
+            ),
+            (
+                MasterReason::Unknown,
+                "master_runtime_binding",
+                "Turn 1: Blocked | Something went wrong (master_runtime_binding)",
+            ),
+        ] {
+            let mut lines = Vec::new();
+            turn_lines(&turn(reason, cause), &mut lines);
+            assert_eq!(lines, vec![expected.to_owned()]);
+        }
+    }
+
+    #[test]
     fn a_blocked_turn_without_a_sign_in_tells_the_owner_what_to_do() {
         let turn = MasterTurnView {
             id: RequestId::new("turn-1").unwrap(),
@@ -2624,6 +2662,7 @@ mod turn_line_tests {
             runtime: None,
             reply: None,
             detail: None,
+            cause: None,
         };
         let mut lines = Vec::new();
         turn_lines(&turn, &mut lines);

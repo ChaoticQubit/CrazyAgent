@@ -17,8 +17,8 @@ use crate::master_session::{
     METADATA_BYTES_MAX, MasterBackend, MasterBootstrapAuth, MasterCursor, MasterOwnerAction,
     MasterReason, MasterReply, MasterRuntimeView, MasterSessionPhase, MasterSessionView,
     MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX, RcliConfiguredProfileProof,
-    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, error,
-    validate_action, validate_page, validate_selection,
+    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code,
+    error, validate_action, validate_page, validate_selection,
 };
 use crate::model_gateway::{
     self, Attempt, AttemptCompletion, AttemptOutcome, AttemptRequest,
@@ -109,7 +109,7 @@ pub(crate) enum MasterRuntimeCommand {
 pub(crate) enum MasterRuntimeObservation {
     Running { runtime: MasterRuntimeView },
     Response { reply: MasterReply },
-    Failed { reason: MasterReason },
+    Failed { reason: MasterReason, cause: String },
     Cancelled,
     Disconnected,
 }
@@ -1546,6 +1546,7 @@ fn preflight_turn(
             };
             turn.phase = phase;
             turn.reason = Some(MasterReason::CapacityUnavailable);
+            turn.cause = Some(cause_code(&failure.0));
             persist_runtime(tx, config, session, turn)?;
             Ok(false)
         }
@@ -1652,6 +1653,7 @@ fn block_unready(
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
     turn.phase = MasterTurnPhase::Blocked;
     turn.reason = Some(reason);
+    turn.cause = Some(cause_code(&failure.0));
     persist_runtime(tx, config, session, turn)?;
     Ok(true)
 }
@@ -1859,7 +1861,7 @@ fn observe_turn(
             turn.reply = Some(reply);
             turn.phase = MasterTurnPhase::Succeeded;
         }
-        MasterRuntimeObservation::Failed { reason } => {
+        MasterRuntimeObservation::Failed { reason, cause } => {
             if turn.phase == MasterTurnPhase::Failed && turn.reason == Some(reason) {
                 return Ok(());
             }
@@ -1893,6 +1895,7 @@ fn observe_turn(
             }
             turn.phase = MasterTurnPhase::Failed;
             turn.reason = Some(reason);
+            turn.cause = Some(cause_code(&cause));
         }
         MasterRuntimeObservation::Cancelled => {
             if !matches!(
@@ -2800,7 +2803,8 @@ pub(super) fn runtime(
             let stopping = matches!(
                 observation,
                 MasterRuntimeObservation::Failed {
-                    reason: MasterReason::ScopeRevoked
+                    reason: MasterReason::ScopeRevoked,
+                    ..
                 } | MasterRuntimeObservation::Cancelled
                     | MasterRuntimeObservation::Disconnected
             );
@@ -2828,6 +2832,7 @@ pub(super) fn runtime(
                     MasterTurnPhase::Failed
                 };
                 turn.reason = Some(reason);
+                turn.cause = Some(cause_code(&cause));
                 if reason == MasterReason::RepositoryConfigRefused {
                     let repository = master_repository(&tx, &session.project_id)?;
                     turn.detail = crate::worktrees::refused_config_line(&cause, &repository);
@@ -2994,6 +2999,7 @@ fn execute(
                 runtime: None,
                 reply: None,
                 detail: None,
+                cause: None,
             };
             let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(next)?, encode(&turn)?]).map_err(error)?;
             assert_eq!(changed, 1);

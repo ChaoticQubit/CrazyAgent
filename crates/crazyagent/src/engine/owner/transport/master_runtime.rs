@@ -394,6 +394,7 @@ impl OwnerRuntimeHandle {
                 } else {
                     MasterRuntimeObservation::Failed {
                         reason: reason_for_error(&error),
+                        cause: error.0.clone(),
                     }
                 };
                 self.observe_master_turn(&prepared, turn_id, observation)
@@ -710,9 +711,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
-        "native_profile_lock_unavailable" | "master_runtime_host_unavailable" => {
-            MasterReason::RuntimeUnavailable
-        }
+        "native_profile_lock_unavailable"
+        | "master_runtime_host_unavailable"
+        | "rcli_profile_configuration_required" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }

@@ -29,7 +29,7 @@ fn connection() -> ModelConnection {
 
 fn reason(code: &str) -> MasterReason {
     match rcli_failure_observation(&EngineError(code.into())) {
-        MasterRuntimeObservation::Failed { reason } => reason,
+        MasterRuntimeObservation::Failed { reason, .. } => reason,
         _ => panic!("an ordinary failure changed its runtime observation category"),
     }
 }

@@ -1448,6 +1448,7 @@ export interface MasterTurn {
   reason: string | null;
   reply: { text: string } | null;
   detail?: string | null;
+  cause?: string | null;
 }
 
 export interface MasterState {

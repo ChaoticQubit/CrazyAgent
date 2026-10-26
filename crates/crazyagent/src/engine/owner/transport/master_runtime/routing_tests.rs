@@ -828,6 +828,63 @@ async fn a_turn_that_cannot_start_ends_blocked_with_its_reason_in_the_read() {
 }
 
 #[tokio::test]
+async fn an_unregistered_rcli_profile_stops_the_turn_with_its_own_cause() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    let returned = case.drive().await;
+    assert_eq!(
+        returned
+            .expect_err("an RCLI master without a registered profile cannot start")
+            .0,
+        "rcli_profile_configuration_required"
+    );
+    let stopped = case.persisted_turn().await;
+    assert_eq!(stopped.id, case.turn.id);
+    assert_eq!(stopped.phase, MasterTurnPhase::Blocked);
+    assert_eq!(stopped.reason, Some(MasterReason::RuntimeUnavailable));
+    assert_eq!(
+        stopped.cause.as_deref(),
+        Some("rcli_profile_configuration_required")
+    );
+    assert_eq!(stopped.detail, None);
+    let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
+    assert_eq!(session.current_turn, None);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn an_unclassified_cause_is_kept_as_a_code_and_private_text_is_redacted() {
+    for (cause, stored) in [
+        ("master_runtime_binding", "master_runtime_binding"),
+        (
+            "Provider said: token sk-live-123 rejected at /private/tmp/x",
+            "master_cause_redacted",
+        ),
+    ] {
+        let case = Fixture::new(MasterBackend::Rcli, true).await;
+        let result = case
+            .command(MasterRuntimeCommand::Fail {
+                host: case.runtime().identity(),
+                project_id: case.session.project_id.clone(),
+                session_id: case.session.session_id.clone(),
+                turn_id: case.turn.id.clone(),
+                reason: reason_for_error(&EngineError(cause.into())),
+                cause: cause.into(),
+            })
+            .await
+            .unwrap();
+        let MasterRuntimeResult::Turn(returned) = result else {
+            panic!("a failed dispatch returns the settled turn");
+        };
+        let stopped = case.persisted_turn().await;
+        assert_eq!(*returned, stopped);
+        assert_eq!(stopped.phase, MasterTurnPhase::Blocked, "{cause}");
+        assert_eq!(stopped.reason, Some(MasterReason::Unknown), "{cause}");
+        assert_eq!(stopped.cause.as_deref(), Some(stored), "{cause}");
+        case.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_guard() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     let proof = case.register().await;
@@ -910,6 +967,7 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     let failed = case.persisted_turn().await;
     assert_eq!(failed.phase, MasterTurnPhase::Failed);
     assert_eq!(failed.reason, Some(MasterReason::ProfileBusy));
+    assert_eq!(failed.cause.as_deref(), Some("native_profile_in_use"));
     assert!(failed.runtime.is_none());
     assert!(failed.reply.is_none());
     assert_eq!(failed.id, case.turn.id);
@@ -1116,6 +1174,11 @@ async fn a_repository_whose_config_runs_a_command_is_refused_with_the_key_and_no
         assert_eq!(
             failed.reason,
             Some(MasterReason::RepositoryConfigRefused),
+            "{key}"
+        );
+        assert_eq!(
+            failed.cause.as_deref(),
+            Some(format!("repository_config_refused:{code}").as_str()),
             "{key}"
         );
         let detail = failed

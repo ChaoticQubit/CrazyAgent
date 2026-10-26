@@ -271,22 +271,52 @@ export function masterStatus(session: MasterState["session"], turns: MasterTurn[
   return "Stopped";
 }
 
-/** One plain line for a master turn that has no reply yet or ended without one.
- * Input: the turn. Output: the line. */
+const STOPPED_WHY = new Map<string, string>([
+  ["readiness_unknown", "the account is not signed in. Sign in again in Settings, Accounts"],
+  ["readiness_stale", "the account is not signed in. Sign in again in Settings, Accounts"],
+  ["connection_changed", "its settings changed while it was open"],
+  ["invalid_authentication", "the sign-in was rejected. Sign in again in Settings, Accounts"],
+  ["quota_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["quota_unknown", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["budget_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["rate_limited", "the account is resting after too many requests"],
+  ["cooldown_active", "the account is resting after too many requests"],
+  ["capacity_unavailable", "another turn is still running"],
+  ["profile_busy", "its account is busy signing in or out"],
+  ["scope_revoked", "it no longer has access to this project"],
+  ["runtime_unavailable", "it could not start. Check it in Settings, Harnesses"],
+  ["capture_incomplete", "its reply was cut off"],
+  ["output_limit", "its reply was longer than the limit"],
+  ["unsupported_capability", "it cannot lead a project yet"],
+  ["cancelled", "you stopped this turn"],
+]);
+
+/** The code a stopped master turn shows: the cause the engine stored, else its reason,
+ * else its phase. Input: the turn. Output: the code, never a bare "unknown". */
+export function stopCode(turn: MasterTurn): string {
+  if (turn.cause) return turn.cause;
+  return turn.reason && turn.reason !== "unknown" ? turn.reason : turn.phase;
+}
+
+/** One plain line for a master turn that has no reply yet or ended without one; a stopped
+ * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
-  const reason = turn.reason ? turn.reason.replaceAll("_", " ") : "";
-  if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return "Not signed in. Sign in again in Settings, Accounts, then send again.";
-  if (turn.phase === "blocked" && turn.reason === "readiness_stale") return "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.";
-  if (turn.phase === "blocked" && turn.reason === "connection_changed") return "Settings changed since the master started. End the conversation, then send again.";
-  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return "The master couldn't start: this project has no repository yet.";
-  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_config_refused") return `The master couldn't start: ${turn.detail ?? "a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again."}`;
+  const code = ` (${stopCode(turn)})`;
+  if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return `Not signed in. Sign in again in Settings, Accounts, then send again.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "connection_changed") return `Settings changed since the master started. End the conversation, then send again.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return `The master couldn't start: this project has no repository yet.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_config_refused") return `The master couldn't start: ${turn.detail ?? "a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again."}${code}`;
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
     case "running": return "Thinking...";
     case "waiting_approval": return "Waiting for your approval";
     case "succeeded": return "Replied";
     case "cancelled": return "Stopped";
-    case "failed": case "blocked": case "uncertain": return `The master stopped${reason ? `: ${reason}` : ""}.`;
+    case "failed": case "blocked": case "uncertain": {
+      const why = turn.reason ? STOPPED_WHY.get(turn.reason) : undefined;
+      return `The master stopped${why ? `: ${why}` : ""}.${code}`;
+    }
   }
 }
 
