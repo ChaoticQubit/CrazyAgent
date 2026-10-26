@@ -49,6 +49,7 @@ struct Process {
     stderr: Option<ChildStderr>,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
+    tools: bool,
     input: Receiver<Turn>,
     output: mpsc::Sender<ObservedEvent>,
     report: watch::Sender<Status>,
@@ -80,13 +81,16 @@ pub(super) fn run(
         stop,
         group,
     } = channels;
-    if let Err(error) = validate_command(&command, &profile, &home) {
-        report.send_replace(Status {
-            phase: Phase::Retired,
-            fault: Some(error),
-        });
-        return;
-    }
+    let tools = match validate_command(&command, &profile, &home) {
+        Ok(tools) => tools,
+        Err(error) => {
+            report.send_replace(Status {
+                phase: Phase::Retired,
+                fault: Some(error),
+            });
+            return;
+        }
+    };
     if stop.load(Ordering::Acquire) {
         report.send_replace(Status {
             phase: Phase::Retired,
@@ -105,6 +109,9 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if tools {
+        command.env("SHELL", super::TOOLS_SHELL);
+    }
     let mut command = match sandbox.wrap(&command) {
         Ok(command) => command,
         Err(_) => {
@@ -142,6 +149,7 @@ pub(super) fn run(
         stderr: None,
         protocol,
         limits,
+        tools,
         input,
         output,
         report,
@@ -373,12 +381,12 @@ impl Process {
                 if matches!(&event.kind, EventKind::TurnFinished { .. }) {
                     self.completed_turns += 1;
                 }
-                let native_tool = matches!(&event.kind, EventKind::ToolUse { .. });
+                let refused_tool = !self.tools && matches!(&event.kind, EventKind::ToolUse { .. });
                 if self.output.try_send(event.into()).is_err() {
                     self.fail(Fault::Host("claude_host_event_delivery_failed"));
                     return;
                 }
-                if native_tool {
+                if refused_tool {
                     self.fail(Fault::Host("claude_host_native_tools_unsupported"));
                     return;
                 }

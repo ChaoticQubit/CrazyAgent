@@ -576,3 +576,366 @@ fn claude_host_faults_become_plain_codes_a_log_can_name() {
         "claude_host_protocol_disconnected"
     );
 }
+
+fn arguments(command: &std::process::Command) -> Vec<String> {
+    command
+        .get_args()
+        .map(|arg| arg.to_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_delegate_server() {
+    let directories = Directories::new();
+    let engine = Path::new("/approved/crazyagent");
+    let drop = directories
+        .root
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let launch = |engine: &Path, drop: &Path| {
+        tools_launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &directories.home,
+            "native-default",
+            None,
+            MasterTools { engine, drop },
+        )
+    };
+    let command = launch(engine, &drop).unwrap();
+    let args = arguments(&command);
+    let config: serde_json::Value = serde_json::from_str(&args[12]).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({"mcpServers": {"crazyagent-team": {
+            "type": "stdio",
+            "command": "/approved/crazyagent",
+            "args": ["team-mcp", drop.to_str().unwrap()],
+        }}})
+    );
+    assert_eq!(
+        args,
+        [
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--tools",
+            "default",
+            "--permission-mode",
+            "bypassPermissions",
+            "--strict-mcp-config",
+            "--mcp-config",
+            args[12].as_str(),
+            "--setting-sources",
+            "",
+            "--settings",
+            "{\"disableAllHooks\":true}",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--max-turns",
+            "24",
+        ]
+    );
+    let environment: Vec<(&str, &str)> = command
+        .get_envs()
+        .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+        .collect();
+    let home = directories.home.to_str().unwrap();
+    assert_eq!(
+        environment,
+        [
+            ("CLAUDE_CONFIG_DIR", home),
+            ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home),
+            ("HOME", home),
+            ("SHELL", "/bin/zsh"),
+            ("TERM", "dumb"),
+        ]
+    );
+    assert_eq!(
+        arguments(&directories.command("native-default").unwrap()),
+        [
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{\"mcpServers\":{}}",
+            "--setting-sources",
+            "",
+            "--settings",
+            "{\"disableAllHooks\":true}",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--max-turns",
+            "1",
+        ]
+    );
+    let control = directories.root.join("drop\nfile.jsonl");
+    for (engine, drop) in [
+        (Path::new("crazyagent"), drop.as_path()),
+        (engine, Path::new("crazyagent-delegations.jsonl")),
+        (engine, control.as_path()),
+    ] {
+        assert_eq!(
+            launch(engine, drop).err().map(|error| error.0).as_deref(),
+            Some("claude_host_invalid_launch"),
+            "{engine:?} {drop:?}"
+        );
+    }
+}
+
+#[test]
+fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-tools-validate", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let tools = MasterTools {
+        engine: &engine,
+        drop: &drop,
+    };
+    let on = tools_launch_command(
+        Path::new("/approved/claude"),
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        tools,
+    )
+    .unwrap();
+    let off = launch_command(
+        Path::new("/approved/claude"),
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+    )
+    .unwrap();
+    assert_eq!(validate_command(&on, &profile, &home).ok(), Some(true));
+    assert_eq!(validate_command(&off, &profile, &home).ok(), Some(false));
+    let changed = |command: &std::process::Command, at: usize, value: &str| {
+        let mut args = arguments(command);
+        args[at] = value.to_owned();
+        let mut changed = std::process::Command::new(command.get_program());
+        changed
+            .args(args)
+            .current_dir(command.get_current_dir().unwrap());
+        changed.env_clear();
+        for (key, value) in command.get_envs() {
+            changed.env(key, value.unwrap());
+        }
+        changed
+    };
+    let widened = serde_json::json!({"mcpServers": {
+        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop]},
+        "extra": {"type": "stdio", "command": "/bin/sh", "args": []},
+    }})
+    .to_string();
+    let steps = arguments(&on).len() - 1;
+    for refused in [
+        changed(&on, 12, &widened),
+        changed(&on, steps, "99"),
+        changed(&on, 9, "default"),
+        changed(&off, 7, "default"),
+    ] {
+        assert!(
+            matches!(
+                validate_command(&refused, &profile, &home),
+                Err(Fault::Host(
+                    "claude_host_unapproved_command" | "claude_host_invalid_command"
+                ))
+            ),
+            "{:?}",
+            arguments(&refused)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-tools-shell", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in(
+        "claude",
+        "#!/bin/sh\nprintf 'shell=%s\\n' \"$(/usr/bin/printenv SHELL)\" > shell.txt\n/bin/cat > /dev/null\nexit 1\n",
+    );
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let command = tools_launch_command(
+        &harness,
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        MasterTools {
+            engine: &engine,
+            drop: &drop,
+        },
+    )
+    .unwrap();
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut claude = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: crate::protocol::SessionId::new("claude-tools-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: CredentialRef::new("tools-master-profile").unwrap(),
+            worktree_lease: RequestId::new("claude-tools-lease").unwrap(),
+        },
+        fixture.connection.account_ref.clone(),
+        ResourceBudget::unit(),
+    )
+    .await
+    .unwrap();
+    let seen = fixture.project.join("shell.txt");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&seen).map_or(true, |text| !text.ends_with('\n')) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fs::read_to_string(&seen).unwrap(), "shell=/bin/zsh\n");
+    claude.close().await.unwrap();
+}
+
+const TOOL_STEP_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"step-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-1","name":"Write","input":{"file_path":"note.txt"}}]}}'
+printf '%s\n' '{"type":"user","uuid":"step-2","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"written"}]}}'
+printf '%s\n' '{"type":"assistant","uuid":"step-3","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Runs one turn of the tool-step stand-in through a Claude master host built with tools on
+/// or off. Input: the fixture, the lease operation and sequence, and the switch. Output: the
+/// event kinds the host delivered, then its error code, or none when the turn finished.
+async fn tool_step_turn(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    operation: &str,
+    sequence: u64,
+    tools: bool,
+) -> (Vec<crate::adapters::events::EventKind>, Option<String>) {
+    use crate::adapters::events::EventKind;
+
+    let profile = fixture.lease(operation, sequence).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("claude", TOOL_STEP_HARNESS);
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let command = if tools {
+        tools_launch_command(
+            &harness,
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            MasterTools {
+                engine: &engine,
+                drop: &drop,
+            },
+        )
+    } else {
+        launch_command(&harness, &fixture.project, &home, "native-default", None)
+    }
+    .unwrap();
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut claude = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: crate::protocol::SessionId::new("claude-steps-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: CredentialRef::new("steps-master-profile").unwrap(),
+            worktree_lease: RequestId::new("claude-steps-lease").unwrap(),
+        },
+        fixture.connection.account_ref.clone(),
+        ResourceBudget::unit(),
+    )
+    .await
+    .unwrap();
+    claude
+        .start_turn(RequestId::new("claude-steps-turn").unwrap(), "Write a note")
+        .await
+        .unwrap();
+    let mut kinds = Vec::new();
+    let error = loop {
+        match claude.next_event().await {
+            Ok(event) => {
+                let finished = matches!(event.kind, EventKind::TurnFinished { .. });
+                kinds.push(event.kind);
+                if finished {
+                    break None;
+                }
+            }
+            Err(error) => break Some(error.0),
+        }
+    };
+    let _ = claude.close().await;
+    (kinds, error)
+}
+
+#[tokio::test]
+async fn a_tools_on_claude_master_passes_its_tool_steps_through_and_a_tools_off_one_refuses_them() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let (kinds, error) = tool_step_turn(&mut fixture, "claude-steps-on", 1, true).await;
+    assert_eq!(error, None, "{kinds:?}");
+    assert!(
+        kinds.iter().any(|kind| matches!(kind,
+            EventKind::ToolUse { name, parent_tool_use_id: None, .. } if name == "Write")),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| matches!(kind,
+            EventKind::AssistantText { text, parent_tool_use_id: None, .. } if text == "DONE")),
+        "{kinds:?}"
+    );
+    assert!(
+        matches!(
+            kinds.last(),
+            Some(EventKind::TurnFinished {
+                outcome: TurnOutcome::Success,
+                ..
+            })
+        ),
+        "{kinds:?}"
+    );
+    let (kinds, error) = tool_step_turn(&mut fixture, "claude-steps-off", 2, false).await;
+    assert_eq!(
+        error.as_deref(),
+        Some("claude_host_native_tools_unsupported"),
+        "{kinds:?}"
+    );
+    assert!(
+        !kinds
+            .iter()
+            .any(|kind| matches!(kind, EventKind::TurnFinished { .. })),
+        "{kinds:?}"
+    );
+}
