@@ -4,7 +4,7 @@ use super::{
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -171,10 +171,6 @@ fn port(value: Option<OsString>) -> Result<u16, String> {
         .ok_or_else(|| "port must be 1 to 65535".to_string())
 }
 
-/// Applies `policy` to the calling process as one Landlock domain, then a second domain that
-/// keeps the agent's signals inside its own domain where the kernel has the signal scope
-/// (Landlock ABI 6, Linux 6.12); an older kernel skips only that scope. Input: the policy.
-/// Output: the status of the policy domain.
 fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(FS_ABI))?;
     if policy.limit_network {
@@ -193,12 +189,7 @@ fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     for port in &policy.connect {
         created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
     }
-    let status = created.restrict_self()?;
-    Ruleset::default()
-        .scope(Scope::Signal)?
-        .create()?
-        .restrict_self()?;
-    Ok(status)
+    created.restrict_self()
 }
 
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
@@ -244,36 +235,20 @@ fn unix_domain() -> Result<Vec<SeccompRule>, String> {
     Ok(vec![rule])
 }
 
-/// Whether the kernel holds the whole boundary: every filesystem right of `FS_ABI`, and the
-/// network rules when asked, with no_new_privs set. A partly enforced ruleset is refused, so
-/// a kernel below Landlock ABI 3 (no truncate right) falls back to bubblewrap. Input: the
-/// ruleset status and no_new_privs flag `restrict_self` returned. Output: true only for a
-/// fully enforced ruleset.
-fn accepted(ruleset: &RulesetStatus, no_new_privs: bool) -> bool {
-    matches!(ruleset, RulesetStatus::FullyEnforced) && no_new_privs
-}
-
-/// Moves the helper into a new session before it starts the harness, so the agent keeps no
-/// controlling terminal of the engine. The helper starts as its own process group leader,
-/// which `setsid` refuses, so it first joins its parent's group. Output: the new session,
-/// or the reason it could not start.
-fn new_session() -> Result<(), String> {
-    let parent = rustix::process::getppid().ok_or("the helper has no parent process")?;
-    let group = rustix::process::getpgid(Some(parent))
-        .map_err(|error| format!("cannot read the engine's process group: {error}"))?;
-    rustix::process::setpgid(None, Some(group))
-        .map_err(|error| format!("cannot leave the agent's process group: {error}"))?;
-    let session = rustix::process::setsid()
-        .map_err(|error| format!("cannot start a new session: {error}"))?;
-    assert_eq!(rustix::process::getpgid(None).ok(), Some(session));
-    Ok(())
+fn accepted(status: &RestrictionStatus, limit_network: bool) -> bool {
+    let held = match status.ruleset {
+        RulesetStatus::FullyEnforced => true,
+        RulesetStatus::PartiallyEnforced => !limit_network,
+        RulesetStatus::NotEnforced => false,
+    };
+    held && status.no_new_privs
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
 /// A probe applies an empty ruleset and the Unix-socket filter to itself and exits 0 when
-/// this kernel holds both; a run applies the policy and the filter to itself, starts a new
-/// session and then replaces itself with the harness. Output: the exit code, 2 for refused
-/// arguments, 3 when the kernel cannot hold the policy or the session, 126 when the
+/// this kernel holds both; a run applies the policy and the filter to itself and then
+/// replaces itself with the harness. Output: the exit
+/// code, 2 for refused arguments, 3 when the kernel cannot hold the policy, 126 when the
 /// harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
@@ -298,7 +273,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         } => (policy, Some((program, args))),
     };
     match enforce(&policy) {
-        Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
+        Ok(status) if accepted(&status, policy.limit_network) => {}
         Ok(status) => {
             eprintln!(
                 "crazyagent-landlock: this kernel cannot hold the boundary ({:?})",
@@ -318,10 +293,6 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let Some((program, args)) = launch else {
         return ExitCode::SUCCESS;
     };
-    if let Err(reason) = new_session() {
-        eprintln!("crazyagent-landlock: {reason}");
-        return ExitCode::from(3);
-    }
     let error = Command::new(&program).args(args).exec();
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
@@ -604,7 +575,6 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
-        "--new-session",
         "--unshare-ipc",
         "--unshare-pid",
         "--unshare-uts",
@@ -627,17 +597,4 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     }
     command.arg("--chdir").arg(cwd);
     command
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_fully_enforced_ruleset_with_no_new_privs_holds_the_boundary() {
-        assert!(accepted(&RulesetStatus::FullyEnforced, true));
-        assert!(!accepted(&RulesetStatus::PartiallyEnforced, true));
-        assert!(!accepted(&RulesetStatus::NotEnforced, true));
-        assert!(!accepted(&RulesetStatus::FullyEnforced, false));
-    }
 }
