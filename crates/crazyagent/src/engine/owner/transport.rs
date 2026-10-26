@@ -52,6 +52,8 @@ mod native_auth_dispatch_diagnostic_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_lifetime_tests;
 #[cfg(all(test, unix))]
+mod native_auth_restart_tests;
+#[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
@@ -460,6 +462,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
+    reproof: tokio::sync::Mutex<()>,
 }
 
 impl Authority {
@@ -1167,6 +1170,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
+                reproof: tokio::sync::Mutex::new(()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
