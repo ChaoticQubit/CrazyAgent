@@ -987,6 +987,9 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
     let (notes, mut shell, mut connection, first) =
         conversation_with_a_settled_turn(&mut engine).await;
 
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Stopped"), "{shown}");
+    assert!(!shown.contains("e End conversation"), "{shown}");
     shell.key(Key::Esc);
     let shown = render(&mut shell, 100, 40);
     assert!(shown.contains("e End conversation"), "{shown}");

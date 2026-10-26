@@ -433,10 +433,10 @@ impl ProjectPage {
                     ));
                 }
             }
-            MasterOwnerAction::Close { .. } if self.waiting.is_some() => {
-                if self.master.open().is_err() {
-                    self.drop_waiting(ctx, "The master could not start.");
-                }
+            MasterOwnerAction::Close { .. }
+                if self.waiting.is_some() && self.master.open().is_err() =>
+            {
+                self.drop_waiting(ctx, "The master could not start.");
             }
             _ => {}
         }
