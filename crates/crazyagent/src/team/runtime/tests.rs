@@ -735,3 +735,108 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     );
     assert!(!fanout.with_extension("moved").exists());
 }
+
+#[test]
+fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    let secret = base.join("secret.md");
+    std::fs::write(&secret, "outside the project").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Panes".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![HarnessSlot {
+                harness: "codex".into(),
+                agents: 1,
+                tools: false,
+            }],
+            min_agents: 1,
+            max_agents: 2,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let brief = folder.join("context").join("brief.md");
+    let frame = || {
+        let (sent, got) = channel();
+        let setup = setup.clone();
+        std::thread::spawn(move || sent.send(framing(&setup, false)));
+        got.recv_timeout(Duration::from_secs(5)).ok()
+    };
+    let mut wrong = Vec::new();
+
+    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    let framed = frame();
+    if !framed
+        .as_deref()
+        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+    {
+        wrong.push(("normal", framed));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    std::os::unix::fs::symlink(&secret, &brief).unwrap();
+    let framed = frame();
+    if !framed.as_deref().is_some_and(|text| {
+        text.contains("context/brief.md is not a regular file") && !text.contains("outside")
+    }) {
+        wrong.push(("link", framed));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    assert!(
+        crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&brief))
+            .unwrap()
+            .success()
+    );
+    let framed = frame();
+    if !framed
+        .as_deref()
+        .is_some_and(|text| text.contains("context/brief.md is not a regular file"))
+    {
+        wrong.push(("fifo", framed));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    let huge = 64 * 1024 * 1024;
+    let mut text = String::from("# Panes\n\n");
+    text.push_str(&"a".repeat(2 * crate::project_setup::CONTEXT_CHUNK_BYTES));
+    std::fs::write(&brief, &text).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&brief)
+        .unwrap()
+        .set_len(huge)
+        .unwrap();
+    let framed = frame();
+    if !framed.as_deref().is_some_and(|text| {
+        text.contains("Project brief:\n# Panes\n\naaaa")
+            && text.contains(&format!("The brief is {huge} bytes"))
+            && text.len() < BRIEF_BYTES_MAX + 2048
+    }) {
+        wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    let framed = frame();
+    if !framed
+        .as_deref()
+        .is_some_and(|text| text.contains("context/brief.md is missing"))
+    {
+        wrong.push(("missing", framed));
+    }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
