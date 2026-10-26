@@ -236,9 +236,11 @@ pub(crate) fn apply(
         )
         .map_err(error)?;
     if count >= ENTRIES_MAX as i64 {
-        return Ok(Outcome::Rejected {
-            code: "conversation_capacity".into(),
-        });
+        tx.execute(
+            "DELETE FROM conversation_entries WHERE project=?1 AND event_cursor=(SELECT event_cursor FROM conversation_entries WHERE project=?1 AND NOT (kind='brief' AND brief_version=(SELECT MAX(brief_version) FROM conversation_entries WHERE project=?1 AND kind='brief')) ORDER BY event_cursor LIMIT 1)",
+            [project.as_str()],
+        )
+        .map_err(error)?;
     }
     let next = revision
         .checked_add(1)

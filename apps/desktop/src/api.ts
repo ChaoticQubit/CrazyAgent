@@ -37,6 +37,8 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  approved_accounts_limit: "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
+  allowed_destinations_limit: "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
   model_access_duplicate: "This already exists.",
   model_access_missing: "This no longer exists.",
   invalid_model_access: "The engine didn't accept this pool. Check its accounts and save again.",
