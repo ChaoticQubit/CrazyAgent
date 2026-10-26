@@ -67,7 +67,7 @@ struct StoredFence {
 
 struct HostCase {
     db: Connection,
-    lock: File,
+    lock: super::EngineLock,
     custody: Result<NativeProfileCustody, EngineError>,
     sources: settings::SettingsSources,
     config: EffectiveConfig,
