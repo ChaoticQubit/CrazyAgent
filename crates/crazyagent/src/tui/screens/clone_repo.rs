@@ -128,7 +128,7 @@ impl CloneRepo {
                 self.pending = Some(IntakeQuery::GitHubStatus);
                 ctx.request(Request::Intake(Box::new(IntakeJob::GitHubToken(secret))));
             }
-            Err(_) => self.problem = Some(copy("github_token_blank").into()),
+            Err(_) => self.problem = Some(copy("github_token_blank")),
         }
     }
 
@@ -434,9 +434,9 @@ impl Screen for CloneRepo {
             }
             (IntakeQuery::GitHubRepos { .. }, Err(code)) if answered => {
                 self.listing = Load::Failed(code.clone());
-                self.problem = Some(copy(code).into());
+                self.problem = Some(copy(code));
             }
-            (_, Err(code)) if answered => self.problem = Some(copy(code).into()),
+            (_, Err(code)) if answered => self.problem = Some(copy(code)),
             _ => {}
         }
         Flow::Handled

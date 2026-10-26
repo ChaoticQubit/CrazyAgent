@@ -12,6 +12,7 @@ use crate::project_setup::{
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::tui::seam::PoolScope;
+use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
@@ -1772,7 +1773,7 @@ pub(in crate::tui) fn research_kind(path: &str) -> Option<ResearchKind> {
 
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
-/// Returns what happened and what to do.
+/// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
 pub(in crate::tui) fn plain_problem(code: &str) -> String {
     match code {
         "research_report_missing" => {
@@ -1787,12 +1788,16 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
+        "project_folder_unwritable" => {
+            "CrazyAgent can't write in the project folder. Check its permissions."
+        }
+        "project_folder_unavailable" => "Documents can't be added on this system yet.",
         "project_setup_missing" => {
             "This project was made before project setup. Its context is not available."
         }
         "trusted_connection_unavailable" => "Not connected to the engine. Retrying.",
         "pool_project_limit" => "That pool already serves 64 projects. Pick another pool.",
-        "pool_not_found" => "That pool no longer exists. Pick another pool.",
+        "pool_not_found" | "pool_missing" => "That pool no longer exists. Pick another pool.",
         "pool_changed" => "The pools changed meanwhile. Try again.",
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
@@ -1835,7 +1840,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
-        _ => "That didn't work. Try again.",
+        _ => return coded("That didn't work. Try again.", code),
     }
     .into()
 }

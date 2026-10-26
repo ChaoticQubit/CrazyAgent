@@ -294,11 +294,11 @@ impl OnboardingPage {
                         self.poll(ctx);
                     }
                     Ok(_) => {
-                        self.problem = Some(copy("intake_change_outcome_unknown").into());
+                        self.problem = Some(copy("intake_change_outcome_unknown"));
                         self.phase = Phase::Pool { selected: 0 };
                     }
                     Err(code) => {
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         self.phase = Phase::Pool { selected: 0 };
                     }
                 }
@@ -379,7 +379,7 @@ impl OnboardingPage {
                             Ok(SetupView::Changed(OwnerResult::Rejected { code })) => code.as_str(),
                             Ok(_) => "intake_change_outcome_unknown",
                         };
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         let mut review = review;
                         if code == "stale_revision" {
                             Self::read_revision(&project, &mut review, ctx);

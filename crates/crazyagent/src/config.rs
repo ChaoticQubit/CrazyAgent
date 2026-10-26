@@ -663,6 +663,13 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "allowed_destinations_limit" => Some(
             "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
         ),
+        "account_not_found" => Some("This account no longer exists. Refresh and try again."),
+        "model_access_read_only" => {
+            Some("Settings are read-only in this engine. Start it with writable settings.")
+        }
+        "model_access_edit_bounds" => {
+            Some("This change is too large to save at once. Make it in smaller steps.")
+        }
         _ => None,
     }
 }
@@ -1381,6 +1388,14 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
             plain_problem("pool_member_limit"),
             Some("A pool can hold up to 15 accounts")
         );
+        for code in [
+            "account_not_found",
+            "model_access_read_only",
+            "model_access_edit_bounds",
+        ] {
+            let sentence = plain_problem(code).unwrap();
+            assert!(sentence.ends_with('.') && !sentence.contains('_'), "{code}");
+        }
     }
 
     #[test]

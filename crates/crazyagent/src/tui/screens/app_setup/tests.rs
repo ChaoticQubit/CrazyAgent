@@ -380,6 +380,56 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
 }
 
 #[test]
+fn a_failed_install_shows_the_sentence_the_engine_sent() {
+    let mut shell = first_run(120, 36);
+    shell.key(Key::Enter);
+    jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    let mut finished = installed_status();
+    finished.dependencies[0].state = DependencyState::Failed {
+        reason: crate::setup::plain_reason("setup_homebrew_missing").to_owned(),
+    };
+    finished.pack[2].state = PackState::Failed {
+        reason: crate::setup::plain_reason("pack_fetch_failed").to_owned(),
+    };
+    shell.arrive(event(AppSetupEvent::Status(Ok(finished))));
+    let rows = render(&mut shell, 120, 36);
+    find(&rows, "Homebrew is not installed. Install tmux yourself");
+    assert!(
+        !rows.iter().any(|row| row.contains("Something went wrong")),
+        "{}",
+        rows.join("\n")
+    );
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(
+        &render(&mut shell, 120, 36),
+        "caveman: The source could not be downloaded.",
+    );
+}
+
+#[test]
+fn a_setup_problem_without_a_sentence_names_its_code() {
+    assert_eq!(
+        setup_plain("setup_code_nobody_uses"),
+        "Something went wrong during setup. (code: setup_code_nobody_uses)"
+    );
+    assert_eq!(
+        setup_plain("Permission denied (os error 13)"),
+        "Something went wrong during setup. (code: engine_error_unplain)"
+    );
+    assert_eq!(
+        setup_plain("github_config_unsafe"),
+        "The GitHub settings file is unreadable or not private to you."
+    );
+    assert_eq!(
+        setup_plain("home_move_nested"),
+        crate::projects_home::plain_problem("home_move_nested").unwrap()
+    );
+}
+
+#[test]
 fn a_tool_still_being_checked_and_a_late_engine_answer_read_plainly() {
     let mut shell = first_run(80, 24);
     let mut status = first_run_status();
