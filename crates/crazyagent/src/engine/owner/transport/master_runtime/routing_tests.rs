@@ -911,6 +911,23 @@ impl Fixture {
         tx.commit().unwrap();
     }
 
+    fn rejected(&self, connection: &str) -> bool {
+        let config = crate::config::resolve_config(
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+        )
+        .unwrap();
+        let model = config
+            .settings
+            .model_access
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|item| item.id == reference(connection))
+            .unwrap();
+        crate::model_gateway::sign_in_rejected(&self.db(), &model).unwrap()
+    }
+
     fn db(&self) -> Connection {
         let db = Connection::open_with_flags(
             self.root.path().join("engine.db"),
@@ -1824,20 +1841,21 @@ async fn a_rejected_sign_in_is_not_paused_and_hands_the_next_turn_to_the_next_ac
 }
 
 #[tokio::test]
-async fn a_turn_whose_credential_copy_fails_hands_the_next_turn_to_the_next_account() {
+async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_next_turn_on() {
     let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
     case.sign_in("claude-a", true).await;
     case.sign_in("claude-b", true).await;
     let first = case.prepared(&case.turn.id).await;
     assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    let unavailable = EngineError("native_profile_credential_unavailable".into());
     let result = case
         .command(MasterRuntimeCommand::Fail {
             host: case.runtime().identity(),
             project_id: case.session.project_id.clone(),
             session_id: case.session.session_id.clone(),
             turn_id: case.turn.id.clone(),
-            reason: MasterReason::InvalidAuthentication,
-            cause: "native_profile_credential_unavailable".into(),
+            reason: reason_for_error(&unavailable),
+            cause: unavailable.0.clone(),
         })
         .await
         .unwrap();
@@ -1845,9 +1863,15 @@ async fn a_turn_whose_credential_copy_fails_hands_the_next_turn_to_the_next_acco
         panic!("the turn whose credential copy failed did not settle");
     };
     assert_eq!(failed.phase, MasterTurnPhase::Failed);
-    assert_eq!(failed.reason, Some(MasterReason::InvalidAuthentication));
+    assert_eq!(failed.reason, Some(MasterReason::ReadinessUnknown));
+    assert_eq!(
+        failed.cause.as_deref(),
+        Some("native_profile_credential_unavailable")
+    );
     drop(first);
     assert_eq!(case.paused_until("claude-a"), None);
+    assert!(!case.rejected("claude-a"));
+    assert_eq!(case.stale().await, vec![reference("claude-a")]);
     let second = case.submit("Summarize what we discussed so far.").await;
     let next = case.prepared(&second).await;
     assert_eq!(next.attempt.connection.id, reference("claude-b"));

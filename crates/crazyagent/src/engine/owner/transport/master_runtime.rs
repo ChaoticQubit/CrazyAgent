@@ -817,10 +817,12 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
 fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
-        "gateway_health_unknown" | "master_sign_in_missing" => MasterReason::ReadinessUnknown,
-        "gateway_invalid_authentication"
-        | "native_profile_credential_unavailable"
-        | "native_profile_credential_expiring" => MasterReason::InvalidAuthentication,
+        "gateway_health_unknown"
+        | "master_sign_in_missing"
+        | "native_profile_credential_unavailable" => MasterReason::ReadinessUnknown,
+        "gateway_invalid_authentication" | "native_profile_credential_expiring" => {
+            MasterReason::InvalidAuthentication
+        }
         "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,

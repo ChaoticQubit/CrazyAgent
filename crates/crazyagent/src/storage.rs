@@ -34,6 +34,8 @@ pub(crate) mod plugins;
 pub(crate) mod setup;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
+#[cfg(test)]
+pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
 mod model_access_page_tests;

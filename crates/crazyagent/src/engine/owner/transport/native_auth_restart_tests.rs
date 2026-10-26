@@ -181,28 +181,41 @@ impl Restart {
     }
 
     fn model(&self) -> crate::config::ModelConnection {
+        self.model_of(&connection())
+    }
+
+    fn model_of(&self, id: &CredentialRef) -> crate::config::ModelConnection {
         self.config()
             .settings
             .model_access
             .unwrap()
             .connections
             .into_iter()
-            .find(|item| item.id == connection())
+            .find(|item| &item.id == id)
             .unwrap()
     }
 
     fn hold(&self) {
+        self.reject(&self.model());
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        database
+            .execute(
+                "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
+                 ON CONFLICT(connection) DO UPDATE SET until_ms=excluded.until_ms",
+                rusqlite::params![connection().as_str(), now_ms() + 600_000],
+            )
+            .unwrap();
+    }
+
+    /// Records the provider's rejection of one account's sign-in as its newest gateway
+    /// observation, with no pause. Input: the account's connection. Output: none.
+    fn reject(&self, model: &crate::config::ModelConnection) {
         let now = now_ms();
         let config = self.config();
         let mut database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
         database.busy_timeout(Duration::from_secs(2)).unwrap();
         let tx = database.transaction().unwrap();
-        tx.execute(
-            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
-             ON CONFLICT(connection) DO UPDATE SET until_ms=excluded.until_ms",
-            rusqlite::params![connection().as_str(), now + 600_000],
-        )
-        .unwrap();
         let sequence: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(sequence),0) FROM model_gateway_observations",
@@ -215,7 +228,7 @@ impl Restart {
             &config,
             &crate::model_gateway::Observation {
                 id: request(&format!("restart-rejected-{sequence}")),
-                connection: self.model(),
+                connection: model.clone(),
                 sequence: u64::try_from(sequence).unwrap() + 1,
                 observed_at_ms: u64::try_from(now).unwrap(),
                 valid_until_ms: u64::try_from(now).unwrap() + 60_000,
@@ -224,6 +237,34 @@ impl Restart {
         )
         .unwrap();
         tx.commit().unwrap();
+    }
+
+    /// Holds the account's current sign-in for a check before its next use, the way a
+    /// master turn does when this engine could not hand out its credential. Input: the
+    /// run the account was signed in on. Output: none.
+    fn doubt(&self, run: &Run) {
+        let mut database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        let tx = database.transaction().unwrap();
+        crate::storage::doubt_sign_in(&tx, &run.handle.identity(), &self.model()).unwrap();
+        tx.commit().unwrap();
+    }
+
+    /// Picks the research account for project-z from the engine's own settings, sign-ins
+    /// and observations, the pick every research launch uses. Output: the pick.
+    fn research_pick(&self) -> crate::research::accounts::AccountPick {
+        let projects = self.root.path().join("projects");
+        std::fs::create_dir_all(projects.join("project-z")).unwrap();
+        crate::research::accounts::SettingsResolver::new(
+            &self.global,
+            &self.project,
+            &projects,
+            &self.root.path().join("engine.db"),
+        )
+        .unwrap()
+        .resolve("project-z", "claude")
+        .unwrap()
+        .1
     }
 
     /// Holds the account the way a running agent or research run does, with a shared
@@ -554,7 +595,7 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
         let second = restart.start().await;
         assert_eq!(
             settled(&restart, &second, AccountStatus::NotSignedIn).await,
-            Ok(())
+            Err("master_sign_in_rejected".into())
         );
         assert_eq!(
             restart.held(),
@@ -715,4 +756,65 @@ async fn an_owner_check_of_an_account_an_agent_is_using_runs_beside_the_agent() 
     })
     .await
     .expect("the check-beside-agent case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_whose_credential_the_engine_could_not_use_is_checked_before_its_next_use() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        run.sign_in(&restart).await;
+        assert_eq!(restart.launch(), Ok(()));
+        restart.doubt(&run);
+        let doubted = run.account().await;
+        assert_eq!(
+            (doubted.status, doubted.status_label.as_str()),
+            (AccountStatus::NotSignedIn, "Not signed in")
+        );
+        assert_eq!(restart.launch(), Err("master_authentication_stale".into()));
+        assert_eq!(
+            restart.held(),
+            (false, crate::model_gateway::Health::Unknown)
+        );
+        run.authenticate(
+            &restart,
+            connection(),
+            "doubted-check",
+            NativeAuthMethod::ClaudeExisting,
+        )
+        .await;
+        assert_eq!(run.status().await, AccountStatus::SignedIn);
+        assert_eq!(restart.launch(), Ok(()));
+        run.stop().await;
+    })
+    .await
+    .expect("the doubted account case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn research_passes_over_an_account_whose_sign_in_was_rejected_to_the_next_one() {
+    use crate::research::accounts::AccountPick;
+    let restart = Restart::with(TWO);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let first = CredentialRef::new("connection-y").unwrap();
+        run.sign_in_to(&restart, first.clone(), "research-sign-in-y")
+            .await;
+        run.sign_in(&restart).await;
+        let picked = |pick: AccountPick| match pick {
+            AccountPick::Account { connection, .. } => Some(connection),
+            _ => None,
+        };
+        assert_eq!(picked(restart.research_pick()), Some(first.clone()));
+        restart.reject(&restart.model_of(&first));
+        assert_eq!(picked(restart.research_pick()), Some(connection()));
+        restart.reject(&restart.model());
+        assert!(matches!(
+            restart.research_pick(),
+            AccountPick::NoUsableAccount
+        ));
+        run.stop().await;
+    })
+    .await
+    .expect("the research rejection case exceeded 60 seconds");
 }

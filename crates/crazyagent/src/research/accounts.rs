@@ -346,10 +346,11 @@ fn stored_folder(database: &Connection, project: &str) -> Option<PathBuf> {
 }
 
 /// Proves a managed connection is signed in for the running engine with the
-/// same check every master and team turn uses. Takes the engine database and
-/// the connection. Returns the active engine host and the sign-in, or a plain
-/// code such as `research_engine_not_ready`, `master_authentication_stale` or
-/// `native_profile_in_use`.
+/// same check every master and team turn uses, and that the provider did not
+/// reject that sign-in, as the master's account pick requires. Takes the engine
+/// database and the connection. Returns the active engine host and the sign-in,
+/// or a plain code such as `research_engine_not_ready`,
+/// `master_authentication_stale`, `master_sign_in_rejected` or `native_profile_in_use`.
 pub(crate) fn managed_sign_in(
     database: &Connection,
     connection: &ModelConnection,
@@ -373,6 +374,9 @@ pub(crate) fn managed_sign_in(
         .ok_or("research_engine_not_ready")?;
     let fact = crate::storage::native_sign_in(&tx, &host, connection, None)
         .map_err(|problem| problem.0)?;
+    if crate::model_gateway::sign_in_rejected(&tx, connection).map_err(|problem| problem.0)? {
+        return Err("master_sign_in_rejected".into());
+    }
     drop(tx);
     assert_eq!(fact.binding.engine_epoch, host.engine_epoch);
     assert_eq!(fact.binding.connection, *connection);

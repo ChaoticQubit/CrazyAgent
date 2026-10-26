@@ -509,7 +509,11 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
             owner_id TEXT NOT NULL CHECK(length(owner_id)=64),
             owner_epoch INTEGER NOT NULL CHECK(owner_epoch>0)
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS native_auth_one_flow ON native_auth_fences((1));",
+        CREATE UNIQUE INDEX IF NOT EXISTS native_auth_one_flow ON native_auth_fences((1));
+        CREATE TABLE IF NOT EXISTS native_auth_doubts (
+            profile_key TEXT PRIMARY KEY NOT NULL CHECK(length(profile_key)=64),
+            generation INTEGER NOT NULL CHECK(generation>0)
+        );",
     )
     .map_err(error)
 }
@@ -1084,10 +1088,13 @@ pub(crate) fn stale_sign_ins(
         {
             continue;
         }
-        let Some((earlier, generation)) = earlier_run(&tx, connection, host)? else {
-            continue;
+        let due = match earlier_run(&tx, connection, host)? {
+            Some((earlier, generation)) => {
+                master_session::sign_in_at(&tx, &earlier, connection, generation).is_ok()
+            }
+            None => doubted_here(&tx, connection, host)?,
         };
-        if master_session::sign_in_at(&tx, &earlier, connection, generation).is_err() {
+        if !due {
             continue;
         }
         starts.push(NativeAuthStart {
@@ -1162,6 +1169,80 @@ fn never_ran(fact: &NativeAuthFact) -> bool {
                 method: NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting
             }
         )
+}
+
+/// Holds a connection's current sign-in for an account check before its next use, after
+/// this engine could not use it locally (its credential could not be read or handed out),
+/// which is no word from the provider; any newer sign-in or check of the account lifts it.
+/// Inputs: the transaction, the running host and the connection. Output: none; nothing is
+/// held when the connection has no sign-in that passes the launch check.
+pub(crate) fn doubt_sign_in(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &crate::config::ModelConnection,
+) -> Result<(), EngineError> {
+    let Ok(fact) = master_session::native_sign_in(tx, host, connection, None) else {
+        return Ok(());
+    };
+    let generation =
+        i64::try_from(fact.generation).map_err(|_| error("native_auth_generation_bounds"))?;
+    tx.execute(
+        "INSERT INTO native_auth_doubts(profile_key,generation) VALUES (?1,?2)
+         ON CONFLICT(profile_key) DO UPDATE SET generation=excluded.generation",
+        params![profile_key(connection)?, generation],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+/// Tells whether a sign-in is held for an account check before its next use.
+/// Inputs: the database, the connection and the sign-in's generation. Output: true while
+/// that generation is the one held.
+pub(super) fn doubted(
+    db: &Connection,
+    connection: &crate::config::ModelConnection,
+    generation: u64,
+) -> Result<bool, EngineError> {
+    let generation =
+        i64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_doubts WHERE profile_key=?1 AND generation=?2)",
+        params![profile_key(connection)?, generation],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Tells whether a connection's newest sign-in was proved under this run and is held for
+/// an account check. Inputs: the transaction, the connection and the running host.
+/// Output: true when it is, so the next re-proof checks it.
+fn doubted_here(
+    tx: &Transaction<'_>,
+    connection: &crate::config::ModelConnection,
+    host: &HostStamp,
+) -> Result<bool, EngineError> {
+    let key = profile_key(connection)?;
+    let held: Option<i64> = tx
+        .query_row(
+            "SELECT generation FROM native_auth_doubts WHERE profile_key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let newest: Option<i64> = tx
+        .query_row(
+            "SELECT MAX(generation) FROM native_auth_operations WHERE profile_key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let Some(generation) = held.filter(|held| Some(*held) == newest) else {
+        return Ok(false);
+    };
+    let generation =
+        u64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?;
+    Ok(master_session::sign_in_at(tx, host, connection, generation).is_ok())
 }
 
 fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, EngineError> {
