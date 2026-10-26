@@ -68,6 +68,66 @@ fn rate_limit_wording_is_recognized_and_other_errors_are_not() {
     }
 }
 
+/// The strings are Claude Code 2.1.309's own, from its shipped bundle
+/// `/opt/homebrew/Caskroom/claude-code@latest/2.1.309/claude`: the limit-line prefixes and
+/// model-credit pattern its `Bii` check uses, whole limit lines, the limit names its
+/// `You've hit your ${name}` line takes, and the warning and notice prefixes it keeps
+/// apart from limits.
+#[test]
+fn claude_code_limit_lines_are_rate_limits_and_its_warnings_are_not() {
+    let prefixes = [
+        "You've hit your",
+        "You've reached your",
+        "You're out of usage credits",
+        "Your org is out of usage \u{b7} add funds to continue",
+        "Your org is out of usage \u{b7} contact your admin",
+        "Your seat type doesn't include usage credits",
+        "Your seat type doesn't include usage",
+        "Your usage allocation has been disabled by your admin",
+        "Your group's usage limit is set to $0",
+        "Fable 5 requires usage credits",
+        "You're out of extra usage",
+        "Your seat type doesn't include extra usage",
+    ];
+    let lines = [
+        "You've hit your monthly spend limit.",
+        "You've hit your channel's monthly spend limit.",
+        "You've hit your team's shared budget. /model to switch models.",
+        "You've reached your Fable limit.",
+        "You've hit your fast limit",
+        "Fable 5 requires usage credits.",
+        "Sonnet requires usage credits.",
+        "API Error: Request rejected (429)",
+    ];
+    let names = [
+        "session limit",
+        "weekly limit",
+        "Opus limit",
+        "Sonnet limit",
+        "Fable limit",
+        "usage credit limit",
+    ];
+    for message in prefixes.into_iter().chain(lines) {
+        assert!(rate_limited(message), "{message}");
+    }
+    for name in names {
+        let line = format!("You've hit your {name}");
+        assert!(rate_limited(&line), "{line}");
+    }
+    for message in [
+        "You've used",
+        "You're close to",
+        "You're now using usage credits",
+        "Context limit reached",
+        "API Error: Request was aborted.",
+        "API Error: 400 due to tool use concurrency issues.",
+        "Claude Opus is not available with the Claude Pro plan.",
+        "Sonnet requires usage credits",
+    ] {
+        assert!(!rate_limited(message), "{message}");
+    }
+}
+
 #[test]
 fn claude_rate_limit_errors_and_rejections_report_a_rate_limited_turn_error() {
     let mut driver = claude_driver();
