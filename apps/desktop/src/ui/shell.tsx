@@ -5,7 +5,7 @@ import { formatRoute, type Route } from "./router";
 
 export { BrandMark };
 
-export type EngineState = "connecting" | "running" | "down";
+export type EngineState = "connecting" | "running" | "down" | "outdated";
 
 export interface SidebarProject {
   id: string;

@@ -13,7 +13,8 @@ const idle = { kind: "idle" };
 const run = (events, from = idle) => events.reduce(reduceUpdate, from);
 const forbidden = () => { throw new Error("static rendering must not call the app"); };
 const props = (patch = {}) => ({ settings: { kind: "ok", value: { current_version: "0.2.0-dev.202610241200", channel: "dev" } }, phase: idle, channelBusy: false, channelProblem: "",
-  cli: { kind: "idle" }, onChannel: forbidden, onCheck: forbidden, onInstall: forbidden, onRestart: forbidden, onLinkCli: forbidden, onRetry: forbidden, ...patch });
+  cli: { kind: "idle" }, onChannel: forbidden, onCheck: forbidden, onInstall: forbidden, onRestart: forbidden, onLinkCli: forbidden, onRetry: forbidden,
+  engine: { kind: "ok", value: { engine: "0.2.0-dev.202610241200", app: "0.2.0-dev.202610241200", message: null } }, engineRestart: { kind: "idle" }, onRestartEngine: forbidden, ...patch });
 const render = (patch) => renderToStaticMarkup(createElement(UpdatesView, props(patch)));
 
 test("a check finds a newer release or says the app is current", () => {
@@ -132,4 +133,23 @@ test("the Updates page stays plain while loading, missing from the build or fail
   assert.match(render({ settings: { kind: "error", code: "update_channel_invalid", message: "The saved update channel isn't valid." } }), /saved update channel/);
   assert.match(render({ cli: { kind: "done", message: "Linked crazyagent into ~/.local/bin." } }), /Linked crazyagent/);
   assert.match(render({ cli: { kind: "failed", message: "The command line tool couldn't be installed." } }), /role="alert"/);
+});
+
+test("Version and channel names the engine's version beside the app's and offers Restart engine only when they differ", () => {
+  const same = render();
+  assert.match(same, /Engine 0\.2\.0-dev\.202610241200/);
+  assert.doesNotMatch(same, /Restart engine/);
+
+  const message = "Engine is version 0.1.0, this app is 0.2.0-dev.202610241200; restart the engine";
+  const older = render({ engine: { kind: "ok", value: { engine: "0.1.0", app: "0.2.0-dev.202610241200", message } } });
+  assert.match(older, /Engine 0\.1\.0/);
+  assert.match(older, /Engine is version 0\.1\.0, this app is 0\.2\.0-dev\.202610241200; restart the engine/);
+  assert.match(older, />Restart engine<\/button>/);
+  assert.match(render({ engine: { kind: "ok", value: { engine: "0.1.0", app: "0.2.0", message } }, engineRestart: { kind: "busy" } }), /Restarting\.\.\./);
+  assert.match(render({ engine: { kind: "ok", value: { engine: "0.1.0", app: "0.2.0", message } }, engineRestart: { kind: "failed", message: "CrazyAgent couldn't set up its background engine. Try again." } }),
+    /role="alert"[^>]*>CrazyAgent couldn&#x27;t set up its background engine/);
+
+  assert.match(render({ engine: { kind: "ok", value: { engine: null, app: "0.2.0", message: null } } }), /The engine isn&#x27;t answering\./);
+  assert.doesNotMatch(render({ engine: { kind: "loading" } }), /Engine 0/);
+  assert.match(render({ engine: { kind: "not_ready" } }), /CrazyAgent 0\.2\.0-dev/);
 });

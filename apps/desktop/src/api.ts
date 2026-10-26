@@ -17,6 +17,11 @@ const ACCOUNT_PAGES_MAX = 100;
 
 const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
+  engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
+  engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
+  engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
   pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   stale_revision: "This changed since you opened it. Review and save again.",
@@ -166,6 +171,26 @@ export interface ConnectionStatus {
  * change is still unconfirmed. */
 export function connect(): Promise<Result<ConnectionStatus>> {
   return call<ConnectionStatus>("desktop_connect");
+}
+
+/** The default engine's version beside this app's, and the plain message asking for a restart
+ * when they differ. `engine` is null when no engine answers. */
+export interface EngineVersions {
+  engine: string | null;
+  app: string;
+  message: string | null;
+}
+
+/** Reads the default engine's version and this app's. Output: both versions and, when they
+ * differ, the message to show, or a plain error. */
+export function engineVersions(): Promise<Result<EngineVersions>> {
+  return call<EngineVersions>("desktop_engine_versions");
+}
+
+/** Restarts the default engine on this app's own version through its login service, then
+ * reconnects this window. Output: the new connection, or a plain error. */
+export function restartEngine(): Promise<Result<ConnectionStatus>> {
+  return call<ConnectionStatus>("desktop_restart_engine");
 }
 
 /** Reads the current engine connection. Output: connection and unconfirmed-change flags. */

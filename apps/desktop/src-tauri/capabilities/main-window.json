@@ -138,6 +138,8 @@
     "allow-desktop-check-update",
     "allow-desktop-install-update",
     "allow-desktop-restart-app",
-    "allow-desktop-link-cli"
+    "allow-desktop-link-cli",
+    "allow-desktop-engine-versions",
+    "allow-desktop-restart-engine"
   ]
 }
