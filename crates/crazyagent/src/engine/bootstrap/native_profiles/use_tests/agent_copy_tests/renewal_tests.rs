@@ -47,28 +47,53 @@ fn a_lapsed_codex_record_is_renewed_by_the_real_codex_in_the_managed_home_before
 }
 
 #[test]
-fn a_lapsed_claude_record_is_renewed_by_the_real_claude_in_the_managed_home_before_it_is_refused() {
+fn a_lapsed_claude_record_whose_refresh_the_provider_refuses_reads_as_a_revoked_sign_in() {
     let mut case = UseCase::with_harness("claude-code");
     let home = case.home();
-    let record = claude_record((now() - 60) * 1000);
-    let (keychain, service) = claude_keychain(&home, &record);
-    keychain.add(
-        &std::env::var("USER").unwrap(),
-        &service,
-        &record.to_string(),
-    );
+    let (keychain, service) = claude_keychain(&home, &claude_record((now() - 60) * 1000));
     let agent = agent_home(&case);
     let guard = execution(&mut case);
     assert_eq!(
         refused(guard.hand_to_agent(&agent, TURN, &claude())),
-        "native_profile_credential_expiring"
+        "native_profile_sign_in_revoked"
     );
-    assert!(
-        home.join(".claude.json").is_file(),
-        "the real claude never ran in the managed home: {:?}",
-        entries(&home)
+    let stored: Value = serde_json::from_str(&keychain.find(&service)).unwrap();
+    assert_eq!(
+        (
+            &stored["claudeAiOauth"]["accessToken"],
+            &stored["claudeAiOauth"]["refreshToken"],
+            &stored["claudeAiOauth"]["expiresAt"]
+        ),
+        (&json!(""), &json!(""), &json!(0)),
+        "the real claude did not end the sign-in the token endpoint refused"
     );
     assert!(entries(&agent).is_empty());
+}
+
+#[test]
+fn a_claude_record_outside_claudes_refresh_window_is_copied_without_running_claude() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 10 * 60) * 1000;
+    let (keychain, service) = claude_keychain(&home, &claude_record(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard.hand_to_agent(&agent, TURN, &claude()).unwrap();
+    assert_eq!(
+        read_json(&agent.join(".credentials.json"))["claudeAiOauth"]["expiresAt"],
+        expires
+    );
+    assert!(
+        !home.join(".claude.json").exists(),
+        "claude ran although it would not refresh yet: {:?}",
+        entries(&home)
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&keychain.find(&service)).unwrap(),
+        claude_record(expires)
+    );
+    drop(copy);
+    drop(guard);
 }
 
 #[test]
@@ -230,4 +255,44 @@ fn a_codex_master_reads_its_sign_in_from_the_managed_auth_file_inside_a_keychain
     assert!(file.contains("Logged in using ChatGPT"), "{file}");
     let keyring = codex_sign_in("keyring");
     assert!(!keyring.contains("Logged in using ChatGPT"), "{keyring}");
+}
+
+#[test]
+#[ignore = "live: renews a real managed Claude account; the leader runs it with CRAZYAGENT_LIVE_CLAUDE_PROFILE"]
+fn live_a_lapsing_managed_claude_account_is_renewed_and_its_expiry_moves() {
+    let profile = PathBuf::from(
+        std::env::var_os("CRAZYAGENT_LIVE_CLAUDE_PROFILE")
+            .expect("CRAZYAGENT_LIVE_CLAUDE_PROFILE names the managed profile folder holding home"),
+    );
+    let renewal = renewal::Renewal::of_profile(agent_copy::Harness::Claude, &claude(), &profile);
+    let left = |expires: Duration| {
+        i128::from(expires.as_secs()) - i128::from(renewal::since_epoch().unwrap().as_secs())
+    };
+    let before = match renewal.record() {
+        Ok(record) => record.expires,
+        Err(error) => panic!("the account record cannot be renewed: {}", error.0),
+    };
+    assert!(
+        before <= renewal::since_epoch().unwrap() + crate::adapters::claude::REFRESH_WINDOW,
+        "the token lapses in {} s, outside Claude Code's 5-minute refresh window, so no renewal can be shown now",
+        left(before)
+    );
+    let started = Instant::now();
+    let after = renewal.renew(before);
+    let elapsed = started.elapsed();
+    match after {
+        Ok(record) => {
+            println!(
+                "renewal took {elapsed:?}; the token lapsed in {} s before and lapses in {} s now",
+                left(before),
+                left(record.expires)
+            );
+            assert!(
+                record.expires > before + Duration::from_secs(3600),
+                "the record's expiry did not move: it lapses in {} s (native_profile_credential_expiring)",
+                left(record.expires)
+            );
+        }
+        Err(error) => panic!("the renewal ended with {} after {elapsed:?}", error.0),
+    }
 }

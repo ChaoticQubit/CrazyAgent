@@ -519,6 +519,21 @@ impl Run {
         name: &str,
         method: NativeAuthMethod,
     ) -> NativeAuthFact {
+        let fact = self.finished(restart, id, name, method).await;
+        assert_eq!(fact.phase, NativeAuthPhase::AuthenticatedObserved);
+        fact
+    }
+
+    /// Runs one real sign-in operation on the account through the owner and follows it
+    /// until it finishes, whatever it observed. Inputs: the case, the account, the request
+    /// name and the method. Output: the final fact.
+    async fn finished(
+        &self,
+        restart: &Restart,
+        id: CredentialRef,
+        name: &str,
+        method: NativeAuthMethod,
+    ) -> NativeAuthFact {
         let scope = self.scope_of(restart.config().id, id).await;
         let client = self.client();
         let started = client
@@ -539,7 +554,6 @@ impl Run {
                 .await
                 .unwrap();
             if !read.fact.phase.unfinished() {
-                assert_eq!(read.fact.phase, NativeAuthPhase::AuthenticatedObserved);
                 return read.fact;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1065,4 +1079,77 @@ async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next
     })
     .await
     .expect("the idle team agent rejection case exceeded 60 seconds");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_existing_claude_sign_in_whose_token_lapsed_and_cannot_be_renewed_is_not_reported_signed_in()
+ {
+    let mut restart = Restart::new();
+    restart.claude = crate::team::runtime::managed_agent::claude();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let run = restart.start().await;
+        let empty = run
+            .finished(
+                &restart,
+                connection(),
+                "check-empty-profile",
+                NativeAuthMethod::ClaudeExisting,
+            )
+            .await;
+        assert_eq!(empty.phase, NativeAuthPhase::UnauthenticatedObserved);
+        let profiles = restart.root.path().join("native-profiles");
+        let homes: Vec<PathBuf> = std::fs::read_dir(&profiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        let home = &homes[0];
+        let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
+            home,
+            home.join("Library/Keychains/login.keychain-db"),
+        );
+        let service = format!(
+            "Claude Code-credentials-{}",
+            &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+        );
+        keychain.add(
+            "unknown",
+            &service,
+            &serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-reproof-unit",
+                    "refreshToken": "sk-ant-ort01-reproof-unit",
+                    "expiresAt": now_ms() - 60_000,
+                    "scopes": ["user:inference", "user:profile"],
+                    "subscriptionType": "max"
+                }
+            })
+            .to_string(),
+        );
+        let lapsed = run
+            .finished(
+                &restart,
+                connection(),
+                "check-lapsed-sign-in",
+                NativeAuthMethod::ClaudeExisting,
+            )
+            .await;
+        let stored: serde_json::Value = serde_json::from_str(&keychain.find(&service)).unwrap();
+        assert_eq!(
+            (lapsed.phase, lapsed.code.as_deref()),
+            (NativeAuthPhase::UnauthenticatedObserved, None),
+            "the check reported a lapsed sign-in that Claude could not renew; record expiresAt now {}",
+            stored["claudeAiOauth"]["expiresAt"]
+        );
+        assert_eq!(
+            stored["claudeAiOauth"]["expiresAt"],
+            serde_json::json!(0),
+            "the real claude never reached the token endpoint"
+        );
+        run.stop().await;
+    })
+    .await
+    .expect("the lapsed Claude sign-in check exceeded 120 seconds");
 }

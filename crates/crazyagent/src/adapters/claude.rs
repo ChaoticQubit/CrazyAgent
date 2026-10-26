@@ -38,6 +38,37 @@ pub enum ProtocolError {
 
 const AUTH_STATUS_STRING_BYTES_MAX: usize = 4096;
 
+/// How close to its access token's expiry Claude Code 2.1.309 refreshes it: it renews only
+/// a token that lapses within five minutes, and leaves any other untouched.
+#[cfg(unix)]
+pub(crate) const REFRESH_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The arguments of the one print turn that renews a managed Claude Code account. Claude
+/// Code refreshes a token inside its refresh window, and waits for the refresh, before the
+/// turn's API call; `auth status` only starts it and exits about two seconds later. The
+/// turn asks Haiku for one word with no tools, MCP servers, settings, hooks or saved session.
+#[cfg(unix)]
+pub(crate) const RENEWAL_TURN: [&str; 18] = [
+    "--print",
+    "--output-format",
+    "text",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+    "--no-session-persistence",
+    "--tools",
+    "",
+    "--max-turns",
+    "1",
+    "--model",
+    "haiku",
+    "--system-prompt",
+    "Reply with OK.",
+    "OK",
+];
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct AuthStatus {
     pub logged_in: bool,
