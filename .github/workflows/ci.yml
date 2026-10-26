@@ -36,7 +36,7 @@ defaults:
 jobs:
   linux:
     name: Linux format, typecheck, lint and tests
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: >-
@@ -174,7 +174,7 @@ jobs:
 
   macos:
     name: macOS lint and tests
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal
