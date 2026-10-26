@@ -1381,7 +1381,14 @@ fn codex_arguments(
                 .arg(model);
         }
         ResearchAccount::ManagedCodex { model, .. } => {
-            command.args(["-c", "cli_auth_credentials_store=\"file\""]);
+            command.args([
+                "-c",
+                "cli_auth_credentials_store=\"file\"",
+                "-c",
+                "features.apps=false",
+                "-c",
+                "features.plugins=false",
+            ]);
             if let Some(model) = model {
                 if !valid_model(model) {
                     return Err(RunError::Invalid("managed model name".into()));
