@@ -30,10 +30,10 @@ pub(super) fn since_epoch() -> Result<Duration, EngineError> {
 }
 
 /// Takes a profile's renewal lock through a fresh open file description of its folder,
-/// waiting at most `wait`, so only one renewal runs per account while agents keep their
-/// shared leases. Inputs: the profile folder and the wait. Output: the held lock, or
-/// `native_profile_renewal_busy` when another renewal still holds it.
-fn hold(profile: &File, wait: Duration) -> Result<HeldLock, EngineError> {
+/// waiting at most `wait`, so only one renewal or sign-in check runs per account while
+/// agents keep their shared leases. Inputs: the profile folder and the wait. Output: the
+/// held lock, or `native_profile_renewal_busy` when another renewal or check holds it.
+pub(super) fn hold(profile: &File, wait: Duration) -> Result<HeldLock, EngineError> {
     let folder = File::from(
         rustix::fs::openat(
             profile,

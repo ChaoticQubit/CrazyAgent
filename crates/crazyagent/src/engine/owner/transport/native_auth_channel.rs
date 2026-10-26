@@ -41,10 +41,7 @@ fn operation_bound(fact: &NativeAuthFact) -> Duration {
 
 #[cfg(unix)]
 fn purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
-    match fact.action {
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-    }
+    fact.action.profile_purpose()
 }
 
 #[cfg(unix)]

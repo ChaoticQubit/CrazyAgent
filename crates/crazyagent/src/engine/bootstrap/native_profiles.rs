@@ -274,15 +274,17 @@ pub(crate) enum NativeProfileUsePurpose {
         reason = "Execution requires the separately qualified native host"
     )]
     Execution,
+    Check,
 }
 
 impl NativeProfileUsePurpose {
     /// Takes this purpose's lock on one profile file without waiting: shared for an agent's
-    /// execution, so any number of agents run on one signed-in account at once, and
-    /// exclusive for sign-in, refresh and logout, which wait until no agent holds it.
-    /// Inputs: the purpose and the open file. Output: the held lock or `native_profile_in_use`.
+    /// execution and for a check of an existing sign-in, so they run on one signed-in
+    /// account at once, and exclusive for sign-in, refresh and logout, which wait until
+    /// no agent or check holds it. Inputs: the purpose and the open file. Output: the held
+    /// lock or `native_profile_in_use`.
     fn lock(self, file: &File) -> Result<(), EngineError> {
-        let operation = if self == Self::Execution {
+        let operation = if matches!(self, Self::Execution | Self::Check) {
             FlockOperation::NonBlockingLockShared
         } else {
             FlockOperation::NonBlockingLockExclusive
@@ -351,6 +353,7 @@ pub(crate) struct NativeProfileUse {
     operation_id: RequestId,
     generation: u64,
     purpose: NativeProfileUsePurpose,
+    renewal: Option<HeldLock>,
 }
 
 impl NativeProfileUse {
@@ -568,7 +571,7 @@ impl NativeProfileCustody {
         {
             return Err(failure("native_profile_identity_changed"));
         }
-        let guard = NativeProfileUse {
+        let mut guard = NativeProfileUse {
             custody,
             root,
             root_manifest,
@@ -582,9 +585,20 @@ impl NativeProfileCustody {
             operation_id: operation_id.clone(),
             generation,
             purpose,
+            renewal: None,
         };
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
         purpose.lock(&guard.manifest.file)?;
+        if purpose == NativeProfileUsePurpose::Check {
+            let held =
+                renewal::hold(&guard.profile.file, std::time::Duration::ZERO).map_err(|error| {
+                    match error.0.as_str() {
+                        "native_profile_renewal_busy" => failure("native_profile_in_use"),
+                        _ => error,
+                    }
+                })?;
+            guard.renewal = Some(held);
+        }
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
         self.root_hash = Some(digest(&guard.root_manifest.bytes));
         remember_profile(&mut self.profiles, key, hash);

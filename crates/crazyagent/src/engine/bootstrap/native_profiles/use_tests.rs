@@ -109,6 +109,7 @@ fn purpose(index: usize) -> NativeProfileUsePurpose {
         1 => NativeProfileUsePurpose::Refresh,
         2 => NativeProfileUsePurpose::Logout,
         3 => NativeProfileUsePurpose::Execution,
+        4 => NativeProfileUsePurpose::Check,
         _ => panic!("closed purpose index"),
     }
 }
@@ -119,6 +120,7 @@ fn purpose_name(value: &NativeProfileUsePurpose) -> &'static str {
         NativeProfileUsePurpose::Refresh => "refresh",
         NativeProfileUsePurpose::Logout => "logout",
         NativeProfileUsePurpose::Execution => "execution",
+        NativeProfileUsePurpose::Check => "check",
     }
 }
 
@@ -260,21 +262,28 @@ fn retained_guard_revalidates_exact_scope_and_is_non_clone() {
 }
 
 #[test]
-fn purpose_enum_has_exactly_the_four_closed_cases() {
-    let names = (0..4)
+fn purpose_enum_has_exactly_the_five_closed_cases() {
+    let names = (0..5)
         .map(|index| purpose_name(&purpose(index)))
         .collect::<Vec<_>>();
-    assert_eq!(names, ["authentication", "refresh", "logout", "execution"]);
-    assert_eq!(names.len(), 4);
+    assert_eq!(
+        names,
+        ["authentication", "refresh", "logout", "execution", "check"]
+    );
+    assert_eq!(names.len(), 5);
 }
 
 #[test]
 fn every_pair_with_an_account_change_contends_for_the_same_live_physical_lock() {
-    for holder in 0..4 {
-        for contender in 0..4 {
-            if purpose(holder) == NativeProfileUsePurpose::Execution
-                && purpose(contender) == NativeProfileUsePurpose::Execution
-            {
+    let shares = |index| {
+        matches!(
+            purpose(index),
+            NativeProfileUsePurpose::Execution | NativeProfileUsePurpose::Check
+        )
+    };
+    for holder in 0..5 {
+        for contender in 0..5 {
+            if shares(holder) && shares(contender) && (holder, contender) != (4, 4) {
                 continue;
             }
             let mut case = UseCase::new();
@@ -596,7 +605,7 @@ fn revalidation_rejects_zero_and_different_generations() {
 fn revalidation_rejects_a_different_closed_purpose() {
     let mut case = UseCase::new();
     let guard = case.acquire();
-    for index in 1..4 {
+    for index in 1..5 {
         assert!(
             guard
                 .revalidate(

@@ -580,6 +580,7 @@ impl NativeProfileCustody {
             operation_id: operation_id.clone(),
             generation,
             purpose: NativeProfileUsePurpose::Execution,
+            renewal: None,
         };
         guard.revalidate_retained()?;
         guard.purpose.lock(&guard.manifest.file)?;
