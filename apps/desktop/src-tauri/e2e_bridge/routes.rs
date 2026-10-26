@@ -1349,7 +1349,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state)?.agents_using(account_id).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state).await?.agents_using(account_id).await }.await;
             routed(result)
         }
         "desktop_stop_agents_using" => {
@@ -1362,7 +1362,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state)?.stop_agents_using(account_id)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.stop_agents_using(account_id)?; call.await }.await;
             routed(result)
         }
         "desktop_interrupt_agent" => {
