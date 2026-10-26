@@ -231,28 +231,17 @@ fn home(runtime: &Path) -> PathBuf {
     runtime.with_file_name(name)
 }
 
-/// A fresh private runtime folder `r-sbx-<pid>-<name>` under this checkout's
-/// `.local-state`, holding `catalog` as the global settings, so each test of
-/// this binary gets its own engine folder and a failed run keeps its evidence.
+/// A fresh private runtime folder `ca-r-<name>-<random>` under the real temporary root,
+/// short enough for the engine's sockets from any checkout, holding `catalog` as the
+/// global settings. It and its projects home are kept after the test, so each test gets
+/// its own engine folder and a failed run keeps its evidence.
 fn runtime(name: &str, catalog: &str) -> PathBuf {
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    assert!(
-        checkout.join("Cargo.lock").is_file(),
-        "{}",
-        checkout.display()
-    );
-    let base = checkout.join(".local-state");
-    fs::create_dir_all(&base).unwrap();
-    let runtime = base.join(format!("r-sbx-{}-{name}", std::process::id()));
-    for folder in [runtime.clone(), home(&runtime)] {
-        if folder.exists() {
-            fs::remove_dir_all(&folder).unwrap();
-        }
-        fs::create_dir(&folder).unwrap();
-    }
+    let runtime = tempfile::Builder::new()
+        .prefix(&format!("ca-r-{name}-"))
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap()
+        .keep();
+    fs::create_dir(home(&runtime)).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     for (name, text) in [("global.toml", catalog), ("project.toml", "")] {
         fs::write(runtime.join(name), text).unwrap();

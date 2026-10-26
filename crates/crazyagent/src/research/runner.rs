@@ -20,7 +20,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,7 +41,9 @@ const GIT_SAFE: [&str; 10] = [
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
 #[cfg(unix)]
 const FILTER_DRIVERS_MAX: usize = 64;
-static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
+static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 const LINKS_MAX: usize = 100;
@@ -1467,15 +1469,45 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// The setup lock of one project repository; dropping it lets the next setup of that
+/// repository run.
+struct RepositorySetup(PathBuf);
+
+impl Drop for RepositorySetup {
+    fn drop(&mut self) {
+        REPOSITORIES_SETTING_UP
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+        REPOSITORY_FREED.notify_all();
+    }
+}
+
+/// Waits for and takes the setup lock of one project repository, so git init, the start
+/// commit and worktree adds on that repository never race, while other projects set up
+/// at the same time. Takes the project folder, compared after resolving links.
+/// Output: the lock, held until dropped.
+fn repository_setup(root: &Path) -> RepositorySetup {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut busy = REPOSITORIES_SETTING_UP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    while busy.contains(&key) {
+        busy = REPOSITORY_FREED
+            .wait(busy)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    assert!(busy.insert(key.clone()));
+    RepositorySetup(key)
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
-/// once per process at a time. A folder with any `.git` entry is the owner's repository and
+/// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
 /// gets a repository from the engine. Takes the project folder and a private home for git.
 /// Returns Ok once the folder is a repository, or a plain refusal for an owner's folder.
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
-    let _setup = REPOSITORY_SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _setup = repository_setup(root);
     if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
     }
@@ -1551,9 +1583,7 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
-    let _setup = REPOSITORY_SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _setup = repository_setup(sandbox.project_root());
     let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
@@ -2173,6 +2203,30 @@ mod tests {
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    /// Setting up one project's repository must not wait for another project's setup:
+    /// the lock covers one repository, so unrelated projects set up at the same time.
+    #[test]
+    fn a_project_repository_sets_up_while_another_projects_setup_holds_its_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let (busy, free, tmp) = (base.join("busy"), base.join("free"), base.join("tmp"));
+        for folder in [&busy, &free, &tmp] {
+            fs::create_dir(folder).unwrap();
+        }
+        let _held = repository_setup(&busy);
+        let (done, finished) = std::sync::mpsc::channel();
+        let root = free.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(ensure_repository(&root, &tmp).map_err(|e| e.to_string()));
+        });
+        finished
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the free project waited for the busy project's setup lock")
+            .unwrap();
+        assert!(free.join(".git").is_dir());
+        assert!(!busy.join(".git").exists());
+    }
 
     struct EngineRoot {
         _temp: tempfile::TempDir,
