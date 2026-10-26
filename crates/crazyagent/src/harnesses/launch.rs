@@ -948,9 +948,11 @@ impl Driver {
 /// A running harness process driven through its headless interface.
 /// The process leads its own process group, and a harness on pipes has a warden in its
 /// sandbox, so stop reaches every descendant, those in their own sessions included.
+/// `uncertain` is set once its warden did not confirm that sandbox empty.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
+    uncertain: bool,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1069,6 +1071,7 @@ impl Session {
         let mut session = Self {
             child,
             warden,
+            uncertain: false,
             stdin,
             lines,
             driver,
@@ -1167,9 +1170,15 @@ impl Session {
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
     /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally.
-    pub fn stop(mut self) -> Option<i32> {
-        self.stop_group()
+    /// Output: the leader's exit code when it exited normally, or
+    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
+    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+        let code = self.stop_group();
+        assert!(self.stopped && self.warden.is_none());
+        if self.uncertain {
+            return Err(failure("harness_cleanup_uncertain"));
+        }
+        Ok(code)
     }
 
     fn require_live(&self) -> Result<(), LaunchError> {
@@ -1234,7 +1243,8 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
-        crate::sandbox::warden::fire_reported(self.warden.take(), "harness");
+        self.uncertain =
+            crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
         assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))

@@ -240,3 +240,44 @@ pub(crate) fn detached_survivors(
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Kills, by id, the warden of every running harness of this user started from `harness`:
+/// the child the session shim forked, which keeps the shim's command line naming the harness
+/// after the shim itself became the harness, as an agent that killed its own warden leaves
+/// the run. Input: the harness path, unique to the test. Output: the wardens killed.
+pub(crate) fn kill_wardens_of(harness: &str) -> Vec<i32> {
+    let listing = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(listing.status.success());
+    let shim = format!(
+        "{} {} {} setpgrp(0, getpgrp(getppid()))",
+        super::super::SESSION_SHIM[0],
+        super::super::SESSION_SHIM[1],
+        super::super::SESSION_SHIM[2]
+    );
+    let named = format!(" -- {harness}");
+    let wardens: Vec<i32> = naming(
+        &String::from_utf8_lossy(&listing.stdout),
+        &rustix::process::getuid().as_raw().to_string(),
+        i32::try_from(std::process::id()).unwrap(),
+        &named,
+    )
+    .into_iter()
+    .filter(|(_, command)| command.starts_with(&shim))
+    .map(|(pid, _)| pid)
+    .collect();
+    for warden in &wardens {
+        rustix::process::kill_process(
+            Pid::from_raw(*warden).unwrap(),
+            rustix::process::Signal::KILL,
+        )
+        .unwrap();
+    }
+    wardens
+}

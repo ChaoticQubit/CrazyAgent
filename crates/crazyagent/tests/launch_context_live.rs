@@ -249,7 +249,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
             .send("What is the project codename? Answer with the codename only.")
             .unwrap();
         let body = first_request(&mut session, &bodies);
-        session.stop();
+        session.stop().unwrap();
 
         assert!(
             body.contains("meal-tips"),

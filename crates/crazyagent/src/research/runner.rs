@@ -192,7 +192,8 @@ pub struct ResearchRun {
     pub process_group: Option<u32>,
 }
 
-/// A runner failure outside the agent's own outcome.
+/// A runner failure outside the agent's own outcome. `Uncertain` carries the code of a
+/// warden that did not confirm the agent's sandbox empty after the agent stopped.
 #[derive(Debug)]
 pub enum RunError {
     Invalid(String),
@@ -201,6 +202,7 @@ pub enum RunError {
     Context(LaunchError),
     Account(String),
     Busy,
+    Uncertain(&'static str),
     Io(io::Error),
 }
 
@@ -213,6 +215,7 @@ impl fmt::Display for RunError {
             Self::Context(error) => write!(f, "research context: {}", error.0),
             Self::Account(code) => write!(f, "research account: {code}"),
             Self::Busy => write!(f, "research account busy"),
+            Self::Uncertain(code) => write!(f, "research agent cleanup uncertain: {code}"),
             Self::Io(error) => write!(f, "research I/O: {error}"),
         }
     }
@@ -591,11 +594,18 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let reason = match error {
-                    RunError::Context(_) => "Could not give the agent this project's context",
-                    _ => "Could not prepare the research sandbox",
+                let (reason, attempts_max) = match error {
+                    RunError::Context(_) => (
+                        "Could not give the agent this project's context",
+                        self.limits.attempts_max,
+                    ),
+                    RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN, 1),
+                    _ => (
+                        "Could not prepare the research sandbox",
+                        self.limits.attempts_max,
+                    ),
                 };
-                jobs.fail(&job, reason, self.limits.attempts_max)?;
+                jobs.fail(&job, reason, attempts_max)?;
                 Err(error)
             }
         }
@@ -832,6 +842,8 @@ impl ResearchRunner {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let ending = self.supervise(jobs, job, &mut running, &counted, &limited)?;
+        let stopped = running.stop();
+        let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         drop(running);
         let draining = Instant::now();
         while drains.iter().any(|drain| !drain.is_finished()) && draining.elapsed() < DRAIN_WAIT {
@@ -846,6 +858,13 @@ impl ResearchRunner {
             ending
         };
         drop(installed);
+        if let Err(code) = stopped {
+            if let Some(credential) = credential {
+                credential.retain();
+            }
+            std::mem::forget(lease);
+            return Err(RunError::Uncertain(code));
+        }
         drop(credential);
         drop(lease);
         Ok((ending, group, output))
@@ -914,8 +933,8 @@ impl ResearchRunner {
     }
 
     /// Follows a direct agent process until it exits, its stderr shows it waiting out a
-    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes, then
-    /// stops its process group. Takes the job store, the job, the process, its output count
+    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes; the
+    /// caller then stops it. Takes the job store, the job, the process, its output count
     /// and the limit flag its stderr drain sets. Returns how the run ended.
     fn supervise(
         &self,
@@ -953,8 +972,6 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
-        agent.stop();
-        let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         Ok(ending)
     }
 
@@ -1244,10 +1261,17 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
-        running.stop();
+        let stopped = running.stop();
         drop(running);
         for handle in drains {
             let _ = handle.join();
+        }
+        if let Err(code) = stopped {
+            if let Some(credential) = credential {
+                credential.retain();
+            }
+            std::mem::forget(lease);
+            return Err(RunError::Uncertain(code));
         }
         drop(credential);
         drop(lease);
@@ -1907,7 +1931,8 @@ fn stop_timed_out(child: &mut Child) {
 /// then has the agent's warden, where its sandbox gives one, stop every process
 /// left in that sandbox, those that left the group included, so no agent
 /// process outlives the run that started it. If the engine itself dies first,
-/// its [`Lifeline`] kills the group and the warden stops the sandbox.
+/// its [`Lifeline`] kills the group and the warden stops the sandbox. `cleanup`
+/// holds the code of a warden that did not confirm the sandbox empty.
 pub(crate) struct AgentProcess {
     pub(crate) child: Child,
     pub(crate) group: u32,
@@ -1915,6 +1940,7 @@ pub(crate) struct AgentProcess {
     lifeline: Lifeline,
     warden: Option<Warden>,
     stopped: bool,
+    cleanup: Result<(), &'static str>,
 }
 
 impl AgentProcess {
@@ -1942,7 +1968,7 @@ impl AgentProcess {
                 stop_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
-                crate::sandbox::warden::fire_reported(warden, "agent");
+                let _ = crate::sandbox::warden::fire_reported(warden, "agent");
                 return Err(error);
             }
         };
@@ -1953,42 +1979,48 @@ impl AgentProcess {
             lifeline,
             warden,
             stopped: false,
+            cleanup: Ok(()),
         })
     }
 
-    /// Kills the agent's group once, reaps the agent and waits for the group
-    /// to empty. Later calls do nothing, so a reused group id is never killed.
+    /// Kills the agent's group once, reaps the agent, waits for the group to
+    /// empty and fires its warden. Later calls do nothing, so a reused group id
+    /// is never killed. Returns, on every call, Ok or the code of a warden that
+    /// did not confirm the sandbox empty, for the caller to keep what the agent used.
     #[cfg(unix)]
-    pub(crate) fn stop(&mut self) {
-        if self.stopped {
-            return;
+    pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
+        if !self.stopped {
+            stop_group(self.group);
+            let _ = self.child.wait();
+            await_group_exit(self.group);
+            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.lifeline.release();
+            self.stopped = true;
         }
-        stop_group(self.group);
-        let _ = self.child.wait();
-        await_group_exit(self.group);
-        crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
-        self.lifeline.release();
-        self.stopped = true;
+        assert!(self.warden.is_none());
+        self.cleanup
     }
 
     /// Kills the agent and reaps it where no process group exists, once; later calls do
-    /// nothing. Takes the process. Returns nothing.
+    /// nothing. Takes the process. Returns, on every call, Ok or the warden's code.
     #[cfg(not(unix))]
-    pub(crate) fn stop(&mut self) {
-        if self.stopped {
-            return;
+    pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
+        if !self.stopped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.stopped = true;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
-        self.stopped = true;
+        assert!(self.warden.is_none());
+        self.cleanup
     }
 }
 
 impl Drop for AgentProcess {
-    /// Stops the agent's process group if the run did not already stop it.
+    /// Stops the agent's process group if the run did not already stop it. A run that
+    /// fails before its own stop has no outcome left to report; the warden logs one.
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 

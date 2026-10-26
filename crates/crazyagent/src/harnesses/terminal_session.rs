@@ -480,11 +480,12 @@ impl AgentSession {
         }
     }
 
-    /// Stops the agent and every process it started. Output: the exit code when known.
-    pub fn stop(self) -> Option<i32> {
+    /// Stops the agent and every process it started. Output: the exit code when known, or
+    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it.
+    pub fn stop(self) -> Result<Option<i32>, LaunchError> {
         match self {
             Self::Piped(session) => session.stop(),
-            Self::Terminal(session) => session.stop(),
+            Self::Terminal(session) => Ok(session.stop()),
         }
     }
 }
