@@ -17,7 +17,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 51] = [
+pub const INTAKE_CODES: [&str; 57] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -44,6 +44,12 @@ pub const INTAKE_CODES: [&str; 51] = [
     "home_move_nested",
     "home_move_partial",
     "home_move_interrupted",
+    "home_move_worktrees",
+    "home_move_project",
+    "home_move_too_many",
+    "home_move_in_progress",
+    "home_folder_name_invalid",
+    "home_new_project_failed",
     "home_add_unverified",
     "home_add_interrupted",
     "home_record_invalid",
@@ -781,6 +787,26 @@ mod tests {
         );
         assert_eq!(intake_code("home_move_partial"), Some("home_move_partial"));
         assert_eq!(intake_code("folder_name_taken"), None);
+        let engine = [
+            include_str!("../../../../../crates/crazyagent/src/projects_home.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
+        ];
+        let mut refusals: Vec<&str> = engine
+            .iter()
+            .flat_map(|source| source.split("refused(\"").skip(1))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|code| !code.starts_with("home_trash_"))
+            .collect();
+        refusals.sort_unstable();
+        refusals.dedup();
+        assert!(refusals.contains(&"home_copy_failed"), "{refusals:?}");
+        for code in refusals
+            .into_iter()
+            .chain(["home_move_in_progress", "home_new_project_failed"])
+        {
+            assert_eq!(intake_code(code), Some(code), "{code}");
+        }
         assert_eq!(
             github_failure(EngineError("clone_destination_exists".into())).code,
             "clone_destination_exists"

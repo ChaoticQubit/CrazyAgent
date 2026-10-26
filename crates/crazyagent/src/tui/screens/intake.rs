@@ -38,7 +38,8 @@ pub(in crate::tui) fn not_ready(code: &str) -> bool {
 
 /// The plain sentence for one projects home, add project, onboarding or GitHub problem.
 /// Takes the bounded plain code the engine or the client sent.
-/// Returns the sentence; an unknown code gets a generic retry sentence, never the code.
+/// Returns the sentence, the engine's own sentence for a projects home code this list
+/// leaves out, or a generic retry sentence, never the code.
 pub(in crate::tui) fn copy(code: &str) -> &'static str {
     match code {
         "projects_home_unset" => "Pick your projects folder first.",
@@ -121,7 +122,9 @@ pub(in crate::tui) fn copy(code: &str) -> &'static str {
             "The engine connection dropped. CrazyAgent reconnects on its own."
         }
         code if not_ready(code) => NOT_READY,
-        _ => "Something went wrong. Try again.",
+        code => {
+            crate::projects_home::plain_problem(code).unwrap_or("Something went wrong. Try again.")
+        }
     }
 }
 
@@ -144,6 +147,17 @@ mod tests {
         }
         assert_eq!(copy("owner_read_unsupported"), NOT_READY);
         assert!(copy("home_copy_linked_checkout").contains("worktree or submodule"));
+        for code in [
+            "home_move_worktrees",
+            "home_move_project",
+            "home_trash_outside",
+        ] {
+            assert_eq!(
+                Some(copy(code)),
+                crate::projects_home::plain_problem(code),
+                "{code}"
+            );
+        }
         assert!(not_ready("github_unsupported"));
         assert!(!not_ready("github_unreachable"));
     }
