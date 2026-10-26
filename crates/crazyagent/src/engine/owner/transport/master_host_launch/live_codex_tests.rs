@@ -237,6 +237,43 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
 #[tokio::test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() {
+    let turn = browsky_master_turn("Hey can you start 2 sub agents", true).await;
+    assert_eq!(turn.errors, Vec::<String>::new());
+    assert_eq!(turn.outcome, TurnOutcome::Success);
+    assert!((1..=2).contains(&turn.delegations), "{turn:?}");
+}
+
+/// Proves against real Codex that a sub-agent Codex starts on its own is interrupted and the
+/// master's turn still completes: a Browsky master without the tools section, which names
+/// Codex's own sub-agent tools as not allowed, is asked to use `spawn_agent`. Bounded by a
+/// 240 s wall time; prints the host's stdout tail so the child's end is visible.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
+async fn a_real_codex_master_s_own_sub_agent_is_interrupted_and_its_turn_completes() {
+    let turn = browsky_master_turn(
+        "Use your collaboration spawn_agent tool once to start one sub-agent whose task is to reply OK, then tell me in one line what happened to it.",
+        false,
+    )
+    .await;
+    assert_eq!(turn.errors, Vec::<String>::new());
+    assert_eq!(turn.outcome, TurnOutcome::Success);
+    assert!(turn.native >= 1, "{turn:?}");
+}
+
+#[derive(Debug)]
+struct BrowskyTurn {
+    outcome: TurnOutcome,
+    native: usize,
+    errors: Vec<String>,
+    delegations: usize,
+}
+
+/// Runs one real tools-on Codex master turn with Browsky's setup in a private engine root, as
+/// the owner's master runs. Inputs: the prompt and whether the instructions carry the tools
+/// section. Output: the turn's outcome, the Codex sub-agents the host interrupted, the turn's
+/// errors and how many tasks reached the delegate tool; a protocol fault panics after
+/// printing the host's stream diagnostic.
+async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
     use super::super::master_runtime::ReplyText;
 
     let setup: crate::project_setup::StoredSetup = serde_json::from_value(serde_json::json!({
@@ -252,7 +289,11 @@ async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() 
     let instructions = format!(
         "# Browsky\n\n{}\n{}",
         setup.about,
-        crate::launch_context::master_tools_section(&setup)
+        if tools_section {
+            crate::launch_context::master_tools_section(&setup)
+        } else {
+            String::new()
+        }
     );
     let engine = super::live_claude_tests::engine_executable();
     let mut signed_in = SignedIn::codex();
@@ -356,10 +397,7 @@ async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() 
     );
     let account = account.unwrap();
     super::super::master_runtime::account_failure(&account).unwrap();
-    master
-        .start_turn(turn.clone(), "Hey can you start 2 sub agents")
-        .await
-        .unwrap();
+    master.start_turn(turn.clone(), prompt).await.unwrap();
     let mut errors = Vec::new();
     let mut steps = Vec::new();
     let mut reply = ReplyText::default();
@@ -408,9 +446,15 @@ async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() 
         "real codex sub-agents master turn: outcome={outcome:?} native_sub_agents={native} errors={errors:?} steps={steps:?} delegations={delegations:?} reply={:?}",
         reply.text
     );
-    assert_eq!(errors, Vec::<String>::new());
-    assert_eq!(outcome, TurnOutcome::Success);
-    assert!((1..=2).contains(&delegations.len()), "{delegations:?}");
+    if native > 0 {
+        println!("tail:\n{}", master.diagnostic().tail());
+    }
     drop(credential);
     drop(folder);
+    BrowskyTurn {
+        outcome,
+        native,
+        errors,
+        delegations: delegations.len(),
+    }
 }
