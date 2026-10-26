@@ -363,6 +363,12 @@ test("adding an existing folder uses it where it is by default, shows the target
   assert.match(big, /This copies 3 GB/);
   assert.match(big, /class="notice"/);
   assert.match(big, />Copy into projects folder<\/button>/);
+  assert.doesNotMatch(big, /linked git worktree/);
+  const linked = (worktrees, mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees }), mode });
+  assert.match(linked(3, "copy"), /This folder has 3 linked git worktrees\. They stay with the original folder; the copy gets the main checkout and every branch\./);
+  assert.match(linked(1, "copy"), /This folder has 1 linked git worktree\. It stays with the original folder; the copy gets the main checkout and every branch\./);
+  assert.doesNotMatch(linked(0, "copy"), /linked git worktree/);
+  assert.doesNotMatch(linked(3, "here"), /linked git worktree/);
   const hosted = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
   assert.match(hosted, /mira\/plant-shop/);
   assert.match(hosted, />Clone instead<\/button>/);

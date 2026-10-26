@@ -69,6 +69,9 @@ pub(in crate::tui) fn copy(code: &str) -> &'static str {
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed. Try again."
         }
+        "home_copy_linked_checkout" => {
+            "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder."
+        }
         "home_copy_unverified" | "home_add_unverified" => {
             "The copy did not match the original, so the original was kept."
         }
@@ -140,6 +143,7 @@ mod tests {
             assert!(text.ends_with('.'), "{code} shows {text}");
         }
         assert_eq!(copy("owner_read_unsupported"), NOT_READY);
+        assert!(copy("home_copy_linked_checkout").contains("worktree or submodule"));
         assert!(not_ready("github_unsupported"));
         assert!(!not_ready("github_unreachable"));
     }
