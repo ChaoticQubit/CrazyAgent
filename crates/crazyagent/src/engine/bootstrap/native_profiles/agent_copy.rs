@@ -140,7 +140,7 @@ impl NativeProfileUse {
         let turn_end = now.checked_add(turn).ok_or_else(expiring)?;
         let renewal = if record.expires <= turn_end.max(now + USABLE_MIN) {
             let renewal = self.renewal(harness, executable)?;
-            record = renewal.renew(record.expires)?;
+            record = off_worker(|| renewal.renew(record.expires))?;
             if record.expires <= since_epoch()? + USABLE_MIN {
                 return Err(renewal_failed());
             }
@@ -171,6 +171,19 @@ impl NativeProfileUse {
     pub(crate) fn claude_expiry(&self) -> Result<Duration, EngineError> {
         account_record(Harness::Claude, &self.home.file, &self.profile_path()?)
             .map(|record| record.expires)
+    }
+}
+
+/// Runs blocking account work, such as a renewal of up to two minutes or a keeper's join,
+/// so it never stalls the async runtime: on a multi-thread tokio runtime the worker first
+/// hands its other tasks to another thread; anywhere else the work runs in place.
+/// Input: the work. Output: its result.
+pub(super) fn off_worker<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
     }
 }
 

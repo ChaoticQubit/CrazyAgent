@@ -149,6 +149,100 @@ fn a_failed_renewal_is_a_transient_refusal_even_for_a_turn_shorter_than_a_minute
     assert!(entries(&agent).is_empty());
 }
 
+fn scripted_codex(case: &UseCase, name: &str, script: &str, next: &[u8]) -> PathBuf {
+    let harness = case.root.path().join(name);
+    private_file(&case.root.path().join(format!("{name}.next")), next);
+    std::fs::write(&harness, script).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+#[test]
+fn dropping_a_copy_stops_its_keeper_mid_renewal_at_once_and_ends_the_renewal_child() {
+    let mut case = UseCase::new();
+    let harness = scripted_codex(
+        &case,
+        "codex-renews-once",
+        "#!/bin/sh\nif [ ! -f \"$0.renewed\" ]; then\n  : > \"$0.renewed\"\n  cp \"$0.next\" \"$CODEX_HOME/auth.json\"\n  exit 0\nfi\necho $$ > \"$0.pid.part\"\nmv \"$0.pid.part\" \"$0.pid\"\nexec /bin/sleep 120\n",
+        &codex_auth(now() + 200),
+    );
+    private_file(&case.home().join("auth.json"), &codex_auth(now() + 30));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard.hand_to_agent(&agent, TURN, &harness).unwrap();
+    let marker = case.root.path().join("codex-renews-once.pid");
+    let waited = Instant::now();
+    while !marker.is_file() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(20),
+            "the keeper never started its renewal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid: i32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let child = rustix::process::Pid::from_raw(pid).unwrap();
+    let dropping = Instant::now();
+    drop(copy);
+    let took = dropping.elapsed();
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    let ending = Instant::now();
+    while rustix::process::test_kill_process(child).is_ok() {
+        assert!(
+            ending.elapsed() < Duration::from_secs(2),
+            "the renewal child outlived its keeper"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(entries(&agent).is_empty());
+    drop(guard);
+}
+
+#[test]
+fn a_renewal_in_the_handoff_leaves_the_async_runtime_free() {
+    let mut case = UseCase::new();
+    let harness = scripted_codex(
+        &case,
+        "codex-slow",
+        "#!/bin/sh\n/bin/sleep 2\ncp \"$0.next\" \"$CODEX_HOME/auth.json\"\n",
+        &codex_auth(now() + 3 * 86_400),
+    );
+    private_file(&case.home().join("auth.json"), &codex_auth(now() + 30));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_time()
+        .build()
+        .unwrap();
+    let (widest, handed) = runtime.block_on(async move {
+        let ticker = tokio::spawn(async {
+            let mut last = Instant::now();
+            let mut widest = Duration::ZERO;
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                widest = widest.max(last.elapsed());
+                last = Instant::now();
+            }
+            widest
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let handed = tokio::spawn(async move {
+            let handed = guard.hand_to_agent(&agent, TURN, &harness).map(drop);
+            drop(guard);
+            handed
+        })
+        .await
+        .unwrap();
+        (ticker.await.unwrap(), handed)
+    });
+    assert!(handed.is_ok(), "{:?}", handed.err());
+    assert!(widest < Duration::from_secs(1), "{widest:?}");
+}
+
 #[test]
 fn a_missing_or_unusable_codex_record_is_refused() {
     let mut case = UseCase::new();
