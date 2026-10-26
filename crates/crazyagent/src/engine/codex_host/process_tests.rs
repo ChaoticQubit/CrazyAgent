@@ -154,7 +154,14 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
         Ok(process.pid())
     );
     let group = rustix::process::getpgid(Some(processes.descendant));
-    assert!(fixture.lease("codex-group-busy", 2).is_err());
+    assert_eq!(
+        fixture
+            .sign_in("codex-group-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use")
+    );
     let started = Instant::now();
     let closed = process.close().await;
     let elapsed = started.elapsed();
@@ -162,7 +169,7 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     assert_eq!(group, Ok(processes.leader));
     processes.assert_gone();
-    assert!(fixture.lease("codex-group-next", 3).is_ok());
+    assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
 
 #[cfg(unix)]
@@ -193,5 +200,5 @@ async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lea
         rustix::process::test_kill_process(processes.descendant),
         Ok(())
     );
-    assert!(fixture.lease("codex-group-next", 3).is_ok());
+    assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
