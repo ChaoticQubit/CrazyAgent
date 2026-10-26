@@ -527,6 +527,98 @@ fn codex_host_approval_request_is_observed_and_declined_through_supported_rpc() 
 }
 
 #[test]
+fn codex_host_declines_requests_read_together_with_their_turn_end() {
+    let (mut host, request) = active();
+    let mut input = wire(json!({
+        "id":7, "method":"item/commandExecution/requestApproval", "params":{
+            "threadId":"unit-native-thread", "turnId":"unit-native-turn",
+            "itemId":"unit-command", "startedAtMs":1
+        }
+    }));
+    input.extend(wire(json!({
+        "id":8, "method":"item/tool/requestUserInput", "params":{
+            "threadId":"unit-native-thread", "turnId":"unit-native-turn",
+            "itemId":"unit-input", "isBlocking":false,
+            "questions":[{"id":"scope","header":"Scope","question":"Which work?"}]
+        }
+    })));
+    input.extend(completed("completed"));
+    let batch = host.receive(&input).unwrap();
+    assert_eq!(batch.events.len(), 3);
+    assert!(matches!(
+        &batch.events[0].kind,
+        EventKind::ApprovalRequired { .. }
+    ));
+    assert!(matches!(
+        &batch.events[1].kind,
+        EventKind::UnsupportedRequest { .. }
+    ));
+    assert!(matches!(
+        &batch.events[2].kind,
+        EventKind::TurnFinished {
+            outcome: TurnOutcome::Success,
+            ..
+        }
+    ));
+    assert!(
+        batch
+            .events
+            .iter()
+            .all(|event| event.request_id.as_ref() == Some(&request))
+    );
+    assert_eq!(batch.outbound.len(), 2);
+    assert_eq!(
+        message(&batch.outbound[0]),
+        json!({"id":7,"result":{"decision":"decline"}})
+    );
+    assert_eq!(
+        message(&batch.outbound[1]),
+        json!({"id":8,"error":{"code":-32601,"message":"unsupported native request"}})
+    );
+    assert_eq!(host.state(), State::Idle);
+    let next = RequestId::new("unit-next-turn").unwrap();
+    assert!(host.start_turn(next, "unit next prompt").is_ok());
+}
+
+#[test]
+fn codex_host_interrupts_a_codex_native_sub_agent_and_keeps_the_turn() {
+    let (mut host, request) = active();
+    let mut input = wire(json!({"method":"turn/started","params":{
+        "threadId":"unit-child-thread",
+        "turn":{"id":"unit-child-turn","rootTurnId":"unit-native-turn","items":[],"status":"inProgress"}
+    }}));
+    input.extend(wire(json!({"method":"item/agentMessage/delta","params":{
+        "threadId":"unit-child-thread", "turnId":"unit-child-turn",
+        "itemId":"unit-child-item", "delta":"child text"
+    }})));
+    let batch = host.receive(&input).unwrap();
+    assert_eq!(batch.events.len(), 1);
+    assert!(matches!(
+        &batch.events[0].kind,
+        EventKind::Unsupported { subtype: Some(subtype), .. } if subtype == "native_sub_agent"
+    ));
+    assert_eq!(batch.outbound.len(), 1);
+    assert_eq!(
+        message(&batch.outbound[0]),
+        json!({"id":4,"method":"turn/interrupt","params":{
+            "threadId":"unit-child-thread","turnId":"unit-child-turn"
+        }})
+    );
+    assert!(reply(&mut host, 4, json!({})).events.is_empty());
+    assert_eq!(host.state(), State::Active);
+    let finished = host.receive(&completed("completed")).unwrap();
+    assert_eq!(finished.events.len(), 1);
+    assert!(matches!(
+        &finished.events[0].kind,
+        EventKind::TurnFinished {
+            outcome: TurnOutcome::Success,
+            ..
+        }
+    ));
+    assert_eq!(finished.events[0].request_id, Some(request));
+}
+
+#[test]
 fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_success() {
     let (mut host, _) = active();
     assert!(
@@ -541,6 +633,44 @@ fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_suc
     other.initialize().unwrap();
     assert!(other.receive(&vec![b'x'; FRAME_BYTES_MAX + 1]).is_err());
     assert_eq!(other.state(), State::Failed);
+}
+
+#[test]
+fn codex_host_names_the_frame_it_refused_for_the_stream_diagnostic() {
+    let (mut host, _) = active();
+    assert_eq!(host.refused(), None);
+    let refused = host.receive(&wire(json!({"method":"turn/started","params":{
+        "threadId":"unit-child-thread",
+        "turn":{"id":"unit-child-turn","items":[],"status":"inProgress"}
+    }})));
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("codex_host_protocol_stale_message")
+    );
+    assert_eq!(
+        host.refused(),
+        Some("turn/started id=- thread=unit-child-thread parent=- turn=unit-child-turn")
+    );
+    let (mut host, _) = active();
+    assert!(
+        host.receive(&wire(json!({"method":"thread/started","params":{
+            "thread":{"id":"unit other","parentThreadId":"unit-other-thread"}
+        }})))
+        .is_err()
+    );
+    assert_eq!(
+        host.refused(),
+        Some("thread/started id=- thread=? parent=unit-other-thread turn=-")
+    );
+    let (mut host, _) = active();
+    assert!(host.receive(&wire(json!({"id":99,"result":{}}))).is_err());
+    assert_eq!(
+        host.refused(),
+        Some("response id=99 thread=- parent=- turn=-")
+    );
+    let (mut host, _) = active();
+    assert!(host.receive(b"{not json\n").is_err());
+    assert_eq!(host.refused(), Some("unreadable"));
 }
 
 #[test]

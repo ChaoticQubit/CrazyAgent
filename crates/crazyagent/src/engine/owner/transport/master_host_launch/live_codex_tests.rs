@@ -225,3 +225,236 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
     drop(credential);
     drop(folder);
 }
+
+/// Reproduces the owner's failed turn (LB-48): a real tools-on Codex master with the startup
+/// tools section of a project whose team plan has ten Codex sub-agents with tools on is asked
+/// "Hey can you start 2 sub agents". The turn must complete without a protocol fault and hand
+/// one or two tasks to the engine's delegate tool, even when the model first starts Codex's
+/// own sub-agent, which the host interrupts; it prints how many it interrupted and, on a fault,
+/// the host's stream diagnostic. With `CRAZYAGENT_LIVE_REPOSITORY` set
+/// the master works in a git worktree of a shallow clone of that repository, as an owner's
+/// master works in a worktree of the project. Bounded by a 240 s wall time.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
+async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() {
+    let turn = browsky_master_turn("Hey can you start 2 sub agents", true).await;
+    assert_eq!(turn.errors, Vec::<String>::new());
+    assert_eq!(turn.outcome, TurnOutcome::Success);
+    assert!((1..=2).contains(&turn.delegations), "{turn:?}");
+}
+
+/// Proves against real Codex that a sub-agent Codex starts on its own is interrupted and the
+/// master's turn still completes: a Browsky master without the tools section, which names
+/// Codex's own sub-agent tools as not allowed, is asked to use `spawn_agent`. Bounded by a
+/// 240 s wall time; prints the host's stdout tail so the child's end is visible.
+#[tokio::test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
+async fn a_real_codex_master_s_own_sub_agent_is_interrupted_and_its_turn_completes() {
+    let turn = browsky_master_turn(
+        "Use your collaboration spawn_agent tool once to start one sub-agent whose task is to reply OK, then tell me in one line what happened to it.",
+        false,
+    )
+    .await;
+    assert_eq!(turn.errors, Vec::<String>::new());
+    assert_eq!(turn.outcome, TurnOutcome::Success);
+    assert!(turn.native >= 1, "{turn:?}");
+}
+
+#[derive(Debug)]
+struct BrowskyTurn {
+    outcome: TurnOutcome,
+    native: usize,
+    errors: Vec<String>,
+    delegations: usize,
+}
+
+/// Runs one real tools-on Codex master turn with Browsky's setup in a private engine root, as
+/// the owner's master runs. Inputs: the prompt and whether the instructions carry the tools
+/// section. Output: the turn's outcome, the Codex sub-agents the host interrupted, the turn's
+/// errors and how many tasks reached the delegate tool; a protocol fault panics after
+/// printing the host's stream diagnostic.
+async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
+    use super::super::master_runtime::ReplyText;
+
+    let setup: crate::project_setup::StoredSetup = serde_json::from_value(serde_json::json!({
+        "project_id":"browsky","name":"Browsky",
+        "about":"It is the world model brain for my Personal Humanoid Robot.",
+        "tech_stack":["Python"],"platforms":["other"],"research":[],"pool":null,
+        "team":{"master":"codex","master_tools":true,
+            "sub_harnesses":[{"harness":"codex","agents":10,"tools":true}],
+            "min_agents":1,"max_agents":11},
+        "documents":[],"folder":"/tmp/browsky/.crazyagent","created_ms":1,"revision":1
+    }))
+    .unwrap();
+    let instructions = format!(
+        "# Browsky\n\n{}\n{}",
+        setup.about,
+        if tools_section {
+            crate::launch_context::master_tools_section(&setup)
+        } else {
+            String::new()
+        }
+    );
+    let engine = super::live_claude_tests::engine_executable();
+    let mut signed_in = SignedIn::codex();
+    let connection = signed_in.connection.clone();
+    let turn = RequestId::new("codex-live-sub-agents-turn").unwrap();
+    let profile = signed_in.acquire(turn.as_str());
+    let temporary = tempfile::Builder::new()
+        .prefix("ca-live-sub-agents-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let root = Root::open(&base).unwrap();
+    let repository = base.join("repository");
+    let worktree = base.join("worktrees").join("lease");
+    match std::env::var_os("CRAZYAGENT_LIVE_REPOSITORY") {
+        Some(source) => {
+            let mut url = std::ffi::OsString::from("file://");
+            url.push(&source);
+            let git = |arguments: &[&std::ffi::OsStr]| {
+                let status = crate::spawn_gate::status(
+                    std::process::Command::new("/usr/bin/git").args(arguments),
+                )
+                .unwrap();
+                assert!(status.success(), "git {arguments:?}");
+            };
+            git(&[
+                "clone".as_ref(),
+                "--quiet".as_ref(),
+                "--depth".as_ref(),
+                "1".as_ref(),
+                &url,
+                repository.as_os_str(),
+            ]);
+            private_directory(&base.join("worktrees"));
+            git(&[
+                "-C".as_ref(),
+                repository.as_os_str(),
+                "worktree".as_ref(),
+                "add".as_ref(),
+                "--quiet".as_ref(),
+                "--detach".as_ref(),
+                worktree.as_os_str(),
+            ]);
+        }
+        None => {
+            private_directory(&repository);
+            private_directory(&worktree);
+        }
+    }
+    let codex = crate::team::runtime::managed_agent::codex();
+    let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &runtime_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let budget = ResourceBudget {
+        wall_time_ms: 240_000,
+        ..ResourceBudget::unit()
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        tool_record,
+    } = codex_master_turn(
+        &place,
+        &profile,
+        &codex,
+        &connection,
+        Duration::from_millis(budget.wall_time_ms),
+        Some(&engine),
+    )
+    .unwrap();
+    let record = tool_record.unwrap();
+    let mut master = CodexHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: SessionId::new("codex-live-sub-agents-session").unwrap(),
+            harness: NativeHarness::Codex,
+            profile_ref: signed_in.profile_ref(),
+            worktree_lease: RequestId::new("codex-live-sub-agents-lease").unwrap(),
+        },
+        connection.account_ref.clone(),
+        budget,
+        &instructions,
+    )
+    .await
+    .unwrap();
+    let account = master.observe_account().await;
+    println!(
+        "real codex sub-agents master account read: {:?}",
+        account.as_ref().map(|_| "read").map_err(|error| &error.0)
+    );
+    let account = account.unwrap();
+    super::super::master_runtime::account_failure(&account).unwrap();
+    master.start_turn(turn.clone(), prompt).await.unwrap();
+    let mut errors = Vec::new();
+    let mut steps = Vec::new();
+    let mut reply = ReplyText::default();
+    let outcome = loop {
+        let event = match master.next_event().await {
+            Ok(event) => event,
+            Err(error) => {
+                let diagnostic = master.diagnostic();
+                println!(
+                    "real codex sub-agents master turn failed: {} fault={:?} message={:?} steps={steps:?}\ntail:\n{}",
+                    error.0,
+                    diagnostic.fault,
+                    diagnostic.message,
+                    diagnostic.tail()
+                );
+                let _ = master.close().await;
+                panic!("{}", error.0);
+            }
+        };
+        match event.kind {
+            EventKind::AssistantError { code } => errors.push(code),
+            EventKind::TurnError {
+                message,
+                will_retry: false,
+            } => errors.push(message),
+            EventKind::AssistantDelta { item_id, text } => {
+                reply.push(Some(&item_id), &text, true).unwrap()
+            }
+            EventKind::ApprovalRequired { approval, .. } => steps.push(format!("{approval:?}")),
+            EventKind::UnsupportedRequest { method, .. } => steps.push(method),
+            EventKind::Unsupported {
+                subtype: Some(method),
+                ..
+            } => steps.push(method),
+            EventKind::TurnFinished { outcome, .. } => break outcome,
+            _ => {}
+        }
+    };
+    master.close().await.unwrap();
+    let delegations = crate::team::tool::take(&record);
+    let native = steps
+        .iter()
+        .filter(|step| *step == "native_sub_agent")
+        .count();
+    println!(
+        "real codex sub-agents master turn: outcome={outcome:?} native_sub_agents={native} errors={errors:?} steps={steps:?} delegations={delegations:?} reply={:?}",
+        reply.text
+    );
+    if native > 0 {
+        println!("tail:\n{}", master.diagnostic().tail());
+    }
+    drop(credential);
+    drop(folder);
+    BrowskyTurn {
+        outcome,
+        native,
+        errors,
+        delegations: delegations.len(),
+    }
+}

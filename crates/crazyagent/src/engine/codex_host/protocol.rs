@@ -97,6 +97,13 @@ impl CodexHostProtocol {
                         .outbound
                         .push(self.protocol.deny_request(id).map_err(protocol_error)?);
                 }
+                Event::NativeSubAgentStarted { thread_id, turn_id } => {
+                    batch.outbound.push(
+                        self.protocol
+                            .interrupt_child(thread_id, turn_id)
+                            .map_err(protocol_error)?,
+                    );
+                }
                 _ => {}
             }
             let ended = matches!(
@@ -121,6 +128,12 @@ impl CodexHostProtocol {
 
     pub fn state(&self) -> State {
         self.protocol.state()
+    }
+
+    /// Names the frame the Codex protocol last refused, for the master's stream diagnostic.
+    /// Input: none. Output: the name, or none before any refusal.
+    pub fn refused(&self) -> Option<&str> {
+        self.protocol.refused()
     }
 
     pub fn disconnect(&mut self) -> ObservedEvent {
