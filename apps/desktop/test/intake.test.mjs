@@ -139,6 +139,14 @@ test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "not_installed" }), { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." });
 });
 
+test("a mapping paused on every pool account shows when the pause ends in local time", () => {
+  process.env.TZ = "America/New_York";
+  const paused = { kind: "waiting", until_ms: 1_792_729_920_000 };
+  assert.deepEqual(intake.stepView(paused), { word: "Rate limited until 12:32 AM", tone: "warn", line: null });
+  assert.deepEqual(intake.stepView(paused, true), { word: "Skipped", tone: "neutral", line: null });
+  assert.deepEqual(intake.stepView({ kind: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
+});
+
 test("a finished onboarding opens its saved setup, shows unstarted steps as skipped and saves changes", () => {
   const finished = view({ finished: true, graph: { kind: "running" }, mapping: { kind: "waiting" } });
   assert.equal(intake.settled(finished), true);

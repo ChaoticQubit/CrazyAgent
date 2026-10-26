@@ -398,7 +398,13 @@ pub(in crate::tui) fn job_status(job: &ResearchJob, now_ms: i64, offset: i64, lo
             )
         }
         ResearchStatus::Queued => Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted),
-        ResearchStatus::NeedsPool => Row::of("! Needs a pool", look.warning),
+        ResearchStatus::NeedsPool => match job.rate_limited() {
+            Some((until, _)) => Row::of(
+                format!("! Rate limited until {}", clock(until, offset)),
+                look.warning,
+            ),
+            None => Row::of("! Needs a pool", look.warning),
+        },
         ResearchStatus::Failed => Row::of(format!("{} Failed", look.glyph("\u{2717}")), look.error)
             .push(
                 match job.attempts {
@@ -1216,7 +1222,10 @@ pub(in crate::tui) fn activity(
 ) -> Vec<(Option<i64>, String, Style)> {
     let mut steps = vec![(Some(job.created_ms), "Queued".to_owned(), look.fg)];
     if job.status == ResearchStatus::NeedsPool {
-        steps.push((None, "Waiting for a pool".to_owned(), look.warning));
+        let waiting = job
+            .rate_limited()
+            .map_or("Waiting for a pool", |(_, reason)| reason);
+        steps.push((None, waiting.to_owned(), look.warning));
     }
     if let Some(at) = job.started_ms {
         let harness = harness_name(&job.harness, None);

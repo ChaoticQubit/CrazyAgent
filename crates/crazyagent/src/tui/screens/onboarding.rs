@@ -1,5 +1,6 @@
 use super::intake::{NOT_READY, ask, copy, event, not_ready};
 use super::new_project::{NAME_BYTES_MAX, PLATFORM_ORDER};
+use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
 use crate::onboarding::{OnboardingView, Step};
@@ -441,7 +442,14 @@ impl OnboardingPage {
     fn step_line(label: &str, step: &Step, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let state = match step {
-            Step::Waiting => status("Waiting", theme, ctx.glyphs),
+            Step::Waiting { until_ms: None } => status("Waiting", theme, ctx.glyphs),
+            Step::Waiting {
+                until_ms: Some(until),
+            } => status(
+                &format!("Rate limited until {}", clock(*until, local_offset(*until))),
+                theme,
+                ctx.glyphs,
+            ),
             Step::Running => Line::from(vec![
                 Span::styled(ctx.spinner(), theme.running),
                 Span::styled(" Running", theme.running),

@@ -521,6 +521,53 @@ pub struct ResearchJob {
     pub finished_ms: Option<i64>,
 }
 
+const RATE_LIMITED: &str = "rate_limited until ";
+const RATE_LIMITED_LABEL: &str = "Rate limited";
+
+impl ResearchJob {
+    /// Reads the wait of a job parked because every pool account that can run it hit a rate
+    /// or usage limit: the research service's `rate_limited until YYYY-MM-DD HH:MM UTC: <reason>`
+    /// detail on a job that needs a pool. Takes the job. Returns when the limit ends in ms
+    /// since the epoch and the plain reason, or `None` for any other job.
+    pub fn rate_limited(&self) -> Option<(i64, &str)> {
+        if self.status != ResearchStatus::NeedsPool {
+            return None;
+        }
+        let rest = self.error.as_deref()?.strip_prefix(RATE_LIMITED)?;
+        let (until, reason) = rest.split_once(" UTC: ")?;
+        Some((utc_minute_ms(until)?, reason))
+    }
+}
+
+/// Reads a `YYYY-MM-DD HH:MM` UTC minute, the inverse of the research service's date.
+/// Takes the text. Returns its ms since the epoch, or `None` for any other text.
+fn utc_minute_ms(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 16 || [bytes[4], bytes[7], bytes[10], bytes[13]] != *b"-- :" {
+        return None;
+    }
+    let number = |at: usize, len: usize| {
+        let digits = &bytes[at..at + len];
+        digits.iter().all(u8::is_ascii_digit).then(|| {
+            digits
+                .iter()
+                .fold(0, |value, digit| value * 10 + i64::from(digit - b'0'))
+        })
+    };
+    let (year, month, day) = (number(0, 4)?, number(5, 2)?, number(8, 2)?);
+    let (hour, minute) = (number(11, 2)?, number(14, 2)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let year_of_era = shifted - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(((days * 24 + hour) * 60 + minute) * 60_000)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextKind {
@@ -1359,7 +1406,8 @@ fn effective(status: ResearchStatus, has_pool: bool) -> ResearchStatus {
     }
 }
 
-/// Lists a project's research jobs with the current pool assignment applied.
+/// Lists a project's research jobs with the current pool assignment applied; a job of an
+/// assigned pool waiting out a rate limit keeps its wait and reads "Rate limited".
 /// Takes a read transaction, the configuration and the project.
 /// Returns at most 64 jobs in creation order with plain labels.
 pub fn list_jobs(
@@ -1370,8 +1418,16 @@ pub fn list_jobs(
     let has_pool = project_has_pool(config, project);
     let mut jobs = load_jobs(tx, "project", &project.as_str())?;
     for job in &mut jobs {
-        job.status = effective(job.status, has_pool);
-        job.status_label = job.status.label().into();
+        let limited = has_pool && job.rate_limited().is_some();
+        if !limited {
+            job.status = effective(job.status, has_pool);
+        }
+        job.status_label = if limited {
+            RATE_LIMITED_LABEL
+        } else {
+            job.status.label()
+        }
+        .into();
         assert_eq!(&job.project_id, project);
     }
     Ok(jobs)

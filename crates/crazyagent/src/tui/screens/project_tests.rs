@@ -4,7 +4,7 @@ use super::project::{
     memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
-use super::project_view::{activity, project_screen};
+use super::project_view::{activity, job_status, project_screen};
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
@@ -979,6 +979,66 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
         settle(&mut screen, &mut controller, start + 4_500).await,
         ["jobs"],
         "a refused change reads the jobs again"
+    );
+}
+
+#[test]
+fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
+    const REASON: &str =
+        "Every account in this project's pool that can run this research hit its rate limit";
+    let look = Look::plain();
+    let limited = ResearchJob {
+        id: 9,
+        project_id: ProjectId::new("notes-cli").unwrap(),
+        kind: ResearchKind::CompetitorResearch,
+        kind_label: "Competitor research".into(),
+        status: ResearchStatus::NeedsPool,
+        status_label: "Rate limited".into(),
+        report_path: "context/research/competitor_research.md".into(),
+        harness: "claude".into(),
+        tools: false,
+        attempts: 0,
+        claimer: None,
+        error: Some(format!("rate_limited until 2026-10-23 04:32 UTC: {REASON}")),
+        cancel_requested: false,
+        output_bytes: 0,
+        created_ms: 1_000,
+        started_ms: None,
+        heartbeat_ms: None,
+        finished_ms: None,
+    };
+    assert_eq!(
+        text(&[job_status(&limited, 0, 3_600, &look)]),
+        "! Rate limited until 05:32"
+    );
+    assert_eq!(
+        activity(&limited, &look)
+            .into_iter()
+            .map(|(at, text, _)| (at, text))
+            .collect::<Vec<_>>(),
+        [
+            (Some(1_000), "Queued".to_owned()),
+            (None, REASON.to_owned())
+        ]
+    );
+    assert_eq!(
+        crate::tui::seam::ResearchCounts::of(std::slice::from_ref(&limited)).summary(),
+        "Research: rate limited"
+    );
+    let mut waiting = limited.clone();
+    waiting.error = None;
+    assert_eq!(
+        text(&[job_status(&waiting, 0, 3_600, &look)]),
+        "! Needs a pool"
+    );
+    waiting.error = Some(format!("rate_limited until soon: {REASON}"));
+    assert_eq!(
+        text(&[job_status(&waiting, 0, 3_600, &look)]),
+        "! Needs a pool"
+    );
+    assert_eq!(
+        crate::tui::seam::ResearchCounts::of(&[waiting]).summary(),
+        "Research: needs a pool"
     );
 }
 

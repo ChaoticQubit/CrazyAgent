@@ -454,3 +454,93 @@ fn killing_the_engine_ends_its_research_agents() {
     fs::remove_dir_all(&runtime).unwrap();
     fs::remove_dir_all(home(&runtime)).unwrap();
 }
+
+/// Reads a project's research list through the owner client of the running engine, the
+/// read the TUI and the desktop make. Input: the runtime and the project id.
+/// Output: the jobs as the owner sees them.
+fn owner_jobs(runtime: &Path, project: &str) -> Vec<crazyagent::project_setup::ResearchJob> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner =
+                OwnerController::attach(runtime, OwnerClientKind::Tui, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            owner
+                .research_jobs(crazyagent::protocol::ProjectId::new(project).unwrap())
+                .await
+                .unwrap()
+        })
+}
+
+#[test]
+fn research_waiting_on_a_rate_limit_reads_rate_limited_not_needs_a_pool() {
+    let runtime = runtime("rl", CATALOG);
+    let server = installed(&runtime).map(|tmux| Server {
+        tmux,
+        socket: runtime.join(FOLDER).join(SOCKET),
+    });
+    let engine = Engine::start(&runtime);
+    create_cafe(&runtime);
+    let paused_until = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 10 * 60_000;
+    let database = rusqlite::Connection::open(runtime.join("engine.db")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    database
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('anthropic-connection',?1)",
+            [paused_until],
+        )
+        .unwrap();
+    drop(database);
+    let jobs = ResearchJobs::open(&runtime.join("engine.db")).unwrap();
+    let id = jobs
+        .enqueue("project-cafe", "competitor_research", "claude", false)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while jobs
+        .get(id)
+        .unwrap()
+        .unwrap()
+        .error
+        .is_none_or(|detail| !detail.starts_with("rate_limited until "))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the job never waited on the rate limit: {:?}",
+            jobs.get(id).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let listed = owner_jobs(&runtime, "project-cafe");
+    let job = listed.iter().find(|job| job.id == id).unwrap();
+    assert_eq!(
+        (job.status, job.status_label.as_str()),
+        (
+            crazyagent::project_setup::ResearchStatus::NeedsPool,
+            "Rate limited"
+        ),
+        "{job:?}"
+    );
+    assert_eq!(
+        job.rate_limited(),
+        Some((
+            paused_until - paused_until.rem_euclid(60_000),
+            "Every account in this project's pool that can run this research hit its rate limit"
+        )),
+        "{job:?}"
+    );
+    let stderr = engine.stop();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    drop(server);
+    fs::remove_dir_all(&runtime).unwrap();
+    fs::remove_dir_all(home(&runtime)).unwrap();
+}

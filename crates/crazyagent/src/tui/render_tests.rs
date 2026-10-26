@@ -460,6 +460,26 @@ fn home_frames_match_the_design() {
 }
 
 #[test]
+fn a_home_card_whose_research_waits_out_a_rate_limit_says_so_not_needs_a_pool() {
+    let mut cards = projects();
+    cards[2].pool = Some("Main".into());
+    cards[2].research = ResearchCounts {
+        rate_limited: 1,
+        ..Default::default()
+    };
+    let mut ctx = ready(120, 36);
+    ctx.store.projects = Load::Ready(cards);
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    let shown = render(&mut shell, 120, 36).join("\n");
+    assert!(shown.contains("Fieldnotes Mobile"), "{shown}");
+    assert!(shown.contains("! Rate limited"), "{shown}");
+    assert!(shown.contains("Research: rate limited"), "{shown}");
+    assert!(!shown.contains("Needs a pool"), "{shown}");
+}
+
+#[test]
 fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
     let mut cards = projects();
     cards[0].activity = Activity {

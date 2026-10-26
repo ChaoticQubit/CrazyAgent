@@ -32,6 +32,22 @@ export function ago(at: number, now: number): string {
 }
 
 const PROMPT_LINE_MAX = 140;
+const RATE_LIMITED = /^rate_limited until (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC: (.+)$/s;
+
+/** Reads the wait of a research job parked because every pool account that can run it hit a
+ * rate or usage limit, from the engine's "rate_limited until YYYY-MM-DD HH:MM UTC: reason" detail.
+ * Input: the job. Output: when the limit ends in milliseconds and the plain reason, or null. */
+export function rateLimit(job: Pick<ResearchJob, "status" | "error">): { until: number; reason: string } | null {
+  const found = job.status === "needs_pool" ? RATE_LIMITED.exec(job.error ?? "") : null;
+  if (!found) return null;
+  const [year, month, day, hour, minute] = found.slice(1, 6).map(Number);
+  return { until: Date.UTC(year, month - 1, day, hour, minute), reason: found[6].trim() };
+}
+
+/** Names the owner's local clock time of a moment. Input: milliseconds. Output: for example "4:32 PM". */
+export function localClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
 
 /** The first line of a task prompt, cut to fit one row. Input: the prompt. Output: the line. */
 export function firstLine(text: string): string {
@@ -210,7 +226,11 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   const base = { title: job.kind_label, elapsed: "", report: false, active: false };
   switch (job.status) {
     case "queued": return { ...base, status: "Queued", tone: "neutral", progress: "Waiting to start", active: true };
-    case "needs_pool": return { ...base, status: "Needs a pool", tone: "warn", progress: job.error?.trim() || "Waiting for a pool" };
+    case "needs_pool": {
+      const limit = rateLimit(job);
+      if (limit) return { ...base, status: `Rate limited until ${localClock(limit.until)}`, tone: "warn", progress: limit.reason };
+      return { ...base, status: "Needs a pool", tone: "warn", progress: job.error?.trim() || "Waiting for a pool" };
+    }
     case "running": return {
       ...base, status: "Running", tone: "info", elapsed: ran, active: true,
       progress: job.cancel_requested ? "Stopping" : job.output_bytes > 0 ? `Writing report, ${formatBytes(job.output_bytes)} so far` : "Working",
@@ -229,9 +249,13 @@ export function shouldPoll(jobs: ResearchJob[]): boolean {
 }
 
 /** Builds the Needs you line for research that waits on its pool, using the engine's reason
- * when a waiting job carries one. Input: the jobs. Output: one sentence. */
+ * when a waiting job carries one and the local end of a rate limit when that is the reason.
+ * Input: the jobs. Output: one sentence. */
 export function waitingLine(jobs: ResearchJob[]): string {
-  const reason = jobs.find((job) => job.status === "needs_pool" && job.error?.trim())?.error?.trim();
+  const waiting = jobs.find((job) => job.status === "needs_pool" && job.error?.trim());
+  const limit = waiting ? rateLimit(waiting) : null;
+  if (limit) return `Research is rate limited until ${localClock(limit.until)}.`;
+  const reason = waiting?.error?.trim();
   if (!reason) return "Research is waiting for a pool.";
   return `Research is waiting: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
 }

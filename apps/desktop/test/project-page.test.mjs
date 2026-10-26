@@ -41,6 +41,18 @@ test("research rows use the fixed status words and only real progress", () => {
   assert.equal(research.researchRow(job("running", { cancel_requested: true, started_ms: 1_000 }), now).progress, "Stopping");
 });
 
+test("research waiting on a rate limit reads Rate limited until its local end, not Needs a pool", () => {
+  process.env.TZ = "America/New_York";
+  const reason = "Every account in this project's pool that can run this research hit its rate limit";
+  const limited = job("needs_pool", { status_label: "Rate limited", error: `rate_limited until 2026-10-23 04:32 UTC: ${reason}` });
+  assert.deepEqual(research.researchRow(limited, 0),
+    { title: "Market research", status: "Rate limited until 12:32 AM", tone: "warn", progress: reason, elapsed: "", report: false, active: false });
+  assert.equal(research.waitingLine([job("done"), limited]), "Research is rate limited until 12:32 AM.");
+  const malformed = job("needs_pool", { error: `rate_limited until soon: ${reason}` });
+  assert.equal(research.researchRow(malformed, 0).status, "Needs a pool");
+  assert.equal(research.researchRow(job("queued", { error: limited.error }), 0).status, "Queued");
+});
+
 test("research polling continues only while something can still change", () => {
   assert.equal(research.shouldPoll([job("done"), job("failed")]), false);
   assert.equal(research.shouldPoll([job("done"), job("running")]), true);

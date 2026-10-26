@@ -722,8 +722,8 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     bench.use_repos_as_home().await;
     let project = bench.start_onboarding().await;
     let waiting = bench.view(&project).await;
-    assert_eq!(waiting.graph, Step::Waiting);
-    assert_eq!(waiting.mapping, Step::Waiting);
+    assert_eq!(waiting.graph, Step::WAITING);
+    assert_eq!(waiting.mapping, Step::WAITING);
     assert!(waiting.draft.research.is_empty());
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
@@ -745,8 +745,8 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     let again = bench.start_onboarding().await;
     assert_eq!(again, project);
     let retried = bench.view(&project).await;
-    assert_eq!(retried.graph, Step::Waiting);
-    assert_eq!(retried.mapping, Step::Waiting);
+    assert_eq!(retried.graph, Step::WAITING);
+    assert_eq!(retried.mapping, Step::WAITING);
     bench.stop().await;
 }
 
@@ -761,7 +761,7 @@ async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_i
     let waiting = bench.view(&project).await;
     assert_eq!(
         (waiting.graph, waiting.mapping),
-        (Step::Waiting, Step::Waiting)
+        (Step::WAITING, Step::WAITING)
     );
     let entry = bench.home_entry().await;
     assert_eq!(entry.state, FoundState::Onboarding, "{entry:?}");
@@ -886,12 +886,12 @@ async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_insta
     assert_eq!(again, project);
     let retried = bench.view(&project).await;
     assert_eq!(retried.graph, Step::NotInstalled);
-    assert_eq!(retried.mapping, Step::Waiting);
+    assert_eq!(retried.mapping, Step::WAITING);
     bench.graphify_skill().await;
     assert_eq!(bench.start_onboarding().await, project);
     assert_eq!(
         bench.view(&project).await.graph,
-        Step::Waiting,
+        Step::WAITING,
         "a second start after the skill is installed builds the graph"
     );
     bench.stop().await;
@@ -917,7 +917,7 @@ async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_
         .unwrap();
     assert_eq!(rejection(&on), None, "{on:?}");
     assert_eq!(bench.start_onboarding().await, project);
-    assert_eq!(bench.view(&project).await.graph, Step::Waiting);
+    assert_eq!(bench.view(&project).await.graph, Step::WAITING);
     bench.stop().await;
 }
 
@@ -983,7 +983,7 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
     assert!(processes_with(&agents).is_empty());
     let view = bench.view(&project).await;
     assert_eq!(view.graph, failed(GRAPHIFY_MISSING));
-    assert_eq!(view.mapping, Step::Waiting);
+    assert_eq!(view.mapping, Step::WAITING);
     bench.stop().await;
 }
 
@@ -1434,7 +1434,7 @@ async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_runnin
     assert_eq!(view.graph, failed(GRAPHIFY_MISSING), "{view:?}");
     assert_eq!(
         view.mapping,
-        Step::Waiting,
+        Step::WAITING,
         "a saved setup needs no mapping agent: {view:?}"
     );
     assert!(view.finished, "{view:?}");
@@ -1568,5 +1568,44 @@ async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_
     stop_service(service).await;
     assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
+    const UNTIL_MS: i64 = 1_792_729_920_000;
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let asked = Arc::new(Mutex::new(0_usize));
+    let (runner, agents) = bench.runner();
+    let service = {
+        let asked = asked.clone();
+        OnboardingService::start(
+            runner,
+            move |_: &CredentialRef, _: &[ResearchHarness]| {
+                *asked.lock().unwrap() += 1;
+                AccountPick::Paused { until_ms: UNTIL_MS }
+            },
+            || None,
+            OnboardingLimits::default(),
+            Duration::from_millis(50),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while *asked.lock().unwrap() < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "mapping never asked for an account"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let view = bench.view(&project).await;
+    stop_service(service).await;
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    assert_eq!(
+        serde_json::to_value(&view.mapping).unwrap(),
+        serde_json::json!({"kind": "waiting", "until_ms": UNTIL_MS}),
+        "{view:?}"
+    );
     bench.stop().await;
 }

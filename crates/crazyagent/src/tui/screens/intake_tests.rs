@@ -1,3 +1,4 @@
+use super::project_time::{clock, local_offset};
 use super::settings_accounts::tests::{ctx, render};
 use super::{Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
@@ -955,6 +956,36 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
 }
 
 #[test]
+fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
+    const UNTIL_MS: i64 = 1_792_729_920_000;
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Waiting {
+            until_ms: Some(UNTIL_MS),
+        };
+    });
+    let rows = render(&mut shell, 80, 40);
+    let end = clock(UNTIL_MS, local_offset(UNTIL_MS));
+    let paused = format!(
+        "{} Rate limited until {end}",
+        shell.ctx.glyphs.status(Status::Needs)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Map the project") && row.contains(&paused)),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| view.mapping = Step::WAITING);
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Map the project") && row.contains("Waiting")),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "Rate limited"), "{rows:#?}");
+}
+
+#[test]
 fn the_review_still_says_whether_a_code_graph_was_built() {
     let graph_row = |rows: &[String], state: &str| {
         rows.iter()
@@ -1070,7 +1101,7 @@ fn a_saved_setup_opens_with_its_saved_values_and_saves_changes() {
     let (mut shell, _) = review_with(|view| {
         view.finished = true;
         view.graph = Step::Running;
-        view.mapping = Step::Waiting;
+        view.mapping = Step::WAITING;
         view.draft.about = "Keeps notes in the terminal.".into();
         view.missing = vec!["platforms".into()];
     });

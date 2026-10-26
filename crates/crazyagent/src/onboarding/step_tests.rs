@@ -43,7 +43,10 @@ fn onboarded(tx: &Transaction<'_>, graph: &Step) -> ProjectId {
 #[test]
 fn every_step_reads_back_from_its_stored_columns() {
     for step in [
-        Step::Waiting,
+        Step::WAITING,
+        Step::Waiting {
+            until_ms: Some(1_792_729_920_000),
+        },
         Step::Running,
         Step::Done,
         Step::Off,
@@ -51,14 +54,11 @@ fn every_step_reads_back_from_its_stored_columns() {
         Step::failed("graph build failed"),
     ] {
         let (state, reason) = step.columns();
-        assert_eq!(
-            Step::from_columns(state, reason.map(str::to_owned)).unwrap(),
-            step
-        );
+        assert_eq!(Step::from_columns(state, reason).unwrap(), step);
     }
     assert_eq!(
         Step::NotInstalled.columns(),
-        ("off", Some("graphify_not_installed")),
+        ("off", Some("graphify_not_installed".to_owned())),
         "a missing skill is stored as off, so every query that counts off as settled still does"
     );
     assert_eq!(
@@ -67,6 +67,47 @@ fn every_step_reads_back_from_its_stored_columns() {
             .0,
         "onboarding_step_invalid"
     );
+    assert_eq!(
+        Step::from_columns("waiting", Some("soon".into()))
+            .unwrap_err()
+            .0,
+        "onboarding_step_invalid"
+    );
+}
+
+/// The step as clients built before a wait carried its pause end read it.
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EarlierStep {
+    Waiting,
+    Running,
+    Done,
+    Off,
+    NotInstalled,
+    Failed { reason: String },
+}
+
+#[test]
+fn a_paused_wait_carries_its_end_and_earlier_clients_still_read_a_wait() {
+    let paused = Step::Waiting {
+        until_ms: Some(1_792_729_920_000),
+    };
+    let wire = serde_json::to_string(&paused).unwrap();
+    assert_eq!(wire, r#"{"kind":"waiting","until_ms":1792729920000}"#);
+    assert_eq!(serde_json::from_str::<Step>(&wire).unwrap(), paused);
+    assert_eq!(
+        serde_json::from_str::<EarlierStep>(&wire).unwrap(),
+        EarlierStep::Waiting
+    );
+    assert_eq!(
+        serde_json::to_string(&Step::WAITING).unwrap(),
+        r#"{"kind":"waiting"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<Step>(r#"{"kind":"waiting"}"#).unwrap(),
+        Step::WAITING
+    );
+    assert!(serde_json::from_str::<Step>(r#"{"kind":"waiting","until":1}"#).is_err());
 }
 
 #[test]
@@ -93,7 +134,7 @@ fn the_graph_step_starts_from_whether_graphify_is_installed_and_on() {
     graphify(&tx, false);
     assert_eq!(graph_step(&tx).unwrap(), Step::Off);
     graphify(&tx, true);
-    assert_eq!(graph_step(&tx).unwrap(), Step::Waiting);
+    assert_eq!(graph_step(&tx).unwrap(), Step::WAITING);
 }
 
 #[test]
@@ -107,12 +148,12 @@ fn a_restart_stores_why_the_graph_is_not_built() {
     restart(&tx, &project, &pool, Step::Off).unwrap();
     assert_eq!(stored(&tx, &project), Step::Off);
     restart(&tx, &project, &pool, Step::NotInstalled).unwrap();
-    restart(&tx, &project, &pool, Step::Waiting).unwrap();
-    assert_eq!(stored(&tx, &project), Step::Waiting);
+    restart(&tx, &project, &pool, Step::WAITING).unwrap();
+    assert_eq!(stored(&tx, &project), Step::WAITING);
     restart(&tx, &project, &pool, Step::NotInstalled).unwrap();
     assert_eq!(
         stored(&tx, &project),
-        Step::Waiting,
+        Step::WAITING,
         "a waiting graph keeps waiting"
     );
 }
