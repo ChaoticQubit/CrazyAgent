@@ -2,7 +2,7 @@ use super::*;
 use crate::adapters::{claude, codex};
 use serde_json::{Value, json};
 
-const URL: &str = "https://auth.example.invalid/login?state=owner-secret-703";
+const URL: &str = "https://auth.openai.com/login?state=owner-secret-703";
 const EMAIL: &str = "owner-secret-703@example.invalid";
 
 fn fixture() -> (Value, Command) {
