@@ -8,7 +8,7 @@ function invokedCommands() {
   const commands = new Set();
   for (const name of readdirSync(new URL("../src/", import.meta.url))) {
     if (!/\.tsx?$/.test(name)) continue;
-    for (const match of read(`src/${name}`).matchAll(/invoke<[^(]*>\("(desktop_[a-z_]+)"/g)) {
+    for (const match of read(`src/${name}`).matchAll(/(?:invoke|call)<[^(]*>\("(desktop_[a-z_]+)"/g)) {
       commands.add(match[1]);
     }
   }

@@ -642,6 +642,19 @@ export function restartAgent(id: string): Promise<Result<AgentView>> {
   return call<AgentView>("desktop_restart_agent", { id });
 }
 
+/** Lists the running agents that use one account, so a refused sign-out can name them.
+ * Input: the account id. Output: the agents, newest first. */
+export function agentsUsing(accountId: string): Promise<Result<AgentView[]>> {
+  return call<AgentView[]>("desktop_agents_using", { accountId });
+}
+
+/** Stops every agent that uses one account and waits for them to end, so the account can
+ * be signed out. Input: the account id. Output: the agents still using it, none once all
+ * have stopped. */
+export function stopAgentsUsing(accountId: string): Promise<Result<AgentView[]>> {
+  return call<AgentView[]>("desktop_stop_agents_using", { accountId });
+}
+
 /** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
  * owner closed the chooser. */
 export function pickFolder(): Promise<Result<string | null>> {
