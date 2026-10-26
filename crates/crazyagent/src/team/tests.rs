@@ -1287,7 +1287,8 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
     let engine_folder = base.join("engine-bin");
     std::fs::create_dir(&engine_folder).unwrap();
     let engine = engine_folder.join("crazyagent");
-    std::fs::write(&engine, b"").unwrap();
+    std::fs::write(&engine, b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
     let source = pool.clone();
     assert_eq!(
         runtime::TeamRuntime::open(
@@ -2037,5 +2038,37 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         note(
             "- Write the README: this project has no team plan\n- Check the tests: this project has no team plan"
         )
+    );
+
+    let tx = connection.transaction().unwrap();
+    let setup = crate::project_setup::load_setup(&tx, &teams[0])
+        .unwrap()
+        .unwrap();
+    let own = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "Write the changelog",
+        TaskSource::Owner,
+        None,
+        2_000,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let sources: Vec<(i64, TaskSource)> = status(&connection, &setup)
+        .unwrap()
+        .tasks
+        .iter()
+        .map(|task| (task.id, task.source))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            (admitted[0][0], TaskSource::Master),
+            (own, TaskSource::Owner)
+        ],
+        "the clients read a conversation master's task as the master's, the owner's own as theirs"
     );
 }

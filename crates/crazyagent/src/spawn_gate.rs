@@ -45,6 +45,21 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     guarded(|| command.spawn())
 }
 
+/// Starts a child that also inherits one more open descriptor, at its own number, while no
+/// other thread of this process starts a child, then closes this process's copy, so no other
+/// child ever holds it. Input: the configured command and the descriptor to hand over.
+/// Output: the child, or the error that kept it from starting.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io::Result<Child> {
+    guarded(move || {
+        rustix::io::fcntl_setfd(&handed, rustix::io::FdFlags::empty())?;
+        let child = command.spawn();
+        drop(handed);
+        child
+    })
+}
+
 /// Starts a child through the gate and waits for it outside the gate.
 /// Input: the configured command; its stdio is inherited unless set, as with
 /// `Command::status`. Output: the exit status.

@@ -508,10 +508,10 @@ fn delegate_only(setting: &str, tools: crate::engine::claude_host::MasterTools<'
 }
 
 /// Confirms a built master turn names exactly the delegate server the engine registered: for
-/// tools on, the registered engine executable at its canonical path serving the drop file in
-/// the turn's own sandbox temporary folder, and for tools off no server. Inputs: the backend,
-/// the turn and, for tools on, the registered engine executable. Output: Ok, or the refusal
-/// code of the check that failed.
+/// tools on, the registered engine executable at its canonical path, outside every folder the
+/// turn's sandbox lets it write, serving the drop file in the turn's own sandbox temporary
+/// folder, and for tools off no server. Inputs: the backend, the turn and, for tools on, the
+/// registered engine executable. Output: Ok, or the refusal code of the check that failed.
 fn require_master_delegate(
     backend: MasterBackend,
     turn: &MasterTurnLaunch,
@@ -529,6 +529,9 @@ fn require_master_delegate(
         }),
         None => None,
     };
+    if expected.is_some_and(|tools| turn.sandbox.sandbox().writes(tools.engine)) {
+        return Err(failure("master_delegate_writable"));
+    }
     match backend {
         MasterBackend::Codex => require_master_tool_policy(&turn.command, expected)?,
         MasterBackend::Claude => {

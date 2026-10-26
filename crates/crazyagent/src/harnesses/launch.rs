@@ -51,18 +51,30 @@ const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
-const CODEX_TOOLS_ON: [&str; 6] = [
+const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
     "features.apps=false",
     "features.plugins=false",
     "features.goals=false",
+    "features.multi_agent=false",
+    "features.multi_agent_v2=false",
     "mcp_servers={}",
 ];
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
 pub(super) const CLAUDE_NO_MCP: [&str; 2] = ["--mcp-config", "{\"mcpServers\":{}}"];
+pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
+/// Claude Code's own sub-agent tools, denied to every tools-on Claude agent the engine starts,
+/// master and team alike, so sub-agents start only through the engine. Claude Code 2.1.309
+/// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
+/// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
+pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+/// Turns off Claude Code's background Bash commands and background agents for a tools-on
+/// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
+/// the turn's result, which the engine would read as the next task's reply.
+const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -207,6 +219,7 @@ pub enum LaunchEvent {
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
+    LateOutput { lines: u64 },
 }
 
 /// Tells whether a provider error message says the account hit a rate or usage limit.
@@ -472,9 +485,11 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
+                CLAUDE_DENY_FLAG,
             ]
             .map(OsString::from),
         );
+        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(OsString::from));
     } else {
         arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
     }
@@ -491,6 +506,10 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
     ];
     if request.tools {
         environment.push(("SHELL", OsString::from("/bin/zsh")));
+        environment.push((
+            CLAUDE_BACKGROUND_TASKS_OFF.0,
+            OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
+        ));
     }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
         arguments.push(OsString::from("--bare"));
@@ -619,6 +638,7 @@ enum Driver {
         protocol: ClaudeProtocol,
         turns: u64,
         interrupt: Option<String>,
+        late: u64,
     },
 }
 
@@ -660,6 +680,7 @@ impl Driver {
                         protocol,
                         turns: 0,
                         interrupt: None,
+                        late: 0,
                     },
                     Vec::new(),
                 ))
@@ -734,6 +755,7 @@ impl Driver {
                 protocol,
                 turns,
                 interrupt,
+                ..
             } => {
                 if protocol.state() != ClaudeState::Active || interrupt.is_some() {
                     return Err(failure("launch_not_running"));
@@ -852,6 +874,7 @@ impl Driver {
             Self::Claude {
                 protocol,
                 interrupt,
+                late,
                 ..
             } => {
                 let value: serde_json::Value =
@@ -866,6 +889,10 @@ impl Driver {
                         }
                     }
                     Some("control_request" | "keep_alive") => {}
+                    _ if protocol.state() == ClaudeState::Idle => {
+                        *late = late.saturating_add(1);
+                        events.push(LaunchEvent::LateOutput { lines: *late });
+                    }
                     _ => {
                         let decoded = protocol
                             .receive(&framed)
@@ -908,9 +935,11 @@ impl Driver {
 }
 
 /// A running harness process driven through its headless interface.
-/// The process leads its own process group so stop reaches every descendant.
+/// The process leads its own process group, and a harness on pipes has a warden in its
+/// sandbox, so stop reaches every descendant, those in their own sessions included.
 pub struct Session {
     child: Child,
+    warden: Option<crate::sandbox::warden::Warden>,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -982,6 +1011,7 @@ impl Session {
         let output_bytes = request.limits.output_bytes;
         let (sender, lines) = channel();
         let mut child;
+        let mut warden = None;
         let stdin;
         match durable {
             Some(io) => {
@@ -1000,7 +1030,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
-                child = crate::spawn_gate::spawn(&mut command)
+                (child, warden) = crate::sandbox::warden::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
@@ -1027,6 +1057,7 @@ impl Session {
         }
         let mut session = Self {
             child,
+            warden,
             stdin,
             lines,
             driver,
@@ -1123,7 +1154,8 @@ impl Session {
         }
     }
 
-    /// Stops the whole process group: TERM, a bounded grace wait, then KILL.
+    /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
+    /// run's warden, when it has one, stop every process left in its sandbox.
     /// Output: the leader's exit code when it exited normally.
     pub fn stop(mut self) -> Option<i32> {
         self.stop_group()
@@ -1188,7 +1220,13 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
+        if let Some(warden) = self.warden.take()
+            && let Err(code) = warden.fire(crate::sandbox::warden::FIRE_TIME)
+        {
+            eprintln!("harness_warden_unconfirmed cause={code}");
+        }
         assert!(self.stdin.is_none());
+        assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))
     }
 }

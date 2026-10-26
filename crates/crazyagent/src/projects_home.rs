@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
 
 /// The owner's projects home folder and whether the engine is watching it.
 /// `path` is None until the owner picks a folder at first run or in Settings;
-/// `watching` is true while a live folder watch reports changes in it.
+/// `watching` is true while a live folder watch reports changes in it or starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectsHome {

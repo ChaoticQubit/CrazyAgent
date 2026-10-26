@@ -78,6 +78,15 @@ impl NativeProfileUse {
 /// Matches the Unix credential copy; no lease exists here, so no copy is ever made.
 pub(crate) enum AgentCredential {}
 
+impl Drop for AgentCredential {
+    /// Matches the Unix copy, which leaves the agent's home when dropped, so the callers
+    /// that end a copy at a chosen point mean the same on every target.
+    /// No value is ever made, so this never runs.
+    fn drop(&mut self) {
+        match *self {}
+    }
+}
+
 impl NativeProfileUse {
     /// Matches the Unix handoff of a credential copy to an agent's own home. No value is
     /// ever made here. Inputs: the agent home and turn bound, unused. Output: none.

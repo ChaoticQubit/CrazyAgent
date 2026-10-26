@@ -27,7 +27,7 @@ impl Case {
         fs::create_dir(cwd.join(".git")).unwrap();
         fs::create_dir(home_dir.join(".backboard")).unwrap();
         let executable = root_path.join("actual-false");
-        fs::copy("/usr/bin/false", &executable).unwrap();
+        fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let launch = RcliMasterLaunch {
             binding: RcliMasterBinding {
@@ -263,6 +263,13 @@ fn real_private_paths_reject_aliases_overlap_and_group_access() {
 #[test]
 fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child() {
     let case = Case::new();
+    let first =
+        crate::spawn_gate::first_run(&mut std::process::Command::new(&case.launch.executable));
+    assert_eq!(
+        first.code(),
+        Some(1),
+        "the fixture did not run to its own exit"
+    );
     let root = case.launch.executable.parent().unwrap().to_path_buf();
     let other = root.join("other-project");
     fs::create_dir(&other).unwrap();
@@ -289,7 +296,7 @@ fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child
                 Instant::now() < deadline,
                 "real process exit was not observed"
             ),
-            Ok(Some(_)) => panic!("/usr/bin/false produced no host observation"),
+            Ok(Some(_)) => panic!("the exiting fixture produced no host observation"),
             Err(error) => {
                 assert_eq!(error.0, "rcli_master_process_exited");
                 break;

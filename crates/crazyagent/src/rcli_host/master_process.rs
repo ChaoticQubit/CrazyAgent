@@ -1,5 +1,6 @@
 use super::master_launch::error;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
+use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
@@ -16,6 +17,7 @@ const INTERVAL: Duration = Duration::from_millis(5);
 
 pub(super) struct HostProcess {
     child: Child,
+    warden: Option<Warden>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -29,13 +31,14 @@ pub(super) struct HostProcess {
 
 impl HostProcess {
     pub(super) fn spawn(mut command: Command) -> Result<Self, ProtocolError> {
-        let mut child = crate::spawn_gate::spawn(&mut command)
-            .map_err(|_| error("rcli_master_spawn_failed"))?;
+        let (mut child, warden) =
+            warden::spawn(&mut command).map_err(|_| error("rcli_master_spawn_failed"))?;
         let stdin = child.stdin.take().expect("configured host input pipe");
         let stdout = child.stdout.take().expect("configured host output pipe");
         let stderr = child.stderr.take().expect("configured host error pipe");
         let process = Self {
             child,
+            warden,
             stdin: Some(stdin),
             stdout: Some(stdout),
             stderr: Some(stderr),
@@ -262,6 +265,10 @@ impl HostProcess {
             uncertain |= self.reap().is_err();
             uncertain |= self.observe_group().is_err();
             if self.status.is_some() && self.group_absent {
+                uncertain |= self
+                    .warden
+                    .take()
+                    .is_some_and(|warden| warden.fire(warden::FIRE_TIME).is_err());
                 self.clean = true;
                 assert!(self.stdin.is_none());
                 assert!(self.status.is_some());
@@ -314,6 +321,25 @@ mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cleanup_stops_what_a_sandboxed_rcli_master_detached() {
+        use crate::sandbox::warden::fixture::{DetachingRun, survivors};
+
+        let run = DetachingRun::new();
+        let mut command = run.command(&run.profile);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut process = HostProcess::spawn(command).unwrap();
+        assert!(process.warden.is_some());
+        let processes = run.processes();
+        process.cleanup().unwrap();
+        assert!(process.warden.is_none());
+        assert_eq!(survivors(processes, Duration::from_secs(1)), []);
+    }
 
     #[test]
     fn exited_unreaped_host_group_is_not_cleanup_uncertainty() {
