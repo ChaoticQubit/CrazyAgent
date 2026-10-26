@@ -36,6 +36,10 @@ mod master_process {
             match *self {}
         }
 
+        pub(super) fn process_group(&self) -> u32 {
+            match *self {}
+        }
+
         pub(super) fn frame(&mut self) -> Result<Option<Vec<u8>>, ProtocolError> {
             match *self {}
         }

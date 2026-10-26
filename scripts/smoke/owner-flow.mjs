@@ -331,7 +331,7 @@ async function main() {
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: userHome, CRAZYAGENT_HOME: crazyHome, TMPDIR: root, LANG: "en_US.UTF-8" };
   const trail = [];
   const results = [];
-  const state = { generation: 0, accounts: [], pool: null, project: null };
+  const state = { generation: 0, accounts: [], pool: null, project: null, session: null };
   let engine;
   let bridgeProcess;
   let realBridgeProcess;
@@ -476,6 +476,7 @@ async function main() {
       recovered = "new conversation after settings changed, ";
     }
     done("submit_master", receipt);
+    state.session = sessionId;
     return { opened, sessionId, receipt, recovered };
   };
   const send = async (text, serving = null, release = true, at = local) => {
@@ -600,7 +601,8 @@ async function main() {
       state.pool = after;
       return ran(await send("Settings changed. Still there?"));
     });
-    await step("4b", "restart the engine, send again (LB-15)", async () => {
+    await step("4b", "restart the engine, send again in the same conversation (LB-15, LB-23)", async () => {
+      const before = state.session;
       await stop(engine);
       await startEngine();
       let connected = false;
@@ -609,7 +611,9 @@ async function main() {
         if (!connected && Date.now() > deadline) throw new Refused("bridge_reconnect_failed");
       }
       const note = await isolated("4a");
-      return ran(await send("The engine restarted. Still there?"), note);
+      const sent = await send("The engine restarted. Still there?");
+      if (note === "" && state.session !== before) throw new Refused("conversation_not_continued", `${before} became ${state.session}`);
+      return ran(sent, note);
     });
     await step("4c", "first account signed out, send again (LB-17 failover)", async () => {
       const first = needs(state.accounts[0], "2a");

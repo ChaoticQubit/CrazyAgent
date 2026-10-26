@@ -183,14 +183,17 @@ pub struct MasterSessionView {
     pub rebound: Vec<MasterBinding>,
 }
 
-/// Settings an open master session was moved to after a change outside its own scope
-/// (DEC-092). Input: the config and source hash it now runs under and the owner
-/// revision of the send that moved it. The Open binding stays in the session itself.
+/// Settings and engine run an open master session was moved to after a change outside
+/// its own scope or an engine restart (DEC-092, LB-23). Input: the config and source hash
+/// it now runs under, the engine epoch when the send moved it to a new run, and the owner
+/// revision of that send. The Open binding stays in the session itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterBinding {
     pub config_id: ConfigId,
     pub source_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_epoch: Option<String>,
     pub at: Cursor,
 }
 
@@ -203,6 +206,17 @@ impl MasterSessionView {
             .map_or((&self.config_id, self.source_hash.as_str()), |binding| {
                 (&binding.config_id, binding.source_hash.as_str())
             })
+    }
+
+    /// The engine run the session runs under now: the epoch of its latest rebinding that
+    /// moved it to a new run, else the run it was opened in.
+    /// Output: the engine epoch a send, a turn or a bootstrap must match.
+    pub(crate) fn engine_epoch(&self) -> &str {
+        self.rebound
+            .iter()
+            .rev()
+            .find_map(|binding| binding.engine_epoch.as_deref())
+            .unwrap_or(&self.owner.engine_epoch)
     }
 
     /// Whether a turn's attempt made under `config` belongs to this session. Input: the
@@ -226,6 +240,7 @@ impl MasterSessionView {
         let mut previous = (
             &self.config_id,
             self.source_hash.as_str(),
+            self.owner.engine_epoch.as_str(),
             self.owner.revision_after.value(),
         );
         if self.rebound.len() > REBINDS_MAX
@@ -234,17 +249,22 @@ impl MasterSessionView {
             return false;
         }
         for binding in &self.rebound {
+            let epoch = binding.engine_epoch.as_deref().unwrap_or(previous.2);
             if !is_hex_id(binding.config_id.as_str())
                 || !is_hex_id(&binding.source_hash)
-                || binding.at.value() <= previous.2
+                || !is_hex_id(epoch)
+                || binding.engine_epoch.as_deref() == Some(previous.2)
+                || binding.at.value() <= previous.3
                 || binding.at.value() > self.version.value()
-                || (&binding.config_id, binding.source_hash.as_str()) == (previous.0, previous.1)
+                || (&binding.config_id, binding.source_hash.as_str(), epoch)
+                    == (previous.0, previous.1, previous.2)
             {
                 return false;
             }
             previous = (
                 &binding.config_id,
                 binding.source_hash.as_str(),
+                epoch,
                 binding.at.value(),
             );
         }

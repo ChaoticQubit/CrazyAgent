@@ -89,6 +89,13 @@ pub(crate) enum MasterRuntimeCommand {
         turn_id: RequestId,
         attempt_id: RequestId,
     },
+    RecordChild {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        group: i32,
+    },
     Observe {
         host: HostStamp,
         project_id: ProjectId,
@@ -1076,7 +1083,7 @@ fn current_scope(
             owner_epoch: session.owner.resulting_epoch,
         },
     )?;
-    if session.owner.engine_epoch != host.engine_epoch
+    if session.engine_epoch() != host.engine_epoch
         || session.binding()
             != (
                 &config.id,
@@ -1270,7 +1277,7 @@ pub(super) fn validate_bootstrap_auth(
                 }
             }
             if !matches!(fact.action, NativeAuthAction::SignIn { .. })
-                || fact.binding.engine_epoch != session.owner.engine_epoch
+                || fact.binding.engine_epoch != session.engine_epoch()
                 || fact.binding.at_revision.value() > owner_revision(tx)?
                 || !crate::master_session::backend_member(
                     session.selection.backend,
@@ -3247,6 +3254,13 @@ pub(super) fn runtime(
             turn_id,
             ..
         }
+        | MasterRuntimeCommand::RecordChild {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
+        }
         | MasterRuntimeCommand::Observe {
             host,
             project_id,
@@ -3316,6 +3330,7 @@ pub(super) fn runtime(
             let record = verify_preparation(&tx, config, host, &session, &turn)?;
             turn.phase = MasterTurnPhase::Delivering;
             persist_runtime(&tx, config, &mut session, &turn)?;
+            super::harness_groups::launching(&tx, &session.session_id, &turn.id)?;
             tx.commit().map_err(error)?;
             assert!(db.is_autocommit());
             let custody = custody.as_mut().map_err(|error| error.clone())?;
@@ -3336,6 +3351,11 @@ pub(super) fn runtime(
                 )?,
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
+        }
+        MasterRuntimeCommand::RecordChild { group, .. } => {
+            super::harness_groups::record(&tx, &session.session_id, &turn.id, group)?;
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
         MasterRuntimeCommand::Observe {
             ref host,
@@ -3408,48 +3428,54 @@ fn reject(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Moves an open master session to the current settings when nothing it runs on changed
-/// (DEC-092): the config it is bound to and the current one have the same `master_scope`.
-/// Inputs: the transaction, the session, the current config and source hash, and the
-/// revision of this send. Output: true when the session runs under the current settings.
+/// Moves an open master session to the current settings and engine run when nothing it
+/// runs on changed (DEC-092, LB-23): the same config, or one with the same `master_scope`.
+/// Inputs: the transaction, the session, the current config, source hash and engine epoch,
+/// and the revision of this send. Output: true when the session runs under all three now.
 fn rebind(
     tx: &Transaction<'_>,
     session: &mut MasterSessionView,
     config: &EffectiveConfig,
     source_hash: &str,
+    engine_epoch: &str,
     at: Cursor,
 ) -> Result<bool, EngineError> {
-    if session.binding() == (&config.id, source_hash) {
+    let moved = session.engine_epoch() != engine_epoch;
+    if !moved && session.binding() == (&config.id, source_hash) {
         return Ok(true);
     }
     if session.selection.backend == MasterBackend::Rcli || session.rebound.len() >= REBINDS_MAX {
         return Ok(false);
     }
-    let body: Option<Option<String>> = tx
-        .query_row(
-            "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1",
-            [session.binding().0.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some(Some(body)) = body else {
-        return Ok(false);
-    };
-    let bound: EffectiveConfig = serde_json::from_str(&body).map_err(error)?;
-    if &bound.id != session.binding().0 {
-        return Err(error("master_config_record"));
-    }
-    if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
-        return Ok(false);
+    if session.binding().0 != &config.id {
+        let body: Option<Option<String>> = tx
+            .query_row(
+                "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1",
+                [session.binding().0.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some(Some(body)) = body else {
+            return Ok(false);
+        };
+        let bound: EffectiveConfig = serde_json::from_str(&body).map_err(error)?;
+        if &bound.id != session.binding().0 {
+            return Err(error("master_config_record"));
+        }
+        if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+            return Ok(false);
+        }
     }
     session.rebound.push(MasterBinding {
         config_id: config.id.clone(),
         source_hash: source_hash.into(),
+        engine_epoch: moved.then(|| engine_epoch.into()),
         at,
     });
     assert!(session.rebound.len() <= REBINDS_MAX);
     assert_eq!(session.binding(), (&config.id, source_hash));
+    assert_eq!(session.engine_epoch(), engine_epoch);
     Ok(true)
 }
 
@@ -3544,9 +3570,15 @@ fn execute(
     }
     match action {
         MasterOwnerAction::Submit { text, .. } => {
-            if session.owner.engine_epoch != provenance.engine_epoch
-                || !rebind(tx, &mut session, config, source_hash, Cursor::new(next))?
-            {
+            let moved = session.engine_epoch() != provenance.engine_epoch;
+            if !rebind(
+                tx,
+                &mut session,
+                config,
+                source_hash,
+                &provenance.engine_epoch,
+                Cursor::new(next),
+            )? {
                 return Ok(reject("master_source_conflict"));
             }
             if let Err(reason) = validate_selection(config, project, &session.selection) {
@@ -3558,11 +3590,18 @@ fn execute(
                     let turn = load_turn(tx, &session, current, revision)?
                         .ok_or_else(|| error("master_current_turn_record"))?;
                     if turn.phase != MasterTurnPhase::Uncertain {
-                        return Ok(reject("master_turn_outstanding"));
+                        return Ok(reject(if moved {
+                            "master_source_conflict"
+                        } else {
+                            "master_turn_outstanding"
+                        }));
                     }
                     Some(turn)
                 }
             };
+            if moved && !super::master_bootstrap::requalify(tx, &session)? {
+                return Ok(reject("master_source_conflict"));
+            }
             let (count, maximum): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(MAX(ordinal),0) FROM (SELECT ordinal FROM master_turns WHERE session=?1 ORDER BY ordinal LIMIT 1025)", [id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?;
             if count != maximum || count < 0 {
                 return Err(error("master_turn_order"));

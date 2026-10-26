@@ -30,6 +30,12 @@ pub(in crate::engine) struct CodexHost {
 }
 
 impl CodexHost {
+    /// Names the process group the harness was started in, which can outlive this host when
+    /// the engine stops. Input: the host. Output: the group.
+    pub(in crate::engine) fn process_group(&self) -> u32 {
+        self.process.pid()
+    }
+
     pub(in crate::engine) async fn spawn(
         command: Command,
         sandbox: InstalledSandbox,

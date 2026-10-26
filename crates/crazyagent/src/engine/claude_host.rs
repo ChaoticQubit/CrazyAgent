@@ -20,7 +20,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(unix)]
 use std::sync::mpsc::{SyncSender, sync_channel};
 #[cfg(unix)]
@@ -255,6 +255,7 @@ pub(in crate::engine) struct ClaudeHost {
     events: mpsc::Receiver<ObservedEvent>,
     status: watch::Receiver<Status>,
     stop: Arc<AtomicBool>,
+    group: Arc<AtomicU32>,
     close_time: Duration,
     expires: tokio::time::Instant,
 }
@@ -280,11 +281,13 @@ impl ClaudeHost {
             fault: None,
         });
         let stop = Arc::new(AtomicBool::new(false));
+        let group = Arc::new(AtomicU32::new(0));
         let mut host = Self {
             turns,
             events,
             status,
             stop: Arc::clone(&stop),
+            group: Arc::clone(&group),
             close_time: limits.cleanup_time,
             expires: tokio::time::Instant::now() + limits.run_time,
         };
@@ -303,6 +306,7 @@ impl ClaudeHost {
                         output,
                         report,
                         stop,
+                        group,
                     },
                 );
             })
@@ -400,6 +404,13 @@ impl ClaudeHost {
         }
     }
 
+    /// Names the process group the harness was started in, which can outlive this host when
+    /// the engine stops. Input: the host. Output: the group, or none before the harness
+    /// started.
+    pub(in crate::engine) fn process_group(&self) -> Option<u32> {
+        Some(self.group.load(Ordering::Acquire)).filter(|group| *group > 1)
+    }
+
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
         self.stop.store(true, Ordering::Release);
         self.close().await
@@ -461,6 +472,11 @@ impl ClaudeHost {
 
     /// Never yields an event: takes the host. Unreachable without a host value.
     pub(in crate::engine) async fn next_event(&mut self) -> Result<ObservedEvent, EngineError> {
+        match *self {}
+    }
+
+    /// Never names a group: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn process_group(&self) -> Option<u32> {
         match *self {}
     }
 

@@ -278,6 +278,8 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
         active: &mut ActiveRcliMaster,
     ) -> Result<MasterRuntimeObservation, EngineError> {
+        self.record_master_child(prepared, turn_id, active.custody.process_group())
+            .await?;
         let mut prompted = false;
         let mut inspect_at = Instant::now();
         loop {

@@ -401,6 +401,16 @@ impl RebindCase {
         self._stop = stop;
     }
 
+    fn epoch(&self) -> String {
+        self.service
+            .owner_runtime()
+            .unwrap()
+            .authority
+            .host
+            .engine_epoch
+            .clone()
+    }
+
     async fn stop(&mut self) -> Result<(), EngineError> {
         tokio::time::timeout(Duration::from_secs(5), self.service.shutdown())
             .await
@@ -581,30 +591,97 @@ async fn a_send_after_the_sandbox_changes_asks_for_a_new_conversation() {
 }
 
 #[tokio::test]
-async fn a_send_after_a_restart_asks_for_a_new_conversation_even_when_only_settings_outside_it_changed()
+async fn a_send_after_a_restart_continues_the_same_conversation_when_only_settings_outside_it_changed()
  {
     let mut case = RebindCase::start().await;
-    let session = case.open("approval-open").await;
+    let session = case.open("restart-open").await;
+    let first = case.submit(&session, "restart-first").await;
+    let first_turn = case.settled(&session, "restart-first").await;
     let added = case
         .edit(
-            "approval-add-extra",
+            "restart-add-extra",
             ModelAccessEdit::AddAccount {
                 account_ref: reference("extra-account"),
             },
         )
         .await;
     case.restart(&settings(false, &SANDBOX)).await;
-    let sent = case.submit(&session, "approval-send").await;
+    let epoch = case.epoch();
+    let (config, source) = case.basis().await;
+    let sent = case.submit(&session, "restart-send").await;
+    let turn = case.settled(&session, "restart-send").await;
     let current = case.session().await;
+    let turns = case.turns(&session).await;
     case.stop().await.unwrap();
+    assert_eq!(first, OwnerResult::Applied);
+    assert_eq!(
+        first_turn.and_then(|turn| turn.reason),
+        Some(MasterReason::ReadinessUnknown)
+    );
     assert_eq!(added, OwnerResult::Applied);
     assert_eq!(
         sent,
-        conflict(),
-        "a conversation opened before a restart never continues, even when the master's settings match"
+        OwnerResult::Applied,
+        "an engine restart alone does not end the conversation"
+    );
+    assert_eq!(
+        turn.and_then(|turn| turn.reason),
+        Some(MasterReason::ReadinessUnknown),
+        "the turn reaches the sign-in check on the new run, not a source conflict"
     );
     assert_eq!(current.session_id, session.session_id);
-    assert!(current.rebound.is_empty());
+    assert_ne!(epoch, session.owner.engine_epoch);
+    assert_eq!(current.engine_epoch(), epoch);
+    assert_eq!(current.binding(), (&config, source.as_str()));
+    assert_eq!(current.rebound.len(), 1);
+    assert_eq!(
+        current.rebound[0].engine_epoch.as_deref(),
+        Some(epoch.as_str())
+    );
+    assert_eq!(
+        current.owner, session.owner,
+        "the Open record is never rewritten"
+    );
+    assert!(current.rebinds_valid());
+    assert_eq!(turns.len(), 2);
+}
+
+#[tokio::test]
+async fn a_send_after_a_plain_restart_moves_the_conversation_to_the_new_run() {
+    let mut case = RebindCase::start().await;
+    let session = case.open("epoch-open").await;
+    case.restart(&settings(true, &SANDBOX)).await;
+    let epoch = case.epoch();
+    let sent = case.submit(&session, "epoch-send").await;
+    let turn = case.settled(&session, "epoch-send").await;
+    let current = case.session().await;
+    case.stop().await.unwrap();
+    assert_eq!(sent, OwnerResult::Applied);
+    assert_eq!(
+        turn.and_then(|turn| turn.reason),
+        Some(MasterReason::ReadinessUnknown)
+    );
+    assert_eq!(
+        current.binding(),
+        (&session.config_id, session.source_hash.as_str()),
+        "unchanged settings keep the session's own binding"
+    );
+    assert_eq!(current.rebound.len(), 1);
+    assert_eq!(current.engine_epoch(), epoch);
+    assert!(current.rebinds_valid());
+    let tampered = |change: &dyn Fn(&mut MasterSessionView)| {
+        let mut copy = current.clone();
+        change(&mut copy);
+        copy.rebinds_valid()
+    };
+    assert!(!tampered(
+        &|copy| copy.rebound[0].engine_epoch = Some("not-an-epoch".into())
+    ));
+    assert!(
+        !tampered(&|copy| copy.rebound[0].engine_epoch = Some(copy.owner.engine_epoch.clone())),
+        "a binding that moves nothing is not a rebinding"
+    );
+    assert!(!tampered(&|copy| copy.rebound[0].engine_epoch = None));
 }
 
 #[tokio::test]
