@@ -21,6 +21,9 @@ pub(crate) const PROFILE_BUSY: &str = "native_profile_in_use";
 pub enum AccountPick {
     NeedsPool,
     NoUsableAccount,
+    Paused {
+        until_ms: i64,
+    },
     Account {
         connection: CredentialRef,
         account: Box<ResearchAccount>,
@@ -33,6 +36,9 @@ impl AccountPick {
         match self {
             Self::NeedsPool => "Needs a pool",
             Self::NoUsableAccount => "No account in this project's pool can run this research",
+            Self::Paused { .. } => {
+                "Every account in this project's pool that can run this research hit its rate limit"
+            }
             Self::Account { .. } => "Ready",
         }
     }
@@ -47,6 +53,20 @@ pub fn pick_account(
     harness: &str,
     signed_in: impl Fn(&ModelConnection) -> bool,
 ) -> AccountPick {
+    pick_unpaused(access, project, harness, signed_in, |_| None)
+}
+
+/// Picks like [`pick_account`] but skips accounts paused after a rate or usage limit, the
+/// pause master and team turns share. `paused_until` gives the end of an account's pause
+/// in ms since the epoch while it is paused. Returns [`AccountPick::Paused`] with the
+/// earliest end when every account `harness` could use is paused.
+pub fn pick_unpaused(
+    access: &ModelAccess,
+    project: &str,
+    harness: &str,
+    signed_in: impl Fn(&ModelConnection) -> bool,
+    paused_until: impl Fn(&CredentialRef) -> Option<i64>,
+) -> AccountPick {
     let assigned: Vec<_> = access
         .pools
         .iter()
@@ -55,15 +75,29 @@ pub fn pick_account(
     if assigned.is_empty() {
         return AccountPick::NeedsPool;
     }
+    let mut earliest: Option<i64> = None;
     for pool in assigned {
-        if let Some((connection, account)) = pool_account(access, pool, harness, &signed_in) {
-            return AccountPick::Account {
-                connection,
-                account: Box::new(account),
+        for member in &pool.members {
+            let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
+                continue;
             };
+            let Some(account) = usable(connection, harness, &signed_in) else {
+                continue;
+            };
+            match paused_until(&connection.id) {
+                None => {
+                    return AccountPick::Account {
+                        connection: connection.id.clone(),
+                        account: Box::new(account),
+                    };
+                }
+                Some(until) => earliest = Some(earliest.map_or(until, |end| end.min(until))),
+            }
         }
     }
-    AccountPick::NoUsableAccount
+    earliest.map_or(AccountPick::NoUsableAccount, |until_ms| {
+        AccountPick::Paused { until_ms }
+    })
 }
 
 /// Picks the first member of `pool` that `harness` can use, in member order,
@@ -124,10 +158,11 @@ fn usable(
 
 /// Resolves a project to the folder the engine recorded when it was set up,
 /// or else its folder under `projects_root`, and the account picked from its
-/// assigned pool, rereading the engine's settings files and
-/// sign-in records on every call so pool assignment and sign-in take effect
-/// without a restart. A managed account is offered only while it passes the
-/// sign-in check every master and team turn uses for this engine run.
+/// assigned pool, rereading the engine's settings files,
+/// sign-in records and account pauses on every call so pool assignment, sign-in and
+/// pauses take effect without a restart. A managed account is offered only while it
+/// passes the sign-in check every master and team turn uses for this engine run, and no
+/// account while it is paused after a rate or usage limit.
 #[derive(Debug, Clone)]
 pub struct SettingsResolver {
     global: PathBuf,
@@ -182,14 +217,25 @@ impl SettingsResolver {
         }
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
-        let pick = pick_account(&access, project, harness, |connection| {
-            database
-                .as_ref()
-                .is_some_and(|database| match managed_sign_in(database, connection) {
-                    Ok(_) => true,
-                    Err(code) => code == PROFILE_BUSY,
+        let pick = pick_unpaused(
+            &access,
+            project,
+            harness,
+            |connection| {
+                database.as_ref().is_some_and(|database| {
+                    match managed_sign_in(database, connection) {
+                        Ok(_) => true,
+                        Err(code) => code == PROFILE_BUSY,
+                    }
                 })
-        });
+            },
+            |connection| {
+                database
+                    .as_ref()
+                    .and_then(|database| crate::team::paused_until(database, connection).ok())
+                    .flatten()
+            },
+        );
         Some((folder, pick))
     }
 

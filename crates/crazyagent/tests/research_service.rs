@@ -289,3 +289,57 @@ fn each_job_waits_on_the_account_for_its_own_harness_and_unsupported_harnesses_f
     assert!(asked.iter().any(|harness| harness == "claude"));
     assert!(asked.iter().any(|harness| harness == "rcli"));
 }
+
+#[test]
+fn research_waits_with_the_rate_limit_code_and_its_end_while_every_pool_account_is_paused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let project = root.join("project");
+    let state = root.join("state");
+    fs::create_dir_all(project.join("context")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    let database = state.join("research.sqlite3");
+    let jobs = ResearchJobs::open(&database).unwrap();
+    let design = jobs
+        .enqueue("project-p", "design_research", "claude", true)
+        .unwrap();
+    let pick = Arc::new(Mutex::new(AccountPick::Paused {
+        until_ms: 1_792_729_920_000,
+    }));
+    let resolver = {
+        let pick = pick.clone();
+        move |id: &str, _harness: &str| {
+            (id == "project-p").then(|| (project.clone(), pick.lock().unwrap().clone()))
+        }
+    };
+    let runner = Arc::new(
+        ResearchRunner::new(&database, &state, &codex(), ResearchLimits::default()).unwrap(),
+    );
+    let service = ResearchService::start(runner, resolver, Duration::from_millis(100));
+    wait_for(Duration::from_secs(10), || {
+        jobs.get(design).unwrap().unwrap().status == ResearchStatus::NeedsPool
+    });
+    let rows = progress(&jobs, "project-p").unwrap();
+    assert_eq!(
+        rows[0].detail.as_deref(),
+        Some(
+            "rate_limited until 2026-10-23 04:32 UTC: Every account in this project's pool that can run this research hit its rate limit"
+        )
+    );
+    assert_eq!(jobs.get(design).unwrap().unwrap().attempts, 0);
+    *pick.lock().unwrap() = AccountPick::Account {
+        connection: CredentialRef::new("anthropic-local-connection").unwrap(),
+        account: Box::new(ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "qwen2.5:0.5b".into(),
+        }),
+    };
+    wait_for(Duration::from_secs(10), || {
+        jobs.get(design).unwrap().unwrap().status == ResearchStatus::Failed
+    });
+    service.stop();
+    assert_eq!(
+        jobs.get(design).unwrap().unwrap().error.as_deref(),
+        Some("This harness is not installed on this computer")
+    );
+}

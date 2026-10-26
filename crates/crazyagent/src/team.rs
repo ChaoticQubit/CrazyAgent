@@ -1256,6 +1256,43 @@ pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, Engi
         .map_err(error)
 }
 
+/// Pauses a pool account that hit a rate or usage limit for as long as a team agent's
+/// account pauses, in the pause every master, team and research turn honours. Takes a
+/// connection and the account's connection. Returns when the pause ends, in ms since the
+/// epoch; a longer pause already set is kept.
+pub(crate) fn pause_account(
+    connection: &Connection,
+    account: &CredentialRef,
+) -> rusqlite::Result<i64> {
+    let pause = runtime::TeamLimits::default().rate_limit_pause;
+    let until = now_ms().saturating_add(i64::try_from(pause.as_millis()).unwrap_or(i64::MAX));
+    let stored: i64 = connection.query_row(
+        "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
+         ON CONFLICT(connection) DO UPDATE SET until_ms=MAX(until_ms,excluded.until_ms)
+         RETURNING until_ms",
+        params![account.as_str(), until],
+        |row| row.get(0),
+    )?;
+    assert!(stored >= until);
+    Ok(stored)
+}
+
+/// Tells until when a pool account stays paused after a limit. Takes a connection and the
+/// account's connection. Returns the end of its pause in ms since the epoch, or `None`
+/// when it is not paused now.
+pub(crate) fn paused_until(
+    connection: &Connection,
+    account: &CredentialRef,
+) -> rusqlite::Result<Option<i64>> {
+    connection
+        .query_row(
+            "SELECT until_ms FROM team_paused_accounts WHERE connection=?1 AND until_ms>?2",
+            params![account.as_str(), now_ms()],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
 /// Reads a project's team plan use, agents, recent tasks and recent conversation.
 /// Takes a connection and the stored setup.
 /// Returns bounded lists in creation order.

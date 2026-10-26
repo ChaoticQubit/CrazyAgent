@@ -4,7 +4,7 @@ use super::accounts::SettingsResolver;
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
 #[cfg(unix)]
 use super::runner::ResearchLimits;
-use super::runner::{ResearchHarness, ResearchRun, ResearchRunner, RunError, kind_label};
+use super::runner::{ResearchHarness, ResearchRun, ResearchRunner, RunError, kind_label, utc_date};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -71,8 +71,9 @@ pub fn progress(jobs: &ResearchJobs, project: &str) -> Result<Vec<ResearchProgre
 
 /// Background loop that keeps every project's research moving: for each
 /// project and job harness it parks jobs whose pool has no account that
-/// harness can use, resumes them once one is assigned, and starts queued jobs
-/// up to the per-project limit.
+/// harness can use, or only accounts paused after a rate limit with the
+/// `rate_limited` code and the pause's end, resumes them once one is free, and
+/// starts queued jobs up to the per-project limit.
 pub struct ResearchService {
     runner: Arc<ResearchRunner>,
     stop: Arc<AtomicBool>,
@@ -148,9 +149,27 @@ where
                 Some((_, pick @ AccountPick::NoUsableAccount)) => {
                     let _ = jobs.park_waiting(&project, &harness, Some(pick.label()));
                 }
-                Some((root, AccountPick::Account { account, .. })) => {
+                Some((_, pick @ AccountPick::Paused { until_ms })) => {
+                    let until = UNIX_EPOCH
+                        + Duration::from_millis(u64::try_from(until_ms).unwrap_or_default());
+                    let detail =
+                        format!("rate_limited until {}: {}", utc_date(until), pick.label());
+                    let _ = jobs.park_waiting(&project, &harness, Some(&detail));
+                }
+                Some((
+                    root,
+                    AccountPick::Account {
+                        connection,
+                        account,
+                    },
+                )) => {
                     let _ = jobs.resume_waiting(&project, &harness);
-                    runs.extend(runner.spawn_ready(project, &harness, root, Some(*account)));
+                    runs.extend(runner.spawn_ready(
+                        project,
+                        &harness,
+                        root,
+                        Some((connection, *account)),
+                    ));
                 }
             }
         }

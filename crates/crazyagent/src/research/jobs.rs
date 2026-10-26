@@ -396,6 +396,25 @@ impl ResearchJobs {
         )
     }
 
+    /// Returns the job of the claim `held` to the queue without spending its attempt after
+    /// its account hit a rate or usage limit, and pauses that pool account in the pause
+    /// master and team turns share before the job is free, so the next pick fails over to
+    /// another account; a claim lost meanwhile keeps the pause. Takes the claim and the
+    /// account's connection. Returns the new status and when the pause
+    /// ends, in ms since the epoch.
+    pub fn rate_limited(
+        &self,
+        held: &ResearchJob,
+        account: &crate::protocol::CredentialRef,
+    ) -> Result<(ResearchStatus, i64), JobError> {
+        let until = crate::team::pause_account(&self.connection, account)?;
+        self.release(held)?;
+        let status = self
+            .get(held.id)?
+            .map_or(ResearchStatus::Queued, |job| job.status);
+        Ok((status, until))
+    }
+
     /// Each project and harness pair with queued or waiting research, in
     /// order, at most 1000.
     pub fn work(&self) -> Result<Vec<(String, String)>, JobError> {
