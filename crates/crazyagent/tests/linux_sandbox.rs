@@ -145,7 +145,7 @@ fn landlock_holds_the_project_boundary_on_this_kernel() {
         LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
     assert!(
         matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
-        "Linux test machines need Landlock (Linux 5.13 or newer): {:?}",
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
         sandbox.backend()
     );
     assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
@@ -167,6 +167,73 @@ fn bubblewrap_holds_the_same_project_boundary() {
     )
     .unwrap();
     assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
+}
+
+const TRUNCATE: &str = "import os, sys\n\
+for path in sys.argv[1:]:\n    \
+try:\n        os.truncate(path, 0)\n        print('truncated')\n    \
+except OSError:\n        print('refused')\n";
+
+#[test]
+fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let own = case.project.join("worktrees").join("own.txt");
+    let brief = case.project.join("context").join("brief.md");
+    let fixture = case.outside.join("fixture.txt");
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    for sandbox in [&landlock as &dyn Sandbox, &bubblewrap] {
+        fs::write(&own, "own\n").unwrap();
+        let mut harness = Command::new("/usr/bin/python3");
+        harness
+            .args(["-I", "-c", TRUNCATE])
+            .arg(&own)
+            .arg(&brief)
+            .arg(&fixture)
+            .current_dir(case.project.join("worktrees"));
+        let output = crazyagent::spawn_gate::output(
+            sandbox
+                .wrap(&harness)
+                .unwrap()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "truncated\nrefused\nrefused\n"
+        );
+        assert_eq!(fs::read_to_string(&own).unwrap(), "");
+        assert_eq!(fs::read_to_string(&brief).unwrap(), "brief\n");
+        assert_eq!(fs::read_to_string(&fixture).unwrap(), "outside fixture\n");
+    }
 }
 
 #[test]
@@ -582,7 +649,7 @@ fn a_confined_landlock_agent_writes_only_its_own_worktree() {
     let sandbox = LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)).unwrap();
     assert!(
         matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
-        "Linux test machines need Landlock (Linux 5.13 or newer): {:?}",
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
         sandbox.backend()
     );
     assert_confined(&sandbox, &checkouts);

@@ -235,13 +235,12 @@ fn unix_domain() -> Result<Vec<SeccompRule>, String> {
     Ok(vec![rule])
 }
 
-fn accepted(status: &RestrictionStatus, limit_network: bool) -> bool {
-    let held = match status.ruleset {
-        RulesetStatus::FullyEnforced => true,
-        RulesetStatus::PartiallyEnforced => !limit_network,
-        RulesetStatus::NotEnforced => false,
-    };
-    held && status.no_new_privs
+/// Tells whether the ruleset the helper applied holds the boundary. Inputs: the status
+/// `restrict_self` reported and whether no-new-privileges is set. Output: true only when
+/// every requested right is enforced. A partly enforced ruleset leaves rights such as
+/// truncate (Linux before 6.2) unrestricted, so that kernel falls back to bubblewrap.
+fn accepted(ruleset: &RulesetStatus, no_new_privs: bool) -> bool {
+    matches!(ruleset, RulesetStatus::FullyEnforced) && no_new_privs
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
@@ -273,7 +272,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         } => (policy, Some((program, args))),
     };
     match enforce(&policy) {
-        Ok(status) if accepted(&status, policy.limit_network) => {}
+        Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
             eprintln!(
                 "crazyagent-landlock: this kernel cannot hold the boundary ({:?})",
@@ -302,7 +301,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
 }
 
 /// The Linux mechanism holding a project agent's boundary: the `crazyagent-landlock` helper,
-/// or bubblewrap where the kernel has no Landlock.
+/// or bubblewrap where the kernel cannot fully enforce its Landlock rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxBackend {
     Landlock { helper: PathBuf },
@@ -385,7 +384,9 @@ impl LinuxSandbox {
                 },
             ),
             None => Err(SandboxError::Unavailable(
-                "this Linux enforces no Landlock and has no bubblewrap; install bubblewrap".into(),
+                "this Linux cannot fully enforce Landlock file rules (Linux 6.2 or newer) and \
+                 has no bubblewrap; install bubblewrap"
+                    .into(),
             )),
         }
     }
@@ -597,4 +598,18 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
     }
     command.arg("--chdir").arg(cwd);
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_fully_enforced_rules_with_no_new_privs_hold_the_boundary() {
+        assert!(accepted(&RulesetStatus::FullyEnforced, true));
+        assert!(!accepted(&RulesetStatus::PartiallyEnforced, true));
+        assert!(!accepted(&RulesetStatus::NotEnforced, true));
+        assert!(!accepted(&RulesetStatus::FullyEnforced, false));
+        assert!(!accepted(&RulesetStatus::PartiallyEnforced, false));
+    }
 }
