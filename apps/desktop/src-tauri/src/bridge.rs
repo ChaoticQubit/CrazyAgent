@@ -627,16 +627,6 @@ impl NativeBridge {
                 ActionOutcome::Uncertain
             }
         };
-        if outcome == ActionOutcome::Rejected
-            && self
-                .controller()?
-                .pending()
-                .is_some_and(|pending| !pending.uncertain())
-        {
-            self.controller()?
-                .discard_refused()
-                .map_err(|_| failure("unexpected_pending_intent"))?;
-        }
         bounded(IntentReceipt {
             intent,
             outcome,

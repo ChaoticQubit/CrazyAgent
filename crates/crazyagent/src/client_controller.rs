@@ -419,15 +419,16 @@ impl OwnerController {
             OwnerResponse::Read { .. } => {
                 return Err(EngineError("controller_mutation_response".into()));
             }
-            OwnerResponse::Rejected { .. } if first_send => pending.uncertain = false,
+            OwnerResponse::Rejected { .. } if first_send => self.pending = None,
             _ => {}
         }
         Ok(response)
     }
 
-    /// Drops a retained mutation the owner refused on its first and only send, so no copy of
-    /// it can still be recorded. Output: Ok once dropped, `controller_pending_uncertain` while
-    /// any send of it may still be recorded, or no pending intent.
+    /// Drops a retained mutation that was never sent, so no copy of it can be recorded; one
+    /// the owner refused on its first and only send is already dropped by its reply.
+    /// Output: Ok once dropped, `controller_pending_uncertain` while any send of it may still
+    /// be recorded, or no pending intent.
     pub fn discard_refused(&mut self) -> Result<(), EngineError> {
         let pending = self
             .pending
