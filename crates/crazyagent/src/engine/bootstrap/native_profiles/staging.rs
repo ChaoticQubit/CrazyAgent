@@ -42,6 +42,7 @@ pub(super) fn is_staging(name: &[u8], prefix: &str) -> bool {
 pub(super) struct Staging {
     name: String,
     pub(super) directory: Directory,
+    _held: HeldLock,
 }
 
 impl Staging {
@@ -60,8 +61,12 @@ impl Staging {
             .map_err(unsafe_custody)?;
         step()?;
         let directory = Directory::open(parent, OsStr::new(&name))?;
-        lock(&directory.file)?;
-        Ok(Self { name, directory })
+        let held = lock(&directory.file)?;
+        Ok(Self {
+            name,
+            directory,
+            _held: held,
+        })
     }
 
     /// Renames the finished staging directory to its destination name, never over an

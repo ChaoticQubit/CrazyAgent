@@ -654,6 +654,36 @@ fn repin_interrupted_at_every_step_settles_on_one_new_generation() {
 }
 
 #[test]
+fn a_repinned_profile_is_usable_at_once_while_other_threads_start_children() {
+    let mut case = ConfiguredCase::new(false, true);
+    case.register();
+    let (stop, starter) = crate::spawn_gate::start_children_until_stopped();
+    let mut busy = Vec::new();
+    for round in 0..200 {
+        touch(&case.home.join(".backboard/config.json"));
+        match case.custody.register_configured_rcli_profile(
+            &case.host,
+            &case.connection,
+            &case.profile,
+            &case.home,
+        ) {
+            Ok(settled) => {
+                let connection = case.connection.clone();
+                if let Err(error) = acquire(&mut case, &connection, &settled) {
+                    busy.push(format!("round {round}: use: {}", error.0));
+                }
+            }
+            Err(error) => busy.push(format!("round {round}: repin: {}", error.0)),
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(starter.join().unwrap() > 0);
+    assert_eq!(busy, Vec::<String>::new());
+    let state = case.root.path().join("state");
+    assert!(staged_entries(&state.join(ROOT)).is_empty());
+}
+
+#[test]
 fn account_setup_rewrites_the_generated_config_for_a_changed_connection() {
     let mut case = ConfiguredCase::new(false, false);
     let first = case
