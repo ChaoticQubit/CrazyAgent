@@ -76,9 +76,9 @@ fn sid_at(bytes: &[u8]) -> Result<&[u8], &'static str> {
 
 /// Whether the list already holds the explicit entry the boundary would add for `sid`: the same
 /// allow or deny type, at least the access's rights, not inherited, applying to the path itself,
-/// and inherited by files and folders below when the path is a folder. Inputs: the access list
-/// bytes, the SID bytes, the access and whether the path is a folder. Output: true when present;
-/// false for a malformed list, so the entry is written again.
+/// and inherited by files and folders below when the path is a folder and the access inherits.
+/// Inputs: the access list bytes, the SID bytes, the access and whether the path is a folder.
+/// Output: true when present; false for a malformed list, so the entry is written again.
 pub fn holds(acl: &[u8], sid: &[u8], access: Access, folder: bool) -> bool {
     let inherit = OBJECT_INHERIT | CONTAINER_INHERIT;
     entries(acl).is_ok_and(|found| {
@@ -87,7 +87,7 @@ pub fn holds(acl: &[u8], sid: &[u8], access: Access, folder: bool) -> bool {
                 && entry.sid == sid
                 && entry.mask & access.mask() == access.mask()
                 && entry.flags & (INHERITED | INHERIT_ONLY) == 0
-                && (!folder || entry.flags & inherit == inherit)
+                && (!folder || !access.inherits() || entry.flags & inherit == inherit)
         })
     })
 }
@@ -109,7 +109,7 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{DENY_WRITE, MODIFY};
+    use crate::plan::{DENY_WRITE, KEEP_ENTRIES, MODIFY};
 
     const CONTAINER: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 7, 0, 0, 0, 9, 0, 0, 0];
 
@@ -208,6 +208,16 @@ mod tests {
         assert!(holds(&denied, &CONTAINER, Access::DenyWrite, true));
         assert!(!holds(&denied, &CONTAINER, Access::DenyAll, true));
         assert!(!holds(&denied, &CONTAINER, Access::Modify, true));
+        assert!(holds(&denied, &CONTAINER, Access::KeepEntries, true));
+        let kept = acl(&[ace(ACCESS_DENIED, 0x00, KEEP_ENTRIES, &CONTAINER)]);
+        assert!(holds(&kept, &CONTAINER, Access::KeepEntries, true));
+        assert!(!holds(&kept, &CONTAINER, Access::DenyWrite, true));
+        assert!(!holds(
+            &kept,
+            &ALL_APPLICATION_PACKAGES,
+            Access::KeepEntries,
+            true
+        ));
     }
 
     #[test]
