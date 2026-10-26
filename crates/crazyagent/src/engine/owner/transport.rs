@@ -3207,7 +3207,8 @@ fallback_allowed = false
                 let rejected = gateway_actor_unknown(connection.clone(), "invalid-sequence", sequence);
                 assert!(host.observe_model_connection(&rejected).await.is_err());
             }
-            assert_eq!(db.query_row("SELECT COUNT(*) FROM model_gateway_observations", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+            let kept: Vec<(String, i64)> = db.prepare("SELECT id, sequence FROM model_gateway_observations ORDER BY sequence").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+            assert_eq!(kept, [("after-abort".to_owned(), 2)]);
             host.observe_model_connection(&next).await.unwrap();
         }).await;
     }
