@@ -258,10 +258,20 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/mcp_fixture.py");
 
+    /// Writes the MCP fixture as a new executable and runs it once in its `exit` mode, whose
+    /// code 3 only the fixture returns, so its first-exec assessment is over before a check
+    /// times it. Input: the folder. Output: the fixture path, already run once.
     fn fixture(root: &Path) -> PathBuf {
         let path = root.join("mcp_fixture.py");
         std::fs::write(&path, FIXTURE).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let first = crate::spawn_gate::first_run(
+            Command::new(&path)
+                .arg("exit")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin"),
+        );
+        assert_eq!(first.code(), Some(3));
         path
     }
 
