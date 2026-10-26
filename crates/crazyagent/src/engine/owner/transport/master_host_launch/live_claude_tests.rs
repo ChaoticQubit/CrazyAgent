@@ -429,11 +429,13 @@ struct DetachingMaster {
     _root: Root,
 }
 
-/// What the LB-46 turn's shells have started, read from this user's processes.
+/// What the LB-46 turn's shells have started, read from this user's processes, with the
+/// matching processes themselves.
 #[derive(Debug)]
 struct DetachedSeen {
     setsid: bool,
     sleeps: usize,
+    found: Vec<(i32, String)>,
 }
 
 /// A private folder under `/tmp` for one live run. Input: its name prefix. Output: the
@@ -519,16 +521,33 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
 /// This user's processes whose command line contains `needle`, read with `ps`. Input: the
 /// text. Output: their ids and command lines.
 fn processes_naming(needle: &str) -> Vec<(i32, String)> {
-    let user = rustix::process::getuid().as_raw().to_string();
     let listing = crate::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])
-            .stdin(std::process::Stdio::null()),
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
     )
     .unwrap();
-    assert!(listing.status.success(), "{listing:?}");
-    let own = i32::try_from(std::process::id()).unwrap();
-    String::from_utf8_lossy(&listing.stdout)
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    assert!(!listing.stdout.is_empty());
+    naming(
+        &String::from_utf8_lossy(&listing.stdout),
+        &rustix::process::getuid().as_raw().to_string(),
+        i32::try_from(std::process::id()).unwrap(),
+        needle,
+    )
+}
+
+/// Picks from a `ps -o pid=,uid=,command=` listing the processes of `user` other than `own`
+/// whose command line contains `needle`. Inputs: the listing, the user id, this process's id
+/// and the text. Output: their ids and command lines.
+fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(i32, String)> {
+    listing
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
@@ -543,7 +562,12 @@ fn processes_naming(needle: &str) -> Vec<(i32, String)> {
 /// Reads what the LB-46 turn's shells have started: the sleep in its own session, and the
 /// plain sleeps, the `nohup` one and then the foreground one. Output: what runs now.
 fn detached_seen() -> DetachedSeen {
-    let found = processes_naming(DETACHED_SLEEP);
+    detached_in(processes_naming(DETACHED_SLEEP))
+}
+
+/// Reads the LB-46 turn's sleeps from the processes that name [`DETACHED_SLEEP`]. Input:
+/// those processes. Output: what they show, keeping them.
+fn detached_in(found: Vec<(i32, String)>) -> DetachedSeen {
     DetachedSeen {
         setsid: found
             .iter()
@@ -552,6 +576,7 @@ fn detached_seen() -> DetachedSeen {
             .iter()
             .filter(|(_, command)| command.ends_with(DETACHED_SLEEP) && !command.contains("perl"))
             .count(),
+        found,
     }
 }
 
@@ -733,4 +758,53 @@ async fn a_real_claude_master_whose_engine_is_killed_mid_turn_leaves_no_detached
     assert!(seen.setsid && seen.sleeps >= 1, "{seen:?}");
     assert_eq!(survivors, Vec::<(i32, String)>::new());
     assert!(started.elapsed() < DETACHED_LIVE_TIME);
+}
+
+#[test]
+fn processes_naming_finds_a_running_process_of_this_user() {
+    let mut sleeper = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("3011")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let pid = i32::try_from(sleeper.id()).unwrap();
+    let found = processes_naming("sleep 3011");
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+    assert_eq!(found, vec![(pid, "/bin/sleep 3011".to_owned())]);
+}
+
+#[test]
+fn the_sleeps_of_both_live_runs_are_recognized_in_their_ps_lines() {
+    let cancelled = "\
+60764    -2 /usr/libexec/dhcp6d
+98400   501 /bin/sleep 2917
+98402   501 /usr/bin/perl -mPOSIX -e POSIX::setsid(); sleep 2917
+98543   501 /bin/zsh -c source /private/tmp/ca-live-detached-ylXwej/master-runtime-c415c5e22df7b9b2a79ca3354e9edfc9b10fc8fd1ded4d11192d235602781320/home/shell-snapshots/snapshot-zsh-1793037087892-y5st5s.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '/bin/sleep 2917' < /dev/null && pwd -P >| /private/tmp/ca-live-detached-ylXwej/master-runtime-c415c5e22df7b9b2a79ca3354e9edfc9b10fc8fd1ded4d11192d235602781320/tmp/claude-db52-cwd
+98545   501 /bin/sleep 2917
+33508   501 /Applications/Brave Browser.app/Contents/MacOS/Brave Browser Helper (Renderer) --metrics-shmem-handle=1752395122,r,7286591663857117628
+";
+    let seen = detached_in(naming(cancelled, "501", 98000, DETACHED_SLEEP));
+    assert!(seen.setsid);
+    assert_eq!(seen.sleeps, 2);
+    assert_eq!(
+        seen.found.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
+        [98400, 98402, 98543, 98545]
+    );
+    assert!(detached_ready(&seen, &mut None));
+    let killed = "\
+ 1256   501 /bin/sleep 2917
+ 1257   501 /usr/bin/perl -mPOSIX -e POSIX::setsid(); sleep 2917
+ 1320   501 /bin/sleep 2917
+";
+    let seen = detached_in(naming(killed, "501", 1000, DETACHED_SLEEP));
+    assert!(seen.setsid);
+    assert_eq!(seen.sleeps, 2);
+    assert!(detached_ready(&seen, &mut None));
+    let seen = detached_in(naming(killed, "502", 1000, DETACHED_SLEEP));
+    assert!(!seen.setsid);
+    assert_eq!(seen.sleeps, 0);
 }
