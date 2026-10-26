@@ -1,6 +1,6 @@
 use crate::project_setup::DOCUMENT_EXTENSIONS;
 use std::ffi::OsStr;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -239,6 +239,47 @@ pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static s
     Ok(canonical)
 }
 
+/// Reads a small UTF-8 regular file through one open that never follows a link in the last
+/// path part and never waits on a FIFO, then checks the opened file itself, so nothing
+/// swapped in after an earlier check is read. Takes the path and the byte limit. Returns
+/// the text, or none for a link, any other non-regular file, more bytes or invalid UTF-8.
+pub fn read_plain_file(path: &Path, limit: u64) -> Option<String> {
+    let file = open_plain(path).ok()?;
+    let opened = file.metadata().ok()?;
+    if !opened.is_file() || opened.len() > limit {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > limit {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Opens a path to read without following a link in its last part and without waiting
+/// for a FIFO writer. Takes the path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+}
+
+/// Opens a path to read as the reparse point itself, never a link's target.
+/// Takes the path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
 /// Opens one file, folder or web link with the owner's default app and waits for the opener.
 /// Input: the target, already checked by the caller. Output: Ok once the system took it,
 /// `open_unavailable`, or `open_failed`. Explorer's exit code means nothing, so on Windows a
@@ -411,6 +452,35 @@ mod tests {
                     .ends_with("clip.exe")
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_file_is_read_in_one_open_that_follows_no_link_and_waits_on_no_fifo() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("config");
+        std::fs::write(&file, "[core]\n").unwrap();
+        assert_eq!(read_plain_file(&file, 7).as_deref(), Some("[core]\n"));
+        assert_eq!(read_plain_file(&file, 6), None);
+        let link = folder.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_plain_file(&link, 64), None);
+        assert_eq!(read_plain_file(folder.path(), 64), None);
+        let binary = folder.path().join("binary");
+        std::fs::write(&binary, [0xff, 0xfe]).unwrap();
+        assert_eq!(read_plain_file(&binary, 64), None);
+        let fifo = folder.path().join("fifo");
+        let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
+        assert!(made.success());
+        let (sent, read) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(read_plain_file(&fifo, 64));
+        });
+        assert_eq!(
+            read.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(None),
+            "a FIFO is refused without waiting for a writer"
+        );
     }
 
     #[test]

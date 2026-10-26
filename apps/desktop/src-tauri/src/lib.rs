@@ -679,9 +679,9 @@ async fn desktop_terminal_attach(
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
-    terminals.0.room(&agent)?;
-    let session = lock(&state)?.open_terminal(agent.clone()).await?;
-    terminals.0.attach(agent, session, output)
+    let room = terminals.0.room(&agent)?;
+    let session = lock(&state)?.open_terminal(agent).await?;
+    room.attach(session, output)
 }
 
 #[tauri::command]
