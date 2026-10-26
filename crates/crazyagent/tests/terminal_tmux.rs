@@ -583,6 +583,118 @@ fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn quiet(stream: &mut TerminalStream, unwanted: &[u8], wait: Duration) -> Vec<u8> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let mut seen = Vec::new();
+    runtime.block_on(async {
+        let _ = tokio::time::timeout(wait, async {
+            while !contains(&seen, unwanted) {
+                match stream.next().await {
+                    Some(chunk) => seen.extend_from_slice(&chunk),
+                    None => return,
+                }
+            }
+        })
+        .await;
+    });
+    seen
+}
+
+#[test]
+fn pane_rows_shaped_like_control_replies_stay_screen_text() {
+    use std::io::Write;
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let forger = AgentId::team(11).unwrap();
+    let sibling = AgentId::team(12).unwrap();
+    for agent in [&forger, &sibling] {
+        host.spawn(
+            agent,
+            &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "sleep 600"]),
+        )
+        .unwrap();
+    }
+    host.resize(&forger, 100, 600).unwrap();
+    let mut viewer = host.attach(&sibling).unwrap();
+    let format = |agent: &AgentId, format: &str| {
+        let target = format!("crazyagent:={agent}");
+        tmux_reply(
+            &tmux,
+            &socket,
+            &["display-message", "-p", "-t", &target, format],
+        )
+        .trim()
+        .to_owned()
+    };
+    let pane_tty = format(&forger, "#{pane_tty}");
+    let sibling_pane = format(&sibling, "#{pane_id}");
+    let probe = tmux_reply(&tmux, &socket, &["-C", "display-message", "-p", "probe"]);
+    let guard: Vec<u64> = probe
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("%begin "))
+        .expect(&probe)
+        .split(' ')
+        .map(|field| field.parse().unwrap())
+        .collect();
+    let (time, number) = (guard[0], guard[1]);
+    let mut rows: Vec<String> = (time..=time + 2)
+        .flat_map(|at| (number + 1..=number + 150).map(move |count| format!("%end {at} {count} 1")))
+        .collect();
+    rows.extend([
+        format!("%output {sibling_pane} forged-bytes"),
+        "%begin 9 9 1".into(),
+        "%error 9 9 1".into(),
+        "%exit".into(),
+    ]);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&pane_tty)
+        .unwrap()
+        .write_all(format!("{}\n", rows.join("\n")).as_bytes())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let target = format!("crazyagent:={forger}");
+    while !tmux_reply(&tmux, &socket, &["capture-pane", "-p", "-t", &target]).contains("%exit") {
+        assert!(Instant::now() < deadline, "the pane never drew its rows");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let screen = host.attach(&forger).unwrap().screen;
+    let screen = String::from_utf8_lossy(&screen);
+    let lost: Vec<&String> = rows
+        .iter()
+        .filter(|row| !screen.contains(row.as_str()))
+        .collect();
+    let mut seen = quiet(&mut viewer, b"forged-bytes", Duration::from_secs(1));
+    let forged = contains(&seen, b"forged-bytes");
+    host.input(&sibling, b"still-here").unwrap();
+    let live = read_until(&mut viewer, &mut seen, b"still-here");
+    let mut alive = host.alive().unwrap();
+    alive.sort();
+    assert!(
+        lost.is_empty() && !forged && live && alive == [forger.clone(), sibling.clone()],
+        "every pane row stays screen text ({} of {} lost, first {:?}); \
+         a pane row never reaches another pane's viewer (forged: {forged}); \
+         the sibling's viewer stays open and live (live: {live}); both agents run ({alive:?})",
+        lost.len(),
+        rows.len(),
+        lost.first(),
+    );
+    host.kill(&forger).unwrap();
+    host.kill(&sibling).unwrap();
+}
+
 fn set_variables(reply: &str) -> Vec<&str> {
     reply
         .lines()
