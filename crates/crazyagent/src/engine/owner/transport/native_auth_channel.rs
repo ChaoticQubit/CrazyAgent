@@ -1135,11 +1135,15 @@ impl Authority {
         result
     }
 
+    /// Waits until the dispatched native auth operation has ended and its custody is released.
+    /// A failed dispatch is reported on the same diagnostic line the owner loop writes, so
+    /// the answer never depends on which waiter joined the dispatch first. Input: the engine.
+    /// Output: Ok once nothing of it is left to release, or the error when the join, the
+    /// child cleanup or the release could not be confirmed.
     pub(super) async fn drain_native_auth_dispatch(
         &self,
         engine: &Engine,
     ) -> Result<(), EngineError> {
-        let mut task_error = None;
         let mut cleanup_deadline = None;
         loop {
             let changed = self.native_auth_changed.notified();
@@ -1151,7 +1155,7 @@ impl Authority {
                     .lock()
                     .map_err(|_| failure("native_auth_recovery_required"))?;
                 let Some(slot) = current.as_ref() else {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 };
                 (
                     slot.dispatch_task.is_some(),
@@ -1169,7 +1173,9 @@ impl Authority {
                     result = tokio::time::timeout_at(deadline, self.native_auth_dispatch_finished()) => {
                         match result {
                             Ok(Ok(())) => {}
-                            Ok(Err(error)) => task_error = Some(error),
+                            Ok(Err(error)) => {
+                                eprintln!("{}", super::native_auth_dispatch_diagnostic(&error));
+                            }
                             Err(_) => return Err(failure("native_auth_dispatch_join_uncertain")),
                         }
                     }
@@ -1189,7 +1195,7 @@ impl Authority {
                     .lock()
                     .map_err(|_| failure("native_auth_recovery_required"))?;
                 let Some(slot) = current.as_ref() else {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 };
                 if slot.dispatch_task.is_some() || slot.cleaning {
                     drop(current);
@@ -1199,17 +1205,17 @@ impl Authority {
                     return Err(failure("native_auth_dispatch_cleanup_uncertain"));
                 }
                 if slot.cached() && !slot.expired {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 }
                 if !slot.retained && !slot.expired {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 }
                 let Some(dispatch) = (!slot.committed).then(|| slot.dispatch.clone()).flatten()
                 else {
                     current.take();
                     drop(current);
                     self.native_auth_changed.notify_waiters();
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 };
                 current.as_mut().unwrap().cleaning = true;
                 dispatch
@@ -1233,7 +1239,7 @@ impl Authority {
             {
                 return Err(error);
             }
-            return task_error.map_or(Ok(()), Err);
+            return Ok(());
         }
     }
 }
