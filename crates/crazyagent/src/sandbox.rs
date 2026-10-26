@@ -15,6 +15,8 @@ use std::process::Command;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod test_agent;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
