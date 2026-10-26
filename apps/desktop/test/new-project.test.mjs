@@ -287,3 +287,19 @@ test("an edited project keeps its pool and team, adds no documents and renames o
   assert.equal(wizard.basicsErrors({ ...draft, name: "docs site" }, ["Docs Site"]).name, "You already have a project called Docs Site.");
 });
 
+
+test("a pool with one account runs every agent of the team and never tells them to wait for it", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const managed = { method: "native_managed", profile_ref: "r" };
+  const member = { id: "solo", provider: "p", harness: "codex", protocol: "x", account_ref: "solo", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: managed };
+  const pool = { pool: { id: "solo-pool", name: "Solo", members: ["solo"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
+  const team = engineTeam("codex", 2);
+  assert.equal(team.max_agents, 3);
+  const html = renderToStaticMarkup(createElement(TeamEditor, { team, harnesses: catalog, pool, research: [], onChange: () => {}, prefix: "np" }));
+  assert.match(html, /Uses an account from Solo\./);
+  assert.match(html, /This team has 3 agents\./);
+  assert.doesNotMatch(html, /wait for a free account/i);
+  assert.doesNotMatch(html, /Agents beyond/);
+});
