@@ -3365,7 +3365,7 @@ fn reject(code: &str) -> Outcome {
 }
 
 /// Moves an open master session to the current settings and engine run when nothing it
-/// runs on changed (DEC-092, LB-23): the bound and current configs have the same `master_scope`.
+/// runs on changed (DEC-092, LB-23): the same config, or one with the same `master_scope`.
 /// Inputs: the transaction, the session, the current config, source hash and engine epoch,
 /// and the revision of this send. Output: true when the session runs under all three now.
 fn rebind(
@@ -3383,23 +3383,25 @@ fn rebind(
     if session.selection.backend == MasterBackend::Rcli || session.rebound.len() >= REBINDS_MAX {
         return Ok(false);
     }
-    let body: Option<Option<String>> = tx
-        .query_row(
-            "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1",
-            [session.binding().0.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some(Some(body)) = body else {
-        return Ok(false);
-    };
-    let bound: EffectiveConfig = serde_json::from_str(&body).map_err(error)?;
-    if &bound.id != session.binding().0 {
-        return Err(error("master_config_record"));
-    }
-    if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
-        return Ok(false);
+    if session.binding().0 != &config.id {
+        let body: Option<Option<String>> = tx
+            .query_row(
+                "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1",
+                [session.binding().0.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some(Some(body)) = body else {
+            return Ok(false);
+        };
+        let bound: EffectiveConfig = serde_json::from_str(&body).map_err(error)?;
+        if &bound.id != session.binding().0 {
+            return Err(error("master_config_record"));
+        }
+        if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+            return Ok(false);
+        }
     }
     session.rebound.push(MasterBinding {
         config_id: config.id.clone(),
