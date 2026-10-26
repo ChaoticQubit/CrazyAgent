@@ -613,6 +613,56 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
 }
 
 #[test]
+fn hidden_characters_in_memory_text_show_as_escapes() {
+    let hidden = "Hourly\u{e0049}\u{200b} exports";
+    let shown = "Hourly\\u{e0049}\\u200b exports";
+    let raw = |lines: &[String]| {
+        lines
+            .iter()
+            .any(|line| line.contains('\u{e0049}') || line.contains('\u{200b}'))
+    };
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::new();
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(
+        &settings(SettingsEvent::Memories(Ok(vec![saved(
+            1,
+            hidden,
+            MemoryScope::Global,
+            MemoryOrigin::Written,
+        )]))),
+        &mut ctx,
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(vec![suggestion(
+            "tidepool", hidden,
+        )]))),
+        &mut ctx,
+    );
+    let (lines, _) = screen.body(116, &ctx);
+    let rows = texts(&lines);
+    assert!(
+        rows.iter().filter(|line| line.contains(shown)).count() >= 3,
+        "{rows:#?}"
+    );
+    assert!(!raw(&rows), "{rows:#?}");
+    screen.key(&Key::Enter, &mut ctx);
+    let (modal, _) = screen.modal(&ctx).unwrap();
+    let body = texts(&modal.body);
+    assert!(body.iter().any(|line| line.contains(shown)), "{body:#?}");
+    assert!(!raw(&body));
+    screen.key(&Key::Esc, &mut ctx);
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    let (modal, _) = screen.modal(&ctx).unwrap();
+    assert_eq!(modal.title, "Memory");
+    let body = texts(&modal.body);
+    assert!(body.iter().any(|line| line.contains(shown)), "{body:#?}");
+    assert!(!raw(&body));
+}
+
+#[test]
 fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
     let mut ctx = memory_ctx(120, 36);
     let mut screen = Memory::new();

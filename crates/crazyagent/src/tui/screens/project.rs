@@ -1,6 +1,7 @@
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
-use super::project_markdown::{MdLine, render};
+use super::new_project_view::wrap_words;
+use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -17,6 +18,8 @@ use std::path::PathBuf;
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
 const MEMORY_BYTES_MAX: usize = 4096;
+pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
+pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 256;
 const STACK_BYTES_MAX: usize = 2048;
@@ -220,6 +223,33 @@ pub(in crate::tui) struct MemoryEdit {
     pub entry: RequestId,
     pub version: u64,
     pub input: TextInput,
+}
+
+/// The whole text of a suggested memory, shown before the owner saves it.
+/// Holds the memory, its stored text and the first line on screen.
+/// y saves once the last line is on screen; e edits, n dismisses, Esc goes back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct MemoryReview {
+    pub entry: RequestId,
+    pub version: u64,
+    pub text: String,
+    pub scroll: usize,
+}
+
+impl MemoryReview {
+    /// Wraps the memory the way the review box shows it.
+    /// Takes nothing; hidden characters show as escapes and terminal controls are dropped.
+    /// Returns the lines, at most REVIEW_WIDTH cells each.
+    pub fn lines(&self) -> Vec<String> {
+        wrap_words(&sanitize(&self.text), REVIEW_WIDTH)
+    }
+
+    /// Tells whether the last line of the memory is on screen.
+    /// Takes nothing.
+    /// Returns true once the owner has scrolled to the end.
+    pub fn at_end(&self) -> bool {
+        self.scroll + REVIEW_ROWS >= self.lines().len()
+    }
 }
 
 /// The Add file box over the Context tab: the full path of one file to copy
@@ -454,6 +484,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub preview: Option<Preview>,
     pub reading: bool,
     pub edit: Option<MemoryEdit>,
+    pub review: Option<MemoryReview>,
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
@@ -504,6 +535,7 @@ impl ProjectScreen {
             preview: None,
             reading: false,
             edit: None,
+            review: None,
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
@@ -927,6 +959,9 @@ impl ProjectScreen {
         if self.edit.is_some() {
             return self.edit_key(key);
         }
+        if self.review.is_some() {
+            return self.review_key(key);
+        }
         if self.adding.is_some() {
             return self.add_key(key);
         }
@@ -1024,6 +1059,9 @@ impl ProjectScreen {
     pub fn paste(&mut self, text: &str) -> ProjectReply {
         if let Some(edit) = self.edit.as_mut() {
             edit.input.insert_str(text);
+            return ProjectReply::Handled;
+        }
+        if self.review.is_some() {
             return ProjectReply::Handled;
         }
         if let Some(adding) = self.adding.as_mut().filter(|adding| !adding.busy) {
@@ -1139,25 +1177,85 @@ impl ProjectScreen {
         let Some((entry, version, text)) = memory else {
             return ProjectReply::Handled;
         };
-        let decision = match code {
-            KeyCode::Char('y') => ReviewDecision::Keep,
-            KeyCode::Char('n') => ReviewDecision::Reject,
-            _ => {
-                let mut input = TextInput::multi(MEMORY_BYTES_MAX);
-                input.set(&super::project_markdown::sanitize(&text));
-                self.edit = Some(MemoryEdit {
+        match code {
+            KeyCode::Char('y') => {
+                self.review = Some(MemoryReview {
                     entry,
                     version,
-                    input,
+                    text,
+                    scroll: 0,
                 });
-                return ProjectReply::Handled;
+                ProjectReply::Handled
             }
-        };
-        ProjectReply::Review {
+            KeyCode::Char('n') => ProjectReply::Review {
+                entry,
+                version,
+                decision: ReviewDecision::Reject,
+            },
+            _ => {
+                self.edit_memory(entry, version, &text);
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    fn edit_memory(&mut self, entry: RequestId, version: u64, text: &str) {
+        let mut input = TextInput::multi(MEMORY_BYTES_MAX);
+        input.set(&sanitize(text));
+        self.edit = Some(MemoryEdit {
             entry,
             version,
-            decision,
+            input,
+        });
+    }
+
+    fn review_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(review) = self.review.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        let last = review.lines().len().saturating_sub(REVIEW_ROWS);
+        match key.code {
+            KeyCode::Esc => self.review = None,
+            KeyCode::Up => review.scroll = review.scroll.saturating_sub(1),
+            KeyCode::Down => review.scroll = (review.scroll + 1).min(last),
+            KeyCode::PageUp => review.scroll = review.scroll.saturating_sub(REVIEW_ROWS),
+            KeyCode::PageDown => review.scroll = (review.scroll + REVIEW_ROWS).min(last),
+            KeyCode::Char('y') if review.at_end() => {
+                let Some(review) = self.review.take() else {
+                    return ProjectReply::Ignored;
+                };
+                let shown = sanitize(&review.text);
+                let decision = if shown == review.text {
+                    ReviewDecision::Keep
+                } else {
+                    ReviewDecision::Edit {
+                        text: shown.trim().to_owned(),
+                    }
+                };
+                return ProjectReply::Review {
+                    entry: review.entry,
+                    version: review.version,
+                    decision,
+                };
+            }
+            KeyCode::Char('n') => {
+                let Some(review) = self.review.take() else {
+                    return ProjectReply::Ignored;
+                };
+                return ProjectReply::Review {
+                    entry: review.entry,
+                    version: review.version,
+                    decision: ReviewDecision::Reject,
+                };
+            }
+            KeyCode::Char('e') => {
+                if let Some(review) = self.review.take() {
+                    self.edit_memory(review.entry, review.version, &review.text);
+                }
+            }
+            _ => {}
         }
+        ProjectReply::Handled
     }
 
     fn overview_key(&mut self, key: KeyEvent) -> ProjectReply {
@@ -1590,11 +1688,15 @@ impl ProjectScreen {
         assert!(self.confirm_stop.is_none() || self.confirm_delete.is_none());
         let boxes = [
             self.edit.is_some(),
+            self.review.is_some(),
             self.adding.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if let Some(review) = &self.review {
+            assert!(review.scroll < review.lines().len().max(1));
+        }
         if let Some(general) = &self.general {
             assert!(general.cursor < GENERAL_FIELDS);
         }
