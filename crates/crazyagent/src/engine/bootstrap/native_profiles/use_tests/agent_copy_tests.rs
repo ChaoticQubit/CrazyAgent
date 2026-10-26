@@ -349,3 +349,52 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         owner_list
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let (keychain, service) = claude_keychain(&home, &claude_record(expires));
+    let mut record = claude_record(expires);
+    record["mcpOAuth"]["unit-server"]["accessToken"] = json!("m".repeat(40_000));
+    security(
+        &home,
+        &[
+            "add-generic-password",
+            "-U",
+            "-a",
+            "unit",
+            "-s",
+            &service,
+            "-w",
+            &record.to_string(),
+            keychain.to_str().unwrap(),
+        ],
+        None,
+    );
+    let stored = security(
+        &home,
+        &[
+            "find-generic-password",
+            "-s",
+            &service,
+            "-w",
+            keychain.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(stored.len() > 40_000);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let started = std::time::Instant::now();
+    let copy = guard.hand_to_agent(&agent, TURN).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(agent.join(".credentials.json")).unwrap()).unwrap();
+    assert_eq!(written["claudeAiOauth"]["accessToken"], "sk-ant-oat01-unit");
+    assert_eq!(written["claudeAiOauth"]["refreshToken"], Value::Null);
+    assert!(written.get("mcpOAuth").is_none());
+    drop(copy);
+}
