@@ -1,10 +1,32 @@
 use super::super::RegisteredNativeAuthHost;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
+
+const FIRST_EXEC_TIME: Duration = Duration::from_secs(60);
+
+/// Waits until a freshly written cat fixture echoes one line, so it is running cat and the
+/// caller times only its exit after input ends. macOS assesses each new script once after
+/// spawn returns, one at a time across the machine, so that wait has its own bound.
+/// Inputs: the child's input and output pipes. Output: none; panics past FIRST_EXEC_TIME.
+pub(super) fn await_fresh_cat(input: &mut ChildStdin, output: ChildStdout) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut output = output;
+        let mut echoed = [0; 6];
+        let _ = sender.send(output.read_exact(&mut echoed).map(|()| echoed));
+    });
+    input.write_all(b"ready\n").unwrap();
+    let echoed = receiver
+        .recv_timeout(FIRST_EXEC_TIME)
+        .expect("fresh cat fixture did not start within its first-exec bound")
+        .unwrap();
+    reader.join().unwrap();
+    assert_eq!(&echoed, b"ready\n");
+}
 
 #[test]
 fn registered_cat_fixture_reports_actual_exit_and_stderr() {
@@ -26,13 +48,15 @@ fn registered_cat_fixture_reports_actual_exit_and_stderr() {
             .env_clear()
             .current_dir(&home)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0),
     )
     .unwrap();
     let initial = child.try_wait().unwrap();
-    drop(child.stdin.take().unwrap());
+    let mut input = child.stdin.take().unwrap();
+    await_fresh_cat(&mut input, child.stdout.take().unwrap());
+    drop(input);
     let deadline = Instant::now() + Duration::from_secs(2);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {

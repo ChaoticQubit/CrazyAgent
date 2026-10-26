@@ -101,13 +101,13 @@ impl Case {
         self.session.as_mut().unwrap()
     }
 
-    fn spawn(&mut self, mut command: Command) -> (ChildStdin, Pid) {
+    fn spawn(&mut self, mut command: Command, output: Stdio) -> (ChildStdin, Pid) {
         let mut child = crate::spawn_gate::spawn(
             command
                 .env_clear()
                 .current_dir(&self.home)
                 .stdin(Stdio::piped())
-                .stdout(Stdio::null())
+                .stdout(output)
                 .stderr(Stdio::null())
                 .process_group(0),
         )
@@ -132,7 +132,7 @@ impl Case {
     }
 
     fn cat(&mut self) -> (ChildStdin, Pid) {
-        self.spawn(Command::new("/bin/cat"))
+        self.spawn(Command::new("/bin/cat"), Stdio::null())
     }
 
     fn reap(&mut self, input: ChildStdin, group: Pid) {
@@ -264,7 +264,7 @@ fn claude_auth_lifecycle_refuses_status_handoff_until_first_group_is_absent() {
     let mut case = Case::new();
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "read ignored; /bin/sleep 30 </dev/null & exit 0"]);
-    let (mut input, group) = case.spawn(command);
+    let (mut input, group) = case.spawn(command, Stdio::null());
     input.write_all(b"continue\n").unwrap();
     drop(input);
     let deadline = Instant::now() + CHILD_TIME;
@@ -419,7 +419,12 @@ fn claude_auth_lifecycle_retained_executable_rejects_replacement_before_status_c
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let registered = RegisteredNativeAuthHost::capture(&executable).unwrap();
     let digest = registered.verified_sha256().unwrap();
-    let (input, group) = case.spawn(Command::new(registered.verified_path().unwrap()));
+    let (mut input, group) = case.spawn(
+        Command::new(registered.verified_path().unwrap()),
+        Stdio::piped(),
+    );
+    let output = case.session().child_mut().unwrap().stdout.take().unwrap();
+    super::executable_fixture_tests::await_fresh_cat(&mut input, output);
     let original_id = case.session().child_mut().unwrap().id();
     case.reap(input, group);
     case.session().prepare_status_child().unwrap();
