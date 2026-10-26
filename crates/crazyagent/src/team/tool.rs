@@ -15,7 +15,7 @@ pub const DROP_BYTES_MAX: u64 =
     (DELEGATIONS_PER_REPLY_MAX * (TASK_PROMPT_BYTES_MAX * 2 + 256)) as u64;
 const REQUEST_BYTES_MAX: usize = 1024 * 1024;
 const PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
-const RECORDED: &str = "Recorded. When your reply ends, the engine checks this task against the team plan and hands it to a sub-agent; the result comes back to you.";
+const RECORDED: &str = "Recorded. When your reply ends, the engine checks this task against the team plan and hands it to a sub-agent.";
 const INVALID: &str = "Not recorded: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
 const FULL: &str = "Not recorded: the engine takes at most 8 tasks from one reply.";
 const UNWRITABLE: &str = "Not recorded: the engine's task record could not be written.";

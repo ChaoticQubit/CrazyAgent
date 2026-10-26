@@ -1909,3 +1909,129 @@ fn delivered_task_history_makes_room_while_undelivered_results_and_live_work_sta
         "a refusal deletes nothing"
     );
 }
+
+#[test]
+fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leave_a_note() {
+    let (directory, mut connection) = database();
+    let mut teams = Vec::new();
+    for (project, sub) in [
+        (
+            "conversation-team",
+            vec![HarnessSlot {
+                harness: "codex".into(),
+                agents: 2,
+                tools: true,
+            }],
+        ),
+        ("conversation-alone", vec![]),
+    ] {
+        let setup = stored(project, sub);
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                params![
+                    setup.project_id.as_str(),
+                    serde_json::to_string(&setup).unwrap()
+                ],
+            )
+            .unwrap();
+        teams.push(setup.project_id);
+    }
+    let unplanned = ProjectId::new("conversation-unplanned").unwrap();
+    let drop = directory.path().join(tool::DROP_FILE);
+    let calls = [
+        ("Write the README", None),
+        ("Check the tests", Some("claude-code")),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(id, (task, harness))| {
+        let mut arguments = serde_json::json!({ "task": task });
+        if let Some(harness) = harness {
+            arguments["harness"] = (*harness).into();
+        }
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool::TOOL_NAME, "arguments": arguments}})
+        .to_string()
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    let pool = access("conversation-team", &["codex-signed-in"]);
+    let mut admitted = Vec::new();
+    for project in teams.iter().chain([&unplanned]) {
+        tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
+        let proposed = tool::take(&drop);
+        assert_eq!(proposed.len(), 2);
+        assert!(!drop.exists());
+        let tx = connection.transaction().unwrap();
+        admitted.push(admit_conversation(&tx, &pool, project, &proposed, 1_000).unwrap());
+        tx.commit().unwrap();
+    }
+    assert_eq!(admitted[0].len(), 1);
+    assert_eq!(admitted[1..], [Vec::<i64>::new(), Vec::new()]);
+    let task: (String, Option<i64>, String, bool, String, String) = connection
+        .query_row(
+            "SELECT source,turn,harness,tools,prompt,status FROM team_tasks WHERE id=?1",
+            [admitted[0][0]],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        task,
+        (
+            "owner".into(),
+            None,
+            "codex".into(),
+            true,
+            "Write the README".into(),
+            "queued".into()
+        )
+    );
+    let tasks: i64 = connection
+        .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tasks, 1);
+    let notes = |project: &ProjectId| -> Vec<(String, String, String)> {
+        connection
+            .prepare("SELECT author,state,text FROM team_messages WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([project.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let note = |lines: &str| {
+        vec![(
+            "engine".to_owned(),
+            "note".to_owned(),
+            format!("The conversation master's tasks were not handed off:\n{lines}"),
+        )]
+    };
+    assert_eq!(
+        notes(&teams[0]),
+        note("- Check the tests: that harness is not in the team plan")
+    );
+    assert_eq!(
+        notes(&teams[1]),
+        note(
+            "- Write the README: the team plan has no sub-agents\n- Check the tests: the team plan has no sub-agents"
+        )
+    );
+    assert_eq!(
+        notes(&unplanned),
+        note(
+            "- Write the README: this project has no team plan\n- Check the tests: this project has no team plan"
+        )
+    );
+}

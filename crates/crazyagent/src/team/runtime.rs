@@ -2380,8 +2380,10 @@ fn master_brief(stored: &StoredSetup) -> String {
     }
 }
 
-fn refusal(code: &str) -> &'static str {
+/// Words one admission refusal for the owner. Takes the refusal code. Returns the reason.
+pub(super) fn refusal(code: &str) -> &'static str {
     match code {
+        "team_plan_missing" => "this project has no team plan",
         "team_harness_not_in_plan" => "that harness is not in the team plan",
         "team_harness_cannot_run" => "that harness cannot run sub-agents yet",
         "team_queue_full" => "too many tasks are already waiting",
