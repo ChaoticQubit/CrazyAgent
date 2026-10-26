@@ -120,7 +120,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     setProblem("");
     const result = await runSetup(ticks);
     setBusy(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result)); return; }
     setFresh(result.value);
     setStarted(true);
   };

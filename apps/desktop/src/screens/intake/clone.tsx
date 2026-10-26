@@ -114,7 +114,7 @@ export function GitHubSignIn({ status, reloadStatus }: { status: GitHubStatus; r
   }, [device, status.signed_in]);
 
   const failed = (result: { kind: "not_ready" } | { kind: "error"; code: string }, what: string) =>
-    setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result.code));
+    setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result));
 
   const startDevice = async () => {
     if (busy) return;
@@ -177,7 +177,7 @@ export function CloneFromGitHub() {
   }, [signedIn]);
 
   const failed = (result: { kind: "not_ready" } | { kind: "error"; code: string }, what: string) =>
-    setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result.code));
+    setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result));
 
   const more = async () => {
     if (next === null) return;

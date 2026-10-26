@@ -483,9 +483,5 @@ async fn conflict_case(root: &Path) -> TestResult<(Option<String>, String, Strin
     else {
         return Err("actual final brief required".into());
     };
-    Ok((
-        rejected.rejection.map(str::to_owned),
-        retained,
-        final_brief.text,
-    ))
+    Ok((rejected.rejection, retained, final_brief.text))
 }

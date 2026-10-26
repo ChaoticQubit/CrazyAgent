@@ -59,7 +59,7 @@ test("deleting accounts in pools names the pools they leave and the pools delete
   assert.equal(deleteDialog(accounts, undefined).lines.length, 1);
   assert.equal(poolEffect(["a"], pools), undefined);
   assert.equal(poolEffect(["b", "x"], pools), "They leave pools Main and Spare. Main and Spare have no other account, so they are deleted too and their projects have no pool.");
-  assert.equal(api.plainError("account_in_pool"), api.plainError("made_up_code"));
+  assert.equal(api.knownError("account_in_pool"), undefined, "account_in_pool is no longer a refusal, so it has no sentence of its own");
 });
 
 test("deleting a selection tries every account once, cancels a running sign-in first, and reports what was left", async () => {

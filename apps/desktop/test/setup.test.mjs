@@ -34,10 +34,9 @@ registerHooks({
 const client = await import("../src/engine-client.ts");
 
 test("setup and default-pack refusals read as plain sentences", () => {
-  const fallback = client.errorMessage({ code: "unknown" });
   assert.equal(client.errorMessage({ code: "setup_busy" }), "Setup is already running.");
   for (const code of ["setup_store_unavailable", "setup_outcome_unknown", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
-    assert.notEqual(client.errorMessage({ code }), fallback, code);
+    assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });
 
@@ -70,9 +69,9 @@ test("every setup command the client calls is a desktop command the bridge maps 
   assert.ok(!bridge.includes(`"pack_required"`), "no pack entry is forced, so the bridge has no pack_required code");
   const setupCodes = setup.match(/const SETUP_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
   assert.ok(setupCodes, "the bridge lists its setup codes");
-  assert.ok(bridge.includes(".or_else(|| intake::setup_code(code))"), "owner receipts keep setup codes");
+  assert.ok(bridge.includes("fn rejection_code(code: &str) -> String {\n    crazyagent::protocol::plain_code(code).to_owned()\n}"), "owner receipts keep setup codes");
   for (const code of ["setup_busy", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
     assert.ok(setupCodes[1].includes(`"${code}"`), code);
-    assert.notEqual(client.errorMessage({ code }), client.errorMessage({ code: "unknown" }), code);
+    assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });

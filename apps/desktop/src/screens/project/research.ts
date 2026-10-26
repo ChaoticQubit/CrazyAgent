@@ -1,8 +1,9 @@
 import type { IconName, Tone } from "../../ui";
-import { failureCopy, receiptState } from "../../api-projects";
+import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import type { IntentReceipt, MasterState, MasterTurn, ProjectDetail } from "../../engine-client";
+import { namedFailure } from "../../api";
+import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -147,10 +148,10 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
  * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
 export function changeOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
   if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
-  if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
+  if (result.kind === "error") return { toast: "", note: failureCopy(result), reload: false };
   const state = receiptState(result.value);
   if (state.kind === "applied") return { toast: done, note: "", reload: true };
-  return { toast: "", note: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
+  return { toast: "", note: state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
 }
 
 /** What Pause all agents will do to the team's tasks: running ones stop, waiting ones are
@@ -402,10 +403,12 @@ export function resendText(turns: MasterTurn[], sent: Record<string, string>): s
 const SEND_FALLBACK = "Couldn't send. Try again.";
 
 /** The inline line under the composer when a message could not be sent; the message stays
- * in the composer. Input: the failure code. Output: the plain line. */
-export function sendFailureLine(code: string): string {
-  const copy = failureCopy(code);
-  return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
+ * in the composer. Input: the failure code, or the failure with the engine cause behind it.
+ * Output: the plain line, naming the code when there is no sentence for it. */
+export function sendFailureLine(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  const sentence = failureSentence(code);
+  return sentence === undefined ? withCode(SEND_FALLBACK, code) : `Couldn't send. ${namedFailure(sentence, code, cause)}`;
 }
 
 /** The muted line shown when a send found its conversation older than the settings and a new

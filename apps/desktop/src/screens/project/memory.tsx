@@ -132,7 +132,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     <p className="pj-secondary">Facts agents keep for this project. Nothing is saved without your click.</p>
     {memories === undefined && <p className="pj-muted" role="status">Loading memories...</p>}
     {memories?.kind === "not_ready" && <NotReady what="the project memory list isn't in this build." />}
-    {memories?.kind === "error" && <p className="pj-error" role="alert">Couldn't load memories. {failureCopy(memories.code)}</p>}
+    {memories?.kind === "error" && <p className="pj-error" role="alert">Couldn't load memories. {failureCopy(memories)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     {groups.suggested.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-suggested">
       <h3 id="pj-mem-suggested">Suggested</h3>

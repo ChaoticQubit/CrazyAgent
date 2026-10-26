@@ -23,8 +23,8 @@ test("bridge refusals map to plain copy and never echo raw codes or unknown text
   assert.equal(api.classifyFailure(new TypeError("Cannot read properties of undefined (reading 'invoke')")).code, "engine_unreachable");
   const unknown = api.classifyFailure({ code: "native_profile_custody_unsafe <b>" });
   assert.equal(unknown.kind, "error");
-  assert.equal(unknown.message, "Something went wrong. Try again.");
-  assert.equal(api.classifyFailure("some raw panic text with /Users/secret/path").message, "Something went wrong. Try again.");
+  assert.equal(unknown.message, "Something went wrong. Try again. (unknown)");
+  assert.equal(api.classifyFailure("some raw panic text with /Users/secret/path").message, "Something went wrong. Try again. (unknown)");
   for (const code of api.KNOWN_ERROR_CODES) {
     const message = api.plainError(code);
     assert.doesNotMatch(message, /_|\bnull\b|\u2014/, code);

@@ -1,4 +1,6 @@
-use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, failure};
+use super::{
+    ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
+};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
@@ -167,11 +169,12 @@ fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeErr
     } else {
         code
     };
-    failure(
+    caused(
         list.iter()
             .copied()
             .find(|item| *item == code)
             .unwrap_or(fallback),
+        code,
     )
 }
 
@@ -181,19 +184,18 @@ pub fn intake_code(code: &str) -> Option<&'static str> {
     INTAKE_CODES.iter().copied().find(|item| *item == code)
 }
 
-/// Names a setup or pack refusal the window has a sentence for, so an owner receipt
-/// keeps the engine's reason instead of a general one.
-/// Input: an engine code. Output: the same code as a static name, or None.
-pub fn setup_code(code: &str) -> Option<&'static str> {
-    SETUP_CODES.iter().copied().find(|item| *item == code)
-}
-
 fn intake_failure(error: EngineError) -> BridgeError {
     known(&error.0, &INTAKE_CODES, "owner_read_failed")
 }
 
+/// Names a GitHub failure from its allowlist only, never with the engine code behind it:
+/// this path carries tokens, and a token can look like a plain code.
+/// Input: the engine error. Output: the listed code, or `github_failed` with no cause.
 fn github_failure(error: EngineError) -> BridgeError {
-    known(&error.0, &GITHUB_CODES, "github_failed")
+    BridgeError {
+        cause: None,
+        ..known(&error.0, &GITHUB_CODES, "github_failed")
+    }
 }
 
 fn setup_failure(error: EngineError) -> BridgeError {
@@ -317,7 +319,7 @@ impl NativeBridge {
         self.owner_read(OwnerRead::ProjectsHome).await?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -515,12 +517,12 @@ impl NativeBridge {
             .map_err(setup_failure)?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         let receipt = self.deliver_intent(false).await?;
         match receipt.outcome {
             ActionOutcome::Applied => self.setup_status().await,
             ActionOutcome::Rejected => Err(known(
-                receipt.rejection.unwrap_or("setup_failed"),
+                receipt.rejection.as_deref().unwrap_or("setup_failed"),
                 &SETUP_CODES,
                 "setup_failed",
             )),
@@ -773,17 +775,28 @@ mod tests {
             github_failure(EngineError("github_sign_in_expired".into())).code,
             "github_sign_in_expired"
         );
+        let leaked = github_failure(EngineError("ghp_leaked".into()));
+        assert_eq!(leaked.code, "github_failed");
+        assert_eq!(leaked.cause, None);
+        let home = intake_failure(EngineError("home_destination_exists".into()));
+        assert_eq!(home.code, "home_destination_exists");
+        assert_eq!(home.cause, None);
+        let weird = intake_failure(EngineError("weird".into()));
+        assert_eq!(weird.code, "owner_read_failed");
+        assert_eq!(weird.cause.as_deref(), Some("weird"));
+        let raw = setup_failure(EngineError("open /Users/mira/setup: denied".into()));
+        assert_eq!(raw.code, "setup_failed");
         assert_eq!(
-            github_failure(EngineError("ghp_leaked".into())).code,
-            "github_failed"
+            raw.cause.as_deref(),
+            Some(crazyagent::protocol::TEXT_WITHHELD)
         );
         assert_eq!(
-            intake_failure(EngineError("home_destination_exists".into())).code,
-            "home_destination_exists"
+            serde_json::to_value(&weird).unwrap(),
+            serde_json::json!({ "code": "owner_read_failed", "cause": "weird" })
         );
         assert_eq!(
-            intake_failure(EngineError("weird".into())).code,
-            "owner_read_failed"
+            serde_json::to_value(&home).unwrap(),
+            serde_json::json!({ "code": "home_destination_exists" })
         );
         assert_eq!(intake_code("home_move_partial"), Some("home_move_partial"));
         assert_eq!(intake_code("folder_name_taken"), None);
@@ -817,7 +830,7 @@ mod tests {
     fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
         let refused = |code: &str| {
             known(
-                super::super::rejection_code(code),
+                &super::super::rejection_code(code),
                 &SETUP_CODES,
                 "setup_failed",
             )

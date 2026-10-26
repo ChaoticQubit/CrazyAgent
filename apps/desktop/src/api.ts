@@ -1,5 +1,5 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
-import { bridgeCall, errorMessage } from "./engine-client";
+import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent } from "./engine-client";
 import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
 
@@ -7,7 +7,7 @@ export type { SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
 export type { AgentRole, AgentState, AgentView } from "./engine-client";
 
-export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string };
+export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
 
 const FALLBACK = "Something went wrong. Try again.";
@@ -19,6 +19,8 @@ const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
   engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
@@ -106,11 +108,28 @@ const COPY: Record<string, string> = {
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
 
-/** Turns an engine error code into one plain sentence for the owner.
- * Input: an error code. Output: the copy for it, or the generic fallback. */
-export function plainError(code: string): string {
+/** The sentence this window has for an engine or bridge code. Input: the code. Output: the
+ * sentence, or undefined when there is none. */
+export function knownError(code: string): string | undefined {
   if (Object.hasOwn(COPY, code)) return COPY[code];
-  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : FALLBACK;
+  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
+}
+
+/** The owner's line for a failure, never opaque: its own sentence, else the generic sentence;
+ * the engine cause behind it is named after the sentence, and the generic sentence names the code
+ * when there is no cause. Inputs: the sentence if known, the code and the engine cause. Output:
+ * one plain line. */
+export function namedFailure(sentence: string | undefined, code: string, cause?: string): string {
+  const named = cause === undefined || cause === code ? undefined : cause;
+  if (sentence === undefined) return withCode(FALLBACK, named ?? code);
+  return named === undefined ? sentence : withCode(sentence, named);
+}
+
+/** Turns an engine error code into one plain sentence for the owner.
+ * Inputs: an error code and the engine cause behind it, if any. Output: the copy for it, or
+ * the generic fallback naming the code. */
+export function plainError(code: string, cause?: string): string {
+  return namedFailure(knownError(code), code, cause);
 }
 
 /** Sorts a failed bridge call into "not ready yet" (the command is not in this build) or a
@@ -118,12 +137,13 @@ export function plainError(code: string): string {
 export function classifyFailure(error: unknown): Failure {
   if (typeof error === "string") {
     if (/^Command [a-z_]+ not found$/.test(error) || /^[a-z_]+ not allowed\b[\s\S]*Command not found$/.test(error)) return { kind: "not_ready" };
-    return { kind: "error", code: "unknown", message: FALLBACK };
+    return { kind: "error", code: "unknown", message: plainError("unknown") };
   }
   if (error instanceof TypeError || error instanceof ReferenceError) return { kind: "error", code: UNREACHABLE, message: plainError(UNREACHABLE) };
   const raw = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "unknown";
   const code = ["not_connected", "not_configured", "owner_unavailable", "owner_revoked"].includes(raw) ? UNREACHABLE : raw;
-  return { kind: "error", code, message: plainError(code) };
+  const cause = typeof error === "object" && error !== null && "cause" in error && typeof error.cause === "string" ? error.cause : undefined;
+  return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
 }
 
 /** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.

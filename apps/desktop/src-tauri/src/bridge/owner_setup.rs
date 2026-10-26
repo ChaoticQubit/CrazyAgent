@@ -1,4 +1,4 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure};
+use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
@@ -25,7 +25,7 @@ impl NativeBridge {
             .controller()?
             .owner_profile()
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         bounded(profile)
     }
 
@@ -46,14 +46,14 @@ impl NativeBridge {
         }
         profile
             .validate()
-            .map_err(|error| failure(profile_code(&error.0)))?;
+            .map_err(|error| caused(profile_code(&error.0), &error.0))?;
         self.controller()?
             .read(OwnerRead::OwnerProfile)
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::SaveOwnerProfile { profile }, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
     }
@@ -69,7 +69,7 @@ impl NativeBridge {
             .controller()?
             .pool_summaries()
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         assert!(pools.len() <= 64);
         Ok(pools)
     }

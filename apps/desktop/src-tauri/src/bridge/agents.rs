@@ -13,13 +13,14 @@ fn agent_error(error: EngineError) -> BridgeError {
         launch if launch.starts_with("launch_") => "agent_launch_failed",
         code => code,
     };
-    failure(
+    caused(
         BRIDGE_CODES
             .iter()
             .chain(AGENT_CONTROL_CODES)
             .copied()
             .find(|known| *known == code)
             .unwrap_or("agents_outcome_unknown"),
+        &error.0,
     )
 }
 
@@ -129,5 +130,24 @@ mod tests {
             agent_error(EngineError("Not A Code".into())).code,
             "agents_outcome_unknown"
         );
+    }
+
+    /// A launch failure or an unlisted engine code reaches the window with the plain engine
+    /// code behind the bridge code, so the owner can name the launch step that failed.
+    #[test]
+    fn a_launch_or_unlisted_failure_keeps_the_plain_engine_code_behind_it() {
+        let launch = agent_error(EngineError("launch_protocol_failed".into()));
+        assert_eq!(launch.code, "agent_launch_failed");
+        assert_eq!(launch.cause.as_deref(), Some("launch_protocol_failed"));
+        let unlisted = agent_error(EngineError("agent_state_torn".into()));
+        assert_eq!(unlisted.code, "agents_outcome_unknown");
+        assert_eq!(unlisted.cause.as_deref(), Some("agent_state_torn"));
+        let raw = agent_error(EngineError("open /Users/mira/.codex: denied".into()));
+        assert_eq!(raw.code, "agents_outcome_unknown");
+        assert_eq!(
+            raw.cause.as_deref(),
+            Some(crazyagent::protocol::TEXT_WITHHELD)
+        );
+        assert_eq!(agent_error(EngineError("owner_busy".into())).cause, None);
     }
 }

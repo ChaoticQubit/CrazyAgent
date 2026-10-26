@@ -295,7 +295,7 @@ test("a stopped or failed master turn offers its own message to send again", () 
 });
 
 test("a failed send says Couldn't send and keeps specific engine copy", () => {
-  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again.");
+  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again. (made_up_code)");
   assert.equal(research.sendFailureLine("engine_unreachable"), `Couldn't send. ${api.failureCopy("engine_unreachable")}`);
 });
 
@@ -674,7 +674,7 @@ test("files named like object built-ins get the plain file icon instead of crash
 test("an engine code named like an object built-in gets the plain fallback sentence", () => {
   for (const code of ["constructor", "__proto__", "toString"]) {
     assert.equal(typeof api.failureCopy(code), "string", code);
-    assert.equal(api.failureCopy(code), api.failureCopy("some_unknown_code"), code);
+    assert.equal(api.failureCopy(code), `Something went wrong. Try again. (${/^[a-z0-9_]+$/.test(code) ? code : "unknown"})`, code);
   }
 });
 

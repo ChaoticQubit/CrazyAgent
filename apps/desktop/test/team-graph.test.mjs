@@ -308,12 +308,15 @@ test("typed keys and a sent prompt go out in order on one queue, and only the pr
   type(io.encodeTyped("x".repeat(5000)));
   assert.equal(run(async () => { sent.push(["prompt", "run the tests"]); return true; }), true);
   type(io.encodeTyped("\r"));
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  const settle = async (done) => {
+    for (let waited = 0; !done() && waited < 2000; waited += 5) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  await settle(() => sent.length >= 4);
   assert.deepEqual(sent, [["keys", 4096], ["keys", 904], ["prompt", "run the tests"], ["keys", 1]]);
   assert.equal(stops, 0);
   const halted = io.jobQueue(() => { stops += 1; });
   assert.equal(halted(async () => false), true);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle(() => stops === 1);
   assert.equal(halted(async () => true), false);
   assert.equal(stops, 1);
 });

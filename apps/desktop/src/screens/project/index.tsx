@@ -117,7 +117,7 @@ function ProjectMenu({ data }: { data: ProjectData }) {
   function askPause() {
     if (team === undefined) return data.notify("Still loading the team. Try again in a moment.");
     if (team.kind === "not_ready") return data.notify("Not ready yet: pausing agents isn't in this build.");
-    if (team.kind === "error") return data.notify(`Couldn't load the team. ${failureCopy(team.code)}`);
+    if (team.kind === "error") return data.notify(`Couldn't load the team. ${failureCopy(team)}`);
     if (summary.count === 0) return data.notify(summary.line);
     setPausing(true);
   }
@@ -127,10 +127,10 @@ function ProjectMenu({ data }: { data: ProjectData }) {
     setBusy(false);
     setPausing(false);
     data.reloadTeam();
-    if (result.kind !== "ok") return data.notify(result.kind === "not_ready" ? "Not ready yet: pausing agents isn't in this build." : failureCopy(result.code));
+    if (result.kind !== "ok") return data.notify(result.kind === "not_ready" ? "Not ready yet: pausing agents isn't in this build." : failureCopy(result));
     const state = receiptState(result.value);
     if (state.kind === "applied") return data.notify("Paused. Running tasks are stopping and waiting tasks are cancelled.");
-    data.notify(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the Agents tab before trying again.");
+    data.notify(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the Agents tab before trying again.");
   }
   return <>
     <Menu label="Project actions" items={[

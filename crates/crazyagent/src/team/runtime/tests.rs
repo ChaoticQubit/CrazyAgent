@@ -499,13 +499,14 @@ fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results()
         "the unanswered owner message outlived the append that pruned history"
     );
     let mut team = fixture.runtime();
-    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, vec![])
+    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, None, vec![])
         .unwrap();
     team.finish_message(
         &project,
         latest,
         "Here is the plan.\nDELEGATE: Write the landing page",
         TurnEnd::Success,
+        None,
         vec![],
     )
     .unwrap();
@@ -609,12 +610,13 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
         fixture.connection.execute(statement, [PROJECT]).unwrap();
     }
     let mut team = fixture.runtime();
-    team.finish_task(task, "page written", TurnEnd::Success)
+    team.finish_task(task, "page written", TurnEnd::Success, None)
         .unwrap();
-    team.finish_task(task, "", TurnEnd::Closed).unwrap();
-    team.finish_message(&project, message, "", TurnEnd::Interrupted, vec![])
+    team.finish_task(task, "", TurnEnd::Closed, Some("launch_closed"))
         .unwrap();
-    team.finish_message(&project, message, "Done", TurnEnd::Success, vec![])
+    team.finish_message(&project, message, "", TurnEnd::Interrupted, None, vec![])
+        .unwrap();
+    team.finish_message(&project, message, "Done", TurnEnd::Success, None, vec![])
         .unwrap();
     for table in ["team_tasks", "team_messages"] {
         assert_eq!(
@@ -916,6 +918,61 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     }
 
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
+    assert_eq!(
+        launch_end(LaunchError("launch_deadline".into())),
+        (TurnEnd::TimedOut, None)
+    );
+    assert_eq!(
+        launch_end(LaunchError("launch_event_limit".into())),
+        (TurnEnd::TooLong, None)
+    );
+    let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into()));
+    assert_eq!(end, TurnEnd::Closed);
+    assert_eq!(
+        with_code(PROCESS_CLOSED, cause.as_deref()),
+        "The agent process closed. (launch_protocol_failed)"
+    );
+    assert_eq!(
+        with_code(
+            "The agent could not start",
+            Some("No such file: /Users/mira/key")
+        ),
+        "The agent could not start. (engine_text_withheld)"
+    );
+    assert_eq!(with_code(PROCESS_CLOSED, None), PROCESS_CLOSED);
+    assert_eq!(
+        with_code(
+            "The master stopped before it replied.",
+            Some("launch_input_closed")
+        ),
+        "The master stopped before it replied. (launch_input_closed)"
+    );
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Write the page','running',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.finish_task(task, "", TurnEnd::Closed, Some("launch_input_closed"))
+        .unwrap();
+    let problem: String = fixture
+        .connection
+        .query_row("SELECT error FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        problem,
+        "The sub-agent stopped unexpectedly. (launch_input_closed)"
+    );
 }
 
 /// The owner stops a sub-agent while its harness has not drawn its screen yet, which a
