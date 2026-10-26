@@ -922,9 +922,10 @@ fn persist_runtime(
 }
 
 /// Ends an admitted turn that failed before its harness ran. A rejected sign-in, such as a
-/// sign-in whose credential could not be handed out, is reported to the gateway so the
-/// account waits for a fresh sign-in; any other failure ends locally.
-/// Inputs: the transaction, the prepared turn and the reason. Output: its attempt is ended.
+/// token that still lapses after renewal, is reported to the gateway so the account waits
+/// for a fresh sign-in; any other failure, a credential this engine could not read among
+/// them, ends locally. Inputs: the transaction, the prepared turn and the reason.
+/// Output: its attempt is ended.
 fn fail_before_running(
     tx: &Transaction<'_>,
     turn: &mut MasterTurnView,
@@ -1830,7 +1831,11 @@ pub(crate) fn native_sign_in(
     connection: &ModelConnection,
     account_ref: Option<&crate::protocol::CredentialRef>,
 ) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
-    proved_sign_in(tx, host, connection, account_ref, None)
+    let fact = proved_sign_in(tx, host, connection, account_ref, None)?;
+    if super::native_auth::doubted(tx, connection, fact.generation)? {
+        return Err(error("master_authentication_stale"));
+    }
+    Ok(fact)
 }
 
 /// Proves one sign-in operation of a native managed connection, named by its generation,
@@ -3465,7 +3470,9 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
-        MasterRuntimeCommand::Fail { reason, cause, .. } => {
+        MasterRuntimeCommand::Fail {
+            reason, ref cause, ..
+        } => {
             if matches!(
                 turn.phase,
                 MasterTurnPhase::Queued | MasterTurnPhase::Prepared
@@ -3478,7 +3485,13 @@ pub(super) fn runtime(
                     MasterTurnPhase::Failed
                 };
                 turn.reason = Some(reason);
-                turn.cause = Some(cause_code(&cause));
+                turn.cause = Some(cause_code(cause));
+                if turn.phase == MasterTurnPhase::Failed
+                    && cause == "native_profile_credential_unavailable"
+                    && let Some(attempt) = &turn.attempt
+                {
+                    super::native_auth::doubt_sign_in(&tx, host, &attempt.connection)?;
+                }
                 if turn.phase == MasterTurnPhase::Failed
                     && pauses(reason)
                     && let Some(attempt) = &turn.attempt
@@ -3487,7 +3500,7 @@ pub(super) fn runtime(
                 }
                 if reason == MasterReason::RepositoryConfigRefused {
                     let repository = master_repository(&tx, &session.project_id)?;
-                    turn.detail = crate::worktrees::refused_config_line(&cause, &repository);
+                    turn.detail = crate::worktrees::refused_config_line(cause, &repository);
                 }
                 persist_runtime(&tx, config, &mut session, &turn)?;
                 assert!(session.current_turn.is_none());
