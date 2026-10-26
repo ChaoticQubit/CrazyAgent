@@ -1496,30 +1496,43 @@ async fn fill_capacity(client: &OwnerClient, basis: &Basis) -> (NativeAuthFact, 
     (first, second)
 }
 
-async fn assert_capacity_rejections(case: &AuthCase, client: &OwnerClient, basis: &Basis) {
-    let before = case.stored();
-    assert_error(
-        client
-            .start_native_auth(start(
-                basis,
-                "capacity-new-start",
-                NativeAuthMethod::ClaudeOfficial,
-            ))
-            .await,
-        "native_auth_operation_capacity",
-    );
-    assert_error(
-        client
-            .logout_native_auth(logout(basis, "capacity-new-logout"))
-            .await,
-        "native_auth_operation_capacity",
-    );
-    assert_eq!(case.stored(), before);
-    assert!(!case.profile("profile-z").exists());
+async fn assert_capacity_prunes_the_oldest_finished(
+    case: &AuthCase,
+    client: &OwnerClient,
+    basis: &Basis,
+) {
+    let ids =
+        |case: &AuthCase| -> Vec<String> { case.stored().into_iter().map(|row| row.id).collect() };
+    for (id, pruned) in [
+        ("capacity-new-start", "capacity-0"),
+        ("capacity-new-logout", "capacity-1"),
+    ] {
+        let reply = if id.ends_with("start") {
+            client
+                .start_native_auth(start(basis, id, NativeAuthMethod::ClaudeOfficial))
+                .await
+        } else {
+            client.logout_native_auth(logout(basis, id)).await
+        }
+        .unwrap();
+        assert_eq!(reply.fact.operation_id.as_str(), id);
+        assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
+        let kept = ids(case);
+        assert_eq!(kept.len(), 1024, "one finished operation made room");
+        assert!(
+            !kept.iter().any(|kept| kept == pruned),
+            "the oldest finished operation was pruned"
+        );
+        assert!(kept.iter().any(|kept| kept == id));
+        assert!(
+            kept.iter().any(|kept| kept == "capacity-1023"),
+            "the newest operation of each profile is kept"
+        );
+    }
 }
 
 #[tokio::test]
-async fn capacity_1024_preserves_known_replay_conflict_and_nonallocating_reads() {
+async fn capacity_1024_keeps_known_replays_and_prunes_the_oldest_finished_for_a_new_sign_in() {
     run_bounded(CATALOG, Duration::from_secs(90), |case| async move {
         let a = case.basis("connection-a").await;
         let z = case.basis("connection-z").await;
@@ -1567,8 +1580,8 @@ async fn capacity_1024_preserves_known_replay_conflict_and_nonallocating_reads()
                 .await,
             "native_auth_not_active",
         );
-        assert_capacity_rejections(&case, &client, &z).await;
         assert_eq!(case.stored(), before);
+        assert_capacity_prunes_the_oldest_finished(&case, &client, &z).await;
         assert_eq!(case.ordinary_counts(), ordinary);
         case.assert_gateway_unknown("connection-a").await;
     })

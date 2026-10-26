@@ -585,7 +585,7 @@ pub(crate) fn begin_native_auth(
     }
     validate_method(connection, &command)?;
     let key = profile_key(connection)?;
-    ensure_capacity(&tx)?;
+    ensure_capacity(&tx, false)?;
     ensure_idle(&tx, &key)?;
     tx.commit().map_err(error)?;
     let prepared = prepare_requested_profile(db, config, sources, custody, &host, &command)?;
@@ -596,7 +596,7 @@ pub(crate) fn begin_native_auth(
     if connection != &prepared.binding().connection {
         return Err(error("native_profile_source_conflict"));
     }
-    ensure_capacity(&tx)?;
+    ensure_capacity(&tx, true)?;
     ensure_idle(&tx, &key)?;
     let generation = next_generation(&tx, &key)?;
     let purpose = if matches!(command, Command::Logout(_)) {
@@ -1132,16 +1132,48 @@ fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, En
     ))
 }
 
-fn ensure_capacity(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    let count: i64 = tx
-        .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| {
-            row.get(0)
-        })
-        .map_err(error)?;
-    if count >= OPERATIONS_MAX {
+/// Operations no request can still use: finished (observed or unavailable), not held by a
+/// fence and not the newest of their profile, whose fact is the profile's current state and
+/// whose generation the next one follows. Starting, waiting, checking, cancelling and
+/// uncertain operations are never among them.
+const FINISHED_OPERATIONS: &str = "FROM native_auth_operations o
+    WHERE o.phase IN ('authenticated_observed','unauthenticated_observed','unavailable')
+    AND o.id NOT IN (SELECT operation_id FROM native_auth_fences)
+    AND o.generation<(SELECT MAX(n.generation) FROM native_auth_operations n
+        WHERE n.profile_key=o.profile_key)";
+
+/// Makes room for one new operation at the cap. Checking only (`prune` false) refuses when
+/// too few finished operations could go; pruning deletes the oldest of them by insertion
+/// order, just enough for one insert. Inputs: the transaction and whether to delete.
+/// Output: Ok, or `native_auth_operation_capacity`.
+fn ensure_capacity(tx: &Transaction<'_>, prune: bool) -> Result<(), EngineError> {
+    let count = |sql: &str| -> Result<i64, EngineError> {
+        tx.query_row(sql, [], |row| row.get(0)).map_err(error)
+    };
+    let stored = count("SELECT COUNT(*) FROM native_auth_operations")?;
+    if stored < OPERATIONS_MAX {
+        return Ok(());
+    }
+    let excess = stored - OPERATIONS_MAX + 1;
+    if count(&format!("SELECT COUNT(*) {FINISHED_OPERATIONS}"))? < excess {
         return Err(error("native_auth_operation_capacity"));
     }
-    assert!((0..OPERATIONS_MAX).contains(&count));
+    if prune {
+        let deleted = tx
+            .execute(
+                &format!(
+                    "DELETE FROM native_auth_operations WHERE rowid IN
+                     (SELECT o.rowid {FINISHED_OPERATIONS} ORDER BY o.rowid LIMIT ?1)"
+                ),
+                [excess],
+            )
+            .map_err(error)?;
+        assert_eq!(i64::try_from(deleted).ok(), Some(excess));
+        assert_eq!(
+            count("SELECT COUNT(*) FROM native_auth_operations")?,
+            OPERATIONS_MAX - 1
+        );
+    }
     Ok(())
 }
 
