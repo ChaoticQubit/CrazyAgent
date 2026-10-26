@@ -7,6 +7,7 @@ use crate::project_setup::{
     SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TECH_ENTRIES_MAX, TECH_ENTRY_BYTES_MAX, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectSpec};
+use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 
@@ -1777,6 +1778,11 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
             "A document is over the limits or not a supported type. Check Documents.".into(),
             Step::Documents,
         ),
+        "team_harness_unavailable" => (
+            "Could not create the project.",
+            "A harness in this team can't run team agents yet. Pick another harness.".into(),
+            Step::Team,
+        ),
         code if code.starts_with("team_") => (
             "Could not create the project.",
             "The team does not fit the limits. Check Team.".into(),
@@ -1785,6 +1791,12 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
         "trusted_connection_unavailable" => (
             "Could not create the project.",
             "Not connected to the engine. Wait until it reconnects, then press Enter and try again."
+                .into(),
+            Step::Review,
+        ),
+        "owner_busy" => (
+            "CrazyAgent is busy with other windows.",
+            "Your draft is kept. Wait a moment, then press Enter and create the project again."
                 .into(),
             Step::Review,
         ),
@@ -1805,7 +1817,10 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
         ),
         _ => (
             "Could not create the project.",
-            "Press Enter to go back, then try again.".into(),
+            super::intake::known(code).map_or_else(
+                || coded("Press Enter to go back, then try again.", code),
+                |sentence| format!("{sentence} Press Enter to go back, then try again."),
+            ),
             Step::Review,
         ),
     }

@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
     Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
@@ -6,6 +7,10 @@ use crate::engine::owner::native_auth::{
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyObservation, NativeAuthCustodyRetirement,
 };
+
+/// How many newer account checks the host never ran a restart re-proof looks past to find
+/// the sign-in an earlier run proved.
+const UNRUN_CHECKS_MAX: i64 = 16;
 
 impl Clone for Command {
     fn clone(&self) -> Self {
@@ -246,10 +251,7 @@ pub(super) fn dispatch_host(dispatch: &NativeAuthDispatch) -> HostStamp {
 
 #[cfg(unix)]
 fn custody_purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
-    match fact.action {
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-    }
+    fact.action.profile_purpose()
 }
 
 fn validate_dispatch(
@@ -339,7 +341,7 @@ pub(crate) fn recover_native_auth(
     if fact.phase == NativeAuthPhase::Cancelling {
         fact.phase = NativeAuthPhase::Cancelled;
         fact.code = None;
-    } else if unfinished(fact.phase) || fact.phase == NativeAuthPhase::Uncertain {
+    } else if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain {
         fact.phase = NativeAuthPhase::Failed;
         fact.code = Some("native_auth_interrupted".into());
     }
@@ -354,7 +356,7 @@ pub(crate) fn recover_native_auth(
     tx.commit().map_err(error)?;
     drop(release);
     assert!(db.is_autocommit());
-    assert!(!unfinished(fact.phase) && fact.phase != NativeAuthPhase::Uncertain);
+    assert!(!fact.phase.unfinished() && fact.phase != NativeAuthPhase::Uncertain);
     Ok(Some(fact))
 }
 
@@ -508,7 +510,11 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
             owner_id TEXT NOT NULL CHECK(length(owner_id)=64),
             owner_epoch INTEGER NOT NULL CHECK(owner_epoch>0)
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS native_auth_one_flow ON native_auth_fences((1));",
+        CREATE UNIQUE INDEX IF NOT EXISTS native_auth_one_flow ON native_auth_fences((1));
+        CREATE TABLE IF NOT EXISTS native_auth_doubts (
+            profile_key TEXT PRIMARY KEY NOT NULL CHECK(length(profile_key)=64),
+            generation INTEGER NOT NULL CHECK(generation>0)
+        );",
     )
     .map_err(error)
 }
@@ -585,7 +591,7 @@ pub(crate) fn begin_native_auth(
     }
     validate_method(connection, &command)?;
     let key = profile_key(connection)?;
-    ensure_capacity(&tx)?;
+    ensure_capacity(&tx, false)?;
     ensure_idle(&tx, &key)?;
     tx.commit().map_err(error)?;
     let prepared = prepare_requested_profile(db, config, sources, custody, &host, &command)?;
@@ -596,14 +602,13 @@ pub(crate) fn begin_native_auth(
     if connection != &prepared.binding().connection {
         return Err(error("native_profile_source_conflict"));
     }
-    ensure_capacity(&tx)?;
+    ensure_capacity(&tx, true)?;
     ensure_idle(&tx, &key)?;
     let generation = next_generation(&tx, &key)?;
-    let purpose = if matches!(command, Command::Logout(_)) {
-        NativeProfileUsePurpose::Logout
-    } else {
-        NativeProfileUsePurpose::Authentication
-    };
+    let purpose = command
+        .action()
+        .ok_or_else(|| error("native_auth_operation_missing"))?
+        .profile_purpose();
     let guard = custody
         .as_mut()
         .map_err(|error| error.clone())?
@@ -696,7 +701,7 @@ pub(crate) fn cancel_native_auth(
         return Err(error("native_auth_operation_scope_conflict"));
     }
     let mut fact = load_fact(&tx, &expected.operation_id)?;
-    if !unfinished(fact.phase) && fact.phase != NativeAuthPhase::Uncertain {
+    if !fact.phase.unfinished() && fact.phase != NativeAuthPhase::Uncertain {
         return Err(error("native_auth_not_active"));
     }
     let host = HostStamp {
@@ -760,10 +765,7 @@ pub(crate) fn finish_native_auth_without_effect(
     ) {
         return Err(error("native_auth_recovery_required"));
     }
-    let purpose = match fact.action {
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-    };
+    let purpose = fact.action.profile_purpose();
     let guard = custody
         .as_mut()
         .map_err(|error| error.clone())?
@@ -904,7 +906,24 @@ fn store_fact(tx: &Transaction<'_>, fact: &NativeAuthFact) -> Result<(), EngineE
         )
         .map_err(error)?;
     assert_eq!(updated, 1);
+    if fact.phase == NativeAuthPhase::AuthenticatedObserved && fresh_sign_in(&fact.action) {
+        master_session::lift_account_holds(tx, &fact.binding.connection)?;
+    }
     Ok(())
+}
+
+/// Tells whether an operation signs an account in afresh, as opposed to checking an
+/// existing sign-in or logging out; only a fresh sign-in lifts the account's holds.
+/// Input: the action. Output: true for a new sign-in.
+fn fresh_sign_in(action: &NativeAuthAction) -> bool {
+    matches!(
+        action,
+        NativeAuthAction::SignIn { method }
+            if !matches!(
+                method,
+                NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting
+            )
+    )
 }
 
 fn stored_phase(phase: NativeAuthPhase) -> &'static str {
@@ -966,7 +985,9 @@ fn validate_method(
             NativeAuthMethod::CodexBrowser
             | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting => connection.harness.as_str() == "codex",
-            NativeAuthMethod::ClaudeOfficial => connection.harness.as_str() == "claude",
+            NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting => {
+                connection.harness.as_str() == "claude"
+            }
         },
         Command::Logout(_) => matches!(connection.harness.as_str(), "codex" | "claude"),
         Command::Read(_) | Command::Cancel(_) => false,
@@ -1017,7 +1038,7 @@ fn existing(
             |row| row.get(0),
         )
         .map_err(error)?;
-    if (unfinished(fact.phase) || fenced) && fact.binding.engine_epoch != admission.engine_epoch {
+    if (fact.phase.unfinished() || fenced) && fact.binding.engine_epoch != admission.engine_epoch {
         fact.phase = NativeAuthPhase::Uncertain;
         fact.code = Some("native_auth_recovery_required".into());
         store_fact(tx, &fact)?;
@@ -1025,14 +1046,204 @@ fn existing(
     Ok(Some(fact))
 }
 
-fn unfinished(phase: NativeAuthPhase) -> bool {
-    matches!(
-        phase,
-        NativeAuthPhase::Starting
-            | NativeAuthPhase::AwaitingOwner
-            | NativeAuthPhase::CheckingAccount
-            | NativeAuthPhase::Cancelling
+/// Lists the sign-ins a new engine run re-proves before trusting them: each native managed
+/// connection whose latest sign-in finished authenticated under an earlier run of this
+/// database and passes every other launch check under that run. Inputs: the database,
+/// settings, the running host and, for one master, its session. Output: one status-only
+/// account check per such connection, bound to the current settings.
+pub(crate) fn stale_sign_ins(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+    session: Option<&SessionId>,
+) -> Result<Vec<NativeAuthStart>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    let only = match session {
+        None => None,
+        Some(session) => match master_session::native_members(&tx, config, session)? {
+            Some(members) => Some(members),
+            None => return Ok(Vec::new()),
+        },
+    };
+    let source_hash = settings::verified_source_hash(config, sources)?;
+    let connections = config
+        .settings
+        .model_access
+        .as_ref()
+        .map_or(&[][..], |access| &access.connections[..]);
+    let mut starts = Vec::new();
+    for connection in connections {
+        let method = match connection.harness.as_str() {
+            "claude" => NativeAuthMethod::ClaudeExisting,
+            "codex" => NativeAuthMethod::CodexExisting,
+            _ => continue,
+        };
+        if only
+            .as_ref()
+            .is_some_and(|members| !members.contains(&connection.id))
+            || !matches!(
+                connection.auth,
+                crate::config::ModelAuthentication::NativeManaged { .. }
+            )
+        {
+            continue;
+        }
+        let due = match earlier_run(&tx, connection, host)? {
+            Some((earlier, generation)) => {
+                master_session::sign_in_at(&tx, &earlier, connection, generation).is_ok()
+            }
+            None => doubted_here(&tx, connection, host)?,
+        };
+        if !due {
+            continue;
+        }
+        starts.push(NativeAuthStart {
+            request_id: RequestId::new(crate::engine::owner::random_id()?).map_err(error)?,
+            scope: NativeAuthScope {
+                expected_database_instance: host.db_instance.clone(),
+                connection: connection.id.clone(),
+                expected_config_id: config.id.clone(),
+                expected_source_hash: source_hash.clone(),
+            },
+            method,
+        });
+    }
+    drop(tx);
+    assert!(starts.len() <= connections.len());
+    Ok(starts)
+}
+
+/// The earlier engine run a connection's newest sign-in was proved under, when it finished
+/// authenticated in this database under another run, looking past newer account checks
+/// the host never ran (LB-26). Inputs: the transaction, the connection and the running
+/// host. Output: that run's host stamp and the sign-in's generation, or none.
+fn earlier_run(
+    tx: &Transaction<'_>,
+    connection: &crate::config::ModelConnection,
+    host: &HostStamp,
+) -> Result<Option<(HostStamp, u64)>, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT ?2",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(
+            params![profile_key(connection)?, UNRUN_CHECKS_MAX + 1],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    for bytes in rows {
+        let fact = decode_fact(&bytes)?;
+        if never_ran(&fact) {
+            continue;
+        }
+        if fact.phase != NativeAuthPhase::AuthenticatedObserved
+            || fact.binding.database_instance != host.db_instance
+            || fact.binding.engine_epoch == host.engine_epoch
+        {
+            return Ok(None);
+        }
+        return Ok(Some((
+            HostStamp {
+                db_instance: host.db_instance.clone(),
+                engine_epoch: fact.binding.engine_epoch,
+            },
+            fact.generation,
+        )));
+    }
+    Ok(None)
+}
+
+/// Tells whether an operation was an account check the host never ran, which says nothing
+/// about the sign-in it would have checked. Input: the operation's fact. Output: true for
+/// an existing-account check that ended unavailable because the host could not run it.
+fn never_ran(fact: &NativeAuthFact) -> bool {
+    fact.phase == NativeAuthPhase::Unavailable
+        && fact.code.as_deref() == Some("native_auth_host_unavailable")
+        && matches!(
+            fact.action,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting
+            }
+        )
+}
+
+/// Holds a connection's current sign-in for an account check before its next use, after
+/// this engine could not use it locally (its credential could not be read or handed out),
+/// which is no word from the provider; any newer sign-in or check of the account lifts it.
+/// Inputs: the transaction, the running host and the connection. Output: none; nothing is
+/// held when the connection has no sign-in that passes the launch check.
+pub(crate) fn doubt_sign_in(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &crate::config::ModelConnection,
+) -> Result<(), EngineError> {
+    let Ok(fact) = master_session::native_sign_in(tx, host, connection, None) else {
+        return Ok(());
+    };
+    let generation =
+        i64::try_from(fact.generation).map_err(|_| error("native_auth_generation_bounds"))?;
+    tx.execute(
+        "INSERT INTO native_auth_doubts(profile_key,generation) VALUES (?1,?2)
+         ON CONFLICT(profile_key) DO UPDATE SET generation=excluded.generation",
+        params![profile_key(connection)?, generation],
     )
+    .map_err(error)?;
+    Ok(())
+}
+
+/// Tells whether a sign-in is held for an account check before its next use.
+/// Inputs: the database, the connection and the sign-in's generation. Output: true while
+/// that generation is the one held.
+pub(super) fn doubted(
+    db: &Connection,
+    connection: &crate::config::ModelConnection,
+    generation: u64,
+) -> Result<bool, EngineError> {
+    let generation =
+        i64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_doubts WHERE profile_key=?1 AND generation=?2)",
+        params![profile_key(connection)?, generation],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Tells whether a connection's newest sign-in was proved under this run and is held for
+/// an account check. Inputs: the transaction, the connection and the running host.
+/// Output: true when it is, so the next re-proof checks it.
+fn doubted_here(
+    tx: &Transaction<'_>,
+    connection: &crate::config::ModelConnection,
+    host: &HostStamp,
+) -> Result<bool, EngineError> {
+    let key = profile_key(connection)?;
+    let held: Option<i64> = tx
+        .query_row(
+            "SELECT generation FROM native_auth_doubts WHERE profile_key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let newest: Option<i64> = tx
+        .query_row(
+            "SELECT MAX(generation) FROM native_auth_operations WHERE profile_key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let Some(generation) = held.filter(|held| Some(*held) == newest) else {
+        return Ok(false);
+    };
+    let generation =
+        u64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?;
+    Ok(master_session::sign_in_at(tx, host, connection, generation).is_ok())
 }
 
 fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, EngineError> {
@@ -1045,16 +1256,61 @@ fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, En
     ))
 }
 
-fn ensure_capacity(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    let count: i64 = tx
-        .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| {
-            row.get(0)
-        })
-        .map_err(error)?;
-    if count >= OPERATIONS_MAX {
+/// Tells whether a native auth operation still holds the fence of a profile: its custodian
+/// has not yet retired, so launch and account status read it as still checking even after
+/// its outcome is stored. Inputs: the connection or transaction and the profile key.
+/// Output: true while the fence row exists.
+pub(super) fn profile_fenced(db: &Connection, key: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)",
+        [key],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Operations no request can still use: finished (observed or unavailable), not held by a
+/// fence and not the newest of their profile, whose fact is the profile's current state and
+/// whose generation the next one follows. Starting, waiting, checking, cancelling and
+/// uncertain operations are never among them.
+const FINISHED_OPERATIONS: &str = "FROM native_auth_operations o
+    WHERE o.phase IN ('authenticated_observed','unauthenticated_observed','unavailable')
+    AND o.id NOT IN (SELECT operation_id FROM native_auth_fences)
+    AND o.generation<(SELECT MAX(n.generation) FROM native_auth_operations n
+        WHERE n.profile_key=o.profile_key)";
+
+/// Makes room for one new operation at the cap. Checking only (`prune` false) refuses when
+/// too few finished operations could go; pruning deletes the oldest of them by insertion
+/// order, just enough for one insert. Inputs: the transaction and whether to delete.
+/// Output: Ok, or `native_auth_operation_capacity`.
+fn ensure_capacity(tx: &Transaction<'_>, prune: bool) -> Result<(), EngineError> {
+    let count = |sql: &str| -> Result<i64, EngineError> {
+        tx.query_row(sql, [], |row| row.get(0)).map_err(error)
+    };
+    let stored = count("SELECT COUNT(*) FROM native_auth_operations")?;
+    if stored < OPERATIONS_MAX {
+        return Ok(());
+    }
+    let excess = stored - OPERATIONS_MAX + 1;
+    if count(&format!("SELECT COUNT(*) {FINISHED_OPERATIONS}"))? < excess {
         return Err(error("native_auth_operation_capacity"));
     }
-    assert!((0..OPERATIONS_MAX).contains(&count));
+    if prune {
+        let deleted = tx
+            .execute(
+                &format!(
+                    "DELETE FROM native_auth_operations WHERE rowid IN
+                     (SELECT o.rowid {FINISHED_OPERATIONS} ORDER BY o.rowid LIMIT ?1)"
+                ),
+                [excess],
+            )
+            .map_err(error)?;
+        assert_eq!(i64::try_from(deleted).ok(), Some(excess));
+        assert_eq!(
+            count("SELECT COUNT(*) FROM native_auth_operations")?,
+            OPERATIONS_MAX - 1
+        );
+    }
     Ok(())
 }
 

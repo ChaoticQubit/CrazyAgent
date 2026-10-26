@@ -1,3 +1,4 @@
+use super::project_time::{clock, local_offset};
 use super::settings_accounts::tests::{ctx, render};
 use super::{Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
@@ -15,7 +16,7 @@ use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::Status;
 use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
-use crate::tui::seam::{Arrival, Request, ShellRequest};
+use crate::tui::seam::{Arrival, PoolChange, Request, ShellRequest};
 use crate::tui::shell::Shell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -41,6 +42,8 @@ struct Engine {
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
+    #[cfg(target_os = "macos")]
+    _keychain: crate::credentials::test_keychain::TestKeychain,
 }
 
 impl Engine {
@@ -54,6 +57,12 @@ impl Engine {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(target_os = "macos")]
+        let keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(root.path()));
+            keychain
+        };
         let global = root.path().join("global.toml");
         std::fs::write(&global, settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -86,6 +95,8 @@ impl Engine {
             _service: service,
             _stop: stop,
             controller,
+            #[cfg(target_os = "macos")]
+            _keychain: keychain,
         }
     }
 
@@ -182,7 +193,8 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 other => panic!("intake pages never send {other:?}"),
             }
         }
-        quiet = if moved || connection.busy() {
+        quiet = if moved || connection.busy() || crate::tui::test_home::connecting(&shell.ctx.link)
+        {
             0
         } else {
             quiet + 1
@@ -314,6 +326,40 @@ async fn home_lists_a_found_folder_and_add_project_offers_three_ways() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_existing_folder_is_set_up_where_it_is_by_default() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let source = engine.user().join("outside").join("shop");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("README.md"), "shop\n").unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
+    assert!(shows(&rows, "( ) Move"), "{rows:#?}");
+    assert!(shows(&rows, "Stays where it is"), "{rows:#?}");
+    assert!(shows(&rows, "Set up here"), "{rows:#?}");
+    assert!(!shows(&rows, "Goes to "), "{rows:#?}");
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"add existing"), "{sent:?}");
+    assert!(source.join("README.md").exists());
+    assert!(!home.join("shop").exists());
+    assert_eq!(
+        shell.place(),
+        Some(Place::Onboarding {
+            path: source.canonicalize().unwrap().to_str().unwrap().into(),
+            name: "shop".into(),
+            project: None,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;
@@ -331,8 +377,10 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     keys(&mut shell, &format!("{}/", source.display()));
     shell.key(Key::Tab);
     shell.key(Key::Right);
+    shell.key(Key::Right);
     let rows = render(&mut shell, 80, 24);
     assert!(shows(&rows, "(*) Copy"), "{rows:#?}");
+    assert!(shows(&rows, "Goes to "), "{rows:#?}");
     assert!(shows(&rows, "Check size"), "{rows:#?}");
     shell.key(Key::Enter);
     assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
@@ -342,6 +390,17 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     assert!(shows(&rows, "Copy anyway"), "{rows:#?}");
 
     shell.key(Key::Left);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "(*) Move"), "{rows:#?}");
+    assert!(shows(&rows, "Goes to "), "{rows:#?}");
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "won't stay at its old place"), "{rows:#?}");
+    assert!(shows(&rows, "Move it now"), "{rows:#?}");
+    assert!(
+        source.join("data.bin").exists(),
+        "nothing moves before the confirm"
+    );
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
     assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
@@ -354,6 +413,83 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
             name: "big".into(),
             project: None,
         })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let outside = engine.user().join("outside");
+    let source = outside.join("shop");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("README.md"), "shop\n").unwrap();
+    let git = |args: &[&str]| {
+        let done = crate::spawn_gate::output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args),
+        )
+        .unwrap();
+        assert!(done.status.success(), "{done:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "README.md"]);
+    git(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    for branch in ["side", "other"] {
+        let tree = outside.join(format!("shop-{branch}"));
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            tree.to_str().unwrap(),
+        ]);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Size: "), "{rows:#?}");
+    assert!(
+        shows(&rows, "This folder has 2 linked git worktrees. They stay"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "the copy gets the main checkout and every branch."),
+        "{rows:#?}"
+    );
+
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert!(home.join("shop").join("README.md").is_file());
+    assert!(!home.join("shop").join(".git").join("worktrees").exists());
+    assert!(
+        source
+            .join(".git")
+            .join("worktrees")
+            .join("shop-side")
+            .is_dir()
     );
 }
 
@@ -400,6 +536,169 @@ async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
     };
     let onboarding = engine.controller.onboarding(project).await.unwrap();
     assert_eq!(onboarding.name, "notes");
+}
+
+/// Serves the setup change and pool edit a confirmed onboarding review sends,
+/// until the review opens its project. Takes the shell and its engine connection.
+/// Returns the requests sent, in order.
+async fn serve_until_project(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+        }
+        if matches!(shell.place(), Some(Place::Project { .. })) {
+            return sent;
+        }
+        if !connection.busy()
+            && let Some(request) = shell.ctx.next_request()
+        {
+            match request {
+                Request::Setup(query) => {
+                    sent.push("setup");
+                    connection.project_setup(query).unwrap();
+                }
+                Request::EditPool { change } => {
+                    sent.push("edit pool");
+                    let generation = shell.ctx.next_generation();
+                    connection
+                        .shell(ShellRequest::EditPool { change, generation })
+                        .unwrap();
+                }
+                other => panic!("confirming a setup never sends {other:?}"),
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the confirmed setup never opened its project: {sent:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_confirmed_setup_gives_the_chosen_pool_to_the_project_master() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let folder = home.join("notes");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(
+        folder.join("Cargo.toml"),
+        "[package]\nname = \"notes\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let path: String = folder.to_str().unwrap().into();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(
+        &Place::Onboarding {
+            path: path.clone(),
+            name: "notes".into(),
+            project: None,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["pools"]);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let Some(Place::Onboarding {
+        project: Some(project),
+        ..
+    }) = shell.place()
+    else {
+        panic!("the started onboarding names its project");
+    };
+    drop(connection);
+    drop(shell);
+
+    let worker = crate::onboarding::service::start_for_engine(
+        engine.root.path(),
+        &engine.root.path().join("global.toml"),
+        &engine.root.path().join("project.toml"),
+        None,
+        None,
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let onboarding = engine.controller.onboarding(project.clone()).await.unwrap();
+        let done = |step: &Step| {
+            matches!(
+                step,
+                Step::Done | Step::Off | Step::NotInstalled | Step::Failed { .. }
+            )
+        };
+        if done(&onboarding.graph) && done(&onboarding.mapping) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the onboarding never settled: {onboarding:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    worker.stop();
+
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(
+        &Place::Onboarding {
+            path,
+            name: "notes".into(),
+            project: Some(project.clone()),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Confirm"), "{rows:#?}");
+    shell.key(Key::Tab);
+    keys(&mut shell, "Keeps notes.");
+    for _ in 0..3 {
+        shell.key(Key::Tab);
+    }
+    shell.key(Key::Enter);
+    let sent = serve_until_project(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["setup", "edit pool"], "{sent:?}");
+
+    let reply = engine
+        .controller
+        .read(crate::engine::owner::OwnerRead::ModelAccessPage {
+            collection: crate::engine::owner::ModelAccessCollection::Pools,
+            cursor: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let crate::engine::owner::OwnerData::ModelAccessPage { items, .. } = reply.data else {
+        panic!("the engine answers a pool page");
+    };
+    let pool = items
+        .iter()
+        .find_map(|item| match item {
+            crate::engine::owner::ModelAccessRecord::Pool { pool }
+                if pool.id.as_str() == "pool-a" =>
+            {
+                Some(pool)
+            }
+            _ => None,
+        })
+        .expect("the chosen pool is still there");
+    assert!(
+        pool.projects
+            .iter()
+            .any(|scope| scope.as_str() == project.as_str()),
+        "the chosen pool serves the set-up project: {pool:?}"
+    );
+    assert!(
+        pool.roles
+            .iter()
+            .any(|role| role.as_str() == "project_leader"),
+        "the chosen pool may lead the project as its master: {pool:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -477,6 +776,25 @@ fn tools_found(status: &crate::setup::SetupStatus) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready() {
     let mut engine = Engine::start().await;
+    engine
+        .controller
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::AnthropicApi,
+                method: crate::accounts::SignInMethod::ApiKey,
+                name: "Team key".into(),
+                url: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    b"unit-placeholder-anthropic-key-0001".to_vec(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
     let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
@@ -488,13 +806,97 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
     assert_eq!(
         shows(&rows, "Get set up"),
         !found,
-        "the pool has a ready local account, so only tools decide; the engine reports {:?}: {rows:#?}",
+        "a pool exists and an account has a saved key, so only tools decide; the engine reports {:?}: {rows:#?}",
         status.dependencies
     );
     assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_an_account_is_done_only_when_an_engine_account_is_ready_for_agents() {
+    use crate::accounts::{AccountDraft, AccountStatus, Provider, SignInMethod};
+    use crate::engine::owner::AccountSecret;
+
+    let engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;
+    let draft = |provider, method, name: &str, model: Option<&str>| AccountDraft {
+        provider,
+        method,
+        name: name.into(),
+        url: None,
+        model: model.map(Into::into),
+    };
+    for _ in 0..2 {
+        let waiting = engine
+            .controller
+            .add_account(
+                draft(
+                    Provider::Claude,
+                    SignInMethod::Subscription,
+                    "ChaoticQubit",
+                    None,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.status, AccountStatus::NotSignedIn);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    for line in [
+        "No account is ready for",
+        "agents yet. Sign one in",
+        "or check its key or URL.",
+    ] {
+        assert!(shows(&rows, line), "{line}: {rows:#?}");
+    }
+    assert!(shows(&rows, "Enter opens Settings"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Settings(super::SettingsSection::Accounts))
+    );
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+
+    let saved = engine
+        .controller
+        .add_account(
+            draft(
+                Provider::AnthropicApi,
+                SignInMethod::ApiKey,
+                "Team key",
+                Some("claude-sonnet-4-5"),
+            ),
+            Some(AccountSecret::new(b"unit-placeholder-anthropic-key-0001".to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status, AccountStatus::KeySaved);
+    shell.refresh();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[x] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "Team key is ready for"), "{rows:#?}");
+    assert!(shows(&rows, "agents."), "{rows:#?}");
+    assert!(
+        rows.iter().all(|row| row.chars().count() <= 80),
+        "{rows:#?}"
+    );
+}
+
 fn waiting_review() -> (Shell, ProjectId) {
+    review_with(|_| {})
+}
+
+/// The onboarding page of `notes` after its onboarding read arrives: the graph
+/// done and the mapping failed, changed by `change` first.
+fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
     let project = ProjectId::new("project-notes").unwrap();
     let mut ctx = ctx(80, 40);
     let screen = open(
@@ -531,7 +933,10 @@ fn waiting_review() -> (Shell, ProjectId) {
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
+        finished: false,
     };
+    let mut draft = draft;
+    change(&mut draft);
     shell.arrive(intake(
         IntakeQuery::Onboarding {
             project: project.clone(),
@@ -539,6 +944,114 @@ fn waiting_review() -> (Shell, ProjectId) {
         Ok(IntakeView::Onboarding(Box::new(draft))),
     ));
     (shell, project)
+}
+
+#[test]
+fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Off;
+        view.mapping = Step::Running;
+    });
+    let rows = render(&mut shell, 80, 40);
+    let off = format!("{} Turned off", shell.ctx.glyphs.status(Status::Off));
+    assert!(shows(&rows, "Build the code graph"), "{rows:#?}");
+    assert!(shows(&rows, &off), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Running"), "{rows:#?}");
+}
+
+#[test]
+fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
+    const UNTIL_MS: i64 = 1_792_729_920_000;
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Waiting {
+            until_ms: Some(UNTIL_MS),
+        };
+    });
+    let rows = render(&mut shell, 80, 40);
+    let end = clock(UNTIL_MS, local_offset(UNTIL_MS));
+    let paused = format!(
+        "{} Rate limited until {end}",
+        shell.ctx.glyphs.status(Status::Needs)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Map the project") && row.contains(&paused)),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| view.mapping = Step::WAITING);
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Map the project") && row.contains("Waiting")),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "Rate limited"), "{rows:#?}");
+}
+
+#[test]
+fn the_review_still_says_whether_a_code_graph_was_built() {
+    let graph_row = |rows: &[String], state: &str| {
+        rows.iter()
+            .any(|row| row.contains("Build the code graph") && row.contains(state))
+    };
+    let (mut shell, _) = review_with(|view| view.graph = Step::Off);
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Turned off"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "Mapping failed: No model answered."),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Failed {
+            reason: "graphify not installed".into(),
+        }
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Failed"), "{rows:#?}");
+    assert!(shows(&rows, "graphify not installed"), "{rows:#?}");
+
+    let (mut shell, _) = waiting_review();
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(graph_row(&rows, "Done"), "{rows:#?}");
+}
+
+#[test]
+fn a_graph_step_without_the_graphify_skill_says_it_is_not_installed_not_turned_off() {
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::NotInstalled;
+        view.mapping = Step::Running;
+    });
+    let rows = render(&mut shell, 80, 40);
+    let missing = format!("{} Not installed", shell.ctx.glyphs.status(Status::Off));
+    assert!(shows(&rows, &missing), "{rows:#?}");
+    assert!(!shows(&rows, "Turned off"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify isn't installed, so no code graph is built. Install it in Setup."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Running"), "{rows:#?}");
 }
 
 #[test]
@@ -567,6 +1080,142 @@ fn the_review_marks_what_is_missing_and_clears_it_as_the_owner_fills_it() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "[x] CLI"), "{rows:#?}");
     assert!(shows(&rows, "Check the setup and confirm it."), "{rows:#?}");
+}
+
+#[test]
+fn a_failed_mapping_shows_its_reason_and_r_on_confirm_maps_again() {
+    let (mut shell, _) = review_with(|view| {
+        view.draft.pool = Some(crate::protocol::CredentialRef::new("main").unwrap());
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Mapping failed: No model answered."),
+        "{rows:#?}"
+    );
+    shell.key(Key::BackTab);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Retry mapping"), "{rows:#?}");
+    shell.key(Key::Char('r'));
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("r on Confirm maps the project again");
+    };
+    let IntakeJob::Query(IntakeQuery::StartOnboarding { path, pool, .. }) = *job else {
+        panic!("a retry starts the onboarding again");
+    };
+    assert_eq!(path, "/Users/owner/Projects/notes");
+    assert_eq!(pool.as_str(), "main");
+}
+
+#[test]
+fn a_saved_setup_opens_with_its_saved_values_and_saves_changes() {
+    let (mut shell, _) = review_with(|view| {
+        view.finished = true;
+        view.graph = Step::Running;
+        view.mapping = Step::WAITING;
+        view.draft.about = "Keeps notes in the terminal.".into();
+        view.missing = vec!["platforms".into()];
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "This project is set up."), "{rows:#?}");
+    assert!(shows(&rows, "Keeps notes in the terminal."), "{rows:#?}");
+    assert!(!shows(&rows, "Mapping failed"), "{rows:#?}");
+    shell.key(Key::BackTab);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Save changes"), "{rows:#?}");
+    assert!(!shows(&rows, "Retry mapping"), "{rows:#?}");
+}
+
+/// The review of `notes` with the pool `main` in its draft, confirmed and saved
+/// by the engine. Returns the shell, the project and the pool change the page
+/// sends next, if any.
+fn confirmed_with_pool() -> (Shell, ProjectId, Option<Request>) {
+    let pool = crate::protocol::CredentialRef::new("main").unwrap();
+    let (mut shell, project) = review_with(|view| view.draft.pool = Some(pool.clone()));
+    while shell.ctx.next_request().is_some() {}
+    let stored = crate::project_setup::StoredSetup {
+        project_id: project.clone(),
+        name: "notes".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: Some(pool),
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/Users/owner/Projects/notes".into(),
+        created_ms: 0,
+        revision: 7,
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: SetupQuery::Setup {
+                project: project.clone(),
+            },
+            result: Ok(crate::project_setup::SetupView::Setup(Some(Box::new(
+                stored,
+            )))),
+        },
+    )))));
+    shell.key(Key::Tab);
+    keys(&mut shell, "Keeps notes.");
+    for _ in 0..3 {
+        shell.key(Key::Tab);
+    }
+    shell.key(Key::Enter);
+    let Some(Request::Setup(SetupQuery::Change { action, generation })) = shell.ctx.next_request()
+    else {
+        panic!("confirm sends the setup change");
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: SetupQuery::Change { action, generation },
+            result: Ok(crate::project_setup::SetupView::Changed(
+                crate::engine::owner::OwnerResult::Applied,
+            )),
+        },
+    )))));
+    let next = shell.ctx.next_request();
+    (shell, project, next)
+}
+
+#[test]
+fn a_confirmed_setup_gives_its_pool_to_the_project_before_the_project_opens() {
+    let opened = |project: &ProjectId| Place::Project {
+        id: project.clone(),
+        name: "notes".into(),
+        tab: ProjectTab::Overview,
+    };
+    let (mut shell, project, next) = confirmed_with_pool();
+    let Some(Request::EditPool {
+        change: PoolChange::Assign { pool, project: to },
+    }) = next
+    else {
+        panic!("the saved setup's pool is given to the project: {next:?}");
+    };
+    assert_eq!(pool.as_ref().map(|id| id.as_str()), Some("main"));
+    assert_eq!(to, project);
+    assert_ne!(shell.place(), Some(opened(&project)));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    assert_eq!(shell.place(), Some(opened(&project)));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "notes is ready."), "{rows:#?}");
+
+    let (mut shell, project, _) = confirmed_with_pool();
+    shell.arrive(Arrival::PoolEdited(Err("pool_assignment_rejected".into())));
+    assert_eq!(shell.place(), Some(opened(&project)));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "notes is set up, but its pool is not assigned."),
+        "{rows:#?}"
+    );
 }
 
 #[test]
@@ -680,4 +1329,55 @@ fn a_pasted_github_token_leaves_only_as_its_own_job_and_is_never_drawn() {
     assert!(matches!(*job, IntakeJob::GitHubToken(_)));
     assert_eq!(job.query(), IntakeQuery::GitHubStatus);
     assert!(shell.ctx.next_request().is_none());
+}
+
+/// Starts an engine whose GitHub settings file sets an empty client id, so the engine
+/// refuses a GitHub sign-in with `github_client_id_not_configured` before any network call.
+async fn engine_without_github_client_id() -> Engine {
+    let engine = Engine::start().await;
+    let file = engine.root.path().join("github.toml");
+    std::fs::write(&file, "client_id = \"\"\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    engine
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_github_sign_in_the_engine_refuses_says_why_on_the_clone_page() {
+    let engine = engine_without_github_client_id().await;
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::CloneRepo, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["github"]);
+    assert!(shows(&render(&mut shell, 100, 24), "Sign in with GitHub"));
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["github"]);
+    let rows = render(&mut shell, 100, 24);
+    assert!(
+        shows(&rows, "Sign in with GitHub isn't set up in this build yet."),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "Something went wrong"), "{rows:#?}");
+    assert!(
+        !shows(&rows, "github_client_id_not_configured"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_projects_home_the_engine_refuses_says_why_on_the_setup_page() {
+    let engine = Engine::start().await;
+    let file = engine.user().join("notes.txt");
+    std::fs::write(&file, "not a folder").unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Setup { first_run: false }, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('h'));
+    keys(&mut shell, file.to_str().unwrap());
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
+    let message = shell.ctx.message().expect("the refusal is shown");
+    assert_eq!(message.lead, "Pick a folder, not a file or a link.");
 }

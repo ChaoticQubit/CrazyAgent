@@ -7,7 +7,7 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { MESSAGE_BYTES_MAX, canSend, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, delegating, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
@@ -20,7 +20,16 @@ const tones: Record<string, Tone> = { Ready: "neutral", "Thinking...": "info", R
 
 function unwrap<T>(result: Result<T>): T {
   if (result.kind === "ok") return result.value;
-  throw result.kind === "not_ready" ? { code: "not_ready" } : { code: result.code };
+  throw result.kind === "not_ready" ? { code: "not_ready" } : { code: result.code, cause: result.cause };
+}
+
+/** Reads the code and engine cause out of a thrown failure.
+ * Input: anything a master action threw. Output: its code, "unknown" when it has none, and its
+ * string cause when present. */
+function thrown(failure: unknown): { code: string; cause?: string } {
+  const code = typeof failure === "object" && failure !== null && "code" in failure ? String(failure.code) : "unknown";
+  const cause = typeof failure === "object" && failure !== null && "cause" in failure && typeof failure.cause === "string" ? failure.cause : undefined;
+  return cause === undefined ? { code } : { code, cause };
 }
 
 function confirm(receipt: IntentReceipt) {
@@ -41,6 +50,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const [now, setNow] = useState(() => Date.now());
   const [working, setWorking] = useState(false);
   const [problem, setProblem] = useState("");
+  const [note, setNote] = useState("");
   const [needsPool, setNeedsPool] = useState(false);
   const [notReady, setNotReady] = useState(false);
   const current = useRef(data.id);
@@ -53,7 +63,9 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const active = session?.phase === "configured";
   const waiting = turns.some((turn) => !turnSettled(turn));
   const unseen = Object.keys(sent).some((id) => !turns.some((turn) => turn.id === id));
-  const status = needsPool ? "Needs a pool" : masterStatus(session, turns);
+  const handedOff = delegating(turns);
+  const noPool = needsPool || (data.pools?.kind === "ok" && data.assigned === null);
+  const status = noPool ? "Needs a pool" : masterStatus(session, turns);
 
   const setSent = (next: Record<string, string>) => {
     sentByProject.set(data.id, next);
@@ -72,17 +84,21 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     } else setTurns([]);
   }
 
-  async function act(action: () => Promise<void>, describe: (code: string) => string = failureCopy) {
+  function report(failure: unknown, describe: (failure: { code: string; cause?: string }) => string = failureCopy) {
+    const named = thrown(failure);
+    if (named.code === "not_ready") setNotReady(true);
+    else if (named.code === "master_open_unavailable") setNeedsPool(true);
+    else setProblem(describe(named));
+  }
+
+  async function act(action: () => Promise<void>, describe: (failure: { code: string; cause?: string }) => string = failureCopy) {
     if (working) return;
     setWorking(true);
     setProblem("");
     try {
       await action();
     } catch (failure) {
-      const code = typeof failure === "object" && failure !== null && "code" in failure ? String(failure.code) : "unknown";
-      if (code === "not_ready") setNotReady(true);
-      else if (code === "master_open_unavailable") setNeedsPool(true);
-      else setProblem(describe(code));
+      report(failure, describe);
     }
     setWorking(false);
   }
@@ -103,37 +119,48 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   }, [data.id]);
 
   useEffect(() => {
-    if (!waiting && !unseen) return;
+    if (!waiting && !unseen && !handedOff) return;
     const timer = window.setInterval(() => {
       setNow(Date.now());
-      void refresh().catch(() => setProblem(failureCopy("owner_read_failed")));
+      void refresh().catch((failure) => report(failure));
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [waiting, unseen, ticket, session?.session_id]);
+  }, [waiting, unseen, handedOff, ticket, session?.session_id]);
 
   useEffect(() => {
     const element = thread.current;
     if (element && nearBottom(element)) element.scrollTop = element.scrollHeight;
   }, [turns.length, Object.keys(sent).length]);
 
+  async function begin() {
+    confirm(unwrap(await startMaster(ticket, nextGeneration())));
+    setNeedsPool(false);
+    const state = unwrap(await readMaster(ticket));
+    setMaster(state);
+    if (state.session?.phase !== "configured") throw { code: "master_outcome_pending" };
+    setTurns([]);
+    return state.session;
+  }
+
   const send = (again?: string) => act(async () => {
     const message = (again ?? text).trim();
     const at = Date.now();
     if (!message || !ticket) return;
-    let live = session;
-    if (!active) {
-      confirm(unwrap(await startMaster(ticket, nextGeneration())));
-      setNeedsPool(false);
-      const state = unwrap(await readMaster(ticket));
-      setMaster(state);
-      live = state.session;
-      if (live?.phase !== "configured") throw { code: "master_outcome_pending" };
-      setTurns([]);
+    setNote("");
+    let fresh = !active;
+    let live = active && session ? session : await begin();
+    let receipt = unwrap(await sendToMaster(ticket, live.session_id, message, nextGeneration()));
+    if (restartForSettings(receipt)) {
+      confirm(unwrap(await endMaster(ticket, live.session_id, nextGeneration())));
+      live = await begin();
+      fresh = true;
+      receipt = unwrap(await sendToMaster(ticket, live.session_id, message, nextGeneration()));
+      if (receiptState(receipt).kind === "applied") setNote(NEW_CONVERSATION_NOTE);
     }
-    const receipt = unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration()));
+    if (receiptState(receipt).kind === "rejected") await refresh().catch(() => undefined);
     confirm(receipt);
-    sentAtByProject.set(data.id, { ...(active ? sentAtByProject.get(data.id) : {}), [receipt.operation_id]: at });
-    setSent({ ...(active ? sent : {}), [receipt.operation_id]: message });
+    sentAtByProject.set(data.id, { ...(fresh ? {} : sentAtByProject.get(data.id)), [receipt.operation_id]: at });
+    setSent({ ...(fresh ? {} : sent), [receipt.operation_id]: message });
     if (again === undefined) setText("");
     await refresh();
   }, sendFailureLine);
@@ -143,10 +170,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (!turn || !session) return;
     const result = await cancelMasterTurn(ticket, session.session_id, turn.id, nextGeneration());
     if (result.kind === "not_ready") return data.notify("Not ready yet: stopping a reply isn't in this build.");
-    if (result.kind === "error") return setProblem(failureCopy(result.code));
+    if (result.kind === "error") return setProblem(failureCopy(result));
     const state = receiptState(result.value);
-    if (state.kind === "rejected") return setProblem(failureCopy(state.code));
-    await refresh().catch(() => setProblem(failureCopy("owner_read_failed")));
+    if (state.kind === "rejected") return setProblem(failureCopy(state));
+    await refresh().catch((failure) => report(failure));
   }
 
   const end = () => act(async () => {
@@ -184,6 +211,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
         {turn.reply ? <div className="pj-msg-master"><ProjectMark />
           <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}
+        {taskLines(turn).map((line, index) => <p key={`task-${index}`} className="pj-small pj-muted" data-testid="master-task">{displayText(line)}</p>)}
+        {accountLines(turn).map((line) => <p key={line} className="pj-small pj-muted" data-testid="master-account">{displayText(line)}</p>)}
         {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}
       {Object.entries(sent).filter(([id]) => !turns.some((turn) => turn.id === id)).map(([id, message]) =>
@@ -191,10 +220,11 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     </div>
     {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
-    {needsPool && <div className="pj-note warn" role="alert"><p>This project needs a pool before the master can reply.</p>
+    {noPool && <div className="pj-note warn" role="alert"><p>Pick a pool to start. The master replies once this project has one.</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
     {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
+    {note && <p className="pj-small pj-muted" role="status">{note}</p>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); if (sendable) void send(); }}>
       <label htmlFor="pj-composer" className="pj-sr">Message the master</label>

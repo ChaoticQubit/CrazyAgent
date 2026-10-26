@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge, bounded, failure};
+use super::{BridgeError, NativeBridge, bounded, caused, failure};
 use crazyagent::harnesses::HarnessEntry;
 
 impl NativeBridge {
@@ -13,7 +13,7 @@ impl NativeBridge {
             .controller()?
             .harness_catalog()
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         assert!(!entries.is_empty());
         bounded(entries)
     }

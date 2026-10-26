@@ -38,17 +38,24 @@ impl CodexHostProtocol {
         self.protocol.start_thread(cwd).map_err(protocol_error)
     }
 
-    /// Starts the read-only master thread with the project's startup instructions as its
-    /// developer instructions. Input: absolute project directory and the instruction text.
-    /// Output: the encoded `thread/start` request, or a plain protocol code.
+    /// Starts the master thread with the project's startup instructions as its developer
+    /// instructions: read-only, or with `tools` a thread whose tools run without approval
+    /// prompts or Codex's own sandbox inside the master's (DEC-093). Input: absolute project
+    /// directory, the instruction text and the tools switch. Output: the encoded
+    /// `thread/start` request, or a plain protocol code.
     pub fn start_instructed_thread(
         &mut self,
         cwd: &Path,
         instructions: &str,
+        tools: bool,
     ) -> Result<Vec<u8>, EngineError> {
-        self.protocol
-            .start_instructed_thread(cwd, instructions)
-            .map_err(protocol_error)
+        if tools {
+            self.protocol
+                .start_instructed_tool_thread(cwd, instructions)
+        } else {
+            self.protocol.start_instructed_thread(cwd, instructions)
+        }
+        .map_err(protocol_error)
     }
 
     pub fn start_turn(
@@ -90,6 +97,13 @@ impl CodexHostProtocol {
                         .outbound
                         .push(self.protocol.deny_request(id).map_err(protocol_error)?);
                 }
+                Event::NativeSubAgentStarted { thread_id, turn_id } => {
+                    batch.outbound.push(
+                        self.protocol
+                            .interrupt_child(thread_id, turn_id)
+                            .map_err(protocol_error)?,
+                    );
+                }
                 _ => {}
             }
             let ended = matches!(
@@ -114,6 +128,12 @@ impl CodexHostProtocol {
 
     pub fn state(&self) -> State {
         self.protocol.state()
+    }
+
+    /// Names the frame the Codex protocol last refused, for the master's stream diagnostic.
+    /// Input: none. Output: the name, or none before any refusal.
+    pub fn refused(&self) -> Option<&str> {
+        self.protocol.refused()
     }
 
     pub fn disconnect(&mut self) -> ObservedEvent {

@@ -85,11 +85,11 @@ fn private_file(path: &Path, bytes: &[u8]) {
     assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, 0o600);
 }
 
-fn connection() -> ModelConnection {
+fn connection_for(harness: &str) -> ModelConnection {
     ModelConnection {
         id: reference("unit-connection"),
         provider: reference("unit-provider"),
-        harness: reference("codex"),
+        harness: reference(harness),
         protocol: reference("native"),
         account_ref: reference("unit-account"),
         endpoint: ModelEndpoint::Native {},
@@ -109,6 +109,7 @@ fn purpose(index: usize) -> NativeProfileUsePurpose {
         1 => NativeProfileUsePurpose::Refresh,
         2 => NativeProfileUsePurpose::Logout,
         3 => NativeProfileUsePurpose::Execution,
+        4 => NativeProfileUsePurpose::Check,
         _ => panic!("closed purpose index"),
     }
 }
@@ -119,11 +120,16 @@ fn purpose_name(value: &NativeProfileUsePurpose) -> &'static str {
         NativeProfileUsePurpose::Refresh => "refresh",
         NativeProfileUsePurpose::Logout => "logout",
         NativeProfileUsePurpose::Execution => "execution",
+        NativeProfileUsePurpose::Check => "check",
     }
 }
 
 impl UseCase {
     fn new() -> Self {
+        Self::with_harness("codex")
+    }
+
+    fn with_harness(harness: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-pu-unit-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -143,7 +149,7 @@ impl UseCase {
             db_instance: "a".repeat(64),
             engine_epoch: "b".repeat(64),
         };
-        let connection = connection();
+        let connection = connection_for(harness);
         let (custody_id, key) = custody.prepare(&host, &connection).unwrap();
         assert_eq!(key, digest(b"unit-profile"));
         assert_eq!(custody_id.len(), 64);
@@ -256,18 +262,30 @@ fn retained_guard_revalidates_exact_scope_and_is_non_clone() {
 }
 
 #[test]
-fn purpose_enum_has_exactly_the_four_closed_cases() {
-    let names = (0..4)
+fn purpose_enum_has_exactly_the_five_closed_cases() {
+    let names = (0..5)
         .map(|index| purpose_name(&purpose(index)))
         .collect::<Vec<_>>();
-    assert_eq!(names, ["authentication", "refresh", "logout", "execution"]);
-    assert_eq!(names.len(), 4);
+    assert_eq!(
+        names,
+        ["authentication", "refresh", "logout", "execution", "check"]
+    );
+    assert_eq!(names.len(), 5);
 }
 
 #[test]
-fn every_purpose_pair_contends_for_the_same_live_physical_lock() {
-    for holder in 0..4 {
-        for contender in 0..4 {
+fn every_pair_with_an_account_change_contends_for_the_same_live_physical_lock() {
+    let shares = |index| {
+        matches!(
+            purpose(index),
+            NativeProfileUsePurpose::Execution | NativeProfileUsePurpose::Check
+        )
+    };
+    for holder in 0..5 {
+        for contender in 0..5 {
+            if shares(holder) && shares(contender) && (holder, contender) != (4, 4) {
+                continue;
+            }
             let mut case = UseCase::new();
             let guard = case
                 .custody
@@ -308,6 +326,71 @@ fn every_purpose_pair_contends_for_the_same_live_physical_lock() {
             assert_free(&case.manifest());
         }
     }
+}
+
+#[test]
+fn one_profile_serves_concurrent_executions_while_account_changes_stay_exclusive() {
+    let mut case = UseCase::new();
+    let execution = NativeProfileUsePurpose::Execution;
+    let custody = case.custody.as_mut().unwrap();
+    let first = custody
+        .acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("agent-1"),
+            1,
+            execution,
+        )
+        .unwrap();
+    let second = custody
+        .acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("agent-2"),
+            1,
+            execution,
+        )
+        .unwrap();
+    let third = case
+        .recapture()
+        .acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("agent-3"),
+            1,
+            execution,
+        )
+        .unwrap();
+    for (guard, name) in [
+        (&first, "agent-1"),
+        (&second, "agent-2"),
+        (&third, "agent-3"),
+    ] {
+        assert!(
+            guard
+                .revalidate(&case.host, &case.binding, &request_id(name), 1, execution)
+                .is_ok()
+        );
+    }
+    for change in 0..3 {
+        let result = case.recapture().acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("account-change"),
+            1,
+            purpose(change),
+        );
+        assert_eq!(
+            result.err().expect("account change must wait for agents").0,
+            "native_profile_in_use"
+        );
+    }
+    assert_busy(&case.manifest());
+    drop(first);
+    drop(second);
+    assert_busy(&case.manifest());
+    drop(third);
+    assert_free(&case.manifest());
 }
 
 #[test]
@@ -522,7 +605,7 @@ fn revalidation_rejects_zero_and_different_generations() {
 fn revalidation_rejects_a_different_closed_purpose() {
     let mut case = UseCase::new();
     let guard = case.acquire();
-    for index in 1..4 {
+    for index in 1..5 {
         assert!(
             guard
                 .revalidate(
@@ -663,6 +746,40 @@ fn revalidation_rejects_extra_root_and_profile_layout_entries() {
 }
 
 #[test]
+fn revalidation_accepts_the_lock_claude_code_takes_beside_home_and_refuses_other_shapes_of_it() {
+    let mut case = UseCase::new();
+    let guard = case.acquire();
+    let lock = case.profile().join("home.lock");
+    std::fs::create_dir(&lock).unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o755)).unwrap();
+    case.revalidate(&guard).unwrap();
+    std::fs::remove_dir(&lock).unwrap();
+    case.revalidate(&guard).unwrap();
+    for shape in ["file", "symlink", "writable"] {
+        match shape {
+            "file" => private_file(&lock, b"synthetic lock entry"),
+            "symlink" => symlink(case.home(), &lock).unwrap(),
+            _ => {
+                std::fs::create_dir(&lock).unwrap();
+                std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o777)).unwrap();
+            }
+        }
+        assert_eq!(
+            case.revalidate(&guard).err().unwrap().0,
+            "native_profile_custody_unsafe",
+            "{shape}"
+        );
+        let kept = std::fs::symlink_metadata(&lock).unwrap();
+        if kept.is_dir() {
+            std::fs::remove_dir(&lock).unwrap();
+        } else {
+            std::fs::remove_file(&lock).unwrap();
+        }
+    }
+    case.revalidate(&guard).unwrap();
+}
+
+#[test]
 fn revalidation_rejects_missing_home_and_identity_without_recreation() {
     for home in [false, true] {
         let mut case = UseCase::new();
@@ -751,8 +868,11 @@ fn substituted_retained_manifest_descriptor_is_rejected() {
     assert_busy(&case.manifest());
     drop(guard);
     assert_busy(&case.manifest());
+    let forked_alias = retained.try_clone().unwrap();
+    flock(&retained, FlockOperation::Unlock).unwrap();
     drop(retained);
     assert_free(&case.manifest());
+    drop(forked_alias);
 }
 
 struct ExecProbe {
@@ -1006,3 +1126,5 @@ fn contradictory_epoch_guard_assembly_trips_a_real_internal_assertion() {
     let guard = case.acquire();
     assert!(case.revalidate(&guard).is_ok());
 }
+
+mod agent_copy_tests;

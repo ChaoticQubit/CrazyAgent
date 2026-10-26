@@ -33,7 +33,9 @@ mod native_profiles;
 mod native_profiles;
 #[cfg(all(test, unix))]
 pub(crate) use native_profiles::MAX_PROFILES;
-pub(crate) use native_profiles::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
+pub(crate) use native_profiles::{
+    AgentCredential, NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose,
+};
 
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]
@@ -43,6 +45,7 @@ const LOCATOR_MAX: usize = 2048;
 pub struct OwnerConnectionIdentity {
     database_instance: String,
     engine_epoch: String,
+    engine_version: String,
 }
 
 impl OwnerConnectionIdentity {
@@ -52,6 +55,12 @@ impl OwnerConnectionIdentity {
 
     pub fn engine_epoch(&self) -> &str {
         &self.engine_epoch
+    }
+
+    /// The version the connected engine published at start; empty for an engine that
+    /// predates the version handshake.
+    pub fn engine_version(&self) -> &str {
+        &self.engine_version
     }
 }
 
@@ -95,6 +104,16 @@ struct Locator {
     owner_socket: Identity,
     ordinary_name: String,
     ordinary_socket: Identity,
+    #[serde(default)]
+    engine_version: String,
+}
+
+#[cfg(unix)]
+const ENGINE_VERSION_BYTES_MAX: usize = 64;
+
+#[cfg(unix)]
+fn engine_version_valid(version: &str) -> bool {
+    version.len() <= ENGINE_VERSION_BYTES_MAX && !version.chars().any(char::is_control)
 }
 
 fn fail(code: &str) -> EngineError {
@@ -132,6 +151,7 @@ fn parse_locator(bytes: &[u8]) -> Result<Locator, EngineError> {
         || !locator.generation.starts_with('o')
         || !hex(&locator.generation[1..], 8)
         || socket_name(&locator.ordinary_name).is_err()
+        || !engine_version_valid(&locator.engine_version)
         || [
             locator.database,
             locator.generation_identity,
@@ -440,6 +460,7 @@ async fn discover_owner(
     let identity = OwnerConnectionIdentity {
         database_instance: binding.pinned.value.db_instance.clone(),
         engine_epoch: binding.pinned.value.engine_epoch.clone(),
+        engine_version: binding.pinned.value.engine_version.clone(),
     };
     Ok((client, identity, binding))
 }
@@ -455,8 +476,35 @@ pub(super) fn runner_binding(
     let identity = OwnerConnectionIdentity {
         database_instance: binding.pinned.value.db_instance.clone(),
         engine_epoch: binding.pinned.value.engine_epoch.clone(),
+        engine_version: binding.pinned.value.engine_version.clone(),
     };
     Ok((generation, identity, binding))
+}
+
+/// Reads the version a running engine published in its locator, for the version message
+/// only; nothing else is trusted from it, so it reads any future locator shape. Input:
+/// the engine's data root. Output: the version, or none without a readable one.
+#[cfg(unix)]
+pub fn reported_engine_version(root: &Path) -> Option<String> {
+    let mut bytes = Vec::new();
+    File::open(root.join(LOCATOR))
+        .ok()?
+        .take(LOCATOR_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > LOCATOR_MAX {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let version = value.get("engine_version")?.as_str()?;
+    (!version.is_empty() && engine_version_valid(version)).then(|| version.to_owned())
+}
+
+/// Reports no engine version where no engine locator can exist yet. Input: the root,
+/// unused. Output: none.
+#[cfg(not(unix))]
+pub fn reported_engine_version(_root: &Path) -> Option<String> {
+    None
 }
 
 pub(super) async fn discover_pair(
@@ -520,11 +568,21 @@ fn cancelled(shutdown: &watch::Receiver<bool>) -> Result<(), EngineError> {
     }
 }
 
+/// Refuses, before anything is created, a socket path that has no socket address even
+/// through its short address. Input: the socket path. Output: Ok, or
+/// `owner_socket_path_too_long`.
+#[cfg(unix)]
 fn check_path_length(path: &Path) -> Result<(), EngineError> {
-    let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
-    if path.as_os_str().as_encoded_bytes().len() >= limit {
+    if !crate::socket_address::fits(path) {
         return Err(fail("owner_socket_path_too_long"));
     }
+    Ok(())
+}
+
+/// Accepts every path where the engine binds no Unix socket. Input: the path, unused.
+/// Output: Ok.
+#[cfg(not(unix))]
+fn check_path_length(_path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
@@ -817,10 +875,45 @@ impl EngineService {
             owner_socket,
             ordinary_name: ordinary.into(),
             ordinary_socket,
+            engine_version: crate::version::VERSION.into(),
         };
         self.publish(value, previous)?;
+        self.sweep_generations();
         cancelled(shutdown)?;
         Ok(())
+    }
+
+    /// Removes the owner generation folders an earlier engine run left in the anchor after
+    /// a crash or a failed shutdown, once the locator names this run's own generation; the
+    /// engine database lock makes this the only run on the anchor. Input: none. Output:
+    /// none; a folder that is not a private directory or cannot be removed is logged.
+    #[cfg(unix)]
+    fn sweep_generations(&self) {
+        let Some((current, _)) = &self.generation else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&self.anchor.path) else {
+            eprintln!("owner_generation_sweep_unavailable");
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let generation = name.len() == 9
+                && name.starts_with('o')
+                && name[1..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if !generation || &name == current {
+                continue;
+            }
+            let private = self
+                .anchor
+                .metadata(&name)
+                .is_ok_and(|metadata| safe_directory(&metadata));
+            if !private || std::fs::remove_dir_all(self.anchor.path.join(&name)).is_err() {
+                eprintln!("owner_generation_sweep_kept");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -982,6 +1075,10 @@ impl EngineService {
     }
 
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), EngineError> {
+        let reproof = self
+            .owner_runtime
+            .as_ref()
+            .map(OwnerRuntimeHandle::reprove_in_background);
         let result = if *shutdown.borrow() {
             Ok(())
         } else {
@@ -994,6 +1091,10 @@ impl EngineService {
                 }
             }
         };
+        if let Some(reproof) = reproof {
+            reproof.abort();
+            let _ = reproof.await;
+        }
         combine(result, self.shutdown().await)
     }
 
@@ -1041,7 +1142,18 @@ impl EngineService {
                     }
                     std::fs::remove_file(path).map_err(io_error)?;
                 }
-                std::fs::remove_dir(self.anchor.path.join(generation)).map_err(io_error)
+                let path = self.anchor.path.join(&generation);
+                for entry in std::fs::read_dir(&path).map_err(io_error)? {
+                    let entry = entry.map_err(io_error)?;
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("master-runtime-")
+                    {
+                        std::fs::remove_dir_all(entry.path()).map_err(io_error)?;
+                    }
+                }
+                std::fs::remove_dir(path).map_err(io_error)
             })();
             if let Err(error) = clean {
                 errors.push(error.0);
@@ -1109,7 +1221,55 @@ mod tests {
             owner_socket: id,
             ordinary_name: "engine.sock".into(),
             ordinary_socket: id,
+            engine_version: crate::version::VERSION.into(),
         }
+    }
+
+    #[test]
+    fn locator_carries_a_bounded_engine_version_and_tolerates_older_engines() {
+        let parsed = parse_locator(&serde_json::to_vec(&sample()).unwrap()).unwrap();
+        assert_eq!(parsed.engine_version, crate::version::VERSION);
+        let mut older = serde_json::to_value(sample()).unwrap();
+        older.as_object_mut().unwrap().remove("engine_version");
+        let parsed = parse_locator(&serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!(parsed.engine_version, "");
+        for bad in ["0.2.0\n".to_owned(), "9".repeat(65)] {
+            let mut value = sample();
+            value.engine_version = bad;
+            assert_eq!(
+                parse_locator(&serde_json::to_vec(&value).unwrap())
+                    .unwrap_err()
+                    .0,
+                "owner_locator_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_engine_version_reads_any_locator_shape_for_the_message_only() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(reported_engine_version(root.path()), None);
+        let mut future = serde_json::to_value(sample()).unwrap();
+        future["engine_version"] = "9.0.0".into();
+        future["added_later"] = true.into();
+        std::fs::write(
+            root.path().join(LOCATOR),
+            serde_json::to_vec(&future).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reported_engine_version(root.path()).as_deref(),
+            Some("9.0.0")
+        );
+        future["engine_version"] = "9.0.0\u{1b}[2J".into();
+        std::fs::write(
+            root.path().join(LOCATOR),
+            serde_json::to_vec(&future).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reported_engine_version(root.path()), None);
+        std::fs::write(root.path().join(LOCATOR), vec![b' '; LOCATOR_MAX + 1]).unwrap();
+        assert_eq!(reported_engine_version(root.path()), None);
     }
 
     #[test]

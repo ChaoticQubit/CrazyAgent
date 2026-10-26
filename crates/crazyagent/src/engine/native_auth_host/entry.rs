@@ -1,8 +1,8 @@
 use super::RegisteredNativeAuthHost;
 use super::custody::CustodySession;
-use crate::engine::bootstrap::{NativeProfileUsePurpose, runner_binding};
+use crate::engine::bootstrap::runner_binding;
 use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyChannel;
-use crate::engine::owner::{HostStamp, NativeAuthAction, NativeAuthFact};
+use crate::engine::owner::{HostStamp, NativeAuthFact};
 use crate::engine::{EngineError, io_error};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::os::fd::{AsFd, OwnedFd};
@@ -124,10 +124,7 @@ async fn run_inner(
         db_instance: identity.database_instance().to_owned(),
         engine_epoch: identity.engine_epoch().to_owned(),
     };
-    let purpose = match fact.action {
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-    };
+    let purpose = fact.action.profile_purpose();
     let mut custody = binding.capture_native_profile_custody()?;
     let guard = custody.acquire_use(
         &host,

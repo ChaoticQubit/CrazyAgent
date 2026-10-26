@@ -137,7 +137,13 @@ struct Reply {
 /// Reads up to `max` bytes of the regular file at `path` as text, never
 /// through a link in its last component. Returns `None` for anything else.
 fn read_text(path: &Path, max: u64) -> Option<String> {
-    let file = open_text(path).ok()?;
+    file_text(open_text(path).ok()?, max)
+}
+
+/// Reads up to `max` bytes of the open `file` as trimmed text when it is a
+/// regular file. Takes the file and the bound. Returns `None` for anything
+/// else or for empty text.
+fn file_text(file: std::fs::File, max: u64) -> Option<String> {
     if !file.metadata().ok()?.is_file() {
         return None;
     }
@@ -168,16 +174,47 @@ fn open_text(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// Creates a fresh world-readable partial file without following a link at `path`.
-/// Takes the path. Returns the new file or the I/O error, also when it exists.
+/// A real folder opened once, so every file read beneath it stays in that
+/// folder even when its path is later swapped for a link.
 #[cfg(unix)]
-fn create_partial(path: &Path) -> std::io::Result<std::fs::File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
+type Folder = rustix::fd::OwnedFd;
+
+/// A real folder checked by path where no folder-relative open exists here.
+#[cfg(windows)]
+type Folder = std::path::PathBuf;
+
+/// Opens the real folder at `path`, never through a link in its last
+/// component. Takes the path. Returns the folder or `None`.
+#[cfg(unix)]
+fn open_folder(path: &Path) -> Option<Folder> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(path, flags, Mode::empty()).ok()
+}
+
+/// Checks that `path` is a real folder, not a link to one. Takes the path.
+/// Returns the folder path or `None`.
+#[cfg(windows)]
+fn open_folder(path: &Path) -> Option<Folder> {
+    real_dir(path).then(|| path.to_path_buf())
+}
+
+/// Opens the file `name` in `folder` for reading without following a link or
+/// blocking on a FIFO. Takes the folder and the file name. Returns the file or `None`.
+#[cfg(unix)]
+fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    rustix::fs::openat(folder, name, flags, Mode::empty())
+        .ok()
+        .map(std::fs::File::from)
+}
+
+/// Opens the file `name` in `folder` as the reparse point itself. Takes the
+/// folder and the file name. Returns the file or `None`.
+#[cfg(windows)]
+fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
+    open_text(&folder.join(name)).ok()
 }
 
 /// Creates a fresh partial file as the reparse point itself, never a link's target; it
@@ -245,19 +282,19 @@ pub(crate) fn gather(repo: &Path) -> Evidence {
             read_text(&repo.join(name), MANIFEST_BYTES_MAX).map(|text| ((*name).to_owned(), text))
         })
         .collect();
-    let graph = repo.join("graphify-out");
-    if real_dir(&graph) {
-        evidence.graph =
-            read_text(&graph.join("GRAPH_REPORT.md"), GRAPH_REPORT_BYTES_MAX).or_else(|| {
-                std::fs::symlink_metadata(graph.join("graph.json"))
-                    .ok()
-                    .filter(|metadata| metadata.file_type().is_file())
-                    .map(|metadata| format!("graph.json, {} bytes", metadata.len()))
+    if let Some(graph) = open_folder(&repo.join("graphify-out")) {
+        evidence.graph = open_in(&graph, "GRAPH_REPORT.md")
+            .and_then(|file| file_text(file, GRAPH_REPORT_BYTES_MAX))
+            .or_else(|| {
+                let metadata = open_in(&graph, "graph.json")?.metadata().ok()?;
+                metadata
+                    .is_file()
+                    .then(|| format!("graph.json, {} bytes", metadata.len()))
             });
     }
-    let layout = repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
-    if real_dir(&layout) {
-        evidence.overview = read_text(&layout.join(OVERVIEW_FILE), OVERVIEW_EVIDENCE_BYTES_MAX);
+    if let Some(layout) = open_folder(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY)) {
+        evidence.overview = open_in(&layout, OVERVIEW_FILE)
+            .and_then(|file| file_text(file, OVERVIEW_EVIDENCE_BYTES_MAX));
     }
     assert!(evidence.entries.len() <= ENTRIES_MAX);
     assert!(evidence.manifests.len() <= MANIFESTS.len());
@@ -632,20 +669,38 @@ pub(crate) fn merge(
 /// it is a readable, valid draft; `None` otherwise, so onboarding starts
 /// fresh without touching the file.
 pub(crate) fn reused(layout: &Path) -> Option<Drafted> {
-    let setup = layout.join(LAYOUT_SETUP);
-    if !real_dir(&setup) {
-        return None;
-    }
-    let text = read_text(&setup.join(DRAFT_FILE), DRAFT_BYTES_MAX)?;
+    let setup = open_folder(&layout.join(LAYOUT_SETUP))?;
+    let text = file_text(open_in(&setup, DRAFT_FILE)?, DRAFT_BYTES_MAX)?;
     let drafted: Drafted = serde_json::from_str(&text).ok()?;
     (clean_entry(&drafted.name, NAME_BYTES_MAX).as_deref() == Some(drafted.name.as_str())
         && drafted.draft.validate().is_ok())
     .then_some(drafted)
 }
 
+/// Writes `bytes` to `directory`/`name` through a fresh world-readable partial
+/// file and a rename, all beneath the directory opened once without following a
+/// link, so a directory swapped for a link afterwards is never written through.
+/// Takes the real directory, the file name and the bytes. Returns any I/O failure.
+#[cfg(unix)]
+fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let folder =
+        open_folder(directory).ok_or_else(|| std::io::Error::other("not a real directory"))?;
+    let partial = format!(".{name}.partial");
+    let _ = rustix::fs::unlinkat(&folder, partial.as_str(), AtFlags::empty());
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let created = rustix::fs::openat(&folder, partial.as_str(), flags, Mode::from_raw_mode(0o644))?;
+    let mut file = std::fs::File::from(created);
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    rustix::fs::renameat(&folder, partial.as_str(), &folder, name)?;
+    Ok(())
+}
+
 /// Writes `bytes` to `directory`/`name` through a fresh partial file and a
 /// rename, never through a link. Takes the real directory, the file name and
 /// the bytes. Returns any I/O failure.
+#[cfg(windows)]
 fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
     if !real_dir(directory) {
         return Err(std::io::Error::other("not a real directory"));
@@ -674,9 +729,8 @@ pub(crate) fn save(layout: &Path, drafted: &Drafted) -> std::io::Result<()> {
 /// The overview in `layout`/overview.md, bounded to 64 KiB and never read
 /// through a link, or `None` while there is none.
 pub(crate) fn overview(layout: &Path) -> Option<String> {
-    real_dir(layout)
-        .then(|| read_text(&layout.join(OVERVIEW_FILE), OVERVIEW_BYTES_MAX as u64))
-        .flatten()
+    let layout = open_folder(layout)?;
+    file_text(open_in(&layout, OVERVIEW_FILE)?, OVERVIEW_BYTES_MAX as u64)
 }
 
 /// Writes the agent's overview as `layout`/overview.md unless one already

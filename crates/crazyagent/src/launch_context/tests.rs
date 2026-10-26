@@ -52,6 +52,31 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
 }
 
 #[test]
+fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
+    for length in [900, 1011] {
+        let base = tempfile::tempdir().unwrap();
+        let mut folder = base.path().canonicalize().unwrap();
+        while folder.as_os_str().len() + 100 < length - 50 {
+            folder.push("n".repeat(99));
+        }
+        let rest = length - folder.as_os_str().len() - 1;
+        folder.push("m".repeat(rest));
+        assert_eq!(folder.as_os_str().len(), length);
+        fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+        let setup = stored(&folder);
+
+        let text = render(&setup.project_id, Some(&setup), "");
+
+        assert!(text.contains(&format!("Project folder: {}\n", folder.display())));
+        assert!(text.contains(&format!(
+            "Context folder: {}/.crazyagent\n",
+            folder.display()
+        )));
+        assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
+    }
+}
+
+#[test]
 fn a_project_without_a_setup_still_gets_a_plain_header() {
     let text = render(&ProjectId::new("bare").unwrap(), None, "");
     assert_eq!(
@@ -159,6 +184,42 @@ fn the_team_index_stays_within_its_bound_with_many_plugins() {
     assert!(text.contains("- Skill skill-000-"));
     assert!(!text.contains("- MCP server server-099"));
     assert!(text.ends_with(" more\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+    };
+    let installed = context.install("codex", &home, false).unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(installed._lock.try_clone().unwrap())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(
+        context.install("codex", &home, false).unwrap_err().0,
+        "launch_home_busy"
+    );
+
+    drop(installed);
+    let again = context.install("codex", &home, false);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        again.is_ok(),
+        "the ended launch still kept its home busy: {:?}",
+        again.err()
+    );
 }
 
 #[test]
@@ -290,4 +351,109 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
     assert!(config.get("mcp_servers").is_none());
     assert!(!home.join("skills").join("crazyagent").exists());
     drop(installed);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {
+    let agents = crate::sandbox::test_agent::TestAgent::new();
+    let marker = agents.peer.join(STATE).join("marker");
+    fs::create_dir(agents.peer.join(STATE)).unwrap();
+    fs::write(&marker, "peer").unwrap();
+    let skills = agents.home.join("skills");
+    let plant = format!(
+        "rm -rf '{}' && ln -s '{}' '{}'",
+        skills.display(),
+        agents.peer.display(),
+        skills.display()
+    );
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: String::new(),
+    };
+
+    agents.shell(&plant);
+    assert!(
+        fs::symlink_metadata(&skills)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let installed = context.install("codex", &agents.home, false).unwrap();
+    assert!(marker.exists(), "launch removed a folder through the link");
+    drop(installed);
+    assert!(marker.exists(), "cleanup removed a folder through the link");
+
+    agents.shell(&format!("rm -f '{}'", skills.display()));
+    let installed = context.install("codex", &agents.home, false).unwrap();
+    agents.shell(&plant);
+    drop(installed);
+    assert!(marker.exists(), "cleanup followed a link planted mid-run");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "peer");
+
+    fs::remove_file(&skills).unwrap();
+    fs::create_dir_all(skills.join(STATE).join("old")).unwrap();
+    let installed = context.install("codex", &agents.home, false).unwrap();
+    assert!(!skills.join(STATE).exists(), "real copies were left behind");
+    fs::create_dir(skills.join(STATE)).unwrap();
+    drop(installed);
+    assert!(!skills.join(STATE).exists(), "real copies were left behind");
+    assert!(skills.is_dir() && marker.exists());
+}
+
+#[test]
+fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_agent() {
+    use crate::project_setup::HarnessSlot;
+    let folder = tempfile::tempdir().unwrap();
+    let mut setup = stored(folder.path());
+    setup.team.sub_harnesses = vec![
+        HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: true,
+        },
+        HarnessSlot {
+            harness: "claude-code".into(),
+            agents: 1,
+            tools: false,
+        },
+    ];
+
+    let text = master_tools_section(&setup);
+
+    assert!(text.contains("Your tools are on in this conversation"));
+    assert!(text.contains("`delegate` tool of the `crazyagent-team` MCP server"));
+    assert!(text.contains("Start sub-agents only with this tool"));
+    assert!(text.contains(
+        "Never use your harness's own sub-agent tools, such as Codex's `spawn_agent`, `followup_task`, `send_message` or `wait_agent`"
+    ));
+    assert!(text.contains("CrazyAgent stops any agent they start"));
+    assert!(!text.contains("sub-agent tools are disabled"));
+    assert!(text.contains("appear in the project's Agents tab and Team view"));
+    assert!(text.contains("a short note on how it went comes back to this conversation"));
+    assert!(!text.contains("not in this conversation"));
+    assert!(text.contains("- codex: up to 2 agents, tools on\n"));
+    assert!(text.contains("- claude-code: up to 1 agents, tools off\n"));
+    assert!(!text.contains("tools are off"));
+    assert!(!text.contains("no sub-agents"));
+
+    setup.team.sub_harnesses.clear();
+    let alone = master_tools_section(&setup);
+    assert!(alone.contains("Your tools are on in this conversation"));
+    assert!(alone.contains("This project's team plan has no sub-agents"));
+
+    setup.team.sub_harnesses = (0..200)
+        .map(|index| HarnessSlot {
+            harness: format!("{index}-{}", "h".repeat(250)),
+            agents: 1,
+            tools: true,
+        })
+        .collect();
+    let crowded = master_tools_section(&setup);
+    assert!(
+        crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK,
+        "{}",
+        crowded.len()
+    );
+    assert!(crowded.contains(" more\n"));
 }

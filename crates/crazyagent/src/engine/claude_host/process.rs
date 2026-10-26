@@ -1,18 +1,21 @@
+use super::diagnostic::StreamDiagnostic;
 use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::sandbox::InstalledSandbox;
+use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
@@ -29,6 +32,8 @@ pub(super) struct Channels {
     pub(super) output: mpsc::Sender<ObservedEvent>,
     pub(super) report: watch::Sender<Status>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) group: Arc<AtomicU32>,
+    pub(super) diagnostic: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
 
 struct PendingInput {
@@ -39,6 +44,7 @@ struct PendingInput {
 
 struct Process {
     child: Child,
+    warden: Option<Warden>,
     group: Pid,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
@@ -47,6 +53,7 @@ struct Process {
     stderr: Option<ChildStderr>,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
+    tools: bool,
     input: Receiver<Turn>,
     output: mpsc::Sender<ObservedEvent>,
     report: watch::Sender<Status>,
@@ -60,12 +67,15 @@ struct Process {
     completed_turns: usize,
     frame: Vec<u8>,
     deadline: Instant,
+    record: StreamDiagnostic,
+    kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
 
 pub(super) fn run(
     mut command: Command,
     sandbox: InstalledSandbox,
     profile: NativeProfileUse,
+    home: PathBuf,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
     channels: Channels,
@@ -75,14 +85,19 @@ pub(super) fn run(
         output,
         report,
         stop,
+        group,
+        diagnostic,
     } = channels;
-    if let Err(error) = validate_command(&command, &profile) {
-        report.send_replace(Status {
-            phase: Phase::Retired,
-            fault: Some(error),
-        });
-        return;
-    }
+    let tools = match validate_command(&command, &profile, &home) {
+        Ok(tools) => tools,
+        Err(error) => {
+            report.send_replace(Status {
+                phase: Phase::Retired,
+                fault: Some(error),
+            });
+            return;
+        }
+    };
     if stop.load(Ordering::Acquire) {
         report.send_replace(Status {
             phase: Phase::Retired,
@@ -90,16 +105,6 @@ pub(super) fn run(
         });
         return;
     }
-    let home = match profile.profile_path() {
-        Ok(home) => home,
-        Err(_) => {
-            report.send_replace(Status {
-                phase: Phase::Retired,
-                fault: Some(Fault::Host("claude_host_profile_changed")),
-            });
-            return;
-        }
-    };
     command
         .env_clear()
         .env("HOME", &home)
@@ -111,6 +116,11 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if tools {
+        command
+            .env("SHELL", super::TOOLS_SHELL)
+            .env(super::BACKGROUND_TASKS_OFF.0, super::BACKGROUND_TASKS_OFF.1);
+    }
     let mut command = match sandbox.wrap(&command) {
         Ok(command) => command,
         Err(_) => {
@@ -126,8 +136,8 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
-    let child = match crate::spawn_gate::spawn(&mut command) {
-        Ok(child) => child,
+    let (child, warden) = match warden::spawn(&mut command) {
+        Ok(started) => started,
         Err(_) => {
             report.send_replace(Status {
                 phase: Phase::Retired,
@@ -136,16 +146,20 @@ pub(super) fn run(
             return;
         }
     };
+    assert!(child.id() > 1);
+    group.store(child.id(), Ordering::Release);
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,
         child,
+        warden,
         profile: Some(profile),
         stdin: None,
         stdout: None,
         stderr: None,
         protocol,
         limits,
+        tools,
         input,
         output,
         report,
@@ -159,6 +173,8 @@ pub(super) fn run(
         completed_turns: 0,
         frame: Vec::new(),
         deadline: Instant::now() + limits.run_time,
+        record: StreamDiagnostic::default(),
+        kept: diagnostic,
     };
     process.stdin = process.child.stdin.take();
     process.stdout = process.child.stdout.take();
@@ -317,12 +333,17 @@ impl Process {
             match stdout.read(&mut buffer) {
                 Ok(0) => {
                     self.stdout = None;
+                    if self.completed_turns > 0 && !self.frame.is_empty() {
+                        self.record.late(&self.frame);
+                        self.frame.clear();
+                    }
                     if !self.frame.is_empty() && !self.stop.load(Ordering::Acquire) {
                         self.fail(Fault::Host("claude_host_truncated_output"));
                     }
                     return;
                 }
                 Ok(count) => {
+                    self.record.keep(&buffer[..count]);
                     self.stdout_bytes = self.stdout_bytes.saturating_add(count);
                     if self.stdout_bytes > self.limits.stdout_bytes {
                         self.fail(Fault::Host("claude_host_stdout_limit"));
@@ -353,16 +374,25 @@ impl Process {
         assert!(self.frame.len() <= crate::protocol::FRAME_BYTES_MAX);
         for byte in bytes {
             if self.frame.len() == crate::protocol::FRAME_BYTES_MAX {
-                self.fail(Fault::Host("claude_host_frame_limit"));
-                return;
+                if self.completed_turns == 0 {
+                    self.fail(Fault::Host("claude_host_frame_limit"));
+                    return;
+                }
+            } else {
+                self.frame.push(*byte);
             }
-            self.frame.push(*byte);
             if *byte != b'\n' {
+                continue;
+            }
+            if self.completed_turns > 0 {
+                self.record.late(&self.frame);
+                self.frame.clear();
                 continue;
             }
             let events = match self.protocol.receive(&self.frame) {
                 Ok(events) => events,
                 Err(error) => {
+                    self.record.failed(&self.frame);
                     self.fail(Fault::Protocol(error));
                     return;
                 }
@@ -376,13 +406,14 @@ impl Process {
                 self.events += 1;
                 if matches!(&event.kind, EventKind::TurnFinished { .. }) {
                     self.completed_turns += 1;
+                    self.stdin = None;
                 }
-                let native_tool = matches!(&event.kind, EventKind::ToolUse { .. });
+                let refused_tool = !self.tools && matches!(&event.kind, EventKind::ToolUse { .. });
                 if self.output.try_send(event.into()).is_err() {
                     self.fail(Fault::Host("claude_host_event_delivery_failed"));
                     return;
                 }
-                if native_tool {
+                if refused_tool {
                     self.fail(Fault::Host("claude_host_native_tools_unsupported"));
                     return;
                 }
@@ -478,6 +509,17 @@ impl Process {
         sent
     }
 
+    /// Has the run's warden stop every process left in the harness sandbox, those that left
+    /// the harness group included, once the harness is reaped and its group is empty.
+    /// Takes nothing; records an uncertain cleanup when the warden does not confirm it.
+    fn fire_warden(&mut self) {
+        if let Some(warden) = self.warden.take()
+            && warden.fire(warden::FIRE_TIME).is_err()
+        {
+            self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+        }
+    }
+
     fn cleanup(&mut self) {
         self.report.send_replace(Status {
             phase: Phase::Closing,
@@ -511,6 +553,8 @@ impl Process {
             if let Some(status) = self.status
                 && self.group_absent
             {
+                self.fire_warden();
+                let now = Instant::now();
                 let gone = *group_gone_at.get_or_insert(now);
                 let open = self.stdout.is_some() || self.stderr.is_some();
                 if !open || now >= gone + GRACE {
@@ -548,6 +592,9 @@ impl Process {
             self.fail(Fault::Host("claude_host_incomplete_turn"));
         }
         self.profile = None;
+        self.record.fault = self.fault.map(|fault| fault.error().0);
+        *self.kept.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(std::mem::take(&mut self.record));
         self.report.send_replace(Status {
             phase: Phase::Retired,
             fault: self.fault,

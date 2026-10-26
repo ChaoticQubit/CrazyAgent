@@ -59,6 +59,17 @@ def main():
             waiting = True
         elif text.startswith("echo "):
             reply(text[len("echo "):])
+        elif text == "escape":
+            escaped = subprocess.Popen(
+                ["/bin/sleep", "300"],
+                stdin=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            with open("escaped.json.tmp", "w") as handle:
+                json.dump({"pid": escaped.pid}, handle)
+            os.replace("escaped.json.tmp", "escaped.json")
+            reply("escaped")
         elif text.startswith("exit "):
             reply("leaving")
             return int(text[len("exit "):])

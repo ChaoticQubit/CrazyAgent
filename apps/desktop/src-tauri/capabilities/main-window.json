@@ -35,6 +35,7 @@
     "allow-desktop-team-graph",
     "allow-desktop-terminal-attach",
     "allow-desktop-terminal-input",
+    "allow-desktop-terminal-prompt",
     "allow-desktop-terminal-resize",
     "allow-desktop-terminal-detach",
     "allow-desktop-update-project-setup",
@@ -125,6 +126,8 @@
     "allow-desktop-project-plugins",
     "allow-desktop-agents",
     "allow-desktop-stop-agent",
+    "allow-desktop-account-use",
+    "allow-desktop-release-account",
     "allow-desktop-interrupt-agent",
     "allow-desktop-restart-agent",
     "allow-desktop-pick-folder",
@@ -137,6 +140,8 @@
     "allow-desktop-check-update",
     "allow-desktop-install-update",
     "allow-desktop-restart-app",
-    "allow-desktop-link-cli"
+    "allow-desktop-link-cli",
+    "allow-desktop-engine-versions",
+    "allow-desktop-restart-engine"
   ]
 }

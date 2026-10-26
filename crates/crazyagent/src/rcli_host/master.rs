@@ -91,6 +91,12 @@ impl RcliMasterHost {
         &self.launch.binding
     }
 
+    /// Names the process group the rcli master runs in, which can outlive this host when
+    /// the engine stops. Input: the host. Output: the group.
+    pub fn process_group(&self) -> u32 {
+        self.process.process_group()
+    }
+
     pub fn prompt(&mut self, turn_id: RequestId, text: &str) -> Result<(), ProtocolError> {
         if !self.ready {
             return Err(error("rcli_master_not_ready"));

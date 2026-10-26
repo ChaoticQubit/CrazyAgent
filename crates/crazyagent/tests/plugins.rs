@@ -114,7 +114,9 @@ fn skill_folder(root: &Path, folder: &str, name: &str) -> String {
 }
 
 fn fixture(root: &Path) -> String {
-    let path = root.join("mcp_fixture.py");
+    let folder = root.join("servers");
+    fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("mcp_fixture.py");
     fs::write(&path, FIXTURE).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path.display().to_string()
@@ -289,8 +291,13 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
     case.close().await;
 }
 
+/// Wiring test: tests/fixtures/mcp_fixture.py stands in for an MCP server and invents its
+/// tool list, so this checks approval, secrets and what agents are given. Real harnesses
+/// offered the approved server: launch_context_live.rs
+/// real_codex_and_claude_receive_the_approved_skill_server_and_context.
+/// No test checks a real third-party MCP server: none is installed or approved.
 #[tokio::test]
-async fn mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
+async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
     let mut case = Case::new().await;
     let mut controller = case.controller().await;
     let project = create_project(&mut controller, "app").await;
@@ -590,5 +597,120 @@ async fn a_server_whose_secret_cannot_be_saved_is_not_left_behind() {
         .unwrap();
     assert!(added.secrets[0].saved);
     drop(controller);
+    case.close().await;
+}
+
+/// A checked server runs inside the agent boundary: it still answers with its own secret,
+/// but it can neither write outside its own check folders nor read another server's saved
+/// secret in the engine folder.
+#[tokio::test]
+async fn a_server_check_cannot_write_outside_or_read_another_servers_secret() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    controller
+        .add_mcp_server(
+            Scope::Global,
+            "other".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec![],
+            },
+            vec![("OTHER_TOKEN".into(), secret("other-value"))],
+        )
+        .await
+        .unwrap();
+    let saved = files_under(&root.join("plugins/secrets"));
+    assert_eq!(saved.len(), 1);
+    let marker = root.join("escaped");
+    let spec = ServerSpec::Stdio {
+        command: fixture(&root),
+        args: vec![
+            "escape".into(),
+            marker.display().to_string(),
+            saved[0].display().to_string(),
+        ],
+    };
+    let server = controller
+        .add_mcp_server(
+            Scope::Global,
+            "escape".into(),
+            spec.clone(),
+            vec![("FIXTURE_TOKEN".into(), secret("dummy-value"))],
+        )
+        .await
+        .unwrap();
+    controller
+        .approve_mcp_server(server.id.clone(), spec)
+        .await
+        .unwrap();
+    let checked = controller
+        .check_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert!(
+        !marker.exists(),
+        "the checked server must not write outside its boundary"
+    );
+    assert_eq!(checked.tools, vec!["echo", "authorized"]);
+    assert_eq!(checked.problem, None);
+    let folder = root.join("mcp-checks").join(&server.id);
+    assert!(folder.join("home").is_dir());
+    controller
+        .remove_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert!(
+        !folder.exists(),
+        "a removed server leaves no check folder behind"
+    );
+    case.close().await;
+}
+
+/// A checked server cannot swap its own check folder for a link that would widen its next
+/// check: the engine refuses a check folder that is not the plain folder it made.
+#[tokio::test]
+async fn a_server_check_folder_swapped_for_a_link_is_refused() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let target = root.join("planted-target");
+    fs::create_dir(&target).unwrap();
+    let spec = ServerSpec::Stdio {
+        command: fixture(&root),
+        args: vec!["plant".into(), target.display().to_string()],
+    };
+    let server = controller
+        .add_mcp_server(
+            Scope::Global,
+            "plant".into(),
+            spec.clone(),
+            vec![("FIXTURE_TOKEN".into(), secret("dummy-value"))],
+        )
+        .await
+        .unwrap();
+    controller
+        .approve_mcp_server(server.id.clone(), spec)
+        .await
+        .unwrap();
+    let first = controller
+        .check_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.tools, vec!["echo", "authorized"]);
+    let home = root.join("mcp-checks").join(&server.id).join("home");
+    assert!(
+        fs::symlink_metadata(&home).unwrap().is_symlink(),
+        "the server swapped its home for a link"
+    );
+    let second = controller
+        .check_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert!(
+        !target.join("planted").exists(),
+        "a later check must not write through the link"
+    );
+    assert_eq!(second.problem.as_deref(), Some("The server can't start."));
     case.close().await;
 }

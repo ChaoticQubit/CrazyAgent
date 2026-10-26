@@ -3,7 +3,7 @@ use super::*;
 use crate::plugins::ServerSpec;
 #[cfg(unix)]
 use crate::setup::fetch;
-use crate::setup::pack::{PackGroup, PackManifestEntry};
+use crate::setup::pack::PackManifestEntry;
 #[cfg(unix)]
 use crate::setup::pack::{PackKind, PackSource};
 use crate::setup::progress;
@@ -164,7 +164,7 @@ fn start_run(
     let entries: Vec<PackManifestEntry> = manifest
         .entries
         .into_iter()
-        .filter(|entry| entry.group == PackGroup::Always || ticked.contains(&entry.id))
+        .filter(|entry| ticked.contains(&entry.id))
         .collect();
     let begun = progress::with(&root, |state| {
         if state.running {
@@ -351,7 +351,11 @@ fn extract_bundled(_setup: &Path) -> Option<PathBuf> {
 
 async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackManifestEntry>) {
     let installer = platform_installer(root);
+    let graph_tool = progress::snapshot(root).graph_tool;
     for dep in Dependency::ALL {
+        if dep == Dependency::Graphify && !graph_tool {
+            continue;
+        }
         install_dependency(installer.clone(), root, dep).await;
     }
     let _ = storage(sender, Command::Sweep).await;

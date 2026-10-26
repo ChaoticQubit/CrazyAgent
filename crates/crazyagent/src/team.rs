@@ -1,7 +1,7 @@
 use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
-use crate::protocol::{CredentialRef, Outcome, ProjectId};
+use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -17,6 +17,8 @@ pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
 pub const RESULT_BYTES_MAX: usize = 16 * 1024;
 pub const DELEGATIONS_PER_REPLY_MAX: usize = 8;
+pub const NOTE_BYTES_MAX: usize = 800;
+pub const CONVERSATION_TASKS_MAX: i64 = 1024;
 pub const TASKS_ACTIVE_MAX: i64 = 32;
 pub const TASKS_PER_PROJECT_MAX: i64 = 1000;
 pub const MESSAGES_PER_PROJECT_MAX: i64 = 2000;
@@ -31,9 +33,10 @@ pub const DELEGATE_MARKER: &str = "DELEGATE";
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
 
-/// Text the owner typed straight into one team agent's terminal. It is recorded on the
-/// agent's task, and the master hears a short note of it on its next turn.
-/// `agent` is the team agent id; `text` is at most `DIRECT_INPUT_BYTES_MAX` bytes.
+/// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
+/// on the agent's task until the master hears a short note of it on its next turn.
+/// Keys typed into the terminal are never kept. `agent` is the team agent id; `text` is at
+/// most `DIRECT_INPUT_BYTES_MAX` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectInput {
     pub project: ProjectId,
@@ -644,6 +647,15 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 finished_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
+            CREATE TABLE IF NOT EXISTS team_conversation_tasks (
+                task INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                session TEXT NOT NULL,
+                turn TEXT NOT NULL,
+                note TEXT,
+                noted_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS team_conversation_tasks_turn ON team_conversation_tasks(session, turn);
             CREATE TABLE IF NOT EXISTS team_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -669,19 +681,19 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 record TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS team_direct_inputs (
+            CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
                 agent INTEGER NOT NULL,
                 task INTEGER,
                 harness TEXT NOT NULL,
                 text TEXT NOT NULL,
-                created_ms INTEGER NOT NULL,
-                delivered INTEGER NOT NULL DEFAULT 0
+                created_ms INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS team_direct_inputs_project ON team_direct_inputs(project, delivered);",
+            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    direct::erase_typed_input(connection)
 }
 
 fn slot<'a>(plan: &'a TeamPlan, harness: &str) -> Option<&'a HarnessSlot> {
@@ -787,6 +799,81 @@ pub fn admit(
     let id = tx.last_insert_rowid();
     assert!(id > 0);
     Ok(Ok(id))
+}
+
+/// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
+/// project's team (DEC-093) as the owner's own tasks: each passes `admit` against the team
+/// plan and pool, and the refused ones are listed in one engine note in the Team view, never
+/// dropped silently. Each admitted task is tied to the conversation turn that proposed it,
+/// so the engine's note on how it ended comes back to that conversation.
+/// Takes the transaction, live model access, the project, the conversation session and
+/// turn, at most `DELEGATIONS_PER_REPLY_MAX` proposals and the time. Returns the task ids.
+pub fn admit_conversation(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    project: &ProjectId,
+    origin: (&SessionId, &RequestId),
+    proposed: &[Delegation],
+    now: i64,
+) -> Result<Vec<i64>, EngineError> {
+    assert!(proposed.len() <= DELEGATIONS_PER_REPLY_MAX);
+    let stored = crate::project_setup::load_setup(tx, project)?;
+    let mut admitted = Vec::new();
+    let mut refused = Vec::new();
+    for delegation in proposed {
+        let outcome = match &stored {
+            Some(stored) => admit(
+                tx,
+                access,
+                stored,
+                delegation.harness.as_deref(),
+                &delegation.prompt,
+                TaskSource::Owner,
+                None,
+                now,
+            )?,
+            None => Err("team_plan_missing"),
+        };
+        match outcome {
+            Ok(id) => {
+                tx.execute(
+                    "INSERT INTO team_conversation_tasks(task,project,session,turn) VALUES (?1,?2,?3,?4)",
+                    params![id, project.as_str(), origin.0.as_str(), origin.1.as_str()],
+                )
+                .map_err(error)?;
+                admitted.push(id);
+            }
+            Err(code) => refused.push(format!(
+                "- {}: {}",
+                bound_text(&delegation.prompt, 200),
+                runtime::refusal(code)
+            )),
+        }
+    }
+    if !refused.is_empty() {
+        let _ = append_message(
+            tx,
+            project,
+            MessageAuthor::Engine,
+            &format!(
+                "The conversation master's tasks were not handed off:\n{}",
+                refused.join("\n")
+            ),
+            MessageState::Note,
+            now,
+        )?;
+    }
+    if !admitted.is_empty() {
+        tx.execute(
+            "DELETE FROM team_conversation_tasks WHERE project=?1
+             AND task NOT IN (SELECT task FROM team_conversation_tasks WHERE project=?1 ORDER BY task DESC LIMIT ?2)
+             AND (note IS NOT NULL OR task NOT IN (SELECT id FROM team_tasks))",
+            params![project.as_str(), CONVERSATION_TASKS_MAX],
+        )
+        .map_err(error)?;
+    }
+    assert_eq!(admitted.len() + refused.len(), proposed.len());
+    Ok(admitted)
 }
 
 fn rejected(code: &str) -> Outcome {
@@ -1189,7 +1276,11 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
 }
 
 pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms";
-pub(crate) const TASK_COLUMNS: &str = "id,source,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms";
+/// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
+/// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
+/// so the team plan and history treat it like one, but reads as the master's, so the Agents
+/// tab, Team view and TUI say it came from the master.
+pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms";
 
 pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
     let source: String = row.get(1)?;
@@ -1253,6 +1344,43 @@ pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, Engi
             |row| row.get(0),
         )
         .map_err(error)
+}
+
+/// Pauses a pool account that hit a rate or usage limit for as long as a team agent's
+/// account pauses, in the pause every master, team and research turn honours. Takes a
+/// connection and the account's connection. Returns when the pause ends, in ms since the
+/// epoch; a longer pause already set is kept.
+pub(crate) fn pause_account(
+    connection: &Connection,
+    account: &CredentialRef,
+) -> rusqlite::Result<i64> {
+    let pause = runtime::TeamLimits::default().rate_limit_pause;
+    let until = now_ms().saturating_add(i64::try_from(pause.as_millis()).unwrap_or(i64::MAX));
+    let stored: i64 = connection.query_row(
+        "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
+         ON CONFLICT(connection) DO UPDATE SET until_ms=MAX(until_ms,excluded.until_ms)
+         RETURNING until_ms",
+        params![account.as_str(), until],
+        |row| row.get(0),
+    )?;
+    assert!(stored >= until);
+    Ok(stored)
+}
+
+/// Tells until when a pool account stays paused after a limit. Takes a connection and the
+/// account's connection. Returns the end of its pause in ms since the epoch, or `None`
+/// when it is not paused now.
+pub(crate) fn paused_until(
+    connection: &Connection,
+    account: &CredentialRef,
+) -> rusqlite::Result<Option<i64>> {
+    connection
+        .query_row(
+            "SELECT until_ms FROM team_paused_accounts WHERE connection=?1 AND until_ms>?2",
+            params![account.as_str(), now_ms()],
+            |row| row.get(0),
+        )
+        .optional()
 }
 
 /// Reads a project's team plan use, agents, recent tasks and recent conversation.

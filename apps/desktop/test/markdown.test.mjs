@@ -9,6 +9,13 @@ const md = await import("../src/screens/project/markdown.tsx");
 
 const render = (source) => renderToStaticMarkup(createElement(md.MarkdownView, { source, onOpenLink: () => {} }));
 
+const cpuMs = (run) => {
+  const started = process.cpuUsage();
+  const result = run();
+  const used = process.cpuUsage(started);
+  return { result, ms: (used.user + used.system) / 1000 };
+};
+
 test("headings, paragraphs, lists, rules and quotes parse into blocks", () => {
   const blocks = md.parseMarkdown("# Market\n\nFirst line\nsecond line\n\n- one\n* two\n\n1. first\n2) second\n\n---\n\n> quoted *text*\n\n###### Deep");
   assert.deepEqual(blocks.map((block) => block.kind), ["heading", "paragraph", "list", "list", "rule", "quote", "heading"]);
@@ -120,11 +127,12 @@ test("heading sections list every heading in order for saving one section", () =
 
 test("huge or deeply nested input stays bounded", () => {
   const deep = "*".repeat(5000) + "x" + "*".repeat(5000);
-  const started = performance.now();
-  md.parseMarkdown(deep);
-  md.parseMarkdown("[".repeat(20000));
-  md.parseMarkdown("| a ".repeat(2000) + "\n" + "|---".repeat(2000));
-  assert.ok(performance.now() - started < 2000);
+  const { ms } = cpuMs(() => {
+    md.parseMarkdown(deep);
+    md.parseMarkdown("[".repeat(20000));
+    md.parseMarkdown("| a ".repeat(2000) + "\n" + "|---".repeat(2000));
+  });
+  assert.ok(ms < 2000);
   const long = "line\n".repeat(300000);
   const blocks = md.parseMarkdown(long);
   const text = blocks.map((block) => block.kind === "paragraph" ? block.children.map((c) => c.text ?? "").join("") : "").join("");
@@ -137,13 +145,8 @@ test("the renderer never injects raw HTML", () => {
 });
 
 test("heading and list lines that never match parse in linear time", () => {
-  const timed = (source) => {
-    const started = performance.now();
-    const blocks = md.parseMarkdown(source);
-    return { blocks, ms: performance.now() - started };
-  };
   for (const source of ["#" + " ".repeat(16000) + "\u2028", "-" + " ".repeat(200000) + "\u2028", "1." + "\t".repeat(200000) + "\u2029"]) {
-    const { blocks, ms } = timed(source);
+    const { result: blocks, ms } = cpuMs(() => md.parseMarkdown(source));
     assert.ok(ms < 1000, `${JSON.stringify(source.slice(0, 3))} took ${ms} ms`);
     assert.equal(blocks.length, 1);
   }
@@ -158,9 +161,7 @@ test("a full-size line of openers that never close parses inline in linear time"
     "[".repeat(size - 3000) + "](" + "x".repeat(2990), fill("http://a" + ")".repeat(2040) + " ")];
   for (const source of sources) {
     assert.ok(source.length <= size);
-    const started = performance.now();
-    const blocks = md.parseMarkdown(source);
-    const ms = performance.now() - started;
+    const { result: blocks, ms } = cpuMs(() => md.parseMarkdown(source));
     assert.ok(ms < 1500, `${JSON.stringify(source.slice(0, 5))} took ${Math.round(ms)} ms`);
     assert.equal(blocks.length, 1);
   }

@@ -112,14 +112,13 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
     }
     assert!(args.ends_with(&["app-server".into(), "--listen".into(), "stdio://".into()]));
     assert_eq!(built.get_program(), "/usr/bin/sandbox-exec");
-    assert_eq!(
-        args[..3],
-        [
-            "-f".to_owned(),
-            work.path().join("project.sb").to_str().unwrap().to_owned(),
-            installed("codex").to_str().unwrap().to_owned()
-        ]
-    );
+    let mut start = vec![
+        "-f".to_owned(),
+        work.path().join("project.sb").to_str().unwrap().to_owned(),
+    ];
+    start.extend(crazyagent::sandbox::SESSION_SHIM.map(str::to_owned));
+    start.push(installed("codex").to_str().unwrap().to_owned());
+    assert_eq!(args[..start.len()], start);
     let home_text = home.path().to_str().unwrap().to_owned();
     let mut expected = BTreeMap::from([
         ("CODEX_HOME".into(), home_text.clone()),
@@ -130,7 +129,10 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         ("TMPDIR".into(), home_text),
     ]);
     expected.extend(
-        crazyagent::sandbox::AGENT_GIT_ENV.map(|(name, value)| (name.to_owned(), value.to_owned())),
+        crazyagent::sandbox::AGENT_GIT_ENV
+            .into_iter()
+            .chain(crazyagent::sandbox::AGENT_TLS_ENV)
+            .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     assert_eq!(environment(&built), expected);
     assert_eq!(built.get_current_dir(), Some(work.path()));
@@ -255,6 +257,7 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     let home_text = home.path().to_str().unwrap();
     assert_eq!(variables["CLAUDE_CONFIG_DIR"], home_text);
     assert_eq!(variables["CLAUDE_SECURESTORAGE_CONFIG_DIR"], home_text);
+    assert_eq!(variables["CLAUDE_CODE_TMPDIR"], home_text);
     assert!(!variables.contains_key("ANTHROPIC_API_KEY"));
     let args = arguments(&off);
     assert!(
@@ -270,14 +273,10 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     let wrapped = command(&on).unwrap();
     assert_eq!(wrapped.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&wrapped);
-    assert_eq!(
-        args[..3],
-        [
-            "-f".to_owned(),
-            profile.to_str().unwrap().to_owned(),
-            on.executable.to_str().unwrap().to_owned()
-        ]
-    );
+    let mut start = vec!["-f".to_owned(), profile.to_str().unwrap().to_owned()];
+    start.extend(crazyagent::sandbox::SESSION_SHIM.map(str::to_owned));
+    start.push(on.executable.to_str().unwrap().to_owned());
+    assert_eq!(args[..start.len()], start);
     assert!(args.windows(2).any(|pair| pair == ["--tools", "default"]));
     assert!(
         args.windows(2)
@@ -447,6 +446,110 @@ fn run_turn(session: &mut Session, prompt: &str) -> (String, Vec<LaunchEvent>) {
         }
     }
     panic!("turn did not finish: {seen:?}");
+}
+
+const DETACHING_AGENT: &str = r#"#!/bin/sh
+[ "$1" = first-exec ] && exit 3
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; exec "/bin/sh", "-c", q(/usr/bin/nohup /bin/sleep 30 < /dev/null > /dev/null 2>&1 & echo $! > orphan.pid)' < /dev/null > /dev/null 2>&1
+echo $$ > leader.pid
+exec /bin/sleep 30
+"#;
+
+fn private_folder(parent: &Path, name: &str) -> PathBuf {
+    let folder = parent.join(name);
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::canonicalize(folder).unwrap()
+}
+
+fn written_pid(folder: &Path, name: &str) -> Option<rustix::process::Pid> {
+    std::fs::read_to_string(folder.join(name))
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok())
+        .and_then(rustix::process::Pid::from_raw)
+}
+
+#[test]
+fn stopping_a_headless_agent_stops_what_its_shells_detached() {
+    use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+
+    let root = private_dir("crazyagent-detached-agent-");
+    let project = private_folder(root.path(), "project");
+    let home = private_folder(root.path(), "home");
+    let tmp = private_folder(root.path(), "tmp");
+    let bin = private_folder(root.path(), "bin");
+    let harness = bin.join("claude");
+    std::fs::write(&harness, DETACHING_AGENT).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = crazyagent::spawn_gate::status(
+        std::process::Command::new(&harness)
+            .arg("first-exec")
+            .current_dir(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(first.code(), Some(3));
+    let profile = root.path().join("agent.sb");
+    ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+    )
+    .unwrap()
+    .allow_read(&bin)
+    .unwrap()
+    .install(&profile)
+    .unwrap();
+    let session = Session::start(LaunchRequest {
+        harness: "claude-code".into(),
+        executable: harness,
+        working_dir: project.clone(),
+        account: AccountBinding::Subscription { home },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile),
+        limits: LaunchLimits::default(),
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (leader, detached) = loop {
+        if let (Some(leader), Some(session), Some(orphan)) = (
+            written_pid(&project, "leader.pid"),
+            written_pid(&project, "descendant.pid"),
+            written_pid(&project, "orphan.pid"),
+        ) {
+            break (leader, [session, orphan]);
+        }
+        assert!(Instant::now() < deadline, "stand-in agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    for process in detached {
+        assert_ne!(rustix::process::getpgid(Some(process)), Ok(leader));
+        assert_eq!(rustix::process::test_kill_process(process), Ok(()));
+    }
+    session.stop();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let survivors = loop {
+        let survivors: Vec<_> = [leader]
+            .into_iter()
+            .chain(detached)
+            .filter(|process| {
+                rustix::process::test_kill_process(*process) != Err(rustix::io::Errno::SRCH)
+            })
+            .collect();
+        if survivors.is_empty() || Instant::now() >= deadline {
+            break survivors;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    for process in &survivors {
+        let _ = rustix::process::kill_process(*process, rustix::process::Signal::KILL);
+    }
+    assert!(survivors.is_empty(), "{survivors:?} survived the agent");
 }
 
 fn group_alive(group: u32) -> bool {

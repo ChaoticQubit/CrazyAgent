@@ -100,6 +100,13 @@ impl Harness {
         reply.outcome
     }
 
+    async fn try_call(&mut self, command: Command) -> Result<Outcome, String> {
+        let request = self.request(command);
+        let reply = self.engine.apply(request).await.map_err(|e| e.0)?;
+        self.revision = reply.revision.value();
+        Ok(reply.outcome)
+    }
+
     async fn owner(&mut self, action: OwnerVerification) -> Outcome {
         self.call(Command::OwnerVerification { action }).await
     }
@@ -245,7 +252,7 @@ async fn unavailable_attempts_survive_restart_replay_and_revocation() {
         .await
         .unwrap();
     assert_eq!(h.state().await, state);
-    assert_eq!(h.engine.apply(request).await.unwrap(), first);
+    assert_eq!(h.engine.apply(request.clone()).await.unwrap(), first);
     assert_eq!(
         h.owner(OwnerVerification::Accept {
             candidate_id: id("candidate"),
@@ -260,15 +267,28 @@ async fn unavailable_attempts_survive_restart_replay_and_revocation() {
         h.owner(OwnerVerification::Revoke { baseline_id }).await,
         Outcome::Applied
     );
-    assert!(matches!(
+    assert_eq!(
         h.owner(OwnerVerification::Accept {
             candidate_id: id("candidate"),
             attempt_id: id("attempt")
         })
         .await,
-        Outcome::Rejected { .. }
-    ));
+        Outcome::Rejected {
+            code: "candidate_authority_revoked".into()
+        }
+    );
+    assert_eq!(h.engine.apply(request).await.unwrap(), first);
     h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT body FROM verification_attempts WHERE candidate='candidate' AND id='attempt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let kept: VerificationReceipt = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept.outcomes, state.attempts[0].1.outcomes);
 }
 
 #[tokio::test]
@@ -395,7 +415,10 @@ async fn stale_receipt_never_accepts_and_json_success_is_unproven() {
     }
     let mut missing = forged.clone();
     missing.outcomes.remove(&id("code"));
-    assert!(missing.accepts(&state.current).is_err());
+    assert_eq!(
+        missing.accepts(&state.current).unwrap_err().0,
+        "required_evidence_not_passed"
+    );
     let mut tampered = forged.clone();
     tampered.artifacts.values_mut().next().unwrap().push(0);
     assert_eq!(
@@ -495,6 +518,191 @@ async fn retained_attempt_history_remains_bounded_and_retrievable() {
         "verification_capacity"
     );
     assert_eq!(h.state().await.attempts_total, 128);
+    h.engine.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn verification_capacity_counts_live_records_not_superseded_history() {
+    let mut h = Harness::open().await;
+    let current = h.setup().await;
+    let mut revoked = draft();
+    revoked.requirements = "Revoked contract".into();
+    let revoked_id = revoked.identity().unwrap();
+    assert_eq!(
+        h.call(Command::ProposeBaseline {
+            draft: revoked.clone()
+        })
+        .await,
+        Outcome::Applied
+    );
+    assert_eq!(
+        h.owner(OwnerVerification::Revoke {
+            baseline_id: revoked_id.clone()
+        })
+        .await,
+        Outcome::Applied
+    );
+    let contract = |requirements: String| {
+        let mut contract = draft();
+        contract.requirements = requirements;
+        contract
+    };
+    assert_eq!(
+        h.call(Command::CreateProject {
+            project_id: ProjectId::new("other").unwrap(),
+            spec: ProjectSpec {
+                name: "other".into(),
+                repositories: vec![]
+            }
+        })
+        .await,
+        Outcome::Applied
+    );
+    let other = |requirements: &str| {
+        let mut other = contract(requirements.into());
+        other.project_id = ProjectId::new("other").unwrap();
+        other
+    };
+    let superseded = other("Superseded contract");
+    let latest = other("Latest contract");
+    for approved in [&superseded, &latest] {
+        assert_eq!(
+            h.call(Command::ProposeBaseline {
+                draft: approved.clone()
+            })
+            .await,
+            Outcome::Applied
+        );
+        assert_eq!(
+            h.owner(OwnerVerification::Approve {
+                baseline_id: approved.identity().unwrap()
+            })
+            .await,
+            Outcome::Applied
+        );
+    }
+    let pending = |n: usize| contract(format!("Pending contract {n}"));
+    for n in 4..128 {
+        assert_eq!(
+            h.call(Command::ProposeBaseline { draft: pending(n) }).await,
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        h.try_call(Command::ProposeBaseline {
+            draft: pending(128)
+        })
+        .await,
+        Ok(Outcome::Applied)
+    );
+    let database = h.root.path().join("db");
+    let count = |sql: &str| -> i64 {
+        rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count("SELECT COUNT(*) FROM verification_baselines"), 128);
+    let kept = |id: &BaselineId| {
+        format!(
+            "SELECT COUNT(*) FROM verification_baselines WHERE id='{}'",
+            id.as_str()
+        )
+    };
+    assert_eq!(count(&kept(&superseded.identity().unwrap())), 0);
+    assert_eq!(count(&kept(&current)), 1);
+    assert_eq!(count(&kept(&latest.identity().unwrap())), 1);
+    assert_eq!(count(&kept(&revoked_id)), 1);
+    assert_eq!(
+        h.try_call(Command::ProposeBaseline {
+            draft: pending(129)
+        })
+        .await,
+        Err("verification_capacity".into())
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM verification_baselines"), 128);
+    for n in 4..129 {
+        assert_eq!(count(&kept(&pending(n).identity().unwrap())), 1, "{n}");
+    }
+    assert_eq!(
+        h.call(Command::ProposeBaseline { draft: revoked }).await,
+        Outcome::Applied
+    );
+    assert_eq!(
+        h.owner(OwnerVerification::Approve {
+            baseline_id: revoked_id
+        })
+        .await,
+        Outcome::Rejected {
+            code: "baseline_revoked".into()
+        }
+    );
+    for n in 0..128 {
+        assert_eq!(
+            h.owner(OwnerVerification::Verify {
+                candidate_id: id("candidate"),
+                attempt_id: id(&format!("attempt-{n:03}"))
+            })
+            .await,
+            Outcome::Applied
+        );
+    }
+    let register = |candidate: String| OwnerVerification::Register {
+        id: id(&candidate),
+        task_id: TaskId::new("task").unwrap(),
+        snapshot: snapshot(),
+        environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+    };
+    assert_eq!(
+        h.owner(register("candidate-001".into())).await,
+        Outcome::Applied
+    );
+    assert_eq!(
+        h.try_call(Command::OwnerVerification {
+            action: OwnerVerification::Verify {
+                candidate_id: id("candidate-001"),
+                attempt_id: id("fresh"),
+            }
+        })
+        .await,
+        Ok(Outcome::Applied)
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM verification_attempts"), 128);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM verification_attempts WHERE candidate='candidate-001'"),
+        1
+    );
+    for n in 2..128 {
+        assert_eq!(
+            h.owner(register(format!("candidate-{n:03}"))).await,
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        h.try_call(Command::OwnerVerification {
+            action: register("candidate-128".into())
+        })
+        .await,
+        Ok(Outcome::Applied)
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM verification_candidates"), 128);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM verification_candidates WHERE id='candidate'"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM verification_attempts WHERE candidate='candidate'"),
+        0
+    );
+    match h
+        .owner(OwnerVerification::Inspect {
+            candidate_id: id("candidate-128"),
+        })
+        .await
+    {
+        Outcome::Verification { state } => assert_eq!(state.attempts_total, 0),
+        other => panic!("{other:?}"),
+    }
     h.engine.close().await.unwrap();
 }
 
@@ -772,7 +980,14 @@ fn bounded_imports_and_path_safe_snapshot_identity() {
         draft.origin = origin;
         assert!(draft.identity().is_ok());
     }
-    assert!(BaselineDraft::import(&vec![b' '; 32769]).is_err());
+    let mut padded = serde_json::to_vec(&original).unwrap();
+    padded.resize(32768, b' ');
+    assert_eq!(BaselineDraft::import(&padded).unwrap(), original);
+    padded.push(b' ');
+    assert_eq!(
+        BaselineDraft::import(&padded).unwrap_err().0,
+        "baseline_bounds"
+    );
     let mut invalid = original.clone();
     invalid.retry_limit = 1;
     assert!(invalid.validate().is_err());
@@ -885,23 +1100,62 @@ fn worker_can_draft_content_but_cannot_allocate_or_admit_a_baseline() {
         crazyagent::verification::BaselineDraft::import(&serde_json::to_vec(&draft).unwrap())
             .is_ok()
     );
-    assert!(serde_json::from_value::<Command>(command).is_err());
-    for operation in [
-        "Approve",
-        "Revoke",
-        "Register",
-        "Escalate",
-        "FullSuite",
-        "Verify",
-        "Accept",
+    refused_variant(command, "ProposeBaseline");
+    let baseline_id = || BaselineId::new("b".repeat(64)).unwrap();
+    for action in [
+        OwnerVerification::Approve {
+            baseline_id: baseline_id(),
+        },
+        OwnerVerification::Revoke {
+            baseline_id: baseline_id(),
+        },
+        OwnerVerification::Register {
+            id: id("candidate"),
+            task_id: TaskId::new("task").unwrap(),
+            snapshot: snapshot(),
+            environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+        },
+        OwnerVerification::Escalate {
+            candidate_id: id("candidate"),
+            risk: Risk::Low,
+        },
+        OwnerVerification::FullSuite {
+            candidate_id: id("candidate"),
+        },
+        OwnerVerification::Verify {
+            candidate_id: id("candidate"),
+            attempt_id: id("attempt"),
+        },
+        OwnerVerification::Accept {
+            candidate_id: id("candidate"),
+            attempt_id: id("attempt"),
+        },
     ] {
-        let command =
-            serde_json::json!({"kind":"OwnerVerification", "action":{"operation":operation}});
-        assert!(serde_json::from_value::<Command>(command).is_err());
+        let command = serde_json::to_value(Command::OwnerVerification { action }).unwrap();
+        refused_variant(command, "OwnerVerification");
     }
     let request = serde_json::json!({
         "protocol_version":1,"client_id":"worker","request_id":"operation",
         "expected_revision":"0","command":{"kind":"ProposeBaseline","draft":draft}
     });
-    assert!(serde_json::from_value::<WireRequest>(request).is_err());
+    let error = serde_json::from_value::<WireRequest>(request)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unknown variant `ProposeBaseline`"),
+        "{error}"
+    );
+}
+
+/// Checks that a well-formed command is refused only because its kind is hidden.
+/// Takes the command JSON and its kind. Panics unless decoding fails with
+/// serde's unknown-variant error for exactly that kind.
+fn refused_variant(command: serde_json::Value, kind: &str) {
+    let error = serde_json::from_value::<Command>(command)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with(&format!("unknown variant `{kind}`")),
+        "{kind}: {error}"
+    );
 }

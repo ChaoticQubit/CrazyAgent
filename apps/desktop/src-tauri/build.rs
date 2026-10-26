@@ -30,6 +30,7 @@ fn main() {
         "desktop_team_graph",
         "desktop_terminal_attach",
         "desktop_terminal_input",
+        "desktop_terminal_prompt",
         "desktop_terminal_resize",
         "desktop_terminal_detach",
         "desktop_update_project_setup",
@@ -120,6 +121,8 @@ fn main() {
         "desktop_project_plugins",
         "desktop_agents",
         "desktop_stop_agent",
+        "desktop_account_use",
+        "desktop_release_account",
         "desktop_interrupt_agent",
         "desktop_restart_agent",
         "desktop_pick_folder",
@@ -133,6 +136,8 @@ fn main() {
         "desktop_install_update",
         "desktop_restart_app",
         "desktop_link_cli",
+        "desktop_engine_versions",
+        "desktop_restart_engine",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

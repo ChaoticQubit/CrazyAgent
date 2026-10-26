@@ -892,6 +892,83 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
     team.shutdown().unwrap();
 }
 
+/// The owner moved the project folder away before the master started. The agent and the
+/// owner's note name the plain code of the failed file step, never the system's error text
+/// or a path.
+#[test]
+fn a_master_whose_project_folder_is_gone_names_the_plain_file_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let mut setup = stored("team-moved", vec![]);
+    setup.folder = base.join("moved-away").to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-moved", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Message {
+                project_id: setup.project_id.clone(),
+                text: "Plan the page".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 30\n");
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(pool.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    team.tick().unwrap();
+    let failed = status(&connection, &setup).unwrap();
+    let line = "the project folder could not be opened. (io_not_found)";
+    assert_eq!(failed.agents.len(), 1, "{failed:#?}");
+    assert_eq!(failed.agents[0].status, AgentStatus::Failed);
+    assert_eq!(failed.agents[0].problem.as_deref(), Some(line));
+    assert_eq!(
+        failed
+            .messages
+            .iter()
+            .map(|m| (m.author, m.state, m.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (MessageAuthor::Owner, MessageState::Failed, "Plan the page"),
+            (
+                MessageAuthor::Engine,
+                MessageState::Note,
+                format!("The master could not start: {line}").as_str()
+            ),
+        ]
+    );
+    let shown = format!("{failed:?}");
+    assert!(
+        !shown.contains("os error") && !shown.contains("moved-away"),
+        "{shown}"
+    );
+    assert!(!team.has_live_agents());
+    team.shutdown().unwrap();
+}
+
 #[test]
 fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -1016,6 +1093,31 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
 
 #[test]
 fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
+    warm_agents_ended(b"#!/bin/sh\nexit 1\n");
+}
+
+#[test]
+fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
+    let cold = warm_agents_ended(b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n");
+    for agent in &cold.agents {
+        assert_eq!(
+            agent.problem.as_deref(),
+            Some("The agent process closed. (launch_protocol_failed)"),
+            "{cold:#?}"
+        );
+    }
+    assert!(
+        cold.messages
+            .iter()
+            .any(|m| m.text.contains(". (launch_protocol_failed)")),
+        "{cold:#?}"
+    );
+}
+
+/// Runs a project that keeps its two codex sub-agents warm on a stand-in harness until a
+/// warm agent that ended before any work turns keeping warm off.
+/// Input: the stand-in harness script. Output: the team status once both agents ended.
+fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
@@ -1073,7 +1175,7 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let executable = harness(&base, b"#!/bin/sh\nexit 1\n");
+    let executable = harness(&base, script);
     let source = pool.clone();
     let mut team = runtime::TeamRuntime::open(
         &database,
@@ -1116,6 +1218,7 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
     );
     assert!(!team.has_live_agents());
     team.shutdown().unwrap();
+    cold
 }
 
 #[test]
@@ -1177,19 +1280,15 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let seen = folder.join("seen-config.toml");
     let executable = harness(
         &base,
-        format!(
-            "#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > \"{}\"\nexit 1\n",
-            seen.display()
-        )
-        .as_bytes(),
+        b"#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > seen-config.toml\nexit 1\n",
     );
     let engine_folder = base.join("engine-bin");
     std::fs::create_dir(&engine_folder).unwrap();
     let engine = engine_folder.join("crazyagent");
-    std::fs::write(&engine, b"").unwrap();
+    std::fs::write(&engine, b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
     let source = pool.clone();
     assert_eq!(
         runtime::TeamRuntime::open(
@@ -1238,6 +1337,9 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         Some(format!("worktrees/agent-{}", master.id)),
         "the master works in its own git worktree like every agent"
     );
+    let seen = folder
+        .join(master.worktree.as_deref().unwrap())
+        .join("seen-config.toml");
     let config: toml::Table = std::fs::read_to_string(&seen)
         .unwrap_or_else(|e| panic!("the probe harness saw no config ({e}): {team_now:#?}"))
         .parse()
@@ -1806,5 +1908,167 @@ fn delivered_task_history_makes_room_while_undelivered_results_and_live_work_sta
         project_rows(&tx, "team_tasks", "team-tasks"),
         rows,
         "a refusal deletes nothing"
+    );
+}
+
+#[test]
+fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leave_a_note() {
+    let (directory, mut connection) = database();
+    let mut teams = Vec::new();
+    for (project, sub) in [
+        (
+            "conversation-team",
+            vec![HarnessSlot {
+                harness: "codex".into(),
+                agents: 2,
+                tools: true,
+            }],
+        ),
+        ("conversation-alone", vec![]),
+    ] {
+        let setup = stored(project, sub);
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                params![
+                    setup.project_id.as_str(),
+                    serde_json::to_string(&setup).unwrap()
+                ],
+            )
+            .unwrap();
+        teams.push(setup.project_id);
+    }
+    let unplanned = ProjectId::new("conversation-unplanned").unwrap();
+    let drop = directory.path().join(tool::DROP_FILE);
+    let calls = [
+        ("Write the README", None),
+        ("Check the tests", Some("claude-code")),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(id, (task, harness))| {
+        let mut arguments = serde_json::json!({ "task": task });
+        if let Some(harness) = harness {
+            arguments["harness"] = (*harness).into();
+        }
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool::TOOL_NAME, "arguments": arguments}})
+        .to_string()
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    let pool = access("conversation-team", &["codex-signed-in"]);
+    let session = SessionId::new("conversation-session").unwrap();
+    let turn = RequestId::new("conversation-turn").unwrap();
+    let mut admitted = Vec::new();
+    for project in teams.iter().chain([&unplanned]) {
+        tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
+        let proposed = tool::take(&drop);
+        assert_eq!(proposed.len(), 2);
+        assert!(!drop.exists());
+        let tx = connection.transaction().unwrap();
+        admitted.push(
+            admit_conversation(&tx, &pool, project, (&session, &turn), &proposed, 1_000).unwrap(),
+        );
+        tx.commit().unwrap();
+    }
+    assert_eq!(admitted[0].len(), 1);
+    assert_eq!(admitted[1..], [Vec::<i64>::new(), Vec::new()]);
+    let task: (String, Option<i64>, String, bool, String, String) = connection
+        .query_row(
+            "SELECT source,turn,harness,tools,prompt,status FROM team_tasks WHERE id=?1",
+            [admitted[0][0]],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        task,
+        (
+            "owner".into(),
+            None,
+            "codex".into(),
+            true,
+            "Write the README".into(),
+            "queued".into()
+        )
+    );
+    let tasks: i64 = connection
+        .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tasks, 1);
+    let notes = |project: &ProjectId| -> Vec<(String, String, String)> {
+        connection
+            .prepare("SELECT author,state,text FROM team_messages WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([project.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let note = |lines: &str| {
+        vec![(
+            "engine".to_owned(),
+            "note".to_owned(),
+            format!("The conversation master's tasks were not handed off:\n{lines}"),
+        )]
+    };
+    assert_eq!(
+        notes(&teams[0]),
+        note("- Check the tests: that harness is not in the team plan")
+    );
+    assert_eq!(
+        notes(&teams[1]),
+        note(
+            "- Write the README: the team plan has no sub-agents\n- Check the tests: the team plan has no sub-agents"
+        )
+    );
+    assert_eq!(
+        notes(&unplanned),
+        note(
+            "- Write the README: this project has no team plan\n- Check the tests: this project has no team plan"
+        )
+    );
+
+    let tx = connection.transaction().unwrap();
+    let setup = crate::project_setup::load_setup(&tx, &teams[0])
+        .unwrap()
+        .unwrap();
+    let own = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "Write the changelog",
+        TaskSource::Owner,
+        None,
+        2_000,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let sources: Vec<(i64, TaskSource)> = status(&connection, &setup)
+        .unwrap()
+        .tasks
+        .iter()
+        .map(|task| (task.id, task.source))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            (admitted[0][0], TaskSource::Master),
+            (own, TaskSource::Owner)
+        ],
+        "the clients read a conversation master's task as the master's, the owner's own as theirs"
     );
 }

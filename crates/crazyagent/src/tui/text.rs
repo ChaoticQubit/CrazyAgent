@@ -41,8 +41,9 @@ pub fn cut(text: &str, limit: usize, ellipsis: &str) -> String {
 }
 
 /// Wraps text on spaces to a width; words longer than the width are split.
-/// Inputs: text and width. Output: lines no wider than the width; explicit
-/// newlines start new lines; empty text gives no lines.
+/// Inputs: text and width. Output: lines no wider than the width, except that a
+/// character wider than the width gets a line of its own; explicit newlines start
+/// new lines; empty text gives no lines.
 pub fn wrap(text: &str, limit: usize) -> Vec<String> {
     assert!(limit > 0);
     let mut lines = Vec::new();
@@ -70,7 +71,11 @@ pub fn wrap(text: &str, limit: usize) -> Vec<String> {
                         used += char_width(*character);
                         used > limit
                     })
-                    .map_or(rest.len(), |(index, _)| index);
+                    .map_or(rest.len(), |(index, character)| match index {
+                        0 => character.len_utf8(),
+                        _ => index,
+                    });
+                assert!(split > 0);
                 lines.push(rest[..split].to_owned());
                 rest = &rest[split..];
             }
@@ -279,6 +284,36 @@ pub fn thumb(visible: usize, offset: usize, total: usize) -> (usize, usize) {
     (top.min(visible - size), size)
 }
 
+/// The code a screen shows in place of a problem that is not a plain engine code.
+pub const UNPLAIN_CODE: &str = "engine_error_unplain";
+
+/// The longest problem code a screen shows as it is.
+const CODE_BYTES_MAX: usize = 96;
+
+/// Says whether a problem is a plain engine code a screen may show.
+/// Input: the problem. Output: true for 1 to 96 lowercase ASCII letters,
+/// digits or underscores; anything else may be raw error text.
+pub fn plain_code(problem: &str) -> bool {
+    !problem.is_empty()
+        && problem.len() <= CODE_BYTES_MAX
+        && problem
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// The screen's sentence for a problem it has no copy for, naming the code.
+/// Inputs: the sentence and the problem. Output: "<sentence> (code: <code>)",
+/// with `UNPLAIN_CODE` in place of a problem that is not a plain code, so raw
+/// error text never reaches the screen.
+pub fn coded(sentence: &str, problem: &str) -> String {
+    let code = if plain_code(problem) {
+        problem
+    } else {
+        UNPLAIN_CODE
+    };
+    format!("{sentence} (code: {code})")
+}
+
 /// Plain text of a line, for tests and copy.
 /// Input: the line. Output: its characters without styles.
 #[cfg(test)]
@@ -310,6 +345,31 @@ mod tests {
         assert_eq!(wrap("", 10), Vec::<String>::new());
         assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(wrap("one\ntwo three", 5), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn wrap_gives_a_character_wider_than_the_width_its_own_line() {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send([
+                wrap("漢", 1),
+                wrap("a漢b", 1),
+                wrap("漢字 x", 1),
+                wrap("漢字", 3),
+            ]);
+        });
+        let wrapped = receive
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("wrap must return for every width");
+        assert_eq!(
+            wrapped,
+            [
+                vec!["漢"],
+                vec!["a", "漢", "b"],
+                vec!["漢", "字", "x"],
+                vec!["漢", "字"]
+            ]
+        );
     }
 
     #[test]
@@ -406,5 +466,35 @@ mod tests {
             .map(plain)
             .collect();
         assert_eq!(ascii, ["one    #", "two    |", "three  |", "four   |"]);
+    }
+
+    #[test]
+    fn a_problem_without_copy_names_its_code_and_never_its_raw_text() {
+        assert_eq!(
+            coded("That didn't work. Try again.", "pool_summary_bounds"),
+            "That didn't work. Try again. (code: pool_summary_bounds)"
+        );
+        let longest = "a".repeat(96);
+        assert_eq!(coded("No.", &longest), format!("No. (code: {longest})"));
+        assert!(plain_code(UNPLAIN_CODE));
+        let too_long = "a".repeat(97);
+        for raw in [
+            "",
+            "Permission denied (os error 13)",
+            "database is locked",
+            "/Users/owner/Projects/secret",
+            "Pool_Missing",
+            "pool-missing",
+            "pool missing",
+            "pöol",
+            &too_long,
+        ] {
+            assert!(!plain_code(raw), "{raw:?}");
+            assert_eq!(
+                coded("Something went wrong. Try again.", raw),
+                "Something went wrong. Try again. (code: engine_error_unplain)",
+                "{raw:?}"
+            );
+        }
     }
 }

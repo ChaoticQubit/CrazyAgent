@@ -2,12 +2,13 @@
 
 ## Minimal flag check (pseudocode, applies to any language)
 
+The config is fetched at runtime from a config service, NOT hardcoded. `new_checkout` is the new path and lands disabled first; `legacy_checkout` is the old path and the default.
+
 ```
-# Config is fetched at runtime from a config service, NOT hardcoded.
 if config.enabled("new_checkout_flow", user=ctx.user):
-    return new_checkout(ctx)      # new path, lands disabled first
+    return new_checkout(ctx)
 else:
-    return legacy_checkout(ctx)   # old path, default
+    return legacy_checkout(ctx)
 ```
 
 Key properties:
@@ -17,9 +18,9 @@ Key properties:
 
 ## Percentage / staged rollout
 
+The config service returns true for a deterministic hash of the user id, so a given user stays in a stable bucket as the percentage ramps.
+
 ```
-# Config service returns true for a deterministic hash of the user id
-# so a given user stays in a stable bucket as the percentage ramps.
 enabled = config.percentage("new_checkout_flow") >= hash_bucket(user.id)
 ```
 
@@ -35,21 +36,23 @@ Ramp schedule with metric gates (abort and set back to previous step if a gate f
 
 ## Dark launch
 
+The new pipeline runs for real and exercises load and shadow writes; its metrics are compared against legacy, but the user still sees the old output.
+
 ```
-result = new_pipeline(ctx)     # runs for real, exercises load + shadow writes
-log_shadow_metrics(result)     # compare against legacy, but...
-return legacy_pipeline(ctx)    # ...user still sees the old output
+result = new_pipeline(ctx)
+log_shadow_metrics(result)
+return legacy_pipeline(ctx)
 ```
 
 Once shadow metrics match/beat legacy, switch the return to the new path via a flag ramp.
 
 ## Kill switch
 
-Every risky subsystem gets an independent flag defaulting to on-but-abortable:
+Every risky subsystem gets an independent flag defaulting to on-but-abortable. Turning it off degrades gracefully, with no deploy needed:
 
 ```
 if not config.enabled("recommendations_v2"):
-    return []          # degrade gracefully; no deploy needed to disable
+    return []
 ```
 
 ## Rollback via config, not rebuild

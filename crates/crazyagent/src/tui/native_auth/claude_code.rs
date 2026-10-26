@@ -298,7 +298,9 @@ impl State {
             .observe(query, reply.fact.generation, challenge.clone())
             .is_err()
         {
-            self.notice = "Claude challenge changed; close and read the original operation";
+            self.notice = std::borrow::Cow::Borrowed(
+                "Claude challenge changed; close and read the original operation",
+            );
         } else if !had_prompt && self.claude_code.accepts_code() {
             self.selected = 0;
         }

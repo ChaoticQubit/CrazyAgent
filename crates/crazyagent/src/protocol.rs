@@ -432,9 +432,50 @@ pub fn decode_request(frame: &[u8]) -> Result<WireRequest, ProtocolError> {
     Ok(request)
 }
 
+/// The code an owner window may show for a failure: the code itself when it is 1 to 96
+/// lowercase ASCII letters, digits or underscores, else [`TEXT_WITHHELD`], so error text,
+/// paths or provider output never reach a window. Input: the raw failure code. Output: the
+/// code to show.
+pub fn plain_code(raw: &str) -> &str {
+    let plain = (1..=96).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    if plain { raw } else { TEXT_WITHHELD }
+}
+
+/// The fixed code shown in place of a failure whose code is not plain.
+pub const TEXT_WITHHELD: &str = "engine_text_withheld";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_codes_reach_an_owner_window() {
+        for code in [
+            "claude_host_deadline",
+            "owner_busy",
+            "a",
+            "x9_",
+            &"a".repeat(96),
+        ] {
+            assert_eq!(plain_code(code), code);
+        }
+        for raw in [
+            "",
+            "No approved account in the assigned pool",
+            "unclassified-native-host-error",
+            "master_runtime_cleanup_uncertain:codex_host_kill_uncertain",
+            "open /Users/mira/.config/token: permission denied",
+            "Owner_Busy",
+            "caf\u{e9}_code",
+            &"a".repeat(97),
+        ] {
+            assert_eq!(plain_code(raw), TEXT_WITHHELD, "{raw}");
+        }
+        assert_eq!(plain_code(TEXT_WITHHELD), TEXT_WITHHELD);
+    }
 
     pub fn request() -> WireRequest {
         WireRequest {

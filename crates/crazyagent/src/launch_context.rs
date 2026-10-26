@@ -16,7 +16,10 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const HEADER_BYTES_MAX: usize = 1536;
+pub const HEADER_BYTES_MAX: usize = HEADER_TITLE.len()
+    + "You are working on the project \"\".\n".len()
+    + NAME_BYTES_MAX
+    + 2 * ("Project folder: \n".len() + FOLDER_BYTES_MAX);
 pub const BRIEF_BYTES_MAX: usize = crate::project_setup::CONTEXT_CHUNK_BYTES;
 pub const INDEX_ITEMS_MAX: usize = crate::project_setup::CONTEXT_ITEMS_MAX;
 pub const INDEX_BYTES_MAX: usize = 7 * 1024;
@@ -34,6 +37,7 @@ const SECTION_SLACK: usize = 512;
 const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
+const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
@@ -78,6 +82,7 @@ pub struct AgentContext {
 pub struct Installed {
     arguments: Vec<OsString>,
     removals: Vec<PathBuf>,
+    copies: Option<PathBuf>,
     _lock: File,
 }
 
@@ -105,20 +110,78 @@ pub fn for_project(
     })
 }
 
-/// Builds the startup instruction for the engine's own project master conversation, which
-/// runs with its tools off: the same project context and approved memories every agent
-/// gets, then the names of the approved skills and MCP servers that team agents with tools
-/// on receive. No secret value, command, URL or file of a server is read or given.
-/// Input: a transaction the caller holds on `engine.db` and the project. Output: at most
+/// Reads the project's master tools switch: the team plan's `master_tools`, the value the
+/// Team settings write. A project without a stored setup has no switch and runs tools off.
+/// Input: a transaction on `engine.db` and the project. Output: the switch, or a plain code.
+pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, LaunchError> {
+    Ok(crate::project_setup::load_setup(tx, project)
+        .map_err(unavailable)?
+        .is_some_and(|setup| setup.team.master_tools))
+}
+
+/// Builds the startup instruction for the engine's own project master conversation: the
+/// same project context and approved memories every agent gets, then with tools on what
+/// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
+/// the approved skills and MCP servers that team agents with tools on receive. No secret
+/// value, command, URL or file of a server is read or given. Input: a transaction the caller
+/// holds on `engine.db`, the project and its master tools switch. Output: at most
 /// `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown, or a plain code.
-pub fn for_master(tx: &Transaction<'_>, project: &ProjectId) -> Result<String, LaunchError> {
+pub fn for_master(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    tools: bool,
+) -> Result<String, LaunchError> {
     let root = engine_root(tx)?;
-    let plugins = crate::storage::plugins::effective(tx, &root, project)
-        .map_err(|problem| LaunchError(problem.0))?;
     let mut text = project_instructions(tx, project)?;
-    text.push_str(&team_index(&plugins));
+    if tools {
+        let setup = crate::project_setup::load_setup(tx, project)
+            .map_err(unavailable)?
+            .ok_or_else(|| failure("launch_context_master_tools_without_plan"))?;
+        text.push_str(&master_tools_section(&setup));
+    } else {
+        let plugins = crate::storage::plugins::effective(tx, &root, project)
+            .map_err(|problem| LaunchError(problem.0))?;
+        text.push_str(&team_index(&plugins));
+    }
     assert!(text.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
     Ok(text)
+}
+
+/// Tells a conversation master whose tools are on what it can do and how it starts a
+/// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
+/// to the team, and the team plan's sub-agents, or plainly that the plan has none.
+/// Input: the project setup. Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
+pub(crate) fn master_tools_section(setup: &StoredSetup) -> String {
+    let mut section = format!(
+        "\n## Your tools\n\nYour tools are on in this conversation. You can read and search files, edit them and run shell commands in this conversation's own git worktree, your working folder. You cannot write outside it; the project folder itself stays read-only to you.\n\nTo start a sub-agent, call the `{}` tool of the `{}` MCP server with the task in plain words and, if you choose, a harness from the team plan. Each call hands over one task, at most {} in one reply. Start sub-agents only with this tool. Never use your harness's own sub-agent tools, such as Codex's `spawn_agent`, `followup_task`, `send_message` or `wait_agent`: CrazyAgent stops any agent they start, and only agents started with this tool run on the project's pool and appear in the project's Agents tab and Team view. When your reply ends, CrazyAgent checks each task against the team plan and runs it in its own git worktree. Its full progress and result show in the project's Team view. When it ends, a short note on how it went comes back to this conversation as an `Engine:` line you see on your next turn.\n\n",
+        crate::team::tool::TOOL_NAME,
+        crate::team::tool::SERVER_NAME,
+        crate::team::DELEGATIONS_PER_REPLY_MAX
+    );
+    if setup.team.sub_harnesses.is_empty() {
+        section.push_str("This project's team plan has no sub-agents, so CrazyAgent refuses every task you hand over. Do the work yourself, or tell the owner to add sub-agents in the project's Team settings.\n");
+    } else {
+        section.push_str("The team plan's sub-agents:\n");
+        let mut left = 0;
+        for slot in &setup.team.sub_harnesses {
+            let line = format!(
+                "- {}: up to {} agents, tools {}\n",
+                clip(&slot.harness, NAME_BYTES_MAX),
+                slot.agents,
+                if slot.tools { "on" } else { "off" }
+            );
+            if left > 0 || section.len() + line.len() > TEAM_INDEX_BYTES_MAX {
+                left += 1;
+                continue;
+            }
+            section.push_str(&line);
+        }
+        if left > 0 {
+            section.push_str(&format!("- and {left} more\n"));
+        }
+    }
+    assert!(section.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
+    section
 }
 
 fn engine_root(connection: &Connection) -> Result<PathBuf, LaunchError> {
@@ -257,6 +320,7 @@ impl AgentContext {
         let mut installed = Installed {
             arguments: Vec::new(),
             removals: vec![state.clone()],
+            copies: None,
             _lock: lock,
         };
         remove(&state);
@@ -266,8 +330,9 @@ impl AgentContext {
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
-            installed.removals.extend([config.clone(), copies.clone()]);
-            remove(&copies);
+            installed.removals.push(config.clone());
+            installed.copies = Some(home.to_path_buf());
+            remove_copies(home);
             if skills {
                 directory(&home.join("skills"), false)?;
                 self.copy_skills(&copies)?;
@@ -339,10 +404,18 @@ impl Installed {
 }
 
 impl Drop for Installed {
+    /// Deletes the launch's files, then releases the home lock on its open file
+    /// description, so a process that shares it, such as a child another thread is
+    /// starting, can never keep the home busy after the launch ends.
     fn drop(&mut self) {
         for path in &self.removals {
             remove(path);
         }
+        if let Some(home) = &self.copies {
+            remove_copies(home);
+        }
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
     }
 }
 
@@ -363,7 +436,7 @@ fn size(bytes: u64) -> String {
 }
 
 fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> String {
-    let mut header = String::from("# Project context from CrazyAgent\n\n");
+    let mut header = String::from(HEADER_TITLE);
     let mut brief = String::new();
     let mut index = String::new();
     match setup {
@@ -593,6 +666,36 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
         .map_err(|_| failure("launch_home_busy"))?;
     Ok(file)
 }
+
+/// Removes the Codex skill copies at `<home>/skills/crazyagent` without resolving `skills`
+/// by path, because the agent may have replaced that folder with a link: the copies are
+/// moved up into the verified home through descriptors and removed there. A `skills` that
+/// is not a real folder of this user is left alone. Input: the validated agent home.
+#[cfg(unix)]
+fn remove_copies(home: &Path) {
+    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(parent) = rustix::fs::open(home, folder, Mode::empty()) else {
+        return;
+    };
+    let Ok(skills) = rustix::fs::openat(&parent, "skills", folder, Mode::empty()) else {
+        return;
+    };
+    if !rustix::fs::fstat(&skills)
+        .is_ok_and(|stat| stat.st_uid == rustix::process::geteuid().as_raw())
+    {
+        return;
+    }
+    let parked = format!(".{STATE}-skills-{}", std::process::id());
+    remove(&home.join(&parked));
+    if rustix::fs::renameat(&skills, STATE, &parent, parked.as_str()).is_ok() {
+        remove(&home.join(&parked));
+    }
+}
+
+/// Leaves skill copies in place where descriptor-relative removal does not exist; no
+/// launch reaches this, because the home lock is refused first. Input: unused.
+#[cfg(not(unix))]
+fn remove_copies(_home: &Path) {}
 
 fn remove(path: &Path) {
     match fs::symlink_metadata(path) {

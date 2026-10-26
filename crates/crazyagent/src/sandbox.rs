@@ -15,15 +15,24 @@ use std::process::Command;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod test_agent;
+pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
+/// grant whole roots and cannot keep a folder inside one out of reach.
+pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
+
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
+const HIDDEN_MAX: usize = 4;
+const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
 const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
@@ -39,7 +48,6 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/private/etc",
     "/private/var/db",
     "/private/var/select",
-    "/dev",
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/opt/homebrew/lib",
@@ -188,6 +196,18 @@ pub const AGENT_GIT_ENV: [(&str, &str); 5] = [
     ("GIT_CONFIG_VALUE_0", ""),
 ];
 
+/// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
+/// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
+/// Codex does through rustls-native-certs, finds none there because every agent sandbox
+/// denies the keychain services, and fails every HTTPS request. Elsewhere the harness's
+/// own platform store is left as it is.
+#[cfg(target_os = "macos")]
+pub const AGENT_TLS_ENV: [(&str, &str); 1] = [("SSL_CERT_FILE", "/private/etc/ssl/cert.pem")];
+
+/// No fixed TLS setting outside macOS: the platform's own certificate store is reachable.
+#[cfg(not(target_os = "macos"))]
+pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
+
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
 /// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
@@ -232,7 +252,8 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
 
 /// Builds the environment of every agent process in launch order: `base`, then the
 /// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`].
+/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`] and
+/// [`AGENT_TLS_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
@@ -267,7 +288,7 @@ pub fn agent_env<'a>(
         }
         set(&mut env, name, value);
     }
-    for (name, value) in AGENT_GIT_ENV {
+    for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
     }
     if env.len() > AGENT_ENV_MAX {
@@ -280,11 +301,27 @@ pub fn agent_env<'a>(
     Ok(env)
 }
 
+/// The session shim a headless agent starts through inside `sandbox-exec`, followed by the
+/// harness program and its arguments. It joins the engine's process group, starts a new
+/// session and replaces itself with the harness, so the agent holds no controlling terminal
+/// and its pid stays its process group. When the session cannot start it exits unstarted.
+/// Handed a [`warden::WARDEN_FD`], it first forks the run's warden (see [`warden::Warden`])
+/// and keeps that descriptor and variable from the harness.
+#[cfg(unix)]
+pub const SESSION_SHIM: [&str; 5] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-e",
+    r#"setpgrp(0, getpgrp(getppid())) && POSIX::setsid() > 0 or die "crazyagent: no new session: $!\n"; if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#,
+    "--",
+];
+
 /// Builds the one command every sandboxed headless agent process starts from: `-f
-/// <profile> <program>` under `sandbox-exec`, a cleared environment holding exactly
-/// [`agent_env`], and its own process group. Inputs: the installed profile, the absolute
-/// program, the base variables and the harness's variables (None removes one).
-/// Output: the command, or `Invalid` when any variable fails [`agent_variable_allowed`].
+/// <profile>`, the [`SESSION_SHIM`] and `<program>` under `sandbox-exec`, a cleared
+/// environment holding exactly [`agent_env`], and its own process group. Inputs: the
+/// installed profile, the absolute program, the base variables and the harness's variables
+/// (None removes one). Output: the command, or `Invalid` when a variable fails
+/// [`agent_variable_allowed`].
 #[cfg(unix)]
 pub fn agent_command<'a>(
     profile: &Path,
@@ -297,11 +334,16 @@ pub fn agent_command<'a>(
     command
         .arg("-f")
         .arg(profile)
+        .args(SESSION_SHIM)
         .arg(program)
         .env_clear()
         .envs(env.iter().map(|(name, value)| (name, value)))
         .process_group(0);
     assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert_eq!(
+        command.get_args().nth(2 + SESSION_SHIM.len()),
+        Some(program.as_os_str())
+    );
     assert_eq!(command.get_envs().count(), env.len());
     Ok(command)
 }
@@ -402,9 +444,21 @@ pub struct ProjectSandbox {
     agent_tmp: PathBuf,
     worktrees: Vec<PathBuf>,
     read_roots: Vec<PathBuf>,
+    hidden: Vec<PathBuf>,
     network: SandboxNetwork,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
+    checkout: Option<Checkout>,
+}
+
+/// The one git worktree a confined agent writes in place of the whole project folder,
+/// with the two parts of the project repository its commits need: the worktree's own
+/// admin folder under `.git/worktrees` and the shared object store.
+#[derive(Debug, Clone)]
+struct Checkout {
+    worktree: PathBuf,
+    admin: PathBuf,
+    objects: PathBuf,
 }
 
 impl ProjectSandbox {
@@ -436,9 +490,11 @@ impl ProjectSandbox {
             agent_tmp: agent_tmp.to_path_buf(),
             worktrees: Vec::new(),
             read_roots: Vec::new(),
+            hidden: Vec::new(),
             network,
             owner_home: owner,
             engine_secrets: Vec::new(),
+            checkout: None,
         })
     }
 
@@ -484,6 +540,60 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Confines the agent's writes to its own git worktree of the project: the worktree,
+    /// its admin folder in `.git/worktrees` and the shared object store, beside its home,
+    /// temp dir and extra worktrees. The project folder stays readable. Input: a canonical
+    /// worktree in the project's `worktrees/` folder whose `.git` link and admin folder
+    /// name each other. Output: the confined sandbox, or `Invalid`.
+    pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if self.checkout.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
+        if self.read_roots.len() >= READ_ROOTS_MAX {
+            return Err(invalid("too many read roots"));
+        }
+        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        if !clean_absolute(worktree)
+            || worktree.parent() != Some(worktrees.as_path())
+            || canonical(worktree)? != worktree
+        {
+            return Err(invalid(
+                "the worktree must be a canonical folder in worktrees/",
+            ));
+        }
+        let git = self.project_root.join(".git");
+        let admin = canonical(&worktree.join(git_link(&worktree.join(".git"), "gitdir: ")?))?;
+        if !clean_absolute(&admin) || admin.parent() != Some(git.join("worktrees").as_path()) {
+            return Err(invalid(
+                "the worktree's git folder must sit in .git/worktrees",
+            ));
+        }
+        let back = canonical(&admin.join(git_link(&admin.join("gitdir"), "")?))?;
+        if back != worktree.join(".git") {
+            return Err(invalid("the worktree's git folder names another worktree"));
+        }
+        let objects = git.join("objects");
+        if !objects.is_dir() || canonical(&objects)? != objects {
+            return Err(invalid("the project's git objects must be a plain folder"));
+        }
+        let secrets = self.secret_paths();
+        for root in [worktree, admin.as_path(), objects.as_path()] {
+            clear_of_secrets(root, &secrets)?;
+        }
+        assert!(
+            [worktree, admin.as_path(), objects.as_path()]
+                .iter()
+                .all(|root| root.starts_with(&self.project_root) && *root != self.project_root)
+        );
+        self.read_roots.push(self.project_root.clone());
+        self.checkout = Some(Checkout {
+            worktree: worktree.to_path_buf(),
+            admin,
+            objects,
+        });
+        Ok(self)
+    }
+
     /// Adds one extra read-only root, such as a harness install directory. Input: a
     /// canonical existing folder that neither holds nor sits inside a path from
     /// [`Self::secret_paths`]. Output: the widened sandbox, or a refusal.
@@ -493,6 +603,37 @@ impl ProjectSandbox {
         }
         granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
+    /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
+    /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
+    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
+        if self.hidden.len() >= HIDDEN_MAX {
+            return Err(invalid("too many hidden folders"));
+        }
+        let inside = self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .any(|root| folder.starts_with(root) && folder != root.as_path());
+        let parent = folder.parent().filter(|parent| {
+            parent
+                .canonicalize()
+                .is_ok_and(|real| real.as_path() == *parent)
+        });
+        let plain = fs::symlink_metadata(folder).map_or_else(
+            |error| error.kind() == io::ErrorKind::NotFound,
+            |metadata| metadata.is_dir() && !metadata.file_type().is_symlink(),
+        );
+        if !clean_absolute(folder) || !inside || parent.is_none() || !plain {
+            return Err(invalid(
+                "a hidden folder must be a plain folder path inside a granted root",
+            ));
+        }
+        self.hidden.push(folder.to_path_buf());
         Ok(self)
     }
 
@@ -535,12 +676,25 @@ impl ProjectSandbox {
         ]
     }
 
-    /// Every folder this sandbox lets the agent write: the project folder, its own
-    /// home and temp dirs, then its worktrees.
+    /// Every folder this sandbox lets the agent write: the project folder, or for a
+    /// confined agent its worktree, that worktree's git admin folder and the git object
+    /// store, then its own home and temp dirs, then its extra worktrees.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        [&self.project_root, &self.agent_home, &self.agent_tmp]
+        let project: Vec<&PathBuf> = match &self.checkout {
+            Some(checkout) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
+            None => vec![&self.project_root],
+        };
+        project
             .into_iter()
+            .chain([&self.agent_home, &self.agent_tmp])
             .chain(self.worktrees.iter())
+    }
+
+    /// Whether the agent could write `path` or move it away: true when the path is one of
+    /// [`Self::writable_roots`] or inside one. Input: an absolute canonical path. Output:
+    /// the answer.
+    pub fn writes(&self, path: &Path) -> bool {
+        self.writable_roots().any(|root| path.starts_with(root))
     }
 
     /// The Seatbelt profile text for this agent.
@@ -584,7 +738,7 @@ impl ProjectSandbox {
         }
         text.push_str(")\n");
         text.push_str("(deny file-read* file-write*");
-        for secret in self.secret_paths() {
+        for secret in self.secret_paths().into_iter().chain(self.hidden.clone()) {
             if clean_absolute(&secret) {
                 text.push_str(&format!("\n  (subpath \"{}\")", secret.display()));
             }
@@ -596,11 +750,14 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         text.push_str(&self.git_link_denies());
+        if let Some(checkout) = &self.checkout {
+            text.push_str(&checkout.object_denies());
+        }
         text.push_str(
-            "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(deny file-read* file-write*\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
+            "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
         let network = text.len();
         match &self.network {
@@ -633,6 +790,7 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
         assert!(
             MACH_SERVICES
@@ -802,14 +960,23 @@ pub struct InstalledSandbox {
 impl InstalledSandbox {
     /// Installs the sandbox's profile at `profile` (see [`ProjectSandbox::install`]); on
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
-    /// Windows, writes the boundary profile for the helper next to the engine's executable
-    /// (see [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that
-    /// profile, the install refusal, or `Unavailable` where this system has no boundary.
+    /// Windows, checks the helper next to the engine's executable first, then writes its
+    /// boundary profile with the engine's grants folder (see
+    /// [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that profile, the
+    /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if !sandbox.hidden.is_empty() {
+            return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
         #[cfg(target_os = "windows")]
         {
-            let helper = std::env::current_exe()?.with_file_name(windows::HELPER_NAME);
-            let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile)?;
+            let helper = windows::existing_helper(
+                &std::env::current_exe()?.with_file_name(windows::HELPER_NAME),
+            )?;
+            let grants = windows::grants_folder()?;
+            let windows =
+                windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, &grants)?;
             assert!(profile.is_file());
             Ok(Self {
                 sandbox,
@@ -885,6 +1052,48 @@ impl Sandbox for InstalledSandbox {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
         InstalledSandbox::wrap(self, harness)
     }
+}
+
+impl Checkout {
+    /// The Seatbelt rules that let a confined agent add git objects but never change the
+    /// ones the owner and the other agents share: no write in `info/` or `pack/`, no move
+    /// of the store or a fan-out folder, and no rewrite, removal, replacement or hard link
+    /// of an object file. Git still creates new objects by link or rename. Seatbelt regexes
+    /// take no `{n}` counts, so the hex digits repeat. Input: the checkout. Output: the
+    /// rule text.
+    fn object_denies(&self) -> String {
+        const HEX: &str = "[0-9a-fA-F]";
+        let objects = self.objects.display();
+        let pattern = seatbelt_pattern(&self.objects);
+        let text = format!(
+            "(deny file-write*\n  (subpath \"{objects}/info\")\n  (subpath \"{objects}/pack\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n"
+        );
+        assert!(text.matches("(regex #\"^/").count() == 2);
+        text
+    }
+}
+
+/// Reads one git link file the engine's own `git worktree add` wrote: a plain file of at
+/// most 2 KiB holding `prefix`, one absolute or relative path and a newline. Input: the
+/// file and its prefix. Output: the path text, or `Invalid` for any other file.
+fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
+    use std::io::Read;
+    let refused = || invalid("the worktree's git link is not a plain git link file");
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() > GIT_LINK_BYTES_MAX {
+        return Err(refused());
+    }
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(GIT_LINK_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| refused())?;
+    let target = text
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .filter(|target| !target.is_empty() && !target.contains('\n'))
+        .ok_or_else(refused)?;
+    Ok(target.to_owned())
 }
 
 /// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.

@@ -1,4 +1,4 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, failure};
+use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::library::{
     ApprovedMemories, LibraryAction, MemoryOrigin, MemoryScope, SavedMemory, known_code,
@@ -53,12 +53,15 @@ pub struct MemoryList {
 }
 
 fn code(code: &str, fallback: &'static str) -> BridgeError {
-    failure(known_code(code).unwrap_or(match code {
-        "project_missing" => "project_missing",
-        "research_section_invalid" => "research_section_invalid",
-        "context_path_invalid" => "context_path_invalid",
-        _ => fallback,
-    }))
+    caused(
+        known_code(code).unwrap_or(match code {
+            "project_missing" => "project_missing",
+            "research_section_invalid" => "research_section_invalid",
+            "context_path_invalid" => "context_path_invalid",
+            _ => fallback,
+        }),
+        code,
+    )
 }
 
 fn scope(project: Option<&str>) -> Result<MemoryScope, BridgeError> {
@@ -248,10 +251,10 @@ impl NativeBridge {
         self.controller()?
             .read(crazyagent::engine::owner::OwnerRead::OwnerProfile)
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::Memory { action }, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
     }

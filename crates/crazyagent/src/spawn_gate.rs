@@ -45,6 +45,21 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     guarded(|| command.spawn())
 }
 
+/// Starts a child that also inherits one more open descriptor, at its own number, while no
+/// other thread of this process starts a child, then closes this process's copy, so no other
+/// child ever holds it. Input: the configured command and the descriptor to hand over.
+/// Output: the child, or the error that kept it from starting.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io::Result<Child> {
+    guarded(move || {
+        rustix::io::fcntl_setfd(&handed, rustix::io::FdFlags::empty())?;
+        let child = command.spawn();
+        drop(handed);
+        child
+    })
+}
+
 /// Starts a child through the gate and waits for it outside the gate.
 /// Input: the configured command; its stdio is inherited unless set, as with
 /// `Command::status`. Output: the exit status.
@@ -93,13 +108,15 @@ pub async fn accept_tcp(
     std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await
 }
 
-/// Connects a Tokio Unix stream; only the socket is created inside the gate.
+/// Connects a Tokio Unix stream; only the socket is created inside the gate. A path too
+/// long for a socket address is reached through its short address.
 /// Input: the socket path. Output: the connected stream.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> io::Result<tokio::net::UnixStream> {
+    let address = crate::socket_address::address(path.as_ref())?;
     guarded(tokio::net::UnixSocket::new_stream)?
-        .connect(path)
+        .connect(address)
         .await
 }
 
@@ -153,42 +170,48 @@ pub async fn bind_tcp(
     Err(last)
 }
 
-/// Binds a Tokio Unix listener at `path` inside the gate. Must run inside a
-/// Tokio runtime. Input: the socket path. Output: the listener.
+/// Binds a Tokio Unix listener at `path` inside the gate, through its short address when
+/// the path is too long for a socket address. Must run inside a Tokio runtime.
+/// Input: the socket path. Output: the listener.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn bind_unix(path: impl AsRef<std::path::Path>) -> io::Result<tokio::net::UnixListener> {
-    guarded(|| tokio::net::UnixListener::bind(path))
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| tokio::net::UnixListener::bind(&address))
 }
 
-/// Connects a blocking Unix stream inside the gate; a Unix connect never waits
-/// on the network. Input: the socket path. Output: the stream.
+/// Connects a blocking Unix stream inside the gate, through the short address of a path
+/// too long for a socket address; a Unix connect never waits on the network.
+/// Input: the socket path. Output: the stream.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn connect_unix_std(
     path: impl AsRef<std::path::Path>,
 ) -> io::Result<std::os::unix::net::UnixStream> {
-    guarded(|| std::os::unix::net::UnixStream::connect(path))
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| std::os::unix::net::UnixStream::connect(&address))
 }
 
-/// Binds a blocking Unix listener inside the gate.
-/// Input: the socket path. Output: the listener.
+/// Binds a blocking Unix listener inside the gate, through the short address of a path
+/// too long for a socket address. Input: the socket path. Output: the listener.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn bind_unix_std(
     path: impl AsRef<std::path::Path>,
 ) -> io::Result<std::os::unix::net::UnixListener> {
-    guarded(|| std::os::unix::net::UnixListener::bind(path))
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| std::os::unix::net::UnixListener::bind(&address))
 }
 
-/// Binds a Unix datagram socket inside the gate.
-/// Input: the socket path. Output: the socket.
+/// Binds a Unix datagram socket inside the gate, through the short address of a path too
+/// long for a socket address. Input: the socket path. Output: the socket.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn bind_unix_datagram_std(
     path: impl AsRef<std::path::Path>,
 ) -> io::Result<std::os::unix::net::UnixDatagram> {
-    guarded(|| std::os::unix::net::UnixDatagram::bind(path))
+    let address = crate::socket_address::address(path.as_ref())?;
+    guarded(|| std::os::unix::net::UnixDatagram::bind(&address))
 }
 
 /// Creates a connected pair of blocking Unix streams inside the gate.
@@ -299,6 +322,66 @@ const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 fn nonblocking(listener: &std::net::TcpListener) -> io::Result<bool> {
     let flags = rustix::fs::fcntl_getfl(listener)?;
     Ok(flags.contains(rustix::fs::OFlags::NONBLOCK))
+}
+
+/// Starts short real children through the gate on another thread until the returned flag
+/// is set, the way the engine keeps starting agents while other work runs.
+/// Input: none. Output: the stop flag and the thread, which returns how many it started.
+#[cfg(all(test, unix))]
+pub(crate) fn start_children_until_stopped() -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<u64>,
+) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let starter = std::thread::spawn(move || {
+        let mut started = 0_u64;
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let exit = status(
+                Command::new("/usr/bin/true")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .unwrap();
+            assert!(exit.success());
+            started += 1;
+        }
+        started
+    });
+    (stop, starter)
+}
+
+/// How long a test waits for a freshly written executable's first run. macOS assesses each
+/// new executable once on its first exec, after spawn returns and one at a time across the
+/// machine, so this start bound stays apart from the short bounds a test then measures.
+#[cfg(all(test, unix))]
+pub(crate) const FIRST_EXEC_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs a freshly written executable once to completion through the gate, so macOS has
+/// assessed it before a test times it. Input: the command with its program and arguments.
+/// Output: its exit status; panics past [`FIRST_EXEC_TIME`] after stopping it.
+#[cfg(all(test, unix))]
+pub(crate) fn first_run(command: &mut Command) -> ExitStatus {
+    let mut child = spawn(
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + FIRST_EXEC_TIME;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("a fresh executable did not finish its first run within {FIRST_EXEC_TIME:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[cfg(test)]

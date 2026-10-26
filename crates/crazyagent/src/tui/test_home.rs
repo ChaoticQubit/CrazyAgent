@@ -30,6 +30,17 @@ pub(in crate::tui) async fn projects_home(
     home
 }
 
+/// Tells a test pump that its client is still attaching to the engine, so a pause in the
+/// traffic is not yet the engine settling: under load the attach can outlast the pump's
+/// quiet rounds, and a pump that stopped then left every first read unsent.
+/// Input: the shell's link. Output: true while it connects or reconnects.
+pub(in crate::tui) fn connecting(link: &crate::tui::ctx::Link) -> bool {
+    matches!(
+        link,
+        crate::tui::ctx::Link::Connecting | crate::tui::ctx::Link::Reconnecting
+    )
+}
+
 /// How long a TUI engine test lets the engine and its client wait for one answer.
 /// Parallel test engines share one disk, so their flushed writes queue behind
 /// each other and one write can take seconds; the 1 s default then answers

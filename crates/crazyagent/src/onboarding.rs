@@ -11,22 +11,35 @@ pub(crate) mod draft;
 pub(crate) mod graph;
 pub mod service;
 
+#[cfg(test)]
+mod step_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
 const PROJECT_ID_BYTES_MAX: usize = 64;
 const REASON_BYTES_MAX: usize = 256;
+const GRAPHIFY_NOT_INSTALLED: &str = "graphify_not_installed";
 
-/// Where one onboarding step stands: not started, running, finished, or
-/// failed with a plain reason the owner can act on, such as
-/// "graphify not installed".
+/// Where one onboarding step stands: not started (with `until_ms`, the pause
+/// end in ms since the epoch, while every pool account that fits is paused
+/// after a limit; clients that predate it read a plain wait), running,
+/// finished, off (the graph step only, while the Graphify entry is switched
+/// off in Setup), not installed (the graph step only, while Setup never
+/// installed the Graphify skill), or failed with a plain reason the owner can act on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Step {
-    Waiting,
+    Waiting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until_ms: Option<i64>,
+    },
     Running,
     Done,
-    Failed { reason: String },
+    Off,
+    NotInstalled,
+    Failed {
+        reason: String,
+    },
 }
 
 /// What the manifest scan and the mapping agent found that has no field in
@@ -43,8 +56,9 @@ pub struct MappingFacts {
 /// The onboarding of one found or cloned project as clients read it: the
 /// graph and mapping steps, the proposed name, the pre-filled setup the owner
 /// confirms with `UpdateProjectSetup`, the extra facts, `missing`, the draft
-/// fields the owner must still fill such as `about` or `platforms`, and the
-/// mapping agent's `.crazyagent/overview.md` once it exists.
+/// fields the owner must still fill such as `about` or `platforms`, the
+/// mapping agent's `.crazyagent/overview.md` once it exists, and `finished`
+/// once the owner saved the setup, when name and draft are the saved ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingView {
@@ -56,6 +70,7 @@ pub struct OnboardingView {
     pub facts: MappingFacts,
     pub missing: Vec<String>,
     pub overview: Option<String>,
+    pub finished: bool,
 }
 
 /// The receipt of `StartOnboarding`: the project the folder is registered as.
@@ -86,22 +101,40 @@ impl OnboardingAction {
 }
 
 impl Step {
-    /// The stored state name and reason of this step.
-    pub(crate) fn columns(&self) -> (&'static str, Option<&str>) {
+    /// A step that has not started and waits on no pause.
+    pub const WAITING: Step = Step::Waiting { until_ms: None };
+
+    /// The stored state name and reason of this step. A step that is not
+    /// installed is stored as off with its own reason, so every query that
+    /// counts an off graph as settled counts it too; a paused wait stores
+    /// its end as the reason.
+    pub(crate) fn columns(&self) -> (&'static str, Option<String>) {
         match self {
-            Self::Waiting => ("waiting", None),
+            Self::Waiting { until_ms } => ("waiting", until_ms.map(|until| until.to_string())),
             Self::Running => ("running", None),
             Self::Done => ("done", None),
-            Self::Failed { reason } => ("failed", Some(reason.as_str())),
+            Self::Off => ("off", None),
+            Self::NotInstalled => ("off", Some(GRAPHIFY_NOT_INSTALLED.to_owned())),
+            Self::Failed { reason } => ("failed", Some(reason.clone())),
         }
     }
 
     /// Rebuilds a step from its stored state name and reason.
     fn from_columns(state: &str, reason: Option<String>) -> Result<Self, EngineError> {
         Ok(match state {
-            "waiting" => Self::Waiting,
+            "waiting" => Self::Waiting {
+                until_ms: reason
+                    .map(|until| until.parse())
+                    .transpose()
+                    .map_err(|_| failure("onboarding_step_invalid"))?,
+            },
             "running" => Self::Running,
             "done" => Self::Done,
+            "off" => match reason.as_deref() {
+                None => Self::Off,
+                Some(GRAPHIFY_NOT_INSTALLED) => Self::NotInstalled,
+                Some(_) => return Err(failure("onboarding_step_invalid")),
+            },
             "failed" => Self::Failed {
                 reason: reason.unwrap_or_default(),
             },
@@ -297,7 +330,7 @@ pub(crate) fn execute(
             return Ok(rejected("onboarding_project_mismatch"));
         }
         if exists {
-            restart(tx, &project_id, pool)?;
+            restart(tx, &project_id, pool, graph_step(tx)?)?;
             return Ok(Outcome::Applied);
         }
         tx.execute("DELETE FROM onboarding WHERE project=?1", [known])
@@ -351,38 +384,67 @@ pub(crate) fn execute(
         crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
     }
     let now = now_ms();
+    let graph = graph_step(tx)?;
+    let (graph_state, graph_reason) = graph.columns();
     tx.execute(
-        "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
-         VALUES (?1,?2,?3,'waiting','waiting',?4,?5,?5)",
+        "INSERT INTO onboarding(project,repo,pool,graph_state,graph_reason,mapping_state,drafted,created_ms,updated_ms)
+         VALUES (?1,?2,?3,?6,?7,'waiting',?4,?5,?5)",
         params![
             project_id.as_str(),
             repo_text,
             pool.as_str(),
             serde_json::to_string(&drafted).map_err(error)?,
-            now
+            now,
+            graph_state,
+            graph_reason
         ],
     )
     .map_err(error)?;
     Ok(Outcome::Applied)
 }
 
+/// Where a new or restarted graph step begins: waiting while the Graphify
+/// pack entry is installed and on, off while it is switched off, and not
+/// installed while Setup never installed it; no graph is built unless on.
+fn graph_step(tx: &Transaction<'_>) -> Result<Step, EngineError> {
+    let switch = crate::storage::setup::entry_switch(tx, crate::setup::pack::GRAPH_ENTRY)?;
+    Ok(match switch {
+        Some(true) => Step::WAITING,
+        Some(false) => Step::Off,
+        None => Step::NotInstalled,
+    })
+}
+
 /// Sends the failed steps of an onboarding back to waiting on `pool`, so a
-/// second start retries them; finished and running steps keep their state.
+/// second start retries them, and a failed or off graph step to `graph`, so
+/// installing Graphify or switching it on or off in Setup counts on the next
+/// start; finished and running steps keep their state.
 fn restart(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     pool: &CredentialRef,
+    graph: Step,
 ) -> Result<(), EngineError> {
+    assert!(matches!(
+        graph,
+        Step::Waiting { until_ms: None } | Step::Off | Step::NotInstalled
+    ));
     let changed = tx
         .execute(
             "UPDATE onboarding SET pool=?2,
-                graph_reason=CASE WHEN graph_state='failed' THEN NULL ELSE graph_reason END,
-                graph_state=CASE WHEN graph_state='failed' THEN 'waiting' ELSE graph_state END,
+                graph_reason=CASE WHEN graph_state IN ('failed','off') THEN ?5 ELSE graph_reason END,
+                graph_state=CASE WHEN graph_state IN ('failed','off') THEN ?4 ELSE graph_state END,
                 mapping_reason=CASE WHEN mapping_state='failed' THEN NULL ELSE mapping_reason END,
                 mapping_state=CASE WHEN mapping_state='failed' THEN 'waiting' ELSE mapping_state END,
                 updated_ms=?3
              WHERE project=?1",
-            params![project_id.as_str(), pool.as_str(), now_ms()],
+            params![
+                project_id.as_str(),
+                pool.as_str(),
+                now_ms(),
+                graph.columns().0,
+                graph.columns().1
+            ],
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
@@ -391,8 +453,9 @@ fn restart(
 
 /// The onboarding of `project_id`: both steps, the draft, its proposed name,
 /// the extra facts, the fields still missing and the overview, read bounded
-/// and never through a link. Returns `None` for a project that was not
-/// onboarded.
+/// and never through a link. Once the owner saved the setup it is finished,
+/// and the name, draft and missing fields come from the saved setup. Returns
+/// `None` for a project that was not onboarded.
 pub(crate) fn status(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -418,7 +481,13 @@ pub(crate) fn status(
     let Some((graph, graph_reason, mapping, mapping_reason, drafted, repo)) = row else {
         return Ok(None);
     };
-    let drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
+    let mut drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
+    let saved = crate::project_setup::load_setup(tx, project_id)?.filter(|stored| stored.saved());
+    let finished = saved.is_some();
+    if let Some(stored) = saved {
+        drafted.draft = stored.editable();
+        drafted.name = stored.name;
+    }
     let missing = drafted.missing();
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),
@@ -429,5 +498,6 @@ pub(crate) fn status(
         facts: drafted.facts,
         missing,
         overview: draft::overview(&Path::new(&repo).join(CRAZYAGENT_DIRECTORY)),
+        finished,
     }))
 }

@@ -1,17 +1,20 @@
 use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
-#[cfg(unix)]
-use crate::terminal::HostError;
 use crate::terminal::{
-    AgentId, CHUNK_BYTES_MAX, Host, INPUT_BYTES_MAX, TerminalFrame, TerminalRequest, TerminalStream,
+    AgentId, CHUNK_BYTES_MAX, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame,
+    TerminalRequest, TerminalStream,
 };
+#[cfg(unix)]
+use crate::terminal::{HostError, prompt_keys};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
 #[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
+#[cfg(unix)]
+const PASTE_SETTLE: Duration = Duration::from_millis(200);
 #[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
 
@@ -61,6 +64,17 @@ impl TerminalControl {
             return Err(failure("terminal_input_bounds"));
         }
         self.send(&TerminalRequest::Input { bytes }).await
+    }
+
+    /// Sends the owner's explicit message to the agent: the engine types it as one submission
+    /// and Enter, and a sub-agent's master hears a note of it on its next turn.
+    /// Takes non-blank text of at most `PROMPT_BYTES_MAX` bytes.
+    /// Returns once the request is sent.
+    pub async fn prompt(&mut self, text: String) -> Result<(), EngineError> {
+        if text.trim().is_empty() || text.len() > PROMPT_BYTES_MAX {
+            return Err(failure("terminal_prompt_bounds"));
+        }
+        self.send(&TerminalRequest::Prompt { text }).await
     }
 
     /// Sets the agent terminal's size for its app and every viewer.
@@ -212,11 +226,40 @@ async fn act(
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || match request {
         TerminalRequest::Input { bytes } => host.input(&agent, &bytes),
+        TerminalRequest::Prompt { text } => type_prompt(host.as_ref(), &agent, &text).map(drop),
         TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
         TerminalRequest::Attach { .. } | TerminalRequest::Detach => Ok(()),
     })
     .await
     .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
+}
+
+#[cfg(unix)]
+async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<bool, HostError> {
+    let host = host.clone();
+    let agent = agent.clone();
+    tokio::task::spawn_blocking(move || type_prompt(host.as_ref(), &agent, &text))
+        .await
+        .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
+}
+
+/// Types one owner prompt into an agent's app as one submission: a paste when the app turned
+/// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
+/// the text. Returns whether it was typed; blank or oversized text types nothing.
+#[cfg(unix)]
+fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
+    let bracketed = host.input_live(agent)?;
+    let Some(keys) = prompt_keys(text, bracketed) else {
+        return Ok(false);
+    };
+    for chunk in keys.chunks(INPUT_BYTES_MAX) {
+        host.input(agent, chunk)?;
+    }
+    if bracketed {
+        std::thread::sleep(PASTE_SETTLE);
+    }
+    host.input(agent, b"\r")?;
+    Ok(true)
 }
 
 async fn open(
@@ -259,11 +302,11 @@ async fn open(
     Ok((admission, viewer, host))
 }
 
-/// Records the lines the owner typed into a team sub-agent's terminal for the master's next
-/// turn. Takes the engine database, the team agent id and the lines. A failure loses only
-/// the note; the keys already reached the terminal.
+/// Records a prompt the owner sent to a team sub-agent for the master's next turn.
+/// Takes the engine database, the team agent id and the prompt. A failure loses only the
+/// note; the prompt already reached the terminal.
 #[cfg(unix)]
-async fn heard(database: PathBuf, agent: i64, lines: Vec<String>) {
+async fn heard(database: PathBuf, agent: i64, text: String) {
     let _ = tokio::task::spawn_blocking(move || {
         let connection = rusqlite::Connection::open_with_flags(
             &database,
@@ -277,9 +320,7 @@ async fn heard(database: PathBuf, agent: i64, lines: Vec<String>) {
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
-        for line in &lines {
-            let _ = crate::team::direct::record(&connection, agent, line, now);
-        }
+        let _ = crate::team::direct::record(&connection, agent, &text, now);
         Some(())
     })
     .await;
@@ -321,7 +362,6 @@ async fn watch(
 ) {
     let agent = viewer.agent.clone();
     let member = agent.team_agent();
-    let mut typed = crate::team::direct::InputLines::default();
     let database = engine_root(authority)
         .ok()
         .map(|root| root.join("engine.db"));
@@ -351,18 +391,18 @@ async fn watch(
             request = asked.recv() => match request {
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
                 Some(TerminalRequest::Attach { .. }) => break "terminal_request_invalid",
-                Some(request) => {
-                    let lines = match (&request, member) {
-                        (TerminalRequest::Input { bytes }, Some(_)) => typed.feed(bytes),
-                        _ => Vec::new(),
-                    };
-                    if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                Some(TerminalRequest::Prompt { text }) => {
+                    let typed = prompt(&host, &agent, text.clone()).await;
+                    if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
                         break "terminal_ended";
                     }
-                    if let (Some(member), Some(database)) = (member, &database)
-                        && !lines.is_empty()
-                    {
-                        heard(database.clone(), member, lines).await;
+                    if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
+                        heard(database.clone(), member, text).await;
+                    }
+                }
+                Some(request) => {
+                    if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                        break "terminal_ended";
                     }
                 }
             },

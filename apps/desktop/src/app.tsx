@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
-import { SessionContext, useSession, type Session } from "./state";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
+import { engineVersions, plainError, unconfirmedLine, type EngineVersions } from "./api";
+import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
@@ -8,7 +10,8 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { useUpdateWatch } from "./screens/settings/updates";
+import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
+import { updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
@@ -17,6 +20,18 @@ import { GoToLayer } from "./ui/go-to";
  * Output: plain text lines. */
 export function supportDetails(width: number, height: number, now: Date): string {
   return `CrazyAgent desktop\nEngine: not running\nProblem: engine_unreachable\nWindow: ${Math.round(width)}x${Math.round(height)}\nTime: ${now.toISOString()}\n`;
+}
+
+const UPDATES_ROUTE: Route = { name: "settings", tab: "updates" };
+
+/** The way to Settings, Updates from a full-window state that needs no engine, naming a
+ * release a check already found. Output: the line and the Check for updates button. */
+function UpdateLink() {
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
+  return <>
+    {update.kind === "available" && <p>CrazyAgent {displayText(update.update.version)} is available.</p>}
+    <span><Button variant="quiet" icon="refresh-cw" onClick={() => navigate(UPDATES_ROUTE)}>Check for updates</Button></span>
+  </>;
 }
 
 function EngineDown({ onRetry }: { onRetry: () => void }) {
@@ -38,11 +53,59 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
       <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
       <span className="row"><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button>
         <Button icon="copy" onClick={() => void copy()}>Copy details for support</Button></span>
+      <UpdateLink />
       {copied === "copied" && <p className="secondary" role="status">Copied. Paste it into your message to support.</p>}
       {typeof copied === "object" && <><p className="secondary" role="alert">Couldn't copy. Select the details below and copy them.</p>
         <pre className="support-details">{copied.failed}</pre></>}
     </div>
   </main>;
+}
+
+/** Settings, Updates on its own, for when the engine is down, still starting, or first-run
+ * setup is unfinished, so the owner can always check for and install an update. Input: the
+ * session. Output: the full-window page with Back. */
+function UpdatesAlone({ session }: { session: Session }) {
+  return <SessionContext.Provider value={session}>
+    <main id="main" className="full-state">
+      <div className="box wide">
+        <BrandMark />
+        <h1>Updates</h1>
+        <UpdatesSettings />
+        <span><Button icon="arrow-left" onClick={() => navigate({ name: "home" })}>Back</Button></span>
+      </div>
+    </main>
+    <Toast message={session.toast} />
+  </SessionContext.Provider>;
+}
+
+/** The full-window state for an engine of another version than this app: the engine's own
+ * message naming both versions, Restart engine on this app's version, Try again, and Check
+ * for updates, since a newer app can also end the mismatch. Inputs: the version read, the
+ * restart state and the handlers. */
+export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
+  versions: Loaded<EngineVersions>;
+  restart: EngineRestart;
+  onRestart: () => void;
+  onRetry: () => void;
+}) {
+  const message = versions.kind === "ok" && versions.value.message ? displayText(versions.value.message) : plainError("engine_version_mismatch");
+  return <main id="main" className="full-state">
+    <div className="box">
+      <BrandMark />
+      <Icon name="refresh-cw" size={28} />
+      <h1>CrazyAgent's engine needs a restart</h1>
+      <p className="secondary">{message}</p>
+      <RestartEngine restart={restart} onRestart={onRestart} primary />
+      <span><Button icon="refresh-cw" onClick={onRetry}>Try again</Button></span>
+      <UpdateLink />
+    </div>
+  </main>;
+}
+
+function EngineOutdated({ onRetry }: { onRetry: () => void }) {
+  const [versions] = useLoad(engineVersions);
+  const [restart, restartNow] = useEngineRestart(onRetry);
+  return <EngineOutdatedView versions={versions} restart={restart} onRestart={restartNow} onRetry={onRetry} />;
 }
 
 function Launching() {
@@ -59,7 +122,7 @@ function Launching() {
 export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
-    case "settings": return <Settings tab={route.tab} action={route.action} />;
+    case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
@@ -68,13 +131,17 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
   }
 }
 
-/** The whole app for one session and route: the engine-down state, the launch skeleton, the
- * first-run Welcome page while the profile is empty, or the shell with the routed screen.
- * Inputs: the session and the current route. */
+/** The whole app for one session and route: the engine-down or engine-outdated state, the
+ * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
+ * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
+ * session and the current route. */
 export function AppView({ session, route }: { session: Session; route: Route }) {
-  if (session.engine === "down") return <EngineDown onRetry={session.retry} />;
-  if (session.engine === "connecting" || session.profile.kind === "loading") return <Launching />;
+  const updates = route.name === "settings" && route.tab === "updates";
+  if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
+  if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
+  if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
+  if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
   if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
       <Welcome onSaved={(_, next) => { void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
@@ -85,8 +152,11 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} />}
       sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
-      {session.unconfirmed && <Banner action={<Button size="small" onClick={() => void session.checkUnconfirmed()}>Check again</Button>}>
-        We couldn't confirm your last change. Check it and save again.
+      {session.unconfirmed && <Banner action={<span className="row">
+        <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
+        <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+      </span>}>
+        {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}
       <Screen route={route} session={session} />
       <GoToLayer projects={projects ?? []} />

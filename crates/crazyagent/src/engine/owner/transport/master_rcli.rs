@@ -111,7 +111,10 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "master_runtime_host_unavailable" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     };
-    MasterRuntimeObservation::Failed { reason }
+    MasterRuntimeObservation::Failed {
+        reason,
+        cause: error.0.clone(),
+    }
 }
 
 impl OwnerRuntimeHandle {
@@ -125,12 +128,7 @@ impl OwnerRuntimeHandle {
                 self.observe_master_turn(prepared, turn_id, observation)
                     .await
             }
-            Err(error)
-                if matches!(
-                    error.0.as_str(),
-                    "native_profile_in_use" | "master_runtime_profile_not_acquired"
-                ) =>
-            {
+            Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
                 self.inspect_master_turn(
                     &prepared.session.project_id,
                     &prepared.session.session_id,
@@ -167,7 +165,7 @@ impl OwnerRuntimeHandle {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(resources.wall_time_ms))
             .ok_or_else(|| failure("master_runtime_budget_exhausted"))?;
-        let profile = self.acquire_master_profile(prepared, turn_id).await?;
+        let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(
                 &prepared.session.project_id,
@@ -199,6 +197,8 @@ impl OwnerRuntimeHandle {
         }
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
+        let _folder =
+            super::master_host_launch::MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
         let sandbox = super::master_host_launch::master_sandbox(
             &self.authority.root,
             &runtime_ref,
@@ -278,6 +278,8 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
         active: &mut ActiveRcliMaster,
     ) -> Result<MasterRuntimeObservation, EngineError> {
+        self.record_master_child(prepared, turn_id, active.custody.process_group())
+            .await?;
         let mut prompted = false;
         let mut inspect_at = Instant::now();
         loop {
@@ -359,6 +361,7 @@ impl OwnerRuntimeHandle {
                                 capture_sequence: active.capture.sequence(),
                             },
                         },
+                        delegations: Vec::new(),
                     });
                 }
                 RcliMasterStatus::Cancelled => return Ok(MasterRuntimeObservation::Cancelled),

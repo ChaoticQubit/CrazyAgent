@@ -1,6 +1,7 @@
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
-use super::project_markdown::{MdLine, render};
+use super::new_project_view::wrap_words;
+use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -11,12 +12,15 @@ use crate::project_setup::{
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::tui::seam::PoolScope;
+use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
 const MEMORY_BYTES_MAX: usize = 4096;
+pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
+pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 256;
 const STACK_BYTES_MAX: usize = 2048;
@@ -168,13 +172,15 @@ impl MasterStatus {
 }
 
 /// The master conversation the Conversation tab draws.
-/// Holds the master harness name, its account, whether tools are on, the status and the messages.
+/// Holds the master harness name, its account, whether tools are on, whether its conversation
+/// is open, the status and the messages.
 /// The host fills it from the engine's master session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct Transcript {
     pub harness: String,
     pub account: Option<String>,
     pub tools: bool,
+    pub open: bool,
     pub status: MasterStatus,
     pub messages: Vec<Message>,
 }
@@ -220,6 +226,33 @@ pub(in crate::tui) struct MemoryEdit {
     pub entry: RequestId,
     pub version: u64,
     pub input: TextInput,
+}
+
+/// The whole text of a suggested memory, shown before the owner saves it.
+/// Holds the memory, its stored text and the first line on screen.
+/// y saves once the last line is on screen; e edits, n dismisses, Esc goes back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct MemoryReview {
+    pub entry: RequestId,
+    pub version: u64,
+    pub text: String,
+    pub scroll: usize,
+}
+
+impl MemoryReview {
+    /// Wraps the memory the way the review box shows it.
+    /// Takes nothing; hidden characters show as escapes and terminal controls are dropped.
+    /// Returns the lines, at most REVIEW_WIDTH cells each.
+    pub fn lines(&self) -> Vec<String> {
+        wrap_words(&sanitize(&self.text), REVIEW_WIDTH)
+    }
+
+    /// Tells whether the last line of the memory is on screen.
+    /// Takes nothing.
+    /// Returns true once the owner has scrolled to the end.
+    pub fn at_end(&self) -> bool {
+        self.scroll + REVIEW_ROWS >= self.lines().len()
+    }
 }
 
 /// The Add file box over the Context tab: the full path of one file to copy
@@ -403,6 +436,15 @@ pub(in crate::tui) struct JobLog {
     pub read_ms: i64,
 }
 
+/// What the owner asked to see from a project page: its folder, shown in the file manager,
+/// or one context file inside it, as the engine's project record names them.
+/// `Context` keeps the folder and the path inside it apart so the host can check both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum OpenRequest {
+    Folder(String),
+    Context { folder: String, path: String },
+}
+
 /// What the project screen asks its host to do after a key.
 /// Ignored lets global keys run; the other replies are engine calls or navigation.
 /// Engine calls carry exactly what the engine needs.
@@ -417,11 +459,12 @@ pub(in crate::tui) enum ProjectReply {
         version: u64,
         decision: ReviewDecision,
     },
-    Open(String),
+    Open(OpenRequest),
     PickPool,
-    Assign(crate::protocol::CredentialRef),
+    Assign(Option<crate::protocol::CredentialRef>),
     Send(String),
     StopTurn,
+    EndConversation,
     Retry,
     Team,
 }
@@ -454,6 +497,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub preview: Option<Preview>,
     pub reading: bool,
     pub edit: Option<MemoryEdit>,
+    pub review: Option<MemoryReview>,
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
@@ -504,6 +548,7 @@ impl ProjectScreen {
             preview: None,
             reading: false,
             edit: None,
+            review: None,
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
@@ -907,16 +952,19 @@ impl ProjectScreen {
         counts
     }
 
-    /// Gives the absolute path of a context file.
-    /// Takes the path inside the project folder.
-    /// Returns the path, or none before the folder is known.
-    pub fn absolute(&self, path: &str) -> Option<String> {
+    /// Names one context file to open: the folder its context paths start from and the
+    /// path inside it. Takes the path inside the project folder.
+    /// Returns the request, or none before the folder is known.
+    pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
         let folder = self
             .setup
             .as_ref()
             .map(|setup| setup.folder.clone())
             .or_else(|| self.context.as_ref().map(|context| context.folder.clone()))?;
-        Some(format!("{}/{path}", folder.trim_end_matches('/')))
+        Some(OpenRequest::Context {
+            folder,
+            path: path.to_owned(),
+        })
     }
 
     /// Handles one key for the open tab, the edit box or the delete question.
@@ -926,6 +974,9 @@ impl ProjectScreen {
         self.problem = None;
         if self.edit.is_some() {
             return self.edit_key(key);
+        }
+        if self.review.is_some() {
+            return self.review_key(key);
         }
         if self.adding.is_some() {
             return self.add_key(key);
@@ -1026,6 +1077,9 @@ impl ProjectScreen {
             edit.input.insert_str(text);
             return ProjectReply::Handled;
         }
+        if self.review.is_some() {
+            return ProjectReply::Handled;
+        }
         if let Some(adding) = self.adding.as_mut().filter(|adding| !adding.busy) {
             adding.input.insert_str(text);
             adding.error = None;
@@ -1115,6 +1169,9 @@ impl ProjectScreen {
                 ProjectReply::Retry
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
+                ProjectReply::EndConversation
+            }
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             KeyCode::Enter => {
@@ -1139,25 +1196,85 @@ impl ProjectScreen {
         let Some((entry, version, text)) = memory else {
             return ProjectReply::Handled;
         };
-        let decision = match code {
-            KeyCode::Char('y') => ReviewDecision::Keep,
-            KeyCode::Char('n') => ReviewDecision::Reject,
-            _ => {
-                let mut input = TextInput::multi(MEMORY_BYTES_MAX);
-                input.set(&super::project_markdown::sanitize(&text));
-                self.edit = Some(MemoryEdit {
+        match code {
+            KeyCode::Char('y') => {
+                self.review = Some(MemoryReview {
                     entry,
                     version,
-                    input,
+                    text,
+                    scroll: 0,
                 });
-                return ProjectReply::Handled;
+                ProjectReply::Handled
             }
-        };
-        ProjectReply::Review {
+            KeyCode::Char('n') => ProjectReply::Review {
+                entry,
+                version,
+                decision: ReviewDecision::Reject,
+            },
+            _ => {
+                self.edit_memory(entry, version, &text);
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    fn edit_memory(&mut self, entry: RequestId, version: u64, text: &str) {
+        let mut input = TextInput::multi(MEMORY_BYTES_MAX);
+        input.set(&sanitize(text));
+        self.edit = Some(MemoryEdit {
             entry,
             version,
-            decision,
+            input,
+        });
+    }
+
+    fn review_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(review) = self.review.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        let last = review.lines().len().saturating_sub(REVIEW_ROWS);
+        match key.code {
+            KeyCode::Esc => self.review = None,
+            KeyCode::Up => review.scroll = review.scroll.saturating_sub(1),
+            KeyCode::Down => review.scroll = (review.scroll + 1).min(last),
+            KeyCode::PageUp => review.scroll = review.scroll.saturating_sub(REVIEW_ROWS),
+            KeyCode::PageDown => review.scroll = (review.scroll + REVIEW_ROWS).min(last),
+            KeyCode::Char('y') if review.at_end() => {
+                let Some(review) = self.review.take() else {
+                    return ProjectReply::Ignored;
+                };
+                let shown = sanitize(&review.text);
+                let decision = if shown == review.text {
+                    ReviewDecision::Keep
+                } else {
+                    ReviewDecision::Edit {
+                        text: shown.trim().to_owned(),
+                    }
+                };
+                return ProjectReply::Review {
+                    entry: review.entry,
+                    version: review.version,
+                    decision,
+                };
+            }
+            KeyCode::Char('n') => {
+                let Some(review) = self.review.take() else {
+                    return ProjectReply::Ignored;
+                };
+                return ProjectReply::Review {
+                    entry: review.entry,
+                    version: review.version,
+                    decision: ReviewDecision::Reject,
+                };
+            }
+            KeyCode::Char('e') => {
+                if let Some(review) = self.review.take() {
+                    self.edit_memory(review.entry, review.version, &review.text);
+                }
+            }
+            _ => {}
         }
+        ProjectReply::Handled
     }
 
     fn overview_key(&mut self, key: KeyEvent) -> ProjectReply {
@@ -1177,7 +1294,9 @@ impl ProjectScreen {
             KeyCode::Char('y' | 'n' | 'e') => return self.decide(focused, key.code),
             KeyCode::Char('o') => {
                 return self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
-                    ProjectReply::Open(s.project_folder().display().to_string())
+                    ProjectReply::Open(OpenRequest::Folder(
+                        s.project_folder().display().to_string(),
+                    ))
                 });
             }
             KeyCode::Enter
@@ -1353,8 +1472,8 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('o') => {
-                if let Some(path) = item.and_then(|item| self.absolute(&item.path)) {
-                    return ProjectReply::Open(path);
+                if let Some(request) = item.and_then(|item| self.context_request(&item.path)) {
+                    return ProjectReply::Open(request);
                 }
             }
             KeyCode::Char('a') => {
@@ -1417,7 +1536,7 @@ impl ProjectScreen {
         }
         let picked = self.setup.as_ref().and_then(|setup| setup.pool.clone());
         match (&self.pool, picked) {
-            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(id),
+            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(Some(id)),
             _ if self.pool_choices.is_empty() => ProjectReply::PickPool,
             (pool, _) => {
                 let current = pool.as_ref().filter(|pool| pool.assigned).and_then(|pool| {
@@ -1431,18 +1550,22 @@ impl ProjectScreen {
         }
     }
 
+    /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
+    /// Takes the key and the cursor. Returns the chosen pool, None for "No pool", or Handled.
     fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
-        assert!(cursor < self.pool_choices.len().max(1));
-        let last = self.pool_choices.len().saturating_sub(1);
+        let last = self.pool_choices.len();
+        assert!(cursor <= last);
         match key.code {
             KeyCode::Up => self.pool_picker = Some(cursor.saturating_sub(1)),
             KeyCode::Down => self.pool_picker = Some((cursor + 1).min(last)),
             KeyCode::Esc => self.pool_picker = None,
             KeyCode::Enter => {
                 self.pool_picker = None;
-                if let Some(choice) = self.pool_choices.get(cursor) {
-                    return ProjectReply::Assign(choice.id.clone());
-                }
+                return ProjectReply::Assign(
+                    self.pool_choices
+                        .get(cursor)
+                        .map(|choice| choice.id.clone()),
+                );
             }
             _ => {}
         }
@@ -1450,15 +1573,15 @@ impl ProjectScreen {
     }
 
     /// Replaces the pools the picker lists.
-    /// Takes the choices in the engine's order; an open picker keeps a cursor inside the list.
-    /// Returns nothing.
+    /// Takes the choices in the engine's order; an open picker keeps a cursor on a pool
+    /// or on "No pool", and closes when no pool is left. Returns nothing.
     pub fn set_pool_choices(&mut self, choices: Vec<PoolChoice>) {
         self.pool_choices = choices;
         if let Some(cursor) = self.pool_picker {
             self.pool_picker = if self.pool_choices.is_empty() {
                 None
             } else {
-                Some(cursor.min(self.pool_choices.len() - 1))
+                Some(cursor.min(self.pool_choices.len()))
             };
         }
     }
@@ -1467,7 +1590,9 @@ impl ProjectScreen {
         match key.code {
             KeyCode::Enter => self.pool_reply(),
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
-                ProjectReply::Open(s.project_folder().display().to_string())
+                ProjectReply::Open(OpenRequest::Folder(
+                    s.project_folder().display().to_string(),
+                ))
             }),
             KeyCode::Char('g') => {
                 match self.setup.as_ref() {
@@ -1578,7 +1703,7 @@ impl ProjectScreen {
 
     fn assert_consistent(&self) {
         if let Some(cursor) = self.pool_picker {
-            assert!(cursor < self.pool_choices.len());
+            assert!(!self.pool_choices.is_empty() && cursor <= self.pool_choices.len());
         }
         if let Some(jobs) = &self.jobs {
             assert!(self.agents_cursor <= jobs.len());
@@ -1590,11 +1715,15 @@ impl ProjectScreen {
         assert!(self.confirm_stop.is_none() || self.confirm_delete.is_none());
         let boxes = [
             self.edit.is_some(),
+            self.review.is_some(),
             self.adding.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if let Some(review) = &self.review {
+            assert!(review.scroll < review.lines().len().max(1));
+        }
         if let Some(general) = &self.general {
             assert!(general.cursor < GENERAL_FIELDS);
         }
@@ -1654,7 +1783,7 @@ pub(in crate::tui) fn research_kind(path: &str) -> Option<ResearchKind> {
 
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
-/// Returns what happened and what to do.
+/// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
 pub(in crate::tui) fn plain_problem(code: &str) -> String {
     match code {
         "research_report_missing" => {
@@ -1669,12 +1798,16 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
+        "project_folder_unwritable" => {
+            "CrazyAgent can't write in the project folder. Check its permissions."
+        }
+        "project_folder_unavailable" => "Documents can't be added on this system yet.",
         "project_setup_missing" => {
             "This project was made before project setup. Its context is not available."
         }
         "trusted_connection_unavailable" => "Not connected to the engine. Retrying.",
         "pool_project_limit" => "That pool already serves 64 projects. Pick another pool.",
-        "pool_not_found" => "That pool no longer exists. Pick another pool.",
+        "pool_not_found" | "pool_missing" => "That pool no longer exists. Pick another pool.",
         "pool_changed" => "The pools changed meanwhile. Try again.",
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
@@ -1697,6 +1830,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "project_spec_bounds" => "Enter a project name of 1 to 256 characters.",
         "project_setup_bounds" => "Some answers are too long or repeated. Check each one.",
+        "team_harness_unavailable" => {
+            "A harness in this team can't run team agents yet. Pick another harness."
+        }
         "project_about_invalid" => {
             "The description is too long or has characters that can't be saved."
         }
@@ -1709,12 +1845,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "stale_revision" | "project_setup_revision" => {
             "This project changed since you opened the form. Open it again."
         }
-        "project_master_open" => {
-            "End this project's master conversation first, then remove the project."
-        }
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
-        _ => "That didn't work. Try again.",
+        _ => return coded("That didn't work. Try again.", code),
     }
     .into()
 }

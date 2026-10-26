@@ -1,12 +1,13 @@
-import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
-import { errorMessage, retryBusy } from "./engine-client";
-import type { AccountPool, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
+import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
+import { bridgeCall, errorMessage, withCode } from "./engine-client";
+import type { ActionReceipt, PendingIntent } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
-export type { AgentRole, AgentState, AgentView } from "./engine-client";
+export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
-export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string };
+export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
 
 const FALLBACK = "Something went wrong. Try again.";
@@ -16,8 +17,15 @@ const ACCOUNT_PAGES_MAX = 100;
 
 const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
+  engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
+  owner_read_failed: "Couldn't read this from the engine. Try again.",
+  engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
+  engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
+  engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
-  pending_intent: "We couldn't confirm your last change. Check it and save again.",
+  pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   stale_config: "This changed since you opened it. Review and save again.",
@@ -27,10 +35,13 @@ const COPY: Record<string, string> = {
   rejected: "The engine didn't accept this change.",
   unavailable: "This isn't available right now. Try again.",
   pool_member_limit: "A pool can hold up to 15 accounts.",
-  pool_in_use: "Can't delete this pool. A project uses it. Choose another pool for it first.",
+  pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
+  pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  approved_accounts_limit: "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
+  allowed_destinations_limit: "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
   model_access_duplicate: "This already exists.",
   model_access_missing: "This no longer exists.",
   invalid_model_access: "The engine didn't accept this pool. Check its accounts and save again.",
@@ -58,6 +69,7 @@ const COPY: Record<string, string> = {
   account_reply_too_large: "The server at this URL sent a reply that is too large.",
   account_method_unavailable: "This sign-in method isn't available for this provider.",
   account_identity_unavailable: "Couldn't create the account. Try again.",
+  native_auth_cancel_pending: "The sign-in is still stopping. Try again in a moment.",
   account_not_found: "This account no longer exists.",
   native_profile_not_managed: "This account doesn't use a subscription sign-in.",
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
@@ -96,11 +108,28 @@ const COPY: Record<string, string> = {
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
 
-/** Turns an engine error code into one plain sentence for the owner.
- * Input: an error code. Output: the copy for it, or the generic fallback. */
-export function plainError(code: string): string {
+/** The sentence this window has for an engine or bridge code. Input: the code. Output: the
+ * sentence, or undefined when there is none. */
+export function knownError(code: string): string | undefined {
   if (Object.hasOwn(COPY, code)) return COPY[code];
-  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : FALLBACK;
+  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
+}
+
+/** The owner's line for a failure, never opaque: its own sentence, else the generic sentence;
+ * the engine cause behind it is named after the sentence, and the generic sentence names the code
+ * when there is no cause. Inputs: the sentence if known, the code and the engine cause. Output:
+ * one plain line. */
+export function namedFailure(sentence: string | undefined, code: string, cause?: string): string {
+  const named = cause === undefined || cause === code ? undefined : cause;
+  if (sentence === undefined) return withCode(FALLBACK, named ?? code);
+  return named === undefined ? sentence : withCode(sentence, named);
+}
+
+/** Turns an engine error code into one plain sentence for the owner.
+ * Inputs: an error code and the engine cause behind it, if any. Output: the copy for it, or
+ * the generic fallback naming the code. */
+export function plainError(code: string, cause?: string): string {
+  return namedFailure(knownError(code), code, cause);
 }
 
 /** Sorts a failed bridge call into "not ready yet" (the command is not in this build) or a
@@ -108,19 +137,20 @@ export function plainError(code: string): string {
 export function classifyFailure(error: unknown): Failure {
   if (typeof error === "string") {
     if (/^Command [a-z_]+ not found$/.test(error) || /^[a-z_]+ not allowed\b[\s\S]*Command not found$/.test(error)) return { kind: "not_ready" };
-    return { kind: "error", code: "unknown", message: FALLBACK };
+    return { kind: "error", code: "unknown", message: plainError("unknown") };
   }
   if (error instanceof TypeError || error instanceof ReferenceError) return { kind: "error", code: UNREACHABLE, message: plainError(UNREACHABLE) };
   const raw = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "unknown";
   const code = ["not_connected", "not_configured", "owner_unavailable", "owner_revoked"].includes(raw) ? UNREACHABLE : raw;
-  return { kind: "error", code, message: plainError(code) };
+  const cause = typeof error === "object" && error !== null && "cause" in error && typeof error.cause === "string" ? error.cause : undefined;
+  return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
 }
 
 /** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.
  * Inputs: the command and its arguments. Output: the value, not ready, or a plain error. */
 export async function call<T>(command: string, args?: InvokeArgs): Promise<Result<T>> {
   try {
-    return { kind: "ok", value: await retryBusy(() => native<T>(command, args)) };
+    return { kind: "ok", value: await bridgeCall<T>(command, args) };
   } catch (error) {
     return classifyFailure(error);
   }
@@ -165,14 +195,124 @@ export function connect(): Promise<Result<ConnectionStatus>> {
   return call<ConnectionStatus>("desktop_connect");
 }
 
+/** The default engine's version beside this app's, and the plain message asking for a restart
+ * when they differ. `engine` is null when no engine answers. */
+export interface EngineVersions {
+  engine: string | null;
+  app: string;
+  message: string | null;
+}
+
+/** Reads the default engine's version and this app's. Output: both versions and, when they
+ * differ, the message to show, or a plain error. */
+export function engineVersions(): Promise<Result<EngineVersions>> {
+  return call<EngineVersions>("desktop_engine_versions");
+}
+
+/** Restarts the default engine on this app's own version through its login service, then
+ * reconnects this window. Output: the new connection, or a plain error. */
+export function restartEngine(): Promise<Result<ConnectionStatus>> {
+  return call<ConnectionStatus>("desktop_restart_engine");
+}
+
 /** Reads the current engine connection. Output: connection and unconfirmed-change flags. */
 export function status(): Promise<Result<ConnectionStatus>> {
   return call<ConnectionStatus>("desktop_status");
 }
 
-/** Asks the engine to settle an unconfirmed change. Output: ok once it is settled. */
-export function checkUnconfirmed(): Promise<Result<void>> {
-  return change("desktop_reconcile_intent", {});
+/** Reads the change the bridge still keeps unconfirmed. Output: the change, or null. */
+export function keptChange(): Promise<Result<PendingIntent | null>> {
+  return call<PendingIntent | null>("desktop_pending_intent");
+}
+
+/** Asks the engine whether the kept change was recorded, by its operation id and hash,
+ * reconnecting first when a lost reply let go of the engine.
+ * Output: the check's receipt, or why it couldn't run. */
+export async function checkUnconfirmed(): Promise<Result<IntentReceipt>> {
+  const current = await status();
+  if (current.kind === "ok" && !current.value.connected) {
+    const connected = await connect();
+    if (connected.kind !== "ok") return connected;
+  }
+  return call<IntentReceipt>("desktop_reconcile_intent");
+}
+
+/** Sends the exact kept change again; the engine applies it once even if the first send
+ * landed. Output: the receipt, or why it couldn't run. */
+export function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_retry_intent");
+}
+
+/** Pauses before each automatic check of an unconfirmed change, in milliseconds. */
+export const UNCONFIRMED_CHECKS_MS: readonly number[] = [2000, 4000, 8000, 16000, 30000];
+
+const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {
+  add_account: "adding an account",
+  remove_account: "deleting an account",
+  create_connection: "adding a connection",
+  replace_connection: "changing a connection",
+  remove_connection: "removing a connection",
+  create_pool: "creating a pool",
+  replace_pool: "changing a pool",
+  remove_pool: "deleting a pool",
+  assign_project_pool: "changing a project's pool",
+};
+
+const CHANGE: Record<PendingIntent["kind"], string> = {
+  message: "sending your message",
+  brief: "changing the project brief",
+  approve_baseline: "approving a baseline",
+  revoke_baseline: "revoking a baseline",
+  model_access: "changing accounts and pools",
+  create_project: "creating the project",
+  setup_project: "saving the project setup",
+  research_memory: "saving research to memory",
+  project_documents: "adding project documents",
+  project_context_delete: "removing a project file",
+  memory_review: "reviewing a memory",
+  memory_add: "adding a memory",
+  memory_promote: "promoting a memory",
+  memory_delete: "deleting a memory",
+  memory_forget: "forgetting a memory",
+  memory_remember: "saving a memory",
+  memory_selection: "changing the memory selection",
+  master: "changing the master conversation",
+  owner_profile: "saving your profile",
+  projects_home: "changing the projects folder",
+  move_projects_home: "moving your projects",
+  add_existing_folder: "adding a folder",
+  start_onboarding: "starting project setup",
+  run_setup: "running project setup",
+  pack_set: "changing the default pack",
+  pack_remove: "removing a pack",
+};
+
+/** Names a kept change in plain words. Input: the change. Output: a lower-case phrase. */
+export function changeLabel(intent: PendingIntent): string {
+  if (intent.kind === "model_access" && intent.model_access) return MODEL_ACCESS_CHANGE[intent.model_access.kind];
+  return CHANGE[intent.kind];
+}
+
+function capital(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** The banner line for a change that is still unconfirmed. Inputs: the change and the last
+ * check's outcome, or null before any check. Output: the line naming the change. */
+export function unconfirmedLine(intent: PendingIntent, outcome: ActionReceipt["outcome"] | null): string {
+  const label = changeLabel(intent);
+  if (outcome === "not_recorded_at_barrier") return `${capital(label)} hasn't reached the engine. Retry sends the same change again.`;
+  return `We couldn't confirm ${label}. Other changes wait until it's checked.`;
+}
+
+/** The toast after a check or retry settles a kept change. Input: the receipt.
+ * Output: whether it went through, or null while the change is still unconfirmed. */
+export function settledLine(receipt: IntentReceipt): string | null {
+  if (receipt.pending) return null;
+  const label = capital(changeLabel(receipt));
+  if (receipt.outcome === "applied") return `${label} went through.`;
+  const code = receipt.rejection ?? (receipt.outcome === "rejected" ? "rejected" : "unavailable");
+  return `${label} didn't go through. ${plainError(code)}`;
 }
 
 export interface OwnerProfile {
@@ -355,10 +495,28 @@ export function poolInput(name: string, members: string[]): Result<{ name: strin
   return { kind: "ok", value: { name: trimmed, members } };
 }
 
-/** Creates a pool, or renames and replaces the members of an existing one while keeping its
- * project assignments. Inputs: pool id (absent for a new pool), name, member ids.
- * Output: ok once the engine saved it. */
-export async function savePool(id: string | undefined, name: string, members: string[]): Promise<Result<void>> {
+/** A pool's name and member ids, as one read or one save saw them. */
+export interface PoolBase { name: string; members: string[] }
+
+/** Applies what the owner changed in a pool since they read it onto the pool as it is now, so
+ * a change another client made meanwhile is not undone: members the owner removed leave,
+ * members the owner added join after the current ones, and the name changes only when the
+ * owner renamed it. Inputs: the pool now, the pool as the owner read it, and what the owner
+ * saved. Output: the merged name and members, or a plain error such as the 15-account limit. */
+export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Result<PoolBase> {
+  const removed = new Set(opened.members.filter((id) => !saved.members.includes(id)));
+  const kept = now.members.filter((id) => !removed.has(id));
+  const added = saved.members.filter((id) => !opened.members.includes(id) && !kept.includes(id));
+  const renamed = saved.name.trim() !== opened.name.trim() || !now.name.trim();
+  return poolInput(renamed ? saved.name : now.name, [...kept, ...added]);
+}
+
+/** Creates a pool, or saves the owner's changes to an existing one while keeping its project
+ * assignments and any change made elsewhere since the owner read it (see `mergePool`).
+ * Inputs: pool id (absent for a new pool), name, member ids, and for an existing pool its
+ * name and members as the owner read them. Output: ok once the engine saved it. */
+export async function savePool(id: string | undefined, name: string, members: string[], opened?: PoolBase): Promise<Result<void>> {
+  assert(id === undefined || opened !== undefined, "saving an existing pool needs the read it was edited from");
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
   let ticket: string;
@@ -372,14 +530,17 @@ export async function savePool(id: string | undefined, name: string, members: st
     const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
     if (detail.kind !== "ok") return detail;
     if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
+    const now = detail.value.record.pool;
+    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened!, input.value);
+    if (merged.kind !== "ok") return merged;
     ticket = detail.value.ticket;
-    edit = { kind: "replace_pool", pool: { ...detail.value.record.pool, name: input.value.name, members: input.value.members } as AccountPool };
+    edit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
   }
   return change("desktop_edit_model_access", { ticket, edit, generation: nextGeneration() });
 }
 
-/** Deletes a pool; the engine refuses while a project uses it. Input: pool id.
- * Output: ok once deleted. */
+/** Deletes a pool and takes it off every project that uses it, in one engine change.
+ * Input: pool id. Output: ok once deleted; those projects then have no pool. */
 export async function deletePool(id: string): Promise<Result<void>> {
   const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
   if (detail.kind !== "ok") return detail;
@@ -500,6 +661,19 @@ export function interruptAgent(id: string): Promise<Result<void>> {
 /** Restarts one agent with its first task. Input: agent id. Output: the running agent. */
 export function restartAgent(id: string): Promise<Result<AgentView>> {
   return call<AgentView>("desktop_restart_agent", { id });
+}
+
+/** Reads everything that uses one account's sign-in, so a refused sign-out can name it.
+ * Input: the account id. Output: its running agents and other holders, newest first. */
+export function accountUse(accountId: string): Promise<Result<AccountUse>> {
+  return call<AccountUse>("desktop_account_use", { accountId });
+}
+
+/** Ends everything that uses one account's sign-in and waits for it to end, so the account
+ * can be signed out: agents and research jobs stop, master conversations end.
+ * Input: the account id. Output: what still uses it, nothing once all have ended. */
+export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
+  return call<AccountUse>("desktop_release_account", { accountId, generation: nextGeneration() });
 }
 
 /** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
@@ -628,6 +802,13 @@ export function attachTerminal(agent: string, output: Channel<TerminalMessage>):
  * 1 to 4096 bytes. Output: ok once queued in order. */
 export function typeIntoTerminal(agent: string, bytes: number[]): Promise<Result<void>> {
   return call<void>("desktop_terminal_input", { agent, bytes });
+}
+
+/** Sends the owner's explicit prompt to an attached agent terminal: the engine types it as one
+ * submission and tells a sub-agent's master. Inputs: the terminal name and the prompt, up to
+ * 4096 bytes. Output: ok once queued in order with typed keys. */
+export function promptTerminal(agent: string, text: string): Promise<Result<void>> {
+  return call<void>("desktop_terminal_prompt", { agent, text });
 }
 
 /** Sets an attached agent terminal's size. Inputs: the terminal name, columns and rows.

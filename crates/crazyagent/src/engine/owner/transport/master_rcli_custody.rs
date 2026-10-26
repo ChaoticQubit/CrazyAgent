@@ -43,6 +43,12 @@ impl RcliCustody {
             .expect("retained RCLI execution custody")
     }
 
+    /// Names the process group of the RCLI master in custody. Input: the custody.
+    /// Output: the group, or none once the host is gone.
+    pub(super) fn process_group(&self) -> Option<u32> {
+        self.host.as_ref().map(RcliMasterHost::process_group)
+    }
+
     pub(super) fn poll(&mut self) -> Result<Option<RcliMasterObservation>, EngineError> {
         let observed = self.host.as_mut().expect("retained RCLI host").poll();
         observed.map_err(|error| self.observe_error(EngineError(error.0)))

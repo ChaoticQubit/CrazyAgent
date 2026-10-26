@@ -9,6 +9,7 @@ use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::{Activity, ProjectCard, ResearchCounts};
 use super::shell::Shell;
 use super::theme::{Appearance, Colors, Depth};
+use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod};
 use crate::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::Platform;
@@ -377,6 +378,7 @@ fn home_frames_match_the_design() {
         let mut ctx = ready(width, height);
         ctx.store.projects = Load::Ready(Vec::new());
         ctx.store.pools = Load::Ready(Vec::new());
+        ctx.store.accounts = Load::Ready(Vec::new());
         ctx.store.setup = Load::Ready(tools(&[Dependency::Uv, Dependency::Graphify]));
         let mut shell = shell_at(ctx, Place::Home);
         shell.arrive(super::seam::Arrival::Pools(Ok(Vec::new())));
@@ -397,6 +399,7 @@ fn home_frames_match_the_design() {
         let mut ctx = ready(width, height);
         ctx.store.projects = Load::Ready(projects());
         ctx.store.pools = Load::Ready(pools());
+        ctx.store.accounts = Load::Ready(accounts());
         let mut shell = shell_at(ctx, Place::Home);
         shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
         check(
@@ -412,6 +415,7 @@ fn home_frames_match_the_design() {
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(projects());
     ctx.store.pools = Load::Ready(pools());
+    ctx.store.accounts = Load::Ready(accounts());
     ctx.store.projects_seen = Some("10:42".into());
     let mut shell = shell_at(ctx, Place::Home);
     shell.arrive(super::seam::Arrival::Disconnected(
@@ -423,12 +427,56 @@ fn home_frames_match_the_design() {
         &swapped(&swaps),
     );
 
+    let loaded = |statuses: &[AccountStatus]| {
+        super::seam::Arrival::Owner(Box::new(super::client::OwnerEvent::Settings(Box::new(
+            super::client::settings::SettingsEvent::AllAccounts(Ok(statuses
+                .iter()
+                .enumerate()
+                .map(|(index, status)| AccountView {
+                    id: CredentialRef::new(format!("account-{index}")).unwrap(),
+                    name: format!("Claude {index}"),
+                    provider: Provider::Claude,
+                    provider_name: "Claude".into(),
+                    method: SignInMethod::Subscription,
+                    method_label: String::new(),
+                    url: None,
+                    model: None,
+                    status: *status,
+                    status_label: status.label().into(),
+                })
+                .collect())),
+        ))))
+    };
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(Vec::new());
     let mut shell = shell_at(ctx, Place::Home);
-    shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 0, 0, 0)])));
+    shell.arrive(loaded(&[
+        AccountStatus::NotSignedIn,
+        AccountStatus::NotSignedIn,
+    ]));
     shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 2, 0, 0)])));
+    shell.arrive(loaded(&[AccountStatus::SignedIn, AccountStatus::SignedIn]));
     check("home-ready-80", &render(&mut shell, 80, 24), &[]);
+}
+
+#[test]
+fn a_home_card_whose_research_waits_out_a_rate_limit_says_so_not_needs_a_pool() {
+    let mut cards = projects();
+    cards[2].pool = Some("Main".into());
+    cards[2].research = ResearchCounts {
+        rate_limited: 1,
+        ..Default::default()
+    };
+    let mut ctx = ready(120, 36);
+    ctx.store.projects = Load::Ready(cards);
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    let shown = render(&mut shell, 120, 36).join("\n");
+    assert!(shown.contains("Fieldnotes Mobile"), "{shown}");
+    assert!(shown.contains("! Rate limited"), "{shown}");
+    assert!(shown.contains("Research: rate limited"), "{shown}");
+    assert!(!shown.contains("Needs a pool"), "{shown}");
 }
 
 #[test]

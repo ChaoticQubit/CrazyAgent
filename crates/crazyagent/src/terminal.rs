@@ -13,6 +13,7 @@ pub mod windows;
 pub const FOLDER: &str = "terminal";
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
+pub const PROMPT_BYTES_MAX: usize = 4096;
 pub const CHUNK_BYTES_MAX: usize = 8192;
 pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
@@ -22,7 +23,7 @@ pub const VIEWER_BUFFER_BYTES_MAX: usize = 1024 * 1024;
 pub const SCROLLBACK_LINES: u32 = 5000;
 pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;
 
-const _: () = assert!(INPUT_BYTES_MAX == crate::team::DIRECT_INPUT_BYTES_MAX);
+const _: () = assert!(PROMPT_BYTES_MAX == crate::team::DIRECT_INPUT_BYTES_MAX);
 const _: () = assert!(CHUNK_BYTES_MAX * 4 + 256 < crate::protocol::FRAME_BYTES_MAX);
 const _: () = assert!(VIEWER_BUFFER_BYTES_MAX >= CHUNK_BYTES_MAX * 16);
 const _: () = assert!(PANES_PER_PROJECT_MAX == 15);
@@ -225,6 +226,23 @@ pub fn end_except(host: &(impl Host + ?Sized), keep: &[AgentId]) -> Result<(), H
     Ok(())
 }
 
+/// Leaves the host as the engine stops: team agent terminals keep running for the next
+/// engine to take over, every other terminal ends, and with no team agent left the host
+/// leaves nothing behind. Takes the host; one that cannot run has nothing to end.
+/// Returns the host's first failure.
+pub fn quit(host: &(impl Host + ?Sized)) -> Result<(), HostError> {
+    let alive = match host.alive() {
+        Ok(alive) => alive,
+        Err(problem) if problem.0 == "terminal_unavailable" => return Ok(()),
+        Err(problem) => return Err(problem),
+    };
+    let keep: Vec<AgentId> = alive
+        .into_iter()
+        .filter(|agent| agent.team_agent().is_some())
+        .collect();
+    host.close(&keep)
+}
+
 /// Turns a terminal code into the sentence clients show, such as for a refused attach.
 /// Takes the code from `HostError`, `TerminalFrame::Rejected` or `TerminalFrame::Closed`.
 /// Returns plain words without internal terms.
@@ -287,15 +305,52 @@ pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
 }
 
 /// What a viewer sends on an owner terminal connection.
-/// The first frame is `Attach`; `Input`, `Resize` and `Detach` follow on the same connection.
-/// Input bytes are at most `INPUT_BYTES_MAX`; a sub-agent's master later hears a note of them.
+/// The first frame is `Attach`; `Input`, `Prompt`, `Resize` and `Detach` follow on the same
+/// connection. `Input` bytes, at most `INPUT_BYTES_MAX`, are typed as given and never kept.
+/// `Prompt` text, at most `PROMPT_BYTES_MAX`, is the owner's explicit message: it is typed as
+/// one submission, and a sub-agent's master later hears a note of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalRequest {
     Attach { agent_id: AgentId },
     Input { bytes: Vec<u8> },
+    Prompt { text: String },
     Resize { cols: u16, rows: u16 },
     Detach,
+}
+
+/// The keys that type one owner prompt into an agent's app, before its Enter. Control
+/// characters other than newline and tab are dropped, so the prompt cannot press keys or end
+/// a paste. With bracketed paste on, the text goes as one paste with carriage returns between
+/// lines, as a terminal pastes; with it off every line break would be an Enter, so lines join
+/// with spaces. Takes the text and whether the app turned bracketed paste on.
+/// Returns the keys, or none for blank text or text over `PROMPT_BYTES_MAX` bytes.
+pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
+    if text.len() > PROMPT_BYTES_MAX {
+        return None;
+    }
+    let clean: String = text
+        .replace("\r\n", "\n")
+        .chars()
+        .map(|character| if character == '\r' { '\n' } else { character })
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let keys = if bracketed {
+        format!("\x1b[200~{}\x1b[201~", clean.replace('\n', "\r"))
+    } else {
+        clean
+            .split('\n')
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert!(!keys.contains('\n'));
+    Some(keys.into_bytes())
 }
 
 /// What the engine sends on an owner terminal connection.

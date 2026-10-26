@@ -1,8 +1,9 @@
 import type { IconName, Tone } from "../../ui";
-import { failureCopy, receiptState } from "../../api-projects";
+import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import type { IntentReceipt, MasterState, MasterTurn, ProjectDetail } from "../../engine-client";
+import { namedFailure } from "../../api";
+import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -31,6 +32,22 @@ export function ago(at: number, now: number): string {
 }
 
 const PROMPT_LINE_MAX = 140;
+const RATE_LIMITED = /^rate_limited until (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC: (.+)$/s;
+
+/** Reads the wait of a research job parked because every pool account that can run it hit a
+ * rate or usage limit, from the engine's "rate_limited until YYYY-MM-DD HH:MM UTC: reason" detail.
+ * Input: the job. Output: when the limit ends in milliseconds and the plain reason, or null. */
+export function rateLimit(job: Pick<ResearchJob, "status" | "error">): { until: number; reason: string } | null {
+  const found = job.status === "needs_pool" ? RATE_LIMITED.exec(job.error ?? "") : null;
+  if (!found) return null;
+  const [year, month, day, hour, minute] = found.slice(1, 6).map(Number);
+  return { until: Date.UTC(year, month - 1, day, hour, minute), reason: found[6].trim() };
+}
+
+/** Names the owner's local clock time of a moment. Input: milliseconds. Output: for example "4:32 PM". */
+export function localClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
 
 /** The first line of a task prompt, cut to fit one row. Input: the prompt. Output: the line. */
 export function firstLine(text: string): string {
@@ -147,10 +164,10 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
  * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
 export function changeOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
   if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
-  if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
+  if (result.kind === "error") return { toast: "", note: failureCopy(result), reload: false };
   const state = receiptState(result.value);
   if (state.kind === "applied") return { toast: done, note: "", reload: true };
-  return { toast: "", note: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
+  return { toast: "", note: state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
 }
 
 /** What Pause all agents will do to the team's tasks: running ones stop, waiting ones are
@@ -209,7 +226,11 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   const base = { title: job.kind_label, elapsed: "", report: false, active: false };
   switch (job.status) {
     case "queued": return { ...base, status: "Queued", tone: "neutral", progress: "Waiting to start", active: true };
-    case "needs_pool": return { ...base, status: "Needs a pool", tone: "warn", progress: job.error?.trim() || "Waiting for a pool" };
+    case "needs_pool": {
+      const limit = rateLimit(job);
+      if (limit) return { ...base, status: `Rate limited until ${localClock(limit.until)}`, tone: "warn", progress: limit.reason };
+      return { ...base, status: "Needs a pool", tone: "warn", progress: job.error?.trim() || "Waiting for a pool" };
+    }
     case "running": return {
       ...base, status: "Running", tone: "info", elapsed: ran, active: true,
       progress: job.cancel_requested ? "Stopping" : job.output_bytes > 0 ? `Writing report, ${formatBytes(job.output_bytes)} so far` : "Working",
@@ -228,9 +249,13 @@ export function shouldPoll(jobs: ResearchJob[]): boolean {
 }
 
 /** Builds the Needs you line for research that waits on its pool, using the engine's reason
- * when a waiting job carries one. Input: the jobs. Output: one sentence. */
+ * when a waiting job carries one and the local end of a rate limit when that is the reason.
+ * Input: the jobs. Output: one sentence. */
 export function waitingLine(jobs: ResearchJob[]): string {
-  const reason = jobs.find((job) => job.status === "needs_pool" && job.error?.trim())?.error?.trim();
+  const waiting = jobs.find((job) => job.status === "needs_pool" && job.error?.trim());
+  const limit = waiting ? rateLimit(waiting) : null;
+  if (limit) return `Research is rate limited until ${localClock(limit.until)}.`;
+  const reason = waiting?.error?.trim();
   if (!reason) return "Research is waiting for a pool.";
   return `Research is waiting: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
 }
@@ -271,21 +296,89 @@ export function masterStatus(session: MasterState["session"], turns: MasterTurn[
   return "Stopped";
 }
 
-/** One plain line for a master turn that has no reply yet or ended without one.
- * Input: the turn. Output: the line. */
+const STOPPED_WHY = new Map<string, string>([
+  ["readiness_unknown", "the account is not signed in. Sign in again in Settings, Accounts"],
+  ["readiness_stale", "the account is not signed in. Sign in again in Settings, Accounts"],
+  ["connection_changed", "its settings changed while it was open"],
+  ["invalid_authentication", "the sign-in was rejected. Sign in again in Settings, Accounts"],
+  ["quota_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["quota_unknown", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["budget_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
+  ["rate_limited", "the account is resting after too many requests"],
+  ["cooldown_active", "the account is resting after too many requests"],
+  ["capacity_unavailable", "another turn is still running"],
+  ["profile_busy", "its account is busy signing in or out"],
+  ["scope_revoked", "it no longer has access to this project"],
+  ["runtime_unavailable", "it could not start. Check it in Settings, Harnesses"],
+  ["capture_incomplete", "its reply was cut off"],
+  ["output_limit", "its reply was longer than the limit"],
+  ["unsupported_capability", "it cannot lead a project yet"],
+  ["cancelled", "you stopped this turn"],
+]);
+
+/** The code a stopped master turn shows: the cause the engine stored, else its reason,
+ * else its phase. Input: the turn. Output: the code, never a bare "unknown". */
+export function stopCode(turn: MasterTurn): string {
+  if (turn.cause) return turn.cause;
+  return turn.reason && turn.reason !== "unknown" ? turn.reason : turn.phase;
+}
+
+/** One plain line for a master turn that has no reply yet or ended without one; a stopped
+ * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
-  const reason = turn.reason ? turn.reason.replaceAll("_", " ") : "";
-  if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return "Not signed in. Sign in again in Settings, Accounts, then send again.";
-  if (turn.phase === "blocked" && turn.reason === "readiness_stale") return "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.";
-  if (turn.phase === "blocked" && turn.reason === "connection_changed") return "Settings changed since the master started. End the conversation, then send again.";
+  const code = ` (${stopCode(turn)})`;
+  if (turn.phase === "blocked" && (turn.accounts ?? []).length > 0) return `No account in this master's pool can run it now.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return `Not signed in. Sign in again in Settings, Accounts, then send again.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;
+  if (turn.phase === "blocked" && turn.reason === "connection_changed") return `Settings changed since the master started. End the conversation, then send again.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return `The master couldn't start: this project has no repository yet.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_config_refused") return `The master couldn't start: ${turn.detail ?? "a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again."}${code}`;
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
     case "running": return "Thinking...";
     case "waiting_approval": return "Waiting for your approval";
     case "succeeded": return "Replied";
     case "cancelled": return "Stopped";
-    case "failed": case "blocked": case "uncertain": return `The master stopped${reason ? `: ${reason}` : ""}.`;
+    case "failed": case "blocked": case "uncertain": {
+      const why = turn.reason ? STOPPED_WHY.get(turn.reason) : undefined;
+      return `The master stopped${why ? `: ${why}` : ""}.${code}`;
+    }
   }
+}
+
+const accountReasons: Record<string, string> = {
+  readiness_unknown: "not signed in",
+  readiness_stale: "sign-in is out of date",
+  invalid_authentication: "sign-in was rejected",
+  quota_exhausted: "usage limit reached",
+  rate_limited: "rate limited, paused for a few minutes",
+  cooldown_active: "paused for a few minutes",
+  profile_busy: "busy with a sign-in or sign-out",
+  scope_revoked: "not allowed by settings",
+  connection_changed: "settings changed",
+};
+
+/** The lines for the tasks a master turn handed to the team: the engine's note on each one
+ * that ended, otherwise that it is still with a sub-agent. Input: the turn. Output: the lines. */
+export function taskLines(turn: MasterTurn): string[] {
+  return (turn.tasks ?? []).map((task) => task.note ?? `Task ${task.task} is still with a sub-agent.`);
+}
+
+/** Tells whether a task some turn handed to the team has not ended yet, so the conversation
+ * keeps reading until its note arrives. Input: the turns. Output: true while one is open. */
+export function delegating(turns: MasterTurn[]): boolean {
+  return turns.some((turn) => (turn.tasks ?? []).some((task) => task.note === null));
+}
+
+/** The account a master turn runs on or, for a turn no account could run, each account
+ * of the pool with why, and other harnesses that are ready. Input: the turn. Output: the
+ * lines, empty when the turn has not reached an account yet. */
+export function accountLines(turn: MasterTurn): string[] {
+  const account = turn.attempt?.connection.account_ref;
+  if (account) return [`On account ${account}`];
+  return (turn.accounts ?? []).map((item) => item.reason === null
+    ? `${item.account_ref} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
+    : `${item.account_ref}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
 }
 
 /** The Thinking line for a master turn, with the time since this window sent the message.
@@ -346,10 +439,24 @@ export function resendText(turns: MasterTurn[], sent: Record<string, string>): s
 const SEND_FALLBACK = "Couldn't send. Try again.";
 
 /** The inline line under the composer when a message could not be sent; the message stays
- * in the composer. Input: the failure code. Output: the plain line. */
-export function sendFailureLine(code: string): string {
-  const copy = failureCopy(code);
-  return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
+ * in the composer. Input: the failure code, or the failure with the engine cause behind it.
+ * Output: the plain line, naming the code when there is no sentence for it. */
+export function sendFailureLine(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  const sentence = failureSentence(code);
+  return sentence === undefined ? withCode(SEND_FALLBACK, code) : `Couldn't send. ${namedFailure(sentence, code, cause)}`;
+}
+
+/** The muted line shown when a send found its conversation older than the settings and a new
+ * conversation took the message instead. */
+export const NEW_CONVERSATION_NOTE = "Settings changed, so a new conversation started.";
+
+/** Whether a send refused because the settings changed after the conversation started should
+ * end that conversation, start a new one and send the same message there.
+ * Input: the send receipt. Output: true only for that confirmed refusal. */
+export function restartForSettings(receipt: IntentReceipt): boolean {
+  const state = receiptState(receipt);
+  return state.kind === "rejected" && state.code === "master_source_conflict";
 }
 
 /** The most bytes one message to the master may hold; the bridge refuses more. */

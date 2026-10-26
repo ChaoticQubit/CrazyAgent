@@ -398,6 +398,27 @@ fn aborted_success_and_assistant_errors_keep_the_observed_failure_information() 
 }
 
 #[test]
+fn a_harness_with_no_sign_in_is_told_apart_from_a_provider_rejecting_the_sign_in() {
+    let mut p = active();
+    let mut value = assistant(
+        "not-signed-in",
+        json!([{"type":"text","text":"Not logged in \u{b7} Please run /login"}]),
+    );
+    value["error"] = json!("authentication_failed");
+    let events = p.receive(&wire(value)).unwrap();
+    assert!(matches!(&events[0].kind, EventKind::AssistantError { code }
+        if code == "not_signed_in"));
+    let mut value = assistant(
+        "rejected",
+        json!([{"type":"text","text":"Invalid API key \u{b7} Please run /login"}]),
+    );
+    value["error"] = json!("authentication_failed");
+    let events = p.receive(&wire(value)).unwrap();
+    assert!(matches!(&events[0].kind, EventKind::AssistantError { code }
+        if code == "authentication_failed"));
+}
+
+#[test]
 fn malformed_and_repeated_initialization_cannot_rebind_native_identity() {
     let mut p = ready();
     let mut value = init();
@@ -407,6 +428,43 @@ fn malformed_and_repeated_initialization_cannot_rebind_native_identity() {
     let mut value = init();
     value["capabilities"] = json!(["interrupt_receipt_v1", 3]);
     assert_eq!(p.receive(&wire(value)), Err(ProtocolError::InvalidMessage));
+}
+
+#[test]
+fn every_later_turn_opens_with_an_init_for_the_bound_session() {
+    let mut p = active();
+    p.receive(&wire(result("result-1"))).unwrap();
+    p.start_turn(RequestId::new("request-two").unwrap(), "Again")
+        .unwrap();
+    let mut again = init();
+    again["uuid"] = json!("init-2");
+    assert!(p.receive(&wire(again)).unwrap().is_empty());
+    assert_eq!(p.state(), State::Active);
+    let text = p
+        .receive(&wire(assistant(
+            "assistant-2",
+            json!([{"type":"text","text":"two"}]),
+        )))
+        .unwrap();
+    assert_eq!(text.len(), 1);
+    p.receive(&wire(result("result-2"))).unwrap();
+    assert_eq!(p.state(), State::Idle);
+
+    let mut p = active();
+    let mut foreign = init();
+    foreign["uuid"] = json!("init-2");
+    foreign["session_id"] = json!("other-native-session");
+    assert_eq!(p.receive(&wire(foreign)), Err(ProtocolError::StaleMessage));
+    assert_eq!(p.state(), State::Failed);
+
+    let mut p = active();
+    let mut malformed = init();
+    malformed["uuid"] = json!("init-2");
+    malformed["capabilities"] = json!(["interrupt_receipt_v1", 3]);
+    assert_eq!(
+        p.receive(&wire(malformed)),
+        Err(ProtocolError::InvalidMessage)
+    );
 }
 
 #[test]

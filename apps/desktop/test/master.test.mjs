@@ -71,6 +71,9 @@ test("turn status labels are plain language for every phase", () => {
   assert.equal(label("blocked", "connection_changed"),
     "Blocked: settings or the engine changed since the master opened. Close it, open it again, then send again");
   assert.equal(label("uncertain"), "Outcome unclear");
+  assert.equal(label("failed", "unknown"), "Failed");
+  assert.equal(conversation.turnStatus({ id: "t", ordinal: 1, phase: "blocked", reason: "runtime_unavailable", cause: "rcli_profile_configuration_required", reply: null }),
+    "Blocked (rcli_profile_configuration_required)");
   for (const phase of ["delivering", "waiting_approval", "failed", "cancelled"]) assert.ok(label(phase).length > 0);
 });
 
@@ -90,6 +93,21 @@ test("busy bridge calls are retried and other failures are not", async () => {
   calls = 0;
   await assert.rejects(retryBusy(async () => { calls += 1; throw { code: "busy" }; }, 1), { code: "busy" });
   assert.equal(calls, 8);
+});
+
+test("a burst of calls refused busy together does not retry in step until some give up", async () => {
+  const { retryBusy } = await import("../src/engine-client.ts");
+  let held = false;
+  const hold = async () => {
+    if (held) throw { code: "busy" };
+    held = true;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    held = false;
+    return "read";
+  };
+  const burst = Array.from({ length: 13 }, () => retryBusy(hold, 50));
+  const settled = await Promise.allSettled(burst);
+  assert.deepEqual(settled.filter((result) => result.status === "rejected").map((result) => result.reason), []);
 });
 
 test("master controls offer Close on an open master and Start again once it is closed", () => {

@@ -2,15 +2,14 @@
 
 ## given / when / then structure (language-agnostic)
 
+The three blocks of the test body are, in order: given (arrange), only the state relevant to THIS behavior; when (act), exactly one action; then (assert), one behavior with clear expected vs actual.
+
 ```
 test "should not allow withdrawal when balance is empty":
-    # given (arrange) — only the state relevant to THIS behavior
     account = Account(balance=0)
 
-    # when (act) — exactly one action
     result = account.withdraw(10)
 
-    # then (assert) — one behavior, clear expected vs actual
     assert result.failed
     assert result.reason == "insufficient funds"
     assert account.balance == 0

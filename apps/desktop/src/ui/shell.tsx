@@ -5,7 +5,7 @@ import { formatRoute, type Route } from "./router";
 
 export { BrandMark };
 
-export type EngineState = "connecting" | "running" | "down";
+export type EngineState = "connecting" | "running" | "down" | "outdated";
 
 export interface SidebarProject {
   id: string;
@@ -54,6 +54,23 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
           <button type="button" className="btn quiet small" onClick={onRetry}>Try again</button></span>}
     </div>
   </aside>;
+}
+
+const NOT_TEXT_INPUTS = new Set(["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"]);
+
+function isEditableText(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLInputElement) return !NOT_TEXT_INPUTS.has(target.type);
+  return target instanceof HTMLElement && target.isContentEditable;
+}
+
+/** Keeps the web view's own right-click menu (Reload, Services, developer items) out of the
+ * app: a right-click is cancelled unless it lands in editable text, where the native Cut,
+ * Copy and Paste menu stays. Input: the document to guard. Installed once, at startup. */
+export function blockWebContextMenu(target: Document): void {
+  target.addEventListener("contextmenu", (event) => {
+    if (!isEditableText(event.target)) event.preventDefault();
+  });
 }
 
 /** The app frame: skip link, sidebar, and the scrolling main region holding the page, with

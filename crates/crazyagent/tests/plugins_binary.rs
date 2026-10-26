@@ -90,8 +90,11 @@ async fn controller(root: &Path) -> OwnerController {
         .unwrap()
 }
 
+/// Wiring test: the engine binary is real, but tests/fixtures/mcp_fixture.py stands in for
+/// an MCP server and invents its tool list, so this checks what survives a restart.
+/// No test checks a real third-party MCP server: none is installed or approved.
 #[tokio::test]
-async fn skills_and_approved_servers_survive_a_real_engine_binary_restart() {
+async fn wiring_skills_and_approved_servers_survive_a_real_engine_binary_restart() {
     let root = tempfile::Builder::new()
         .prefix("ca-plug-bin-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -115,7 +118,8 @@ async fn skills_and_approved_servers_survive_a_real_engine_binary_restart() {
         "---\nname: release-notes\ndescription: Writes release notes.\n---\n",
     )
     .unwrap();
-    let server_path = path.join("mcp_fixture.py");
+    let server_path = path.join("servers").join("mcp_fixture.py");
+    std::fs::create_dir_all(path.join("servers")).unwrap();
     std::fs::write(&server_path, FIXTURE).unwrap();
     std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let spec = ServerSpec::Stdio {

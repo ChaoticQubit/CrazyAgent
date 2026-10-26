@@ -14,10 +14,11 @@ use crate::engine::owner::{
 };
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::master_session::{
-    METADATA_BYTES_MAX, MasterBackend, MasterBootstrapAuth, MasterCursor, MasterOwnerAction,
-    MasterReason, MasterReply, MasterRuntimeView, MasterSessionPhase, MasterSessionView,
-    MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX, RcliConfiguredProfileProof,
-    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, error,
+    METADATA_BYTES_MAX, MasterAccountState, MasterBackend, MasterBinding, MasterBootstrapAuth,
+    MasterCursor, MasterOwnerAction, MasterReason, MasterReply, MasterRuntimeView,
+    MasterSessionPhase, MasterSessionView, MasterTurnPage, MasterTurnPhase, MasterTurnView,
+    PAGE_BYTES_MAX, REBINDS_MAX, RcliConfiguredProfileProof, RcliProfileRegistration,
+    RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code, error, master_scope,
     validate_action, validate_page, validate_selection,
 };
 use crate::model_gateway::{
@@ -88,6 +89,13 @@ pub(crate) enum MasterRuntimeCommand {
         turn_id: RequestId,
         attempt_id: RequestId,
     },
+    RecordChild {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        group: i32,
+    },
     Observe {
         host: HostStamp,
         project_id: ProjectId,
@@ -96,12 +104,32 @@ pub(crate) enum MasterRuntimeCommand {
         attempt_id: RequestId,
         observation: MasterRuntimeObservation,
     },
+    Fail {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        reason: MasterReason,
+        cause: String,
+    },
+    Checked {
+        provisioned: Box<crate::worktrees::Provisioned>,
+        prepare: Box<MasterRuntimeCommand>,
+    },
 }
 
 pub(crate) enum MasterRuntimeObservation {
-    Running { runtime: MasterRuntimeView },
-    Response { reply: MasterReply },
-    Failed { reason: MasterReason },
+    Running {
+        runtime: MasterRuntimeView,
+    },
+    Response {
+        reply: MasterReply,
+        delegations: Vec<crate::team::Delegation>,
+    },
+    Failed {
+        reason: MasterReason,
+        cause: String,
+    },
     Cancelled,
     Disconnected,
 }
@@ -109,6 +137,7 @@ pub(crate) enum MasterRuntimeObservation {
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
     pub(crate) instructions: String,
+    pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
     pub(crate) attempt: Attempt,
     pub(crate) profile: PreparedNativeProfile,
@@ -136,6 +165,26 @@ pub(crate) enum MasterRuntimeResult {
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
     Profile(Box<NativeProfileUse>),
+    Checkout(Box<MasterCheckout>),
+}
+
+/// A conversation worktree reserved by a turn's preparation, to be checked out away from
+/// the database thread before the same preparation runs again (LB-28).
+pub(crate) struct MasterCheckout {
+    provisioning: crate::worktrees::Provisioning,
+    prepare: MasterRuntimeCommand,
+}
+
+impl MasterCheckout {
+    /// Checks the worktree out, touching only the filesystem and Git. Input: the reserved
+    /// worktree and its preparation. Output: the command that stores the checkout and then
+    /// prepares the turn again.
+    pub(crate) fn materialize(self) -> MasterRuntimeCommand {
+        MasterRuntimeCommand::Checked {
+            provisioned: Box::new(self.provisioning.materialize()),
+            prepare: Box::new(self.prepare),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -412,6 +461,7 @@ fn decode_session(
         || session.owner.revision_after.value() != created
         || session.owner.revision_before.value().checked_add(1) != Some(created)
         || session.owner.event_cursor.as_ref().map(Cursor::value) != Some(created)
+        || !session.rebinds_valid()
     {
         return Err(error("master_session_record"));
     }
@@ -614,6 +664,57 @@ fn cancel_turn(
     Ok(turn)
 }
 
+/// Ends a master conversation: its outstanding turn is cancelled and the session closes.
+/// Takes the transaction, the session and the revision it was read at.
+/// Returns once the turn is cancelled; the caller saves the session.
+fn end_session(
+    tx: &Transaction<'_>,
+    session: &mut MasterSessionView,
+    revision: u64,
+) -> Result<(), EngineError> {
+    if let Some(turn_id) = &session.current_turn {
+        let turn = load_turn(tx, session, turn_id, revision)?
+            .ok_or_else(|| error("master_current_turn_record"))?;
+        cancel_turn(tx, turn)?;
+    }
+    session.current_turn = None;
+    session.phase = MasterSessionPhase::Closed;
+    Ok(())
+}
+
+/// Ends a project's open master conversation as the project is removed, as the owner's
+/// End conversation does, in the removal's own transaction and at its revision.
+/// Takes the transaction, the project and the revision before the removal.
+/// Returns Ok, also when no conversation is open.
+pub(crate) fn close_master_for_removal(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    revision: u64,
+) -> Result<(), EngineError> {
+    let open: Option<String> = tx
+        .query_row(
+            "SELECT id FROM master_sessions WHERE project=?1 AND phase='configured'",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(open) = open else {
+        return Ok(());
+    };
+    let id = SessionId::new(open).map_err(error)?;
+    let mut session =
+        load_session(tx, &id, revision)?.ok_or_else(|| error("master_session_record"))?;
+    assert_eq!(session.phase, MasterSessionPhase::Configured);
+    end_session(tx, &mut session, revision)?;
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| error("master_integer_bounds"))?;
+    session.version = Cursor::new(next);
+    save_session(tx, &session)?;
+    Ok(())
+}
+
 fn preparation(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -707,18 +808,31 @@ fn validate_runtime_record(
         }
         MasterTurnPhase::WaitingApproval => false,
     };
-    if !valid {
+    if !valid
+        || turn.accounts.len() > crate::config::POOL_MEMBERS_MAX
+        || (!turn.accounts.is_empty() && turn.phase != MasterTurnPhase::Blocked)
+    {
         return Err(error("master_runtime_state_unqualified"));
     }
     if let Some(attempt) = &turn.attempt {
         if model_gateway::read_attempt(tx, &attempt.request.id)?.as_ref() != Some(attempt)
-            || attempt.config_id != session.config_id
+            || !session.admits_attempt(
+                &attempt.config_id,
+                matches!(
+                    turn.phase,
+                    MasterTurnPhase::Prepared
+                        | MasterTurnPhase::Delivering
+                        | MasterTurnPhase::Running
+                ),
+            )
             || attempt.request.project_id != session.project_id
             || attempt.request.task_id != turn_task_id(&session.session_id, &turn.id)?
             || attempt.request.role != Role::ProjectLeader
             || attempt.request.pool_ref != session.selection.pool_ref
-            || attempt.request.target_profile_ref != session.selection.target_profile_ref
-            || attempt.request.route != session.selection.route
+            || (
+                attempt.request.target_profile_ref.clone(),
+                attempt.request.route.clone(),
+            ) != member_request(session, &attempt.connection)
             || attempt.request.previous_attempt.is_some()
             || (matches!(
                 turn.phase,
@@ -814,6 +928,47 @@ fn persist_runtime(
     )?;
     assert!(!tx.is_autocommit());
     Ok(())
+}
+
+/// Ends an admitted turn that failed before its harness ran. A rejected sign-in, such as a
+/// token that still lapses after renewal, is reported to the gateway so the account waits
+/// for a fresh sign-in; any other failure, a credential this engine could not read among
+/// them, ends locally. Inputs: the transaction, the prepared turn and the reason.
+/// Output: its attempt is ended.
+fn fail_before_running(
+    tx: &Transaction<'_>,
+    turn: &mut MasterTurnView,
+    reason: MasterReason,
+) -> Result<(), EngineError> {
+    let Some(attempt) = turn.attempt.as_ref().filter(|attempt| {
+        reason == MasterReason::InvalidAuthentication && attempt.completion.is_none()
+    }) else {
+        return complete_local(tx, turn, MasterTurnPhase::Failed);
+    };
+    let completion = AttemptCompletion {
+        outcome: AttemptOutcome::Failed(FailureKind::InvalidAuthentication),
+        effects: Effects::None,
+        finished_at_ms: now_ms()?.max(attempt.selected_at_ms),
+        retry_at_ms: None,
+    };
+    model_gateway::finish_attempt(tx, &attempt.request.id, &completion)?;
+    turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
+    Ok(())
+}
+
+/// Lifts the holds on an account that just signed in afresh: its pause and the provider's
+/// rejection of its earlier sign-in, so its next turn may run at once.
+/// Inputs: the transaction and the account's connection. Output: both holds are gone.
+pub(super) fn lift_account_holds(
+    tx: &Transaction<'_>,
+    connection: &ModelConnection,
+) -> Result<(), EngineError> {
+    tx.execute(
+        "DELETE FROM team_paused_accounts WHERE connection=?1",
+        [connection.id.as_str()],
+    )
+    .map_err(error)?;
+    model_gateway::sign_in_renewed(tx, connection, now_ms()?)
 }
 
 fn complete_local(
@@ -962,9 +1117,12 @@ fn current_scope(
             owner_epoch: session.owner.resulting_epoch,
         },
     )?;
-    if session.owner.engine_epoch != host.engine_epoch
-        || session.config_id != config.id
-        || session.source_hash != settings::verified_source_hash(config, sources)?
+    if session.engine_epoch() != host.engine_epoch
+        || session.binding()
+            != (
+                &config.id,
+                settings::verified_source_hash(config, sources)?.as_str(),
+            )
     {
         return Err(error("master_source_conflict"));
     }
@@ -1153,9 +1311,12 @@ pub(super) fn validate_bootstrap_auth(
                 }
             }
             if !matches!(fact.action, NativeAuthAction::SignIn { .. })
-                || fact.binding.engine_epoch != session.owner.engine_epoch
+                || fact.binding.engine_epoch != session.engine_epoch()
                 || fact.binding.at_revision.value() > owner_revision(tx)?
-                || fact.binding.connection.account_ref != session.selection.route.account_ref
+                || !crate::master_session::backend_member(
+                    session.selection.backend,
+                    &fact.binding.connection,
+                )
             {
                 return Err(error("master_bootstrap_authentication_stale"));
             }
@@ -1290,9 +1451,10 @@ fn authenticated(
     config: &EffectiveConfig,
     host: &HostStamp,
     session: &MasterSessionView,
+    member: &ModelConnection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
 ) -> Result<MasterBootstrapAuth, EngineError> {
-    let fact = current_auth(tx, config, host, session)?;
+    let fact = current_auth(tx, config, host, session, member)?;
     let custody = custody.as_mut().map_err(|error| error.clone())?;
     match &fact {
         MasterBootstrapAuth::NativeSignIn(fact) => {
@@ -1334,43 +1496,389 @@ fn sign_in_gap(phase: NativeAuthPhase) -> Option<&'static str> {
     }
 }
 
+/// Proves one member of the master's pool can authorize its turns now.
+/// Inputs: the transaction, settings, host, session and member connection. Output: the
+/// RCLI configured proof, or the member's sign-in while it is an allowed member of the
+/// pool; the missing, unknown, stale or in-use code otherwise.
 fn current_auth(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     host: &HostStamp,
     session: &MasterSessionView,
+    member: &ModelConnection,
 ) -> Result<MasterBootstrapAuth, EngineError> {
     if session.selection.backend == MasterBackend::Rcli {
         return configured_auth(tx, config, host, session).map(MasterBootstrapAuth::RcliConfigured);
     }
-    let connection = native_profile_connection(config, &session.selection.target_profile_ref)?;
-    native_sign_in(
-        tx,
-        host,
-        connection,
-        Some(&session.selection.route.account_ref),
+    if !master_members(config, session)
+        .into_iter()
+        .any(|(connection, gap, _)| connection == member && gap.is_none())
+    {
+        return Err(error("native_profile_connection_missing"));
+    }
+    let connection = native_profile_connection(config, &member.id)?;
+    native_sign_in(tx, host, connection, Some(&member.account_ref))
+        .map(MasterBootstrapAuth::NativeSignIn)
+}
+
+/// Lists the connections of a pool in pool order.
+/// Inputs: the settings and the pool. Output: each member connection the catalog defines,
+/// empty when the pool or catalog is gone.
+fn pool_connections<'a>(
+    config: &'a EffectiveConfig,
+    pool_ref: &crate::protocol::CredentialRef,
+) -> Vec<&'a ModelConnection> {
+    let Some(catalog) = config.settings.model_access.as_ref() else {
+        return Vec::new();
+    };
+    let Some(pool) = catalog.pools.iter().find(|pool| &pool.id == pool_ref) else {
+        return Vec::new();
+    };
+    let members: Vec<_> = pool
+        .members
+        .iter()
+        .filter_map(|id| catalog.connections.iter().find(|item| &item.id == id))
+        .collect();
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
+    members
+}
+
+fn allowed_destination(config: &EffectiveConfig, target: &crate::protocol::CredentialRef) -> bool {
+    config.settings.allowed_destinations.contains(target)
+        && !config.settings.revoked_destinations.contains(target)
+}
+
+/// Why one pool member cannot run a master turn: the reason the owner sees and the plain
+/// refusal code a blocked turn stores as its cause.
+type Gap = (MasterReason, String);
+
+/// One pool member a master turn may try: its connection, the settings gap that rules it
+/// out before any check (None when settings allow it) and whether the owner chose it.
+type Member<'a> = (&'a ModelConnection, Option<Gap>, bool);
+
+/// Lists the pool members that may run a native master's turns, the owner's chosen
+/// connection first and then in pool order. Inputs: the settings and the session.
+/// Output: each pool connection of the master harness, ScopeRevoked with the refusal code
+/// when settings do not allow its destination or account, and whether it is the owner's.
+fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) -> Vec<Member<'a>> {
+    let mut members: Vec<_> = pool_connections(config, &session.selection.pool_ref)
+        .into_iter()
+        .filter(|connection| {
+            crate::master_session::backend_member(session.selection.backend, connection)
+        })
+        .map(|connection| {
+            let scope = crate::routing::validate_pool_scope(
+                config,
+                &session.selection.pool_ref,
+                &session.project_id,
+                &Role::ProjectLeader,
+                &connection.account_ref,
+            );
+            let gap = if !allowed_destination(config, &connection.id) {
+                Some("master_destination_not_allowed".to_owned())
+            } else {
+                scope.err().map(|refusal| cause_code(&refusal.0))
+            };
+            let chosen = connection.id == session.selection.target_profile_ref;
+            (
+                connection,
+                gap.map(|code| (MasterReason::ScopeRevoked, code)),
+                chosen,
+            )
+        })
+        .collect();
+    members.sort_by_key(|(_, _, chosen)| !chosen);
+    assert!(members.iter().filter(|(_, _, chosen)| *chosen).count() <= 1);
+    members
+}
+
+/// Lists the members a turn may try, in order: the one configured RCLI profile, or the
+/// native pool members. Inputs: the settings and the session. Output: each member with
+/// its settings gap and whether the owner chose it, or the RCLI configuration code.
+fn candidates<'a>(
+    config: &'a EffectiveConfig,
+    session: &MasterSessionView,
+) -> Result<Vec<Member<'a>>, EngineError> {
+    if session.selection.backend == MasterBackend::Rcli {
+        return Ok(vec![(configured_connection(config, session)?, None, true)]);
+    }
+    Ok(master_members(config, session))
+}
+
+/// The target and route a turn's attempt uses on one member: the owner's selection for
+/// RCLI, and for a native master the member's connection and account in place of the
+/// chosen ones. Inputs: the session and the member. Output: the target and route.
+fn member_request(
+    session: &MasterSessionView,
+    member: &ModelConnection,
+) -> (crate::protocol::CredentialRef, crate::routing::RouteRequest) {
+    let route = &session.selection.route;
+    if session.selection.backend == MasterBackend::Rcli {
+        return (session.selection.target_profile_ref.clone(), route.clone());
+    }
+    let target = member.id.clone();
+    let request = crate::routing::RouteRequest {
+        preferred_target: route.preferred_target.as_ref().map(|_| target.clone()),
+        required_target: route.required_target.as_ref().map(|_| target.clone()),
+        account_ref: member.account_ref.clone(),
+        ..route.clone()
+    };
+    (target, request)
+}
+
+/// Names why one pool member cannot run a master turn now.
+/// Input: the failure of that member's launch check. Output: the reason for the turn's
+/// account list with the failure's code, or None when the failure is not about that
+/// member and stops the turn.
+fn member_gap(failure: &EngineError) -> Option<Gap> {
+    let reason = match failure.0.as_str() {
+        "master_authentication_unknown" => MasterReason::ReadinessUnknown,
+        "master_authentication_stale" | "native_profile_identity_changed" => {
+            MasterReason::ReadinessStale
+        }
+        "native_profile_in_use" => MasterReason::ProfileBusy,
+        "native_profile_connection_missing"
+        | "native_profile_not_managed"
+        | "native_profile_binding_conflict" => MasterReason::ConnectionChanged,
+        _ => return None,
+    };
+    Some((reason, cause_code(&failure.0)))
+}
+
+fn fails_over(reason: MasterReason) -> bool {
+    matches!(
+        reason,
+        MasterReason::ReadinessUnknown
+            | MasterReason::ReadinessStale
+            | MasterReason::InvalidAuthentication
+            | MasterReason::QuotaExhausted
+            | MasterReason::RateLimited
+            | MasterReason::CooldownActive
     )
-    .map(MasterBootstrapAuth::NativeSignIn)
+}
+
+fn pauses(reason: MasterReason) -> bool {
+    matches!(
+        reason,
+        MasterReason::QuotaExhausted | MasterReason::RateLimited | MasterReason::CooldownActive
+    )
+}
+
+/// Tells whether a pool account is paused after a limit, the pause sub-agents honour.
+/// Inputs: the transaction and the account's connection. Output: true while paused.
+fn paused(
+    tx: &Transaction<'_>,
+    connection: &crate::protocol::CredentialRef,
+) -> Result<bool, EngineError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_paused_accounts WHERE connection=?1 AND until_ms>?2)",
+        params![connection.as_str(), signed(now_ms()?)?],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Pauses a pool account whose turn hit a limit, for as long as a sub-agent's account
+/// pauses. A rejected sign-in is never paused: it holds until a fresh sign-in. Inputs: the transaction and the account's connection.
+/// Output: the pause is stored; a longer pause already set is kept.
+fn pause_member(
+    tx: &Transaction<'_>,
+    connection: &crate::protocol::CredentialRef,
+) -> Result<(), EngineError> {
+    let pause = crate::team::runtime::TeamLimits::default().rate_limit_pause;
+    let until =
+        signed(now_ms()?)?.saturating_add(i64::try_from(pause.as_millis()).unwrap_or(i64::MAX));
+    let changed = tx
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
+             ON CONFLICT(connection) DO UPDATE SET until_ms=MAX(until_ms,excluded.until_ms)",
+            params![connection.as_str(), until],
+        )
+        .map_err(error)?;
+    assert_eq!(changed, 1);
+    Ok(())
+}
+
+/// Checks one member before a turn: settings, pause, then its launch check.
+/// Inputs: the transaction, settings, host, session, custody, member and settings gap.
+/// Output: the member's proof, or why it cannot run; other failures stop the turn.
+fn member_auth(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    member: &ModelConnection,
+    gap: Option<Gap>,
+) -> Result<Result<MasterBootstrapAuth, Gap>, EngineError> {
+    if let Some(gap) = gap {
+        return Ok(Err(gap));
+    }
+    if model_gateway::sign_in_rejected(tx, member)? {
+        return Ok(Err((
+            MasterReason::InvalidAuthentication,
+            "master_sign_in_rejected".to_owned(),
+        )));
+    }
+    if paused(tx, &member.id)? {
+        return Ok(Err((
+            MasterReason::CooldownActive,
+            "master_account_paused".to_owned(),
+        )));
+    }
+    match authenticated(tx, config, host, session, member, custody) {
+        Ok(auth) => Ok(Ok(auth)),
+        Err(failure) => member_gap(&failure).map(Err).ok_or(failure),
+    }
+}
+
+/// Lists the accounts of other harnesses in the master's pool that could run now.
+/// Inputs: the transaction, settings, host and session. Output: each allowed, unpaused
+/// native member of another harness whose latest sign-in passes the launch check.
+fn other_ready(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &MasterSessionView,
+) -> Result<Vec<MasterAccountState>, EngineError> {
+    let mut ready = Vec::new();
+    for connection in pool_connections(config, &session.selection.pool_ref) {
+        if crate::master_session::backend_member(session.selection.backend, connection)
+            || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
+            || !allowed_destination(config, &connection.id)
+            || paused(tx, &connection.id)?
+            || model_gateway::sign_in_rejected(tx, connection)?
+        {
+            continue;
+        }
+        if native_sign_in(tx, host, connection, Some(&connection.account_ref)).is_ok() {
+            ready.push(MasterAccountState {
+                account_ref: connection.account_ref.clone(),
+                connection: connection.id.clone(),
+                harness: connection.harness.clone(),
+                reason: None,
+            });
+        }
+    }
+    Ok(ready)
+}
+
+/// Blocks a queued turn that no member of its harness can run, naming each member and
+/// why plus the ready accounts of other harnesses. Inputs: the transaction, settings,
+/// host, session, turn and the members' gaps in member order. Output: the blocked turn,
+/// persisted with the owner-chosen member's reason and code, or ConnectionChanged with
+/// native_profile_connection_missing when that member is gone.
+fn block_on_gaps(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    host: &HostStamp,
+    session: &mut MasterSessionView,
+    turn: &mut MasterTurnView,
+    gaps: &[(&ModelConnection, Gap, bool)],
+) -> Result<(), EngineError> {
+    assert_eq!(turn.phase, MasterTurnPhase::Queued);
+    let (reason, cause) = gaps.iter().find(|(_, _, chosen)| *chosen).map_or_else(
+        || {
+            (
+                MasterReason::ConnectionChanged,
+                "native_profile_connection_missing".to_owned(),
+            )
+        },
+        |(_, gap, _)| gap.clone(),
+    );
+    let mut accounts: Vec<_> = gaps
+        .iter()
+        .map(|(connection, (reason, _), _)| MasterAccountState {
+            account_ref: connection.account_ref.clone(),
+            connection: connection.id.clone(),
+            harness: connection.harness.clone(),
+            reason: Some(*reason),
+        })
+        .collect();
+    accounts.extend(other_ready(tx, config, host, session)?);
+    assert!(accounts.len() <= crate::config::POOL_MEMBERS_MAX);
+    assert!(!cause.is_empty());
+    turn.phase = MasterTurnPhase::Blocked;
+    turn.reason = Some(reason);
+    turn.cause = Some(cause);
+    turn.accounts = accounts;
+    persist_runtime(tx, config, session, turn)
+}
+
+/// Names the native connections whose sign-ins a master session's turns may launch on:
+/// every member of its pool that may serve its backend, since a turn moves past a member
+/// that cannot run (LB-17). Inputs: the transaction, settings and session. Output: those
+/// connections, or none for a missing session or a backend without a native sign-in.
+pub(super) fn native_members(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &SessionId,
+) -> Result<Option<Vec<crate::protocol::CredentialRef>>, EngineError> {
+    let Some(session) = load_session(tx, session, owner_revision(tx)?)? else {
+        return Ok(None);
+    };
+    if session.selection.backend == MasterBackend::Rcli {
+        return Ok(None);
+    }
+    let members: Vec<_> = master_members(config, &session)
+        .into_iter()
+        .filter(|(_, gap, _)| gap.is_none())
+        .map(|(connection, _, _)| connection.id.clone())
+        .collect();
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
+    Ok(Some(members))
 }
 
 /// Proves the latest sign-in of a native managed connection can authorize a launch on
 /// this engine run, the same check every master turn uses. Input: the transaction, the
 /// active host, the connection and, for a master, the account its route names. Output:
-/// the authenticated sign-in fact, or the unknown, stale or in-use code.
+/// the authenticated sign-in fact, or the unknown or stale code; while the profile's latest
+/// operation still holds its fence it reads stale, as it does while it checks the account.
 pub(crate) fn native_sign_in(
     tx: &Transaction<'_>,
     host: &HostStamp,
     connection: &ModelConnection,
     account_ref: Option<&crate::protocol::CredentialRef>,
 ) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
+    let fact = proved_sign_in(tx, host, connection, account_ref, None)?;
+    if super::native_auth::doubted(tx, connection, fact.generation)? {
+        return Err(error("master_authentication_stale"));
+    }
+    Ok(fact)
+}
+
+/// Proves one sign-in operation of a native managed connection, named by its generation,
+/// passes the launch check under the run that proved it, so a later run may re-prove it.
+/// Inputs: the transaction, that run's host, the connection and the generation. Output:
+/// the authenticated sign-in fact, or the unknown, stale or in-use code.
+pub(super) fn sign_in_at(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &ModelConnection,
+    generation: u64,
+) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
+    proved_sign_in(tx, host, connection, None, Some(generation))
+}
+
+/// Proves a connection's latest sign-in, or the one with the given generation, can
+/// authorize a launch under the host's run. Inputs: the transaction, host, connection,
+/// the account a master route names and the generation, if any. Output: the fact or code.
+fn proved_sign_in(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &ModelConnection,
+    account_ref: Option<&crate::protocol::CredentialRef>,
+    generation: Option<u64>,
+) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
     let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
         return Err(error("native_profile_not_managed"));
     };
     let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let wanted = generation.map(signed).transpose()?;
     type OperationRow = (String, i64, String, Vec<u8>, Vec<u8>);
     let row: Option<OperationRow> = tx.query_row(
-        "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-        [&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 AND (?2 IS NULL OR generation=?2) ORDER BY generation DESC LIMIT 1",
+        params![&key, wanted], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(error)?;
     let (id, generation, phase, request, bytes) =
         row.ok_or_else(|| error("master_authentication_unknown"))?;
@@ -1378,10 +1886,17 @@ pub(crate) fn native_sign_in(
         return Err(error("native_auth_request_bounds"));
     }
     let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-    let start: NativeAuthStart = serde_json::from_slice(&request).map_err(error)?;
+    if super::native_auth::profile_fenced(tx, &key)? {
+        return Err(error("master_authentication_stale"));
+    }
     if let Some(gap) = sign_in_gap(fact.phase) {
         return Err(error(gap));
     }
+    if !matches!(fact.action, NativeAuthAction::SignIn { .. }) {
+        return Err(error("master_authentication_unknown"));
+    }
+    let start: NativeAuthStart =
+        serde_json::from_slice(&request).map_err(|_| error("master_authentication_stale"))?;
     if fact.operation_id.as_str() != id
         || signed(fact.generation)? != generation
         || fact.phase.name() != phase
@@ -1400,16 +1915,6 @@ pub(crate) fn native_sign_in(
         || fact.binding.at_revision.value() > owner_revision(tx)?
     {
         return Err(error("master_authentication_stale"));
-    }
-    let fenced: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)",
-            [&key],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if fenced {
-        return Err(error("native_profile_in_use"));
     }
     Ok(fact)
 }
@@ -1474,12 +1979,10 @@ fn checked_prompt(
     Ok(text)
 }
 
-fn current_prompt(
+fn prompt_context(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
-    turn_id: &RequestId,
-    message: &str,
-) -> Result<String, EngineError> {
+) -> Result<Option<String>, EngineError> {
     let brief: Option<String> = tx.query_row(
         "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND kind='brief' ORDER BY brief_version DESC LIMIT 1",
         [session.project_id.as_str()], |row| row.get(0),
@@ -1489,7 +1992,145 @@ fn current_prompt(
         (Some(profile), None) => Some(profile.preface()),
         (None, brief) => brief,
     };
+    Ok(context)
+}
+
+fn current_prompt(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn_id: &RequestId,
+    message: &str,
+) -> Result<String, EngineError> {
+    let context = prompt_context(tx, session)?;
     checked_prompt(&session.session_id, turn_id, message, context.as_deref())
+}
+
+fn turn_message(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<String, EngineError> {
+    tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)
+}
+
+const HISTORY_HEADER: &str = "Conversation so far, oldest first:";
+const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
+
+/// Reads the earlier turns of this conversation that reached a model, oldest first, as
+/// the entries the next prompt carries. Inputs: the transaction, session and current
+/// turn. Output: one "Owner:" entry per turn with its reply or a no-reply line, then one
+/// "Engine:" line per task that turn handed to the team.
+fn prior_turns(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Vec<String>, EngineError> {
+    let mut statement = tx
+        .prepare("SELECT CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM master_turns WHERE session=?1 AND ordinal<?2 ORDER BY ordinal LIMIT 1024")
+        .map_err(error)?;
+    let bodies = statement
+        .query_map(
+            params![session.session_id.as_str(), signed(turn.ordinal)?],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let mut entries = Vec::new();
+    for body in bodies {
+        let body = body.ok_or_else(|| error("master_turn_bounds"))?;
+        let earlier: MasterTurnView = serde_json::from_str(&body).map_err(error)?;
+        if earlier.session_id != session.session_id || earlier.ordinal >= turn.ordinal {
+            return Err(error("master_turn_order"));
+        }
+        if !matches!(
+            earlier.phase,
+            MasterTurnPhase::Succeeded | MasterTurnPhase::Failed | MasterTurnPhase::Uncertain
+        ) {
+            continue;
+        }
+        let message = turn_message(tx, session, &earlier)?;
+        let mut entry = match &earlier.reply {
+            Some(reply) => format!("Owner: {message}\nYou: {}", reply.text),
+            None => format!("Owner: {message}\n(No reply was received.)"),
+        };
+        for task in turn_tasks(tx, &session.session_id, &earlier.id)? {
+            entry.push_str("\nEngine: ");
+            entry.push_str(&task.line());
+        }
+        entries.push(entry);
+    }
+    assert!(entries.len() < usize::try_from(turn.ordinal).map_err(error)?);
+    Ok(entries)
+}
+
+/// Joins the prompt context with the newest earlier turns from `start` on.
+/// Inputs: the context, the earlier entries oldest first and the first kept index.
+/// Output: the context the current message follows, or the bare context with no turns.
+fn with_history(context: Option<&str>, entries: &[String], start: usize) -> Option<String> {
+    if start >= entries.len() {
+        return context.map(str::to_owned);
+    }
+    let mut text = String::new();
+    if let Some(context) = context {
+        text.push_str(context);
+        text.push_str("\n\n");
+    }
+    text.push_str(HISTORY_HEADER);
+    if start > 0 {
+        text.push('\n');
+        text.push_str(HISTORY_OMITTED);
+    }
+    for entry in &entries[start..] {
+        text.push_str("\n\n");
+        text.push_str(entry);
+    }
+    Some(text)
+}
+
+/// Lists the tasks one master turn handed to the project's team, oldest first, with the
+/// engine's note once each ended. Inputs: the transaction, the session and the turn.
+/// Output: at most `DELEGATIONS_PER_REPLY_MAX` tasks; a task whose record went before it
+/// ended is left out, since no note can come.
+fn turn_tasks(
+    tx: &Transaction<'_>,
+    session: &SessionId,
+    turn: &RequestId,
+) -> Result<Vec<crate::master_session::MasterTask>, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT c.task,c.note FROM team_conversation_tasks c WHERE c.session=?1 AND c.turn=?2
+             AND (c.note IS NOT NULL OR EXISTS (SELECT 1 FROM team_tasks t WHERE t.id=c.task))
+             ORDER BY c.task LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(
+            params![
+                session.as_str(),
+                turn.as_str(),
+                i64::try_from(crate::team::DELEGATIONS_PER_REPLY_MAX).map_err(error)?
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let mut tasks = Vec::new();
+    for (task, note) in rows {
+        if note
+            .as_ref()
+            .is_some_and(|note| note.len() > crate::team::NOTE_BYTES_MAX)
+        {
+            return Err(error("master_task_note_bounds"));
+        }
+        tasks.push(crate::master_session::MasterTask {
+            task: u64::try_from(task).map_err(error)?,
+            note,
+        });
+    }
+    assert!(tasks.len() <= crate::team::DELEGATIONS_PER_REPLY_MAX);
+    Ok(tasks)
 }
 
 fn prompt(
@@ -1497,8 +2138,30 @@ fn prompt(
     session: &MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
-    let message: String = tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)?;
-    current_prompt(tx, session, &turn.id, &message)
+    let message = turn_message(tx, session, turn)?;
+    let context = prompt_context(tx, session)?;
+    let entries = prior_turns(tx, session, turn)?;
+    let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
+        + HISTORY_HEADER.len()
+        + HISTORY_OMITTED.len()
+        + message.len()
+        + 3;
+    let budget = 16384usize.saturating_sub(fixed);
+    let mut start = entries.len();
+    let mut used = 0;
+    while start > 0 && used + entries[start - 1].len() + 2 <= budget {
+        used += entries[start - 1].len() + 2;
+        start -= 1;
+    }
+    loop {
+        let framed = with_history(context.as_deref(), &entries, start);
+        match checked_prompt(&session.session_id, &turn.id, &message, framed.as_deref()) {
+            Err(failure) if failure.0 == "master_input_too_large" && start < entries.len() => {
+                start += 1;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn preflight_turn(
@@ -1520,6 +2183,7 @@ fn preflight_turn(
             };
             turn.phase = phase;
             turn.reason = Some(MasterReason::CapacityUnavailable);
+            turn.cause = Some(cause_code(&failure.0));
             persist_runtime(tx, config, session, turn)?;
             Ok(false)
         }
@@ -1537,16 +2201,22 @@ fn bundle(
         .attempt
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
+    let tools = matches!(
+        session.selection.backend,
+        MasterBackend::Claude | MasterBackend::Codex
+    ) && crate::launch_context::master_tools(tx, &session.project_id)
+        .map_err(|problem| EngineError(problem.0))?;
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => {
-            crate::launch_context::for_master(tx, &session.project_id)
+            crate::launch_context::for_master(tx, &session.project_id, tools)
                 .map_err(|problem| EngineError(problem.0))?
         }
     };
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         instructions,
+        tools,
         session,
         attempt,
         profile: PreparedNativeProfile::from_binding(record.auth.binding()),
@@ -1594,7 +2264,7 @@ fn verify_preparation(
     turn: &MasterTurnView,
 ) -> Result<Preparation, EngineError> {
     let record = preparation(tx, session, turn)?;
-    if current_auth(tx, config, host, session)? != record.auth {
+    if current_auth(tx, config, host, session, &record.auth.binding().connection)? != record.auth {
         return Err(error("master_authentication_stale"));
     }
     let (allocation, lease) = ready_lease(tx, session, &record.auth)?;
@@ -1626,6 +2296,7 @@ fn block_unready(
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
     turn.phase = MasterTurnPhase::Blocked;
     turn.reason = Some(reason);
+    turn.cause = Some(cause_code(&failure.0));
     persist_runtime(tx, config, session, turn)?;
     Ok(true)
 }
@@ -1653,30 +2324,89 @@ fn prepare_turn(
     if !preflight_turn(tx, config, session, turn)? {
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
     }
-    let auth = match authenticated(tx, config, host, session, custody) {
-        Ok(auth) => auth,
-        Err(failure) => {
-            if block_unready(tx, config, session, turn, &failure)? {
+    let mut gaps = Vec::new();
+    for (member, gap, chosen) in candidates(config, session)? {
+        let auth = match member_auth(tx, config, host, session, custody, member, gap)? {
+            Ok(auth) => auth,
+            Err(gap) => {
+                gaps.push((member, gap, chosen));
+                continue;
+            }
+        };
+        let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
+        let attempt = match admit(tx, config, session, turn, member, &auth)? {
+            Ok(attempt) => attempt,
+            Err(gap) if fails_over(gap.0) => {
+                if pauses(gap.0) {
+                    pause_member(tx, &member.id)?;
+                }
+                gaps.push((member, gap, chosen));
+                continue;
+            }
+            Err((reason, cause)) => {
+                turn.phase = MasterTurnPhase::Blocked;
+                turn.reason = Some(reason);
+                turn.cause = Some(cause);
+                persist_runtime(tx, config, session, turn)?;
                 return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
             }
-            return Err(failure);
+        };
+        if attempt.connection != auth.binding().connection {
+            return Err(error("master_attempt_connection_conflict"));
         }
-    };
-    let (worktree_lease, lease) = ready_lease(tx, session, &auth)?;
+        let record = Preparation {
+            attempt_id: attempt.request.id.clone(),
+            auth,
+            worktree_lease,
+            lease,
+        };
+        let inserted = tx
+            .execute(
+                "INSERT INTO master_preparations(session,turn,body) VALUES (?1,?2,?3)",
+                params![
+                    session.session_id.as_str(),
+                    turn.id.as_str(),
+                    encode(&record)?
+                ],
+            )
+            .map_err(error)?;
+        assert_eq!(inserted, 1);
+        turn.attempt = Some(attempt);
+        turn.phase = MasterTurnPhase::Prepared;
+        persist_runtime(tx, config, session, turn)?;
+        current_scope(tx, config, sources, host, session, turn)?;
+        return bundle(tx, session.clone(), turn);
+    }
+    block_on_gaps(tx, config, host, session, turn, &gaps)?;
+    Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())))
+}
+
+/// Asks the model gateway to admit a turn on one member, in a savepoint rolled back when
+/// the gateway refuses. Inputs: the transaction, settings, session, turn, member and its
+/// proof. Output: the admitted attempt, or the reason and code the gateway refused with.
+fn admit(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+    member: &ModelConnection,
+    auth: &MasterBootstrapAuth,
+) -> Result<Result<Attempt, Gap>, EngineError> {
+    let (target_profile_ref, route) = member_request(session, member);
     let request = AttemptRequest {
         id: RequestId::new(format!("master-attempt-{}", random_id()?)).map_err(error)?,
         task_id: turn_task_id(&session.session_id, &turn.id)?,
         project_id: session.project_id.clone(),
         role: Role::ProjectLeader,
         pool_ref: session.selection.pool_ref.clone(),
-        target_profile_ref: session.selection.target_profile_ref.clone(),
-        route: session.selection.route.clone(),
+        target_profile_ref,
+        route,
         previous_attempt: None,
     };
     tx.execute_batch("SAVEPOINT master_admission")
         .map_err(error)?;
     let admitted = if request.route.required_capabilities.is_empty() {
-        match &auth {
+        match auth {
             MasterBootstrapAuth::NativeSignIn(fact) => {
                 model_gateway::begin_initial_conversation_attempt(
                     tx,
@@ -1709,46 +2439,18 @@ fn prepare_turn(
     } else {
         model_gateway::begin_attempt(tx, config, config, &request, now_ms()?)
     };
-    let attempt = match admitted {
+    match admitted {
         Ok(start) => {
             tx.execute_batch("RELEASE master_admission")
                 .map_err(error)?;
-            start.attempt
+            Ok(Ok(start.attempt))
         }
         Err(failure) => {
             tx.execute_batch("ROLLBACK TO master_admission; RELEASE master_admission")
                 .map_err(error)?;
-            turn.phase = MasterTurnPhase::Blocked;
-            turn.reason = Some(admission_reason(&failure.0));
-            persist_runtime(tx, config, session, turn)?;
-            return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
+            Ok(Err((admission_reason(&failure.0), cause_code(&failure.0))))
         }
-    };
-    if attempt.connection != auth.binding().connection {
-        return Err(error("master_attempt_connection_conflict"));
     }
-    let record = Preparation {
-        attempt_id: attempt.request.id.clone(),
-        auth,
-        worktree_lease,
-        lease,
-    };
-    let inserted = tx
-        .execute(
-            "INSERT INTO master_preparations(session,turn,body) VALUES (?1,?2,?3)",
-            params![
-                session.session_id.as_str(),
-                turn.id.as_str(),
-                encode(&record)?
-            ],
-        )
-        .map_err(error)?;
-    assert_eq!(inserted, 1);
-    turn.attempt = Some(attempt);
-    turn.phase = MasterTurnPhase::Prepared;
-    persist_runtime(tx, config, session, turn)?;
-    current_scope(tx, config, sources, host, session, turn)?;
-    bundle(tx, session.clone(), turn)
 }
 
 /// Names the gateway task of one owner turn, so every turn starts its own attempt chain
@@ -1798,7 +2500,7 @@ fn observe_turn(
             turn.runtime = Some(runtime);
             turn.phase = MasterTurnPhase::Running;
         }
-        MasterRuntimeObservation::Response { reply } => {
+        MasterRuntimeObservation::Response { reply, delegations } => {
             if turn.phase == MasterTurnPhase::Succeeded && turn.reply.as_ref() == Some(&reply) {
                 return Ok(());
             }
@@ -1832,8 +2534,20 @@ fn observe_turn(
             turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;
             turn.reply = Some(reply);
             turn.phase = MasterTurnPhase::Succeeded;
+            if !delegations.is_empty() {
+                let access = config.settings.model_access.clone().unwrap_or_default();
+                let now = i64::try_from(now_ms()?).map_err(error)?;
+                crate::team::admit_conversation(
+                    tx,
+                    &access,
+                    &session.project_id,
+                    (&session.session_id, &turn.id),
+                    &delegations,
+                    now,
+                )?;
+            }
         }
-        MasterRuntimeObservation::Failed { reason } => {
+        MasterRuntimeObservation::Failed { reason, cause } => {
             if turn.phase == MasterTurnPhase::Failed && turn.reason == Some(reason) {
                 return Ok(());
             }
@@ -1867,6 +2581,12 @@ fn observe_turn(
             }
             turn.phase = MasterTurnPhase::Failed;
             turn.reason = Some(reason);
+            turn.cause = Some(cause_code(&cause));
+            if pauses(reason)
+                && let Some(attempt) = &turn.attempt
+            {
+                pause_member(tx, &attempt.connection.id)?;
+            }
         }
         MasterRuntimeObservation::Cancelled => {
             if !matches!(
@@ -1900,6 +2620,10 @@ fn observe_turn(
     persist_runtime(tx, config, session, turn)
 }
 
+/// Reserves the conversation worktree on a turn's first preparation and takes it out for
+/// checkout, so the slow checkout runs off the database thread (LB-28). Inputs: the
+/// database, settings, custody, engine path and command. Output: the reserved worktree
+/// to check out, or none when the command needs no new worktree.
 fn provision_bootstrap(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -1907,7 +2631,7 @@ fn provision_bootstrap(
     custody: &mut Result<NativeProfileCustody, EngineError>,
     path: &Path,
     command: &MasterRuntimeCommand,
-) -> Result<(), EngineError> {
+) -> Result<Option<crate::worktrees::Provisioning>, EngineError> {
     let MasterRuntimeCommand::Prepare {
         host,
         project_id,
@@ -1915,33 +2639,53 @@ fn provision_bootstrap(
         turn_id,
     } = command
     else {
-        return Ok(());
+        return Ok(None);
     };
     let tx = db.transaction().map_err(error)?;
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     current_scope(&tx, config, sources, host, &session, &turn)?;
     if turn.phase != MasterTurnPhase::Queued {
-        return Ok(());
+        return Ok(None);
     }
     if !preflight_turn(&tx, config, &mut session, &mut turn)? {
         tx.commit().map_err(error)?;
-        return Ok(());
+        return Ok(None);
     }
-    let auth = match authenticated(&tx, config, host, &session, custody) {
-        Ok(auth) => auth,
-        Err(failure) => {
-            if block_unready(&tx, config, &mut session, &mut turn, &failure)? {
-                tx.commit().map_err(error)?;
-                return Ok(());
+    let mut gaps = Vec::new();
+    let mut ready = None;
+    for (member, gap, chosen) in candidates(config, &session)? {
+        match member_auth(&tx, config, host, &session, custody, member, gap)? {
+            Ok(auth) => {
+                ready = Some(auth);
+                break;
             }
-            return Err(failure);
+            Err(gap) => gaps.push((member, gap, chosen)),
         }
+    }
+    let Some(auth) = ready else {
+        block_on_gaps(&tx, config, host, &mut session, &mut turn, &gaps)?;
+        tx.commit().map_err(error)?;
+        return Ok(None);
     };
     match ready_lease(&tx, &session, &auth) {
-        Ok(_) => return Ok(()),
+        Ok(_) => return Ok(None),
         Err(failure) if failure.0 == "master_bootstrap_receipt_missing" => {}
         Err(failure) => return Err(failure),
     }
+    let repository = master_repository(&tx, project_id)?;
+    let runtime_dir = path
+        .parent()
+        .ok_or_else(|| error("master_runtime_directory_missing"))?;
+    super::master_bootstrap::reserve(&tx, runtime_dir, &session, &repository, &auth)?;
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit());
+    crate::worktrees::begin_provision(db, &session.bootstrap_task_id, &repository).map(Some)
+}
+
+/// Reads the repository a project's master works in: the first one the project lists.
+/// Inputs: the transaction and the project. Output: the repository path, or
+/// `master_repository_missing` when the project lists none.
+fn master_repository(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<String, EngineError> {
     let body: String = tx
         .query_row(
             "SELECT body FROM projects WHERE id=?1",
@@ -1954,20 +2698,12 @@ fn provision_bootstrap(
     if project.project_id != *project_id {
         return Err(error("master_project_scope_conflict"));
     }
-    let repository = project
+    project
         .spec
         .repositories
         .first()
-        .ok_or_else(|| error("master_repository_missing"))?;
-    let runtime_dir = path
-        .parent()
-        .ok_or_else(|| error("master_runtime_directory_missing"))?;
-    super::master_bootstrap::reserve(&tx, runtime_dir, &session, repository, &auth)?;
-    tx.commit().map_err(error)?;
-    assert!(db.is_autocommit());
-    crate::worktrees::provision(db, &session.bootstrap_task_id, repository)?;
-    assert!(db.is_autocommit());
-    Ok(())
+        .cloned()
+        .ok_or_else(|| error("master_repository_missing"))
 }
 
 fn registration_session(
@@ -2081,13 +2817,23 @@ fn publish_rcli_profile(
         }
         return Ok(record.proof);
     }
-    let count: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM configured_master_profiles p JOIN master_sessions s ON s.id=p.session WHERE s.phase='configured' LIMIT 65)",
+    let counted = || -> Result<i64, EngineError> {
+        tx.query_row(
+            "SELECT COUNT(*) FROM configured_master_profiles",
             [],
             |row| row.get(0),
         )
+        .map_err(error)
+    };
+    let mut count = counted()?;
+    if count >= SESSIONS_MAX as i64 {
+        tx.execute(
+            "DELETE FROM configured_master_profiles WHERE rowid IN (SELECT p.rowid FROM configured_master_profiles p WHERE NOT EXISTS (SELECT 1 FROM master_sessions s WHERE s.id=p.session AND s.phase='configured') ORDER BY p.rowid LIMIT ?1)",
+            [count - (SESSIONS_MAX as i64 - 1)],
+        )
         .map_err(error)?;
+        count = counted()?;
+    }
     if count >= SESSIONS_MAX as i64 {
         return Err(error("master_configured_receipt_limit"));
     }
@@ -2191,11 +2937,17 @@ fn adopt_account_profile(
             continue;
         }
         if receipt.as_ref().is_some_and(|previous| {
-            previous.custody_id != candidate.custody_id
-                || previous.profile_config_sha256 != candidate.profile_config_sha256
-                || previous.profile_generation != candidate.profile_generation
+            previous.profile_generation == candidate.profile_generation
+                && (previous.custody_id != candidate.custody_id
+                    || previous.profile_config_sha256 != candidate.profile_config_sha256)
         }) {
             return Err(error("master_configured_receipt_conflict"));
+        }
+        if receipt
+            .as_ref()
+            .is_some_and(|previous| previous.profile_generation >= candidate.profile_generation)
+        {
+            continue;
         }
         receipt = Some(candidate);
     }
@@ -2584,6 +3336,16 @@ pub(super) fn runtime(
     path: &Path,
     command: MasterRuntimeCommand,
 ) -> Result<MasterRuntimeResult, EngineError> {
+    let command = match command {
+        MasterRuntimeCommand::Checked {
+            provisioned,
+            prepare,
+        } => {
+            crate::worktrees::finish_provision(db, *provisioned)?;
+            *prepare
+        }
+        command => command,
+    };
     #[cfg(all(test, unix))]
     if let MasterRuntimeCommand::RegisterRcliProfile {
         host,
@@ -2612,11 +3374,17 @@ pub(super) fn runtime(
             db, config, sources, custody, host, project_id, session_id,
         )?;
     }
-    provision_bootstrap(db, config, sources, custody, path, &command)?;
+    if let Some(provisioning) = provision_bootstrap(db, config, sources, custody, path, &command)? {
+        return Ok(MasterRuntimeResult::Checkout(Box::new(MasterCheckout {
+            provisioning,
+            prepare: command,
+        })));
+    }
     let tx = db.transaction().map_err(error)?;
     let (host, project_id, session_id, turn_id) = match &command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
+        MasterRuntimeCommand::Checked { .. } => unreachable!(),
         MasterRuntimeCommand::Route {
             host,
             project_id,
@@ -2642,7 +3410,21 @@ pub(super) fn runtime(
             turn_id,
             ..
         }
+        | MasterRuntimeCommand::RecordChild {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
+        }
         | MasterRuntimeCommand::Observe {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
+        }
+        | MasterRuntimeCommand::Fail {
             host,
             project_id,
             session_id,
@@ -2654,6 +3436,7 @@ pub(super) fn runtime(
     match command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
+        MasterRuntimeCommand::Checked { .. } => unreachable!(),
         MasterRuntimeCommand::Route { ref host, .. } => {
             if let Err(failure) = current_scope(&tx, config, sources, host, &session, &turn) {
                 if turn.phase != MasterTurnPhase::Queued
@@ -2704,6 +3487,7 @@ pub(super) fn runtime(
             let record = verify_preparation(&tx, config, host, &session, &turn)?;
             turn.phase = MasterTurnPhase::Delivering;
             persist_runtime(&tx, config, &mut session, &turn)?;
+            super::harness_groups::launching(&tx, &session.session_id, &turn.id)?;
             tx.commit().map_err(error)?;
             assert!(db.is_autocommit());
             let custody = custody.as_mut().map_err(|error| error.clone())?;
@@ -2725,6 +3509,11 @@ pub(super) fn runtime(
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
         }
+        MasterRuntimeCommand::RecordChild { group, .. } => {
+            super::harness_groups::record(&tx, &session.session_id, &turn.id, group)?;
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
         MasterRuntimeCommand::Observe {
             ref host,
             ref attempt_id,
@@ -2743,7 +3532,8 @@ pub(super) fn runtime(
             let stopping = matches!(
                 observation,
                 MasterRuntimeObservation::Failed {
-                    reason: MasterReason::ScopeRevoked
+                    reason: MasterReason::ScopeRevoked,
+                    ..
                 } | MasterRuntimeObservation::Cancelled
                     | MasterRuntimeObservation::Disconnected
             );
@@ -2758,11 +3548,100 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
+        MasterRuntimeCommand::Fail {
+            reason, ref cause, ..
+        } => {
+            if matches!(
+                turn.phase,
+                MasterTurnPhase::Queued | MasterTurnPhase::Prepared
+            ) && session.current_turn.as_ref() == Some(&turn.id)
+            {
+                turn.phase = if turn.phase == MasterTurnPhase::Queued {
+                    MasterTurnPhase::Blocked
+                } else {
+                    fail_before_running(&tx, &mut turn, reason)?;
+                    MasterTurnPhase::Failed
+                };
+                turn.reason = Some(reason);
+                turn.cause = Some(cause_code(cause));
+                if turn.phase == MasterTurnPhase::Failed
+                    && cause == "native_profile_credential_unavailable"
+                    && let Some(attempt) = &turn.attempt
+                {
+                    super::native_auth::doubt_sign_in(&tx, host, &attempt.connection)?;
+                }
+                if turn.phase == MasterTurnPhase::Failed
+                    && pauses(reason)
+                    && let Some(attempt) = &turn.attempt
+                {
+                    pause_member(&tx, &attempt.connection.id)?;
+                }
+                if reason == MasterReason::RepositoryConfigRefused {
+                    let repository = master_repository(&tx, &session.project_id)?;
+                    turn.detail = crate::worktrees::refused_config_line(cause, &repository);
+                }
+                persist_runtime(&tx, config, &mut session, &turn)?;
+                assert!(session.current_turn.is_none());
+            }
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
     }
 }
 
 fn reject(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
+}
+
+/// Moves an open master session to the current settings and engine run when nothing it
+/// runs on changed (DEC-092, LB-23): the same config, or one with the same `master_scope`.
+/// Inputs: the transaction, the session, the current config, source hash and engine epoch,
+/// and the revision of this send. Output: true when the session runs under all three now.
+fn rebind(
+    tx: &Transaction<'_>,
+    session: &mut MasterSessionView,
+    config: &EffectiveConfig,
+    source_hash: &str,
+    engine_epoch: &str,
+    at: Cursor,
+) -> Result<bool, EngineError> {
+    let moved = session.engine_epoch() != engine_epoch;
+    if !moved && session.binding() == (&config.id, source_hash) {
+        return Ok(true);
+    }
+    if session.selection.backend == MasterBackend::Rcli || session.rebound.len() >= REBINDS_MAX {
+        return Ok(false);
+    }
+    if session.binding().0 != &config.id {
+        let body: Option<Option<String>> = tx
+            .query_row(
+                "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1",
+                [session.binding().0.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some(Some(body)) = body else {
+            return Ok(false);
+        };
+        let bound: EffectiveConfig = serde_json::from_str(&body).map_err(error)?;
+        if &bound.id != session.binding().0 {
+            return Err(error("master_config_record"));
+        }
+        if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+            return Ok(false);
+        }
+    }
+    session.rebound.push(MasterBinding {
+        config_id: config.id.clone(),
+        source_hash: source_hash.into(),
+        engine_epoch: moved.then(|| engine_epoch.into()),
+        at,
+    });
+    assert!(session.rebound.len() <= REBINDS_MAX);
+    assert_eq!(session.binding(), (&config.id, source_hash));
+    assert_eq!(session.engine_epoch(), engine_epoch);
+    Ok(true)
 }
 
 fn execute(
@@ -2823,6 +3702,7 @@ fn execute(
             version: Cursor::new(next),
             current_turn: None,
             owner: provenance.clone(),
+            rebound: Vec::new(),
         };
         let changed = tx.execute("INSERT INTO master_sessions(id,project,created,version,phase,body) VALUES (?1,?2,?3,?3,'configured',?4)", params![session.session_id.as_str(), project_id.as_str(), signed(next)?, encode(&session)?]).map_err(error)?;
         assert_eq!(changed, 1);
@@ -2855,14 +3735,37 @@ fn execute(
     }
     match action {
         MasterOwnerAction::Submit { text, .. } => {
-            if session.config_id != config.id || session.source_hash != source_hash {
+            let moved = session.engine_epoch() != provenance.engine_epoch;
+            if !rebind(
+                tx,
+                &mut session,
+                config,
+                source_hash,
+                &provenance.engine_epoch,
+                Cursor::new(next),
+            )? {
                 return Ok(reject("master_source_conflict"));
             }
             if let Err(reason) = validate_selection(config, project, &session.selection) {
                 return Ok(reject(&reason.0));
             }
-            if session.current_turn.is_some() {
-                return Ok(reject("master_turn_outstanding"));
+            let superseded = match &session.current_turn {
+                None => None,
+                Some(current) => {
+                    let turn = load_turn(tx, &session, current, revision)?
+                        .ok_or_else(|| error("master_current_turn_record"))?;
+                    if turn.phase != MasterTurnPhase::Uncertain {
+                        return Ok(reject(if moved {
+                            "master_source_conflict"
+                        } else {
+                            "master_turn_outstanding"
+                        }));
+                    }
+                    Some(turn)
+                }
+            };
+            if moved && !super::master_bootstrap::requalify(tx, &session)? {
+                return Ok(reject("master_source_conflict"));
             }
             let (count, maximum): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(MAX(ordinal),0) FROM (SELECT ordinal FROM master_turns WHERE session=?1 ORDER BY ordinal LIMIT 1025)", [id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?;
             if count != maximum || count < 0 {
@@ -2887,6 +3790,10 @@ fn execute(
             if result != Outcome::Applied {
                 return Ok(result);
             }
+            if let Some(turn) = superseded {
+                cancel_turn(tx, turn)?;
+                session.current_turn = None;
+            }
             let turn = MasterTurnView {
                 id: provenance.operation_id.clone(),
                 session_id: id.clone(),
@@ -2901,6 +3808,10 @@ fn execute(
                 attempt: None,
                 runtime: None,
                 reply: None,
+                accounts: Vec::new(),
+                tasks: Vec::new(),
+                detail: None,
+                cause: None,
             };
             let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(next)?, encode(&turn)?]).map_err(error)?;
             assert_eq!(changed, 1);
@@ -2915,15 +3826,7 @@ fn execute(
             cancel_turn(tx, turn)?;
             session.current_turn = None;
         }
-        MasterOwnerAction::Close { .. } => {
-            if let Some(turn_id) = &session.current_turn {
-                let turn = load_turn(tx, &session, turn_id, revision)?
-                    .ok_or_else(|| error("master_current_turn_record"))?;
-                cancel_turn(tx, turn)?;
-            }
-            session.current_turn = None;
-            session.phase = MasterSessionPhase::Closed;
-        }
+        MasterOwnerAction::Close { .. } => end_session(tx, &mut session, revision)?,
         MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
         }
@@ -3131,10 +4034,11 @@ fn page(
         ])
         .map_err(error)?;
     while let Some(row) = rows.next().map_err(error)? {
-        let turn = decode_turn(tx, session, row, revision)?;
+        let mut turn = decode_turn(tx, session, row, revision)?;
         if page.turns.len() == usize::from(limit) {
             return Ok(page);
         }
+        turn.tasks = turn_tasks(tx, &session.session_id, &turn.id)?;
         if turn.ordinal
             != page
                 .turns
@@ -3303,6 +4207,7 @@ fallback_allowed = false
         home: PathBuf,
         repository: PathBuf,
         root: tempfile::TempDir,
+        _repos: Option<tempfile::TempDir>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3370,6 +4275,18 @@ fallback_allowed = false
     }
 
     async fn owner_apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
+        assert_eq!(
+            owner_result(storage, started, id, mutation).await,
+            OwnerResult::Applied
+        );
+    }
+
+    async fn owner_result(
+        storage: &Storage,
+        started: &Started,
+        id: &str,
+        mutation: OwnerMutation,
+    ) -> OwnerResult {
         let basis = owner_read(storage, started, OwnerRead::Capabilities).await;
         let (send, receive) = oneshot::channel();
         storage
@@ -3385,7 +4302,7 @@ fallback_allowed = false
                 send,
             ))
             .unwrap_or_else(|_| panic!("actual owner mutation queue unavailable"));
-        assert_eq!(receive.await.unwrap().unwrap().result, OwnerResult::Applied);
+        receive.await.unwrap().unwrap().result
     }
 
     impl Fixture {
@@ -3394,6 +4311,16 @@ fallback_allowed = false
         }
 
         async fn new_with_message(with_repository: bool, message: &str) -> Self {
+            Self::build(with_repository, false, message).await
+        }
+
+        /// A master on a project the owner added as an existing folder: the
+        /// committed repository outside the runtime is onboarded, not declared.
+        async fn onboarded() -> Self {
+            Self::build(true, true, PROMPT).await
+        }
+
+        async fn build(with_repository: bool, onboarded: bool, message: &str) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-mrc-")
                 .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -3417,7 +4344,16 @@ fallback_allowed = false
                 }))
                 .unwrap(),
             );
-            let repository = root.path().join("repository");
+            let repos = onboarded.then(|| {
+                tempfile::Builder::new()
+                    .prefix("ca-mrc-repos-")
+                    .tempdir_in("/private/tmp")
+                    .unwrap()
+            });
+            let repository = match &repos {
+                Some(repos) => repos.path().canonicalize().unwrap().join("rcli-project"),
+                None => root.path().join("repository"),
+            };
             if with_repository {
                 std::fs::create_dir(&repository).unwrap();
                 git(
@@ -3451,10 +4387,12 @@ fallback_allowed = false
                 .unwrap_or_else(|_| panic!("actual owner start queue unavailable"));
             let started = receive.await.unwrap().unwrap();
             let project = ProjectId::new("rcli-project").unwrap();
-            owner_apply(
-                &storage,
-                &started,
-                "create-rcli-project",
+            let create = if onboarded {
+                OwnerMutation::StartOnboarding {
+                    path: repository.to_str().unwrap().into(),
+                    pool: reference("local-pool"),
+                }
+            } else {
                 OwnerMutation::CreateProject {
                     project_id: project.clone(),
                     spec: ProjectSpec {
@@ -3465,9 +4403,9 @@ fallback_allowed = false
                             vec![]
                         },
                     },
-                },
-            )
-            .await;
+                }
+            };
+            owner_apply(&storage, &started, "create-rcli-project", create).await;
             let basis = owner_read(
                 &storage,
                 &started,
@@ -3581,6 +4519,7 @@ fallback_allowed = false
                 home,
                 repository,
                 root,
+                _repos: repos,
             }
         }
 
@@ -3593,7 +4532,14 @@ fallback_allowed = false
                 .sender
                 .try_send(Job::MasterRuntime(Box::new(command), send))
                 .unwrap_or_else(|_| panic!("actual master runtime queue unavailable"));
-            receive.await.unwrap()
+            let checkout = match receive.await.unwrap() {
+                Ok(MasterRuntimeResult::Checkout(checkout)) => checkout,
+                result => return result,
+            };
+            let checked = tokio::task::spawn_blocking(move || checkout.materialize())
+                .await
+                .unwrap();
+            Box::pin(self.runtime(checked)).await
         }
 
         async fn register(&self) -> RcliConfiguredProfileProof {
@@ -3610,6 +4556,58 @@ fallback_allowed = false
                 panic!("actual configured profile receipt missing");
             };
             *proof
+        }
+
+        async fn view(&self) -> (MasterSessionView, Vec<MasterTurnView>) {
+            let project_id = self.session.project_id.clone();
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMaster {
+                    project_id: project_id.clone(),
+                },
+            )
+            .await;
+            let OwnerData::ProjectMaster {
+                session: Some(session),
+            } = state.data
+            else {
+                panic!("actual master session missing");
+            };
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMasterTurns {
+                    project_id,
+                    session_id: self.session.session_id.clone(),
+                    cursor: None,
+                    limit: 8,
+                },
+            )
+            .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turns missing");
+            };
+            (*session, page.turns)
+        }
+
+        fn action(&self, id: &str, action: MasterOwnerAction) -> (String, OwnerMutation) {
+            (id.into(), OwnerMutation::ProjectMaster { action })
+        }
+
+        fn submit(&self, id: &str, text: &str) -> (String, OwnerMutation) {
+            self.action(
+                id,
+                MasterOwnerAction::Submit {
+                    project_id: self.session.project_id.clone(),
+                    session_id: self.session.session_id.clone(),
+                    text: text.into(),
+                },
+            )
+        }
+
+        async fn result(&self, (id, mutation): (String, OwnerMutation)) -> OwnerResult {
+            owner_result(&self.storage, &self.started, &id, mutation).await
         }
 
         fn prepare(&self) -> MasterRuntimeCommand {
@@ -3790,6 +4788,22 @@ fallback_allowed = false
             original_config
         );
         assert!(!case.home.join(".backboard/keys.json").exists());
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_added_folder_project_prepares_its_master_turn_on_its_own_repository() {
+        let case = Fixture::onboarded().await;
+        case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("an added folder must prepare its master turn"),
+            Err(failure) => panic!("an added folder must reach its master turn: {failure:?}"),
+        };
+        assert_eq!(prepared.text, PROMPT);
+        assert_eq!(prepared.repository, case.repository);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert!(prepared.cwd.join(".git").is_file());
         case.close().await;
     }
 
@@ -3978,7 +4992,8 @@ fallback_allowed = false
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(registrations > crate::master_session::SESSIONS_MAX as i64);
+        assert!(registrations >= 1);
+        assert!(registrations <= crate::master_session::SESSIONS_MAX as i64);
         drop(tx);
         case.close().await;
     }
@@ -4095,6 +5110,427 @@ fallback_allowed = false
             .try_send(Job::Close(send))
             .unwrap_or_else(|_| panic!("actual actor close queue unavailable"));
         receive.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_profile_capacity_counts_live_sessions_not_closed_history() {
+        let case = Fixture::new(false).await;
+        {
+            let mut db = Connection::open(&case.path).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            let tx = db.transaction().unwrap();
+            for n in 0..SESSIONS_MAX {
+                tx.execute(
+                    "INSERT INTO configured_master_profiles(id,session,body) VALUES (?1,?1,'{}')",
+                    [format!("closed-{n:02}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let proof = case.register().await;
+        let db = case.db();
+        let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM configured_master_profiles"),
+            SESSIONS_MAX as i64
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM configured_master_profiles WHERE id='closed-00'"),
+            0
+        );
+        let stored: String = db
+            .query_row(
+                "SELECT id FROM configured_master_profiles WHERE session=?1",
+                [case.session.session_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, proof.registration_id.as_str());
+        drop(db);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_turn_holds_the_session_until_its_own_cancel_frees_it() {
+        let case = Fixture::new(false).await;
+        let rejected = |code: &str| OwnerResult::Rejected { code: code.into() };
+        let before = case.snapshot();
+        assert_eq!(
+            case.result(case.submit("second-turn", "Still outstanding."))
+                .await,
+            rejected("master_turn_outstanding")
+        );
+        let cancel = |id: &str, turn: &str| {
+            case.action(
+                id,
+                MasterOwnerAction::Cancel {
+                    project_id: case.session.project_id.clone(),
+                    session_id: case.session.session_id.clone(),
+                    turn_id: RequestId::new(turn).unwrap(),
+                },
+            )
+        };
+        assert_eq!(
+            case.result(cancel("cancel-other", "another-turn")).await,
+            rejected("master_turn_not_current")
+        );
+        let held = case.snapshot();
+        assert_eq!((held.turn, held.counts), (before.turn, before.counts));
+        assert_eq!(
+            case.result(cancel("cancel-turn", case.turn.id.as_str()))
+                .await,
+            OwnerResult::Applied
+        );
+        let (session, turns) = case.view().await;
+        assert_eq!(session.current_turn, None);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, case.turn.id);
+        assert_eq!(turns[0].phase, MasterTurnPhase::Cancelled);
+        assert_eq!(turns[0].attempt, None);
+        assert_eq!(turns[0].runtime, None);
+        assert_eq!(turns[0].reply, None);
+        assert_eq!(
+            case.result(case.submit("next-turn", "Use the revised requirement."))
+                .await,
+            OwnerResult::Applied
+        );
+        let (session, turns) = case.view().await;
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].ordinal, 2);
+        assert_eq!(turns[1].phase, MasterTurnPhase::Queued);
+        assert_eq!(session.current_turn, Some(turns[1].id.clone()));
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_cancels_its_queued_turn_and_refuses_late_input() {
+        let case = Fixture::new(false).await;
+        let close = case.action(
+            "close-session",
+            MasterOwnerAction::Close {
+                project_id: case.session.project_id.clone(),
+                session_id: case.session.session_id.clone(),
+            },
+        );
+        assert_eq!(case.result(close).await, OwnerResult::Applied);
+        let (session, turns) = case.view().await;
+        assert_eq!(session.phase, MasterSessionPhase::Closed);
+        assert_eq!(session.current_turn, None);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].phase, MasterTurnPhase::Cancelled);
+        assert_eq!(turns[0].attempt, None);
+        assert_eq!(turns[0].runtime, None);
+        assert_eq!(turns[0].reply, None);
+        assert_eq!(
+            case.result(case.submit("late-turn", "Must not reopen."))
+                .await,
+            OwnerResult::Rejected {
+                code: "master_session_not_active".into()
+            }
+        );
+        assert_eq!(case.view().await.1, turns);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn removing_the_project_ends_its_open_master_conversation_in_the_same_action() {
+        let case = Fixture::new(false).await;
+        let project = case.session.project_id.clone();
+        let remove = (
+            "remove-project".to_owned(),
+            OwnerMutation::RemoveProject {
+                project_id: project.clone(),
+            },
+        );
+        assert_eq!(case.result(remove).await, OwnerResult::Applied);
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let revision = owner_revision(&tx).unwrap();
+        let session = load_session(&tx, &case.session.session_id, revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.phase, MasterSessionPhase::Closed);
+        assert_eq!(session.current_turn, None);
+        assert_eq!(
+            session.version.value(),
+            revision,
+            "the conversation ends in the removal itself, not in a later change"
+        );
+        let turn = load_turn(&tx, &session, &case.turn.id, revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.phase, MasterTurnPhase::Cancelled);
+        let projects: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id=?1",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projects, 0, "the project is removed in the same action");
+        drop(tx);
+        case.close().await;
+    }
+
+    impl Fixture {
+        /// Stores a team plan for the fixture's project: a tools-on Claude Code master and
+        /// one tools-on Codex sub-agent. Output: the stored setup.
+        fn team_plan(&self) -> crate::project_setup::StoredSetup {
+            let setup = crate::project_setup::StoredSetup {
+                project_id: self.session.project_id.clone(),
+                name: "Tools".into(),
+                about: String::new(),
+                tech_stack: vec![],
+                platforms: vec![],
+                research: vec![],
+                pool: None,
+                team: crate::project_setup::TeamPlan {
+                    master: "claude-code".into(),
+                    master_tools: true,
+                    sub_harnesses: vec![crate::project_setup::HarnessSlot {
+                        harness: "codex".into(),
+                        agents: 1,
+                        tools: true,
+                    }],
+                    min_agents: 1,
+                    max_agents: 2,
+                },
+                documents: vec![],
+                folder: self.repository.display().to_string(),
+                created_ms: 1,
+                revision: 1,
+            };
+            let writer = Connection::open(&self.path).unwrap();
+            writer
+                .busy_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            writer
+                .execute(
+                    "INSERT OR REPLACE INTO project_setups VALUES (?1,?2)",
+                    params![
+                        setup.project_id.as_str(),
+                        serde_json::to_string(&setup).unwrap()
+                    ],
+                )
+                .unwrap();
+            setup
+        }
+
+        /// Runs the fixture's turn to a reply that carries the given delegate calls and
+        /// reports that reply `times` times, as a host resending its observation does.
+        /// Inputs: the calls and the count. Output: the stored reply.
+        async fn reply_with(
+            &self,
+            delegations: Vec<crate::team::Delegation>,
+            times: usize,
+        ) -> MasterReply {
+            let MasterRuntimeResult::Prepared(prepared) =
+                self.runtime(self.prepare()).await.unwrap()
+            else {
+                panic!("registered local RCLI must prepare the actual turn");
+            };
+            assert!(!prepared.tools, "an RCLI master runs without tools");
+            let command = |observation| MasterRuntimeCommand::Observe {
+                host: self.started.host.clone(),
+                project_id: self.session.project_id.clone(),
+                session_id: self.session.session_id.clone(),
+                turn_id: self.turn.id.clone(),
+                attempt_id: prepared.attempt.request.id.clone(),
+                observation,
+            };
+            let MasterRuntimeResult::Profile(guard) = self
+                .runtime(MasterRuntimeCommand::AcquireProfile {
+                    host: self.started.host.clone(),
+                    project_id: self.session.project_id.clone(),
+                    session_id: self.session.session_id.clone(),
+                    turn_id: self.turn.id.clone(),
+                    attempt_id: prepared.attempt.request.id.clone(),
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("actual configured RCLI Execution guard missing");
+            };
+            let runtime = MasterRuntimeView {
+                runtime_ref: RequestId::new("tools-runtime").unwrap(),
+                artifact_sha256: "a".repeat(64),
+                native_session_id: Some("tools-native".into()),
+            };
+            self.runtime(command(MasterRuntimeObservation::Running {
+                runtime: runtime.clone(),
+            }))
+            .await
+            .unwrap();
+            let reply = MasterReply {
+                text: "I handed the README to a sub-agent.".into(),
+                provenance: crate::master_session::MasterReplyProvenance {
+                    attempt_id: prepared.attempt.request.id.clone(),
+                    runtime_ref: runtime.runtime_ref.clone(),
+                    capture_ref: RequestId::new("tools-capture").unwrap(),
+                    capture_sequence: 3,
+                },
+            };
+            for _ in 0..times {
+                let MasterRuntimeResult::Turn(turn) = self
+                    .runtime(command(MasterRuntimeObservation::Response {
+                        reply: reply.clone(),
+                        delegations: delegations.clone(),
+                    }))
+                    .await
+                    .unwrap()
+                else {
+                    panic!("an observed reply returns the turn");
+                };
+                assert_eq!(turn.phase, MasterTurnPhase::Succeeded);
+                assert_eq!(turn.reply.as_ref(), Some(&reply));
+            }
+            drop(guard);
+            reply
+        }
+    }
+
+    #[tokio::test]
+    async fn a_master_reply_hands_its_delegate_calls_to_the_team_once() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let setup = case.team_plan();
+        let delegations = vec![
+            crate::team::Delegation {
+                harness: None,
+                prompt: "Write the README".into(),
+            },
+            crate::team::Delegation {
+                harness: Some("claude-code".into()),
+                prompt: "Check the tests".into(),
+            },
+        ];
+        case.reply_with(delegations, 2).await;
+        let db = case.db();
+        let tasks: Vec<(String, String, String)> = db
+            .prepare("SELECT source,harness,prompt FROM team_tasks WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([setup.project_id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tasks,
+            [(
+                "owner".to_owned(),
+                "codex".to_owned(),
+                "Write the README".to_owned()
+            )]
+        );
+        let notes: Vec<String> = db
+            .prepare("SELECT text FROM team_messages WHERE project=?1 AND author='engine'")
+            .unwrap()
+            .query_map([setup.project_id.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            notes,
+            [
+                "The conversation master's tasks were not handed off:\n- Check the tests: that harness is not in the team plan"
+            ]
+        );
+        drop(db);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_conversation_task_that_ends_comes_back_to_the_conversation_and_the_next_turn() {
+        use crate::master_session::MasterTask;
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let setup = case.team_plan();
+        case.reply_with(
+            vec![crate::team::Delegation {
+                harness: None,
+                prompt: "Write the README".into(),
+            }],
+            1,
+        )
+        .await;
+        let task: i64 = case
+            .db()
+            .query_row(
+                "SELECT id FROM team_tasks WHERE project=?1",
+                [setup.project_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let id = u64::try_from(task).unwrap();
+        let (_, turns) = case.view().await;
+        assert_eq!(
+            turns[0].tasks,
+            [MasterTask {
+                task: id,
+                note: None
+            }],
+            "the conversation shows the task it handed off while it waits"
+        );
+        let writer = Connection::open(&case.path).unwrap();
+        writer
+            .busy_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let tx = writer.unchecked_transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &crate::config::ModelAccess::default(),
+                &crate::team::TeamAction::Cancel {
+                    project_id: setup.project_id.clone(),
+                    task: Some(task),
+                },
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+        drop(writer);
+        let mut team = crate::team::runtime::TeamRuntime::open(
+            &case.path,
+            &case.root.path().join("team"),
+            BTreeMap::new(),
+            Box::new(|| None),
+            crate::team::runtime::TeamLimits::default(),
+        )
+        .unwrap();
+        team.tick().unwrap();
+        team.shutdown().unwrap();
+        let note = format!(
+            "Task {task} \"Write the README\" (codex) was stopped: Cancelled by you. Details in the Team view."
+        );
+        let (_, turns) = case.view().await;
+        assert_eq!(
+            turns[0].tasks,
+            [MasterTask {
+                task: id,
+                note: Some(note.clone())
+            }],
+            "the engine's note on the ended task shows under the turn that handed it off"
+        );
+        assert_eq!(
+            case.result(case.submit("next-turn", "What did the sub-agent do?"))
+                .await,
+            OwnerResult::Applied
+        );
+        let (_, turns) = case.view().await;
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let text = prompt(&tx, &case.session, &turns[1]).unwrap();
+        drop(tx);
+        assert!(
+            text.contains(&format!(
+                "You: I handed the README to a sub-agent.\nEngine: {note}"
+            )),
+            "the next turn's context carries the note: {text}"
+        );
+        case.close().await;
     }
 }
 

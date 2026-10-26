@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
+const CHECK_FOLDER: &str = "mcp-checks";
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,13 +601,22 @@ async fn handle(
         }
         Action::RemoveServer { id } => {
             let ResultValue::Removed(references) =
-                actor(engine, Command::RemoveServer { id }).await?
+                actor(engine, Command::RemoveServer { id: id.clone() }).await?
             else {
                 return Err(unknown());
             };
             let root = engine_root(authority)?;
             for reference in references {
                 crate::storage::plugins::remove_secret(&root, &reference)?;
+            }
+            let checked = root.join(CHECK_FOLDER).join(&id);
+            let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checked))
+                .await
+                .map_err(|_| unknown())?;
+            if let Err(problem) = removed
+                && problem.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!("plugin_check_folder_not_removed cause={problem}");
             }
             Reply::Done
         }
@@ -619,28 +629,35 @@ async fn handle(
             let root = engine_root(authority)?;
             let reference = crate::storage::plugins::new_secret_reference()?;
             crate::storage::plugins::store_secret(&root, &reference, secret.into_bytes())?;
-            let attached = actor(
-                engine,
-                Command::AttachSecret {
-                    id,
-                    name,
-                    reference: reference.clone(),
-                },
-            )
-            .await;
-            match attached {
-                Ok(ResultValue::Secret(view, replaced)) => {
-                    if let Some(old) = replaced {
-                        crate::storage::plugins::remove_secret(&root, &old)?;
-                    }
-                    Reply::Server { server: *view }
-                }
-                Ok(_) => return Err(unknown()),
-                Err(problem) => {
-                    let _ = crate::storage::plugins::remove_secret(&root, &reference);
-                    return Err(problem);
-                }
-            }
+            let stored = reference.clone();
+            let attached = engine
+                .settled_job(
+                    |reply| {
+                        Job::Plugins(
+                            Command::AttachSecret {
+                                id,
+                                name,
+                                reference,
+                            },
+                            reply,
+                        )
+                    },
+                    move |result| match result {
+                        Ok(ResultValue::Secret(_, Some(old))) => {
+                            crate::storage::plugins::remove_secret(&root, old)
+                        }
+                        Ok(_) => Ok(()),
+                        Err(_) => {
+                            let _ = crate::storage::plugins::remove_secret(&root, &stored);
+                            Ok(())
+                        }
+                    },
+                )
+                .await?;
+            let ResultValue::Secret(view, _) = attached else {
+                return Err(unknown());
+            };
+            Reply::Server { server: *view }
         }
         Action::RemoveSecret { id, name } => {
             let ResultValue::Secret(view, removed) =
@@ -720,8 +737,9 @@ async fn start_check(
     let engine = engine.clone();
     tokio::spawn(async move {
         let _slot = slot;
+        let folder = id.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let outcome = check::check_stdio(&command, &args, &values, check::CHECK_TIME);
+            let outcome = boundary_check(&root, &folder, &command, &args, &values);
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -747,6 +765,92 @@ async fn start_check(
         }
     });
     Ok(Reply::Server { server: *view })
+}
+
+/// Checks an approved command server inside the boundary agents run it in: its own
+/// project, home and temp folders under `mcp-checks/<id>` in the engine folder, reads of
+/// system paths and the command's folder only, open network, and only its own secrets.
+/// Inputs: the engine folder, server id, command, arguments and secret values. Output:
+/// the tool names, or a plain rejection code.
+#[cfg(unix)]
+fn boundary_check(
+    root: &Path,
+    id: &str,
+    command: &str,
+    args: &[String],
+    secrets: &[(String, Vec<u8>)],
+) -> Result<Vec<String>, &'static str> {
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    assert!(valid_id(id));
+    let program = Path::new(command);
+    match std::fs::metadata(program) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("server_command_not_found");
+        }
+        Ok(found) if found.is_file() && found.permissions().mode() & 0o111 != 0 => {}
+        _ => return Err("server_command_not_runnable"),
+    }
+    let refused = |cause: &dyn std::fmt::Display| {
+        eprintln!("plugin_check_boundary_refused cause={cause}");
+        "server_cant_start"
+    };
+    let checks = root.join(CHECK_FOLDER);
+    let mut folders = Vec::with_capacity(3);
+    for name in ["project", "home", "tmp"] {
+        let folder = checks.join(id).join(name);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&folder)
+            .map_err(|error| refused(&error))?;
+        let plain = checks
+            .join(id)
+            .canonicalize()
+            .map_err(|error| refused(&error))?
+            .join(name);
+        if folder.canonicalize().map_err(|error| refused(&error))? != plain {
+            return Err(refused(
+                &"check folder is not the plain folder the engine made",
+            ));
+        }
+        folders.push(plain);
+    }
+    let profiles = checks.join("profiles");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&profiles)
+        .map_err(|error| refused(&error))?;
+    let reads = program.parent().ok_or("server_command_not_runnable")?;
+    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
+        .and_then(|sandbox| sandbox.guard_engine(root))
+        .and_then(|sandbox| sandbox.allow_read(reads))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profiles.join(format!("{id}.sb"))))
+        .map_err(|error| refused(&error))?;
+    let mut server = std::process::Command::new(program);
+    server.args(args).current_dir(&folders[0]);
+    let mut process = sandbox.wrap(&server).map_err(|error| refused(&error))?;
+    for (name, value) in secrets {
+        process.env(name, std::ffi::OsStr::from_bytes(value));
+    }
+    assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
+    check::check_command(process, check::CHECK_TIME)
+}
+
+/// Refuses to check a command server where no process group can be stopped. Takes the
+/// engine folder, server id, command, arguments and secrets, all unused. Returns
+/// `server_check_unavailable`, like [`check::check_stdio`] on this system.
+#[cfg(not(unix))]
+fn boundary_check(
+    _root: &Path,
+    _id: &str,
+    _command: &str,
+    _args: &[String],
+    _secrets: &[(String, Vec<u8>)],
+) -> Result<Vec<String>, &'static str> {
+    Err("server_check_unavailable")
 }
 
 async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineError> {

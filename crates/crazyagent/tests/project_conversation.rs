@@ -1086,7 +1086,7 @@ async fn unknown_partial_conversation_schema_is_preserved_and_owner_start_rolls_
 }
 
 #[tokio::test]
-async fn full_project_history_rejects_new_effects_and_preserves_exact_old_replay() {
+async fn full_project_history_drops_the_oldest_message_keeps_the_brief_and_exact_old_replay() {
     let root = private_root();
     let service = Service::start(root.path()).await;
     service.create("p").await;
@@ -1094,7 +1094,7 @@ async fn full_project_history_rejects_new_effects_and_preserves_exact_old_replay
     let exact = mutation(
         "capacity-first",
         service.revision().await,
-        append("p", "retained first entry"),
+        append("p", "oldest entry"),
     );
     let OwnerResponse::Applied { operation } =
         writer.request(exact.clone()).await.unwrap().response
@@ -1102,7 +1102,14 @@ async fn full_project_history_rejects_new_effects_and_preserves_exact_old_replay
         panic!("first write missing");
     };
     assert_eq!(operation.result, OwnerResult::Applied);
-    for n in 1..crazyagent::conversation::ENTRIES_MAX {
+    assert_eq!(
+        service
+            .apply(&writer, "capacity-brief", brief("p", 0, "kept brief"))
+            .await
+            .result,
+        OwnerResult::Applied
+    );
+    for n in 2..crazyagent::conversation::ENTRIES_MAX {
         assert_eq!(
             service
                 .apply(
@@ -1115,24 +1122,49 @@ async fn full_project_history_rejects_new_effects_and_preserves_exact_old_replay
             OwnerResult::Applied
         );
     }
-    let before = counts(root.path());
-    let rejected = service
-        .apply(
-            &writer,
-            "capacity-rejected",
-            append("p", "must not evict history"),
-        )
+    let full = counts(root.path());
+    assert_eq!(full.0, crazyagent::conversation::ENTRIES_MAX as i64);
+    let newest = service
+        .apply(&writer, "capacity-newest", append("p", "newest entry"))
         .await;
+    assert_eq!(newest.result, OwnerResult::Applied);
+    let after = counts(root.path());
     assert_eq!(
-        rejected.result,
-        OwnerResult::Rejected {
-            code: "conversation_capacity".into()
-        }
+        (after.0, after.2, after.3),
+        (full.0, full.2 + 1, full.3 + 1)
     );
+    let page = service.history(&writer, "p").await;
     assert_eq!(
-        counts(root.path()),
-        (before.0, before.1, before.2 + 1, before.3)
+        page.entries[0].content,
+        ConversationContent::Brief { version: 1 }
     );
+    assert_eq!(page.entries[0].text, "kept brief");
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.text != "oldest entry")
+    );
+    let OwnerData::CurrentBrief { brief: current, .. } = service
+        .read(
+            &writer,
+            OwnerRead::CurrentBrief {
+                project_id: project("p"),
+            },
+        )
+        .await
+        .data
+    else {
+        panic!("missing current brief");
+    };
+    assert_eq!(current.unwrap().text, "kept brief");
+    assert_eq!(
+        service
+            .apply(&writer, "capacity-brief-2", brief("p", 1, "second brief"))
+            .await
+            .result,
+        OwnerResult::Applied
+    );
+    assert_eq!(counts(root.path()).0, full.0);
     let before_replay = counts(root.path());
     let OwnerResponse::Applied { operation: replay } =
         writer.request(exact).await.unwrap().response

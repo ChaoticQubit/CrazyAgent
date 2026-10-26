@@ -2,10 +2,10 @@ use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
 use super::new_project_view::{Row, Screen as View};
 use super::project::{
-    MasterStatus, ProjectReply, ProjectScreen, Speaker, Tab, Transcript, plain_problem,
-    project_pool,
+    MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
+    plain_problem, project_pool,
 };
-use super::project_master::{MasterRead, transcript_from};
+use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
@@ -14,7 +14,7 @@ use super::settings_plugins::{AddPlugin, EditServer};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
-use crate::project_setup::{SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
 use crate::tui::client::{OwnerEvent, SetupEvent};
@@ -31,7 +31,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
@@ -130,16 +130,42 @@ fn project_tab(tab: Tab) -> ProjectTab {
         .expect("every tab is listed")]
 }
 
-/// Opens a project folder or file with the system's default app.
-/// Takes an absolute path from the engine's project record.
-/// Returns the plain problem when the path is not absolute, does not exist or nothing opened it.
-pub(in crate::tui) fn open_path(path: &str) -> Result<(), String> {
-    let target = Path::new(path);
-    if !target.is_absolute() || !target.exists() {
-        return Err("That file or folder is not there any more.".into());
+/// What the TUI hands the system opener for one request.
+/// `Reveal` shows a folder in the file manager; `Open` opens a file with its default app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Opening {
+    Reveal(PathBuf),
+    Open(PathBuf),
+}
+
+/// Decides what the system opener gets for one open request, with the desktop's checks
+/// (`platform::project_folder` and `platform::context_file`): a project folder is revealed,
+/// never opened, so a folder named like an app bundle is not launched; a context file opens
+/// only as a project document type, not a link, and a regular file inside the folder.
+/// Takes the request. Returns the opening, or the plain problem.
+pub(in crate::tui) fn opening(request: &OpenRequest) -> Result<Opening, String> {
+    let missing = |_| "That file or folder is not there any more.".to_owned();
+    match request {
+        OpenRequest::Folder(folder) => crate::platform::project_folder(folder)
+            .map(Opening::Reveal)
+            .map_err(missing),
+        OpenRequest::Context { folder, path } => {
+            let folder = crate::platform::project_folder(folder).map_err(missing)?;
+            crate::platform::context_file(&folder, path)
+                .map(Opening::Open)
+                .map_err(|_| "CrazyAgent opens only documents inside the project folder.".into())
+        }
     }
-    crate::platform::open(target.as_os_str())
-        .map_err(|_| "Could not open it on this computer.".to_owned())
+}
+
+/// Shows a project folder or opens one context file once [`opening`] allows it.
+/// Takes the request. Returns the plain problem when it is refused or nothing opened it.
+fn open_request(request: &OpenRequest) -> Result<(), String> {
+    match opening(request)? {
+        Opening::Reveal(folder) => crate::platform::reveal(&folder),
+        Opening::Open(file) => crate::platform::open(file.as_os_str()),
+    }
+    .map_err(|_| "Could not open it on this computer.".to_owned())
 }
 
 /// One project as a shell screen.
@@ -149,11 +175,13 @@ pub(in crate::tui) struct ProjectPage {
     screen: ProjectScreen,
     view: View,
     sent: Vec<SetupQuery>,
-    assigning: Option<String>,
+    assigning: Option<(Option<CredentialRef>, Option<String>)>,
+    recording: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
     retried: bool,
+    renewed: bool,
 }
 
 impl ProjectPage {
@@ -171,10 +199,12 @@ impl ProjectPage {
             view: View::default(),
             sent: Vec::new(),
             assigning: None,
+            recording: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
             waiting: None,
             retried: false,
+            renewed: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -262,11 +292,15 @@ impl ProjectPage {
             ));
             return;
         }
-        let session = self
-            .master
-            .transcript()
-            .and_then(|(session, _, _)| session)
-            .map(|session| (session.phase, session.current_turn.is_some()));
+        self.renewed = false;
+        let session = self.master.transcript().and_then(|(session, turns, _)| {
+            session.map(|session| {
+                (
+                    session.phase,
+                    crate::tui::master_session::turn_holds(session.current_turn.as_ref(), turns),
+                )
+            })
+        });
         match session {
             Some((crate::master_session::MasterSessionPhase::Configured, true)) => {
                 self.screen.input.set(&text);
@@ -310,14 +344,9 @@ impl ProjectPage {
         let barrier = not_recorded(event);
         let failed = matches!(event, MasterEvent::Mutation { result: Err(_), .. });
         let applied = self.master.apply(event.clone());
-        if let (Some(code), Some(text)) = (&rejected, submitted_text(event)) {
-            if self.screen.input.value().is_empty() {
-                self.screen.input.set(text);
-            }
-            ctx.say(Message::error(
-                "The master did not take that message.",
-                &plain_problem(code),
-            ));
+        let renewing = self.renew(rejected.as_deref(), submitted_text(event));
+        if let Some(code) = rejected.as_deref().filter(|_| !renewing) {
+            self.refused(event, code, ctx);
         }
         if (barrier || failed) && !self.retried {
             self.retried = true;
@@ -334,18 +363,84 @@ impl ProjectPage {
         }
         match applied {
             Err(_) => self.drop_waiting(ctx, "The master conversation stopped updating."),
-            Ok(Some(confirmed)) => {
-                if matches!(confirmed.action, MasterOwnerAction::Open { .. })
-                    && let Some(waiting) = self.waiting.take()
-                {
-                    self.retried = false;
-                    if self.master.submit(&waiting.text, ctx.next_generation()) != Ok(true) {
-                        self.waiting = Some(waiting);
-                        self.drop_waiting(ctx, "The master started but did not take the message.");
-                    }
+            Ok(Some(confirmed)) => self.confirmed(&confirmed.action, ctx),
+            Ok(None) if renewing => {}
+            Ok(None) => self.advance_open(event, rejected.is_some() || failed, ctx),
+        }
+    }
+
+    /// Ends a conversation the engine refused a message for because it opened before a
+    /// settings change, so the message is sent once more in a new conversation.
+    /// Takes the rejection code and the refused text.
+    /// Returns true when the stale conversation is being ended.
+    fn renew(&mut self, code: Option<&str>, text: Option<&str>) -> bool {
+        let (Some("master_source_conflict"), Some(text)) = (code, text) else {
+            return false;
+        };
+        if self.renewed || self.waiting.is_some() || self.master.control(true).is_err() {
+            return false;
+        }
+        self.renewed = true;
+        self.waiting = Some(Waiting {
+            text: text.to_owned(),
+            opening: false,
+        });
+        true
+    }
+
+    /// Tells the owner the engine refused a master request, in plain words with its code.
+    /// Takes the event and the rejection code; a refused message goes back in the input box.
+    fn refused(&mut self, event: &MasterEvent, code: &str, ctx: &mut Ctx) {
+        let MasterEvent::Mutation { submission, .. } = event else {
+            return;
+        };
+        let lead = match &submission.action {
+            MasterOwnerAction::Submit { text, .. } => {
+                if self.screen.input.value().is_empty() {
+                    self.screen.input.set(text);
+                }
+                "The master did not take that message."
+            }
+            MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
+                "The master could not start."
+            }
+            MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
+            MasterOwnerAction::Close { .. } => "The conversation did not end.",
+        };
+        let problem = master_problem(code);
+        if self.waiting.is_some() {
+            self.drop_waiting(ctx, &format!("{lead} {problem}"));
+        } else {
+            ctx.say(Message::error(lead, &problem));
+        }
+    }
+
+    /// Carries on after the engine confirmed a master request: an opened master takes the
+    /// waiting message, and a conversation ended for a renewal opens a new one.
+    /// Takes the confirmed action.
+    fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
+        match action {
+            MasterOwnerAction::Open { .. } => {
+                let Some(waiting) = self.waiting.take() else {
+                    return;
+                };
+                self.retried = false;
+                if self.master.submit(&waiting.text, ctx.next_generation()) != Ok(true) {
+                    self.waiting = Some(waiting);
+                    self.drop_waiting(ctx, "The master started but did not take the message.");
+                } else if self.renewed {
+                    ctx.say(Message::warning(
+                        "Settings changed, so a new conversation started.",
+                        "",
+                    ));
                 }
             }
-            Ok(None) => self.advance_open(event, rejected.is_some() || failed, ctx),
+            MasterOwnerAction::Close { .. }
+                if self.waiting.is_some() && self.master.open().is_err() =>
+            {
+                self.drop_waiting(ctx, "The master could not start.");
+            }
+            _ => {}
         }
     }
 
@@ -378,9 +473,19 @@ impl ProjectPage {
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
-        let SetupQuery::Change { action, .. } = &query else {
+        let SetupQuery::Change { action, generation } = &query else {
             return;
         };
+        if self.recording == Some(*generation) {
+            self.recording = None;
+            if !applied {
+                ctx.say(Message::warning(
+                    "The pool is changed, but the project details still name the old one.",
+                    "Pick the pool again to save it.",
+                ));
+            }
+            return;
+        }
         let name = |job: i64| {
             self.screen
                 .jobs
@@ -435,6 +540,26 @@ impl ProjectPage {
         }
     }
 
+    fn end_master(&mut self, ctx: &mut Ctx) {
+        if self.waiting.is_some() || self.master.has_pending() {
+            ctx.say(Message::warning(
+                "The master is still taking your last message.",
+                "Wait a moment, then try again.",
+            ));
+            return;
+        }
+        match self.master.control(true) {
+            Ok(()) => ctx.say(Message::success(
+                "Ending the conversation.",
+                "Your next message starts a new one.",
+            )),
+            Err(_) => ctx.say(Message::warning(
+                "There is no open conversation to end.",
+                "",
+            )),
+        }
+    }
+
     fn retry_master(&mut self, ctx: &mut Ctx) {
         let last = self
             .master
@@ -464,7 +589,7 @@ impl ProjectPage {
         self.screen.pool_ready = true;
     }
 
-    fn assign(&mut self, pool: CredentialRef, ctx: &mut Ctx) {
+    fn assign(&mut self, pool: Option<CredentialRef>, ctx: &mut Ctx) {
         if self.assigning.is_some() {
             ctx.say(Message::warning(
                 "Still assigning the pool.",
@@ -472,13 +597,14 @@ impl ProjectPage {
             ));
             return;
         }
-        let name = self
-            .screen
-            .pool_choices
-            .iter()
-            .find(|choice| choice.id == pool)
-            .map_or_else(|| "The pool".to_owned(), |choice| choice.name.clone());
-        self.assigning = Some(name);
+        let name = pool.as_ref().map(|pool| {
+            self.screen
+                .pool_choices
+                .iter()
+                .find(|choice| &choice.id == pool)
+                .map_or_else(|| "The pool".to_owned(), |choice| choice.name.clone())
+        });
+        self.assigning = Some((pool.clone(), name));
         ctx.request(Request::EditPool {
             change: PoolChange::Assign {
                 pool,
@@ -487,17 +613,53 @@ impl ProjectPage {
         });
     }
 
-    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
-        let Some(name) = self.assigning.take() else {
+    /// Records the pool the owner just gave the project in its details too, so a removed
+    /// pool is not offered again as the picked one. Takes the pool, None for no pool.
+    /// Sends nothing when the details already name it; its reply stays quiet unless it fails.
+    fn record_pool(&mut self, pool: Option<CredentialRef>, ctx: &mut Ctx) {
+        let Some(setup) = self.screen.setup.as_ref() else {
             return;
         };
-        match result {
-            Ok(()) => ctx.say(Message::success(
+        if setup.pool == pool {
+            return;
+        }
+        let action = SetupAction::Update {
+            project_id: setup.project_id.clone(),
+            expected_revision: setup.revision,
+            name: None,
+            setup: ProjectSetup {
+                about: setup.about.clone(),
+                tech_stack: setup.tech_stack.clone(),
+                platforms: setup.platforms.clone(),
+                research: setup.research.clone(),
+                pool,
+                team: Some(setup.team.clone()),
+                documents: Vec::new(),
+            },
+        };
+        let generation = ctx.next_generation();
+        self.recording = Some(generation);
+        self.send(SetupQuery::Change { action, generation }, ctx);
+    }
+
+    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) {
+        let Some((pool, name)) = self.assigning.take() else {
+            return;
+        };
+        if result.is_ok() {
+            self.record_pool(pool, ctx);
+        }
+        match (result, name) {
+            (Ok(()), Some(name)) => ctx.say(Message::success(
                 &format!("{name} is assigned."),
                 "Work can start now.",
             )),
-            Err(code) => ctx.say(Message::error(
-                "The pool was not assigned.",
+            (Ok(()), None) => ctx.say(Message::success(
+                "This project has no pool now.",
+                "Pick a pool to start.",
+            )),
+            (Err(code), _) => ctx.say(Message::error(
+                "The pool was not changed.",
                 &plain_problem(code),
             )),
         }
@@ -571,8 +733,8 @@ impl ProjectPage {
                 );
                 Flow::Handled
             }
-            ProjectReply::Open(path) => {
-                match open_path(&path) {
+            ProjectReply::Open(request) => {
+                match open_request(&request) {
                     Ok(()) => ctx.say(Message::success("Opened.", "")),
                     Err(problem) => ctx.say(Message::error(&problem, "")),
                 }
@@ -595,6 +757,10 @@ impl ProjectPage {
             }
             ProjectReply::StopTurn => {
                 self.stop_master(ctx);
+                Flow::Handled
+            }
+            ProjectReply::EndConversation => {
+                self.end_master(ctx);
                 Flow::Handled
             }
             ProjectReply::Retry => {

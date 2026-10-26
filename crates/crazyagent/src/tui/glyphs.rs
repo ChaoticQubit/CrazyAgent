@@ -48,6 +48,7 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Needs a pool",
             "Needs you",
             "Missing",
+            "Rate limited",
         ],
     ),
     (

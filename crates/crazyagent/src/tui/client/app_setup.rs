@@ -177,6 +177,12 @@ mod tests {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(target_os = "macos")]
+        let _keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(root.path()));
+            keychain
+        };
         let global = root.path().join("global.toml");
         std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -251,6 +257,22 @@ mod tests {
         };
         assert!(!github.signed_in);
         assert_eq!(github.login, None);
+
+        let refused = ask(
+            &mut native,
+            AppSetupJob::Pack {
+                change: PackChange::Switch {
+                    id: status.pack[0].id.clone(),
+                    on: true,
+                },
+                generation: 2,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&refused, AppSetupEvent::PackChanged(Err(code)) if code == "pack_not_installed"),
+            "a refused pack change keeps the engine's own code"
+        );
 
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())

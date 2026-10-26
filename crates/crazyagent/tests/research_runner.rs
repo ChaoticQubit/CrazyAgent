@@ -335,7 +335,10 @@ fn spawn_ready_runs_at_most_the_per_project_limit_at_once() {
         "project-a".into(),
         "codex",
         case.project.clone(),
-        Some(endpoint(port)),
+        Some((
+            CredentialRef::new("local-connection").unwrap(),
+            endpoint(port),
+        )),
     );
     assert_eq!(handles.len(), 2);
     let listed = jobs.list("project-a").unwrap();

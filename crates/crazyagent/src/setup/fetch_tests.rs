@@ -99,6 +99,43 @@ fn a_pinned_commit_is_fetched_and_checked_out_exactly() {
 }
 
 #[test]
+fn a_cached_checkout_with_changed_or_extra_files_is_fetched_again() {
+    let work = tempfile::tempdir().unwrap();
+    let setup = private();
+    let (repo, first, _) = repository(work.path());
+    let checkout = fetch_git(setup.path(), &repo, &first).unwrap();
+    let notes = checkout.join("skills/notes/SKILL.md");
+    for name in ["changed", "untracked", "excluded"] {
+        match name {
+            "changed" => skill(&checkout.join("skills/notes"), "notes", "Changed."),
+            "untracked" => skill(&checkout.join("skills/planted"), "planted", "Planted."),
+            _ => {
+                let info = checkout.join(".git/info");
+                std::fs::create_dir_all(&info).unwrap();
+                std::fs::write(info.join("exclude"), "hidden/\n").unwrap();
+                skill(&checkout.join("hidden"), "hidden", "Hidden.");
+            }
+        }
+        assert_eq!(fetch_git(setup.path(), &repo, &first).unwrap(), checkout);
+        assert!(
+            std::fs::read_to_string(&notes)
+                .unwrap()
+                .contains("First version."),
+            "{name}: the pinned content comes back"
+        );
+        assert!(
+            !checkout.join("skills/planted").exists() && !checkout.join("hidden").exists(),
+            "{name}: files outside the pin are gone"
+        );
+        assert_eq!(
+            head(setup.path(), &checkout).as_deref(),
+            Some(first.as_str())
+        );
+    }
+    assert!(hidden(&setup.path().join("pack")).is_empty());
+}
+
+#[test]
 fn a_commit_the_source_does_not_have_is_refused_and_leaves_nothing() {
     let work = tempfile::tempdir().unwrap();
     let setup = private();

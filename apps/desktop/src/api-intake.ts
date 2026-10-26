@@ -1,4 +1,4 @@
-import { classifyFailure, nextGeneration, plainError, type Result } from "./api";
+import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
@@ -32,33 +32,40 @@ const COPY: Record<string, string> = {
   home_source_name: "Rename the folder so it has a plain name first.",
   home_destination_exists: "Your projects folder already has a folder with this name. Rename one of them first.",
   home_copy_special_file: "The folder holds a device or pipe file that can't be copied.",
-  home_copy_too_large: "The folder has too many files or levels to copy. Move it instead.",
+  home_copy_too_large: "The folder has too many files or levels to copy. Use it where it is instead.",
   home_copy_failed: "Couldn't copy the folder. The original is untouched. Try again.",
   home_copy_unverified: "The copy didn't match the original, so the original was kept.",
+  home_copy_linked_checkout: "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.",
   home_move_failed: "Couldn't move the folder. Nothing was removed. Try again.",
   home_move_source_left: "The folder was added, but part of the original couldn't be removed. Check its old place.",
   home_move_same: "This is already your projects folder.",
   home_move_nested: "Choose a projects folder that isn't inside the current one.",
   home_move_partial: "Some projects were moved and couldn't be moved back. Check both folders.",
+  home_move_worktrees: "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it.",
+  home_move_project: "This folder holds or sits inside a project you already added. Use it where it is or copy it.",
   home_move_interrupted: "Moving your projects stopped part way. Check both folders before trying again.",
+  home_move_too_many: "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved.",
+  home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  home_folder_name_invalid: "Give the project a name with letters or digits, and no folder by that name.",
+  home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   folder_size_path_invalid: "Choose the folder again with Choose folder.",
   folder_size_unsafe: "That folder can't be measured.",
   folder_size_unreadable: "Some files in that folder can't be read.",
-  folder_size_timeout: "This folder is very large. Move it instead of copying it.",
-  folder_size_too_large: "This folder is very large. Move it instead of copying it.",
+  folder_size_timeout: "This folder is very large. Use it where it is instead of copying it.",
+  folder_size_too_large: "This folder is very large. Use it where it is instead of copying it.",
   folder_size_interrupted: "Measuring the folder stopped. Try again.",
   crazyagent_folder_invalid: "The project's .crazyagent folder isn't a plain folder. Rename or remove it, then try again.",
   crazyagent_folder_unwritable: "CrazyAgent can't write the project's .crazyagent folder. Check the folder's permissions.",
   git_exclude_invalid: "The project's git exclude file can't be updated. Check .git/info/exclude.",
   owner_home_unknown: "Your home folder couldn't be found.",
-  onboarding_folder_missing: "This folder isn't in your projects folder anymore.",
-  onboarding_folder_unsafe: "This folder can't be set up. Check it's a plain folder in your projects folder.",
+  onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
+  onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",
   onboarding_layout_incomplete: "Setup didn't finish preparing this project. Try again.",
-  onboarding_path_invalid: "This folder can't be set up. Check it's still in your projects folder.",
-  onboarding_path_not_canonical: "This folder can't be set up from this path. Reload Home and try again.",
+  onboarding_path_invalid: "This folder can't be set up. Choose it again with Choose folder.",
+  onboarding_path_not_canonical: "This folder can't be set up from this path. Choose it again with Choose folder.",
   onboarding_project_mismatch: "Another project already uses this folder's name. Rename the folder first.",
   onboarding_step_invalid: "This project's setup record can't be read. Start setup again.",
   project_exists: "A project with this name already exists. Rename the folder first.",
@@ -102,7 +109,6 @@ const COPY: Record<string, string> = {
   setup_owner_unavailable: "CrazyAgent's engine isn't running.",
   setup_store_unavailable: "The app's data folder can't be written.",
   pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
-  pack_required: "This entry is always on and can't be removed.",
   pack_not_installed: "This entry isn't installed yet. Run setup first.",
   pack_id_invalid: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_too_many: "Pick at most 64 entries.",
@@ -131,10 +137,12 @@ const COPY: Record<string, string> = {
   owner_outcome_unknown_reconcile_same_identity: "CrazyAgent didn't answer in time. Try again.",
 };
 
-/** Plain sentence for one intake, GitHub or setup failure code.
- * Input: the code. Output: the intake copy, then the project and app copy, then the fallback. */
-export function intakeCopy(code: string): string {
-  return Object.hasOwn(COPY, code) ? COPY[code] : failureCopy(code);
+/** Plain sentence for one intake, GitHub or setup failure.
+ * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
+ * the project and app copy, then the fallback naming the code; a different cause is named after. */
+export function intakeCopy(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  return Object.hasOwn(COPY, code) ? namedFailure(COPY[code], code, cause) : failureCopy({ code, cause });
 }
 
 function failure<T>(code: string): Result<T> {
@@ -150,7 +158,7 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
     return { kind: "ok", value: await action() };
   } catch (error) {
     const sorted = classifyFailure(error);
-    return sorted.kind === "error" ? { ...sorted, message: intakeCopy(sorted.code) } : sorted;
+    return sorted.kind === "error" ? { ...sorted, message: intakeCopy(sorted) } : sorted;
   }
 }
 

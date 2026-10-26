@@ -1,6 +1,6 @@
-import { call, classifyFailure, connect, plainError, status, type Result } from "./api";
+import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, inspectModelAccess, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, editModelAccess, masterState, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
 } from "./engine-client";
 import type {
@@ -127,17 +127,14 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
 }
 
 const copy: Record<string, string> = {
-  pending_intent: "Another change is still being saved. Wait for it to finish, then try again.",
-  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
-  owner_read_failed: "Couldn't read this from the engine. Try again.",
+  pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   not_connected: "CrazyAgent's engine isn't running.",
   not_configured: "CrazyAgent's engine isn't running.",
   owner_unavailable: "CrazyAgent's engine isn't running.",
-  busy: "Another change is still being saved. Wait for it to finish, then try again.",
+  busy: "Another change is still running. Wait for it to finish.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   invalid_project: "This project no longer exists.",
-  project_master_open: "End this project's master conversation first, then remove the project.",
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
@@ -167,6 +164,7 @@ const copy: Record<string, string> = {
   projects_root_not_a_directory: "CrazyAgent can't write the project folder. Check the disk and try again.",
   project_setup_missing: "This project was created before project setup existed.",
   team_harness_invalid: "Pick a harness for the master and for each agent row.",
+  team_harness_unavailable: "A harness in this team can't run team agents yet. Pick another harness.",
   team_harnesses_too_many: "Use at most 8 agent harnesses.",
   team_agent_count_invalid: "Each harness runs 1 to 15 agents.",
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
@@ -198,10 +196,22 @@ const copy: Record<string, string> = {
   context_item_missing: "This file isn't in the project folder anymore.",
   context_item_unreadable: "This file can't be read.",
   context_path_invalid: "This file can't be opened here.",
-  master_open_unavailable: "This project needs a pool before the master can reply.",
+  master_open_unavailable: "Pick a pool to start. Choose one in this project's Settings, Pool.",
   master_project_mismatch: "The conversation opened for another project. Open this project again.",
   master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
   master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
+  master_session_active: "This project's conversation is already open. Switch tabs and back, then send again.",
+  master_session_capacity: "Too many master conversations are open. End one in another project, then try again.",
+  master_session_missing: "This conversation is gone. Send again to start a new one.",
+  master_session_not_active: "This conversation has ended. Send again to start a new one.",
+  master_turn_outstanding: "The master is still answering your last message. Wait for it or stop it, then send.",
+  master_turn_capacity: "This conversation is full. End it from the conversation menu, then send again.",
+  master_turn_not_current: "That reply already finished.",
+  master_input_too_large: "This conversation is too long for the master. End it from the conversation menu, then send again.",
+  master_scope_or_budget_denied: "The master's limits aren't allowed by your settings. Check the project's pool.",
+  master_pool_missing: "This project needs a pool before the master can reply.",
+  master_backend_account_denied: "The project's pool has no account the master can use. Check the pool's accounts.",
+  rcli_profile_identity_changed: "The local model's profile changed while the master started. Try again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
   resync_required: "The conversation changed while it loaded. Try again.",
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
@@ -209,25 +219,26 @@ const copy: Record<string, string> = {
   rejected: "The engine refused this change.",
 };
 
-/** Plain sentence for one engine failure code.
- * Input: the code. Output: what happened and what to do, or the generic fallback. */
-export function failureCopy(code: string): string {
-  return Object.hasOwn(copy, code) ? copy[code] : plainError(code);
+/** Plain sentence for one engine failure, never opaque.
+ * Input: the code, or a failure with the engine cause behind it. Output: what happened and
+ * what to do, or the generic fallback naming the code. */
+export function failureCopy(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  return namedFailure(failureSentence(code), code, cause);
 }
 
-/** Adds a project and the master role to a pool without changing anything else.
- * Inputs: the saved pool and the project id. Output: the new pool record. */
-export function assignedPool(pool: AccountPool, projectId: string): AccountPool {
-  const projects = pool.projects.includes(projectId) ? [...pool.projects] : [...pool.projects, projectId];
-  const roles = pool.roles.includes("project_leader") ? [...pool.roles] : [...pool.roles, "project_leader"];
-  if (projects.length > 64 || roles.length > 64) throw new Error("A pool allows at most 64 project and 64 role assignments.");
-  return { ...pool, projects, roles };
+/** The sentence the project screens have for a code. Input: the code. Output: the sentence,
+ * or undefined when there is none. */
+export function failureSentence(code: string): string | undefined {
+  return Object.hasOwn(copy, code) ? copy[code] : knownError(code);
 }
 
-/** Removes one project from a pool's assignments and keeps everything else.
- * Inputs: the saved pool and the project id. Output: the new pool record. */
-export function unassignedPool(pool: AccountPool, projectId: string): AccountPool {
-  return pool.projects.includes(projectId) ? { ...pool, projects: pool.projects.filter((id) => id !== projectId) } : pool;
+/** Says whether the saved pools give a project exactly the chosen pool, or none.
+ * Inputs: the saved pools, the project id and the chosen pool id (null for none).
+ * Output: true when only the chosen pool lists the project. */
+export function projectPoolIs(pools: readonly AccountPool[], projectId: string, poolId: string | null): boolean {
+  const holding = pools.filter((pool) => pool.projects.includes(projectId)).map((pool) => pool.id);
+  return poolId === null ? holding.length === 0 : holding.length === 1 && holding[0] === poolId;
 }
 
 export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string } | { kind: "unconfirmed" };
@@ -235,10 +246,10 @@ export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string
 /** Classifies an intent receipt for the screens.
  * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
 export function receiptState(receipt: IntentReceipt): ReceiptState {
-  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
   if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "not_recorded_at_barrier") {
     return { kind: "unconfirmed" };
   }
+  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
   if (receipt.outcome === "applied") return { kind: "applied" };
   return { kind: "rejected", code: receipt.outcome };
 }
@@ -256,18 +267,6 @@ export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation:
  * Input: the receipt from Create project. Output: true when it should reconcile once. */
 export function needsReconcile(receipt: IntentReceipt): boolean {
   return receipt.pending && receipt.rejection === null && (receipt.outcome === "unknown" || receipt.outcome === "uncertain");
-}
-
-/** Reconciles the kept New Project intent once by its operation id and hash, reconnecting
- * first when the reply was lost and the bridge let go of the engine.
- * Input: none. Output: the reconcile receipt, or why it couldn't run. */
-export async function reconcileSetup(): Promise<Result<IntentReceipt>> {
-  const current = await status();
-  if (current.kind === "ok" && !current.value.connected) {
-    const connected = await connect();
-    if (connected.kind !== "ok") return connected;
-  }
-  return call<IntentReceipt>("desktop_reconcile_intent");
 }
 
 /** The New Project receipt after one reconcile: the reconcile's answer when it settled the
@@ -462,22 +461,36 @@ export function loadProjects(): Promise<Result<ProjectPage["items"]>> {
   });
 }
 
-/** Assigns a saved pool to a project as its master pool, or removes that assignment,
- * then reads the saved record back. Inputs: the project id, the pool id, a generation and
- * whether to remove. Output: applied, or why not. */
-export async function assignPool(projectId: string, poolId: string, generation: number, remove = false): Promise<Result<ReceiptState>> {
+/** Names the projects a saved pool serves, for the delete confirm.
+ * Input: the pool id. Output: the project names in engine order; one not listed reads "a project". */
+export function projectsUsing(poolId: string): Promise<Result<string[]>> {
+  return wrap(async () => {
+    const record = (await allRecords("pools")).find((item) => item.kind === "pool" && item.pool.id === poolId);
+    const ids = record?.kind === "pool" ? record.pool.projects : [];
+    if (ids.length === 0) return [];
+    let page = await projects(false);
+    const names = new Map(page.items.map((item) => [item.id, item.name]));
+    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+      page = await projects(true);
+      for (const item of page.items) names.set(item.id, item.name);
+    }
+    return ids.map((id) => names.get(id) ?? "a project");
+  });
+}
+
+/** Gives a project exactly one saved pool, or none, in one engine change, then reads the pools
+ * back. Inputs: the project id, the pool id (null for none) and a generation. Output: applied,
+ * or why not. */
+export async function setProjectPool(projectId: string, poolId: string | null, generation: number): Promise<Result<ReceiptState>> {
   return wrap(async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
-    const basis = await inspectModelAccess("pools", poolId);
-    if (basis.record.kind !== "pool" || !basis.writable) throw { code: "invalid_pool" };
-    const pool = remove ? unassignedPool(basis.record.pool, projectId) : assignedPool(basis.record.pool, projectId);
-    if (JSON.stringify(pool) === JSON.stringify(basis.record.pool)) return { kind: "applied" } as ReceiptState;
-    const state = receiptState(await editModelAccess(basis.ticket, { kind: "replace_pool", pool }, generation));
+    const page = await modelAccessPage("pools", false);
+    if (!page.writable) throw { code: "settings_read_only" };
+    const state = receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
     if (state.kind !== "applied") return state;
-    const saved = await inspectModelAccess("pools", poolId);
-    if (saved.record.kind !== "pool" || JSON.stringify(saved.record.pool) !== JSON.stringify(pool)) return { kind: "unconfirmed" } as ReceiptState;
-    return state;
+    const saved = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
+    return projectPoolIs(saved, projectId, poolId) ? state : { kind: "unconfirmed" } as ReceiptState;
   });
 }
 

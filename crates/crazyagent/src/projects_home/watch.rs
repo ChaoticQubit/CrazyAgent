@@ -132,6 +132,23 @@ impl HomeWatch {
 /// plain names, sorted and capped at `FOLDERS_MAX`; links, files and dot
 /// folders (including copies still being made) are skipped.
 pub fn scan(home: &Path) -> Result<Vec<String>, EngineError> {
+    let folders: Vec<String> = list(home)?.into_iter().take(FOLDERS_MAX).collect();
+    assert!(folders.len() <= FOLDERS_MAX);
+    Ok(folders)
+}
+
+/// Lists every top-level folder of a projects home, for a move that must
+/// take them all. Input: the home folder. Output: the sorted names `scan`
+/// would list, uncut, or None when there are more than `FOLDERS_MAX`.
+pub(super) fn scan_all(home: &Path) -> Result<Option<Vec<String>>, EngineError> {
+    let folders = list(home)?;
+    if folders.len() > FOLDERS_MAX {
+        return Ok(None);
+    }
+    Ok(Some(folders.into_iter().collect()))
+}
+
+fn list(home: &Path) -> Result<BTreeSet<String>, EngineError> {
     let entries =
         std::fs::read_dir(home).map_err(|_| EngineError("projects_home_unreadable".into()))?;
     let mut folders = BTreeSet::new();
@@ -152,7 +169,5 @@ pub fn scan(home: &Path) -> Result<Vec<String>, EngineError> {
             folders.insert(name);
         }
     }
-    let folders: Vec<String> = folders.into_iter().take(FOLDERS_MAX).collect();
-    assert!(folders.len() <= FOLDERS_MAX);
     Ok(folders)
 }

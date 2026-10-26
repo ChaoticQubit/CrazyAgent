@@ -22,12 +22,28 @@ pub enum PackKind {
     McpServer,
 }
 
-/// Where a pack entry belongs on the setup screen. `Always` is required and cannot be
-/// switched off; `Optional` entries start off; every other group starts on.
+/// The id of the code graph entry. While it is not installed and on, onboarding builds no
+/// code graph and setup installs no graphify command.
+pub const GRAPH_ENTRY: &str = "graphify";
+
+/// The name the setup screens show for a pack entry, kept apart from the tool of the
+/// same name. Input: the entry id. Output: `Graphify skill for agents` for the code
+/// graph entry, otherwise the id.
+pub fn entry_title(id: &str) -> &str {
+    if id == GRAPH_ENTRY {
+        "Graphify skill for agents"
+    } else {
+        id
+    }
+}
+
+/// Where a pack entry belongs on the setup screen. `Graph` holds the code graph entry;
+/// `Optional` entries start off; every other group starts on. Every entry, the code
+/// graph included, can be unticked, switched off or removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackGroup {
-    Always,
+    Graph,
     Workflow,
     Design,
     ReplyStyle,

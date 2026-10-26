@@ -33,7 +33,7 @@ const view = (extra = {}) => ({
   project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
   facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
-  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", ...extra,
+  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", finished: false, ...extra,
 });
 
 test("each folder state has its badge, line and one action", () => {
@@ -91,14 +91,15 @@ test("a picked Windows folder is accepted, checked against a Windows projects fo
   assert.equal(intake.joinPath("/Users/mira/Projects/", "shop"), "/Users/mira/Projects/shop");
 });
 
-test("Move is the default and Copy shows the size first, with a warning above 1 GB", () => {
+test("using a folder where it is is the default and Copy shows the size first, with a warning above 1 GB", () => {
   const home = "/Users/mira/Projects";
+  assert.deepEqual(intake.sizeLine("here", null, home), { text: "Sets it up where it is. Nothing is moved or copied.", warn: false });
   assert.deepEqual(intake.sizeLine("move", null, home), { text: "Moves the folder into ~/Projects. It won't stay at its old place.", warn: false });
   assert.deepEqual(intake.sizeLine("copy", null, home), { text: "Checking the folder size...", warn: false });
   assert.deepEqual(intake.sizeLine("copy", 512 * 1024 * 1024, home), { text: "Copies 512 MB into ~/Projects. The original stays where it is.", warn: false });
   assert.deepEqual(intake.sizeLine("copy", GB, home), { text: "Copies 1 GB into ~/Projects. The original stays where it is.", warn: false });
   assert.deepEqual(intake.sizeLine("copy", 2.5 * GB, home),
-    { text: "This copies 2.5 GB into ~/Projects. That takes a while and uses as much disk again. Move is instant on the same disk.", warn: true });
+    { text: "This copies 2.5 GB into ~/Projects. That takes a while and uses as much disk again. Using it where it is needs no copy.", warn: true });
 });
 
 test("the device code shows how long it still works and only GitHub pages open", () => {
@@ -134,6 +135,33 @@ test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
+  assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." });
+  assert.deepEqual(intake.stepView({ kind: "not_installed" }), { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." });
+});
+
+test("a mapping paused on every pool account shows when the pause ends in local time", () => {
+  process.env.TZ = "America/New_York";
+  const paused = { kind: "waiting", until_ms: 1_792_729_920_000 };
+  assert.deepEqual(intake.stepView(paused), { word: "Rate limited until 12:32 AM", tone: "warn", line: null });
+  assert.deepEqual(intake.stepView(paused, true), { word: "Skipped", tone: "neutral", line: null });
+  assert.deepEqual(intake.stepView({ kind: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
+});
+
+test("a finished onboarding opens its saved setup, shows unstarted steps as skipped and saves changes", () => {
+  const finished = view({ finished: true, graph: { kind: "running" }, mapping: { kind: "waiting" } });
+  assert.equal(intake.settled(finished), true);
+  assert.deepEqual(intake.confirmReady(finished), { ready: true, line: "This project is set up. Change anything below, then save." });
+  assert.deepEqual(intake.stepView({ kind: "waiting" }, true), { word: "Skipped", tone: "neutral", line: null });
+  assert.deepEqual(intake.stepView({ kind: "failed", reason: "x" }, true), { word: "Failed", tone: "danger", line: "x" });
+});
+
+test("only a failed mapping of an unfinished setup offers Retry, from the project's own folder", () => {
+  assert.equal(intake.mappingRetry(view({ mapping: { kind: "failed", reason: "x" } })), true);
+  assert.equal(intake.mappingRetry(view({ mapping: { kind: "failed", reason: "x" }, finished: true })), false);
+  assert.equal(intake.mappingRetry(view({ mapping: { kind: "running" } })), false);
+  assert.equal(intake.projectFolder(stored({ folder: "/Users/mira/Projects/shop/.crazyagent" })), "/Users/mira/Projects/shop");
+  assert.equal(intake.projectFolder(stored({ folder: "C:\\Projects\\shop\\.crazyagent" })), "C:\\Projects\\shop");
+  assert.equal(intake.projectFolder(stored({ folder: "/Users/mira/Projects/shop" })), "/Users/mira/Projects/shop");
 });
 
 test("missing items name the form fields, once each", () => {
@@ -166,6 +194,16 @@ test("confirm waits for the mapping agent unless a step failed", () => {
   assert.equal(intake.settled(view()), true);
   assert.equal(intake.settled(view({ mapping: { kind: "running" } })), false);
   assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), true);
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })),
+    { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" } })), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
+  assert.equal(intake.settled(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })), false);
+  assert.equal(intake.settled(view({ graph: { kind: "off" } })), true);
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "not_installed" }, mapping: { kind: "waiting" } })),
+    { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "not_installed" } })), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
+  assert.equal(intake.settled(view({ graph: { kind: "not_installed" }, mapping: { kind: "waiting" } })), false);
+  assert.equal(intake.settled(view({ graph: { kind: "not_installed" } })), true);
 });
 
 test("a started onboarding opens only with a project id from an applied receipt", () => {
@@ -195,15 +233,16 @@ test("setup lists each tool's state in plain words", () => {
 
 const entry = (id, kind, group, on_by_default, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default, state, ...extra });
 const pack = [
-  entry("graphify", "skill", "always", true, { state: "available" }),
+  entry("graphify", "skill", "graph", true, { state: "available" }),
   entry("superpowers", "skill", "workflow", true, { state: "available" }),
   entry("context-mode", "mcp_server", "context", true, { state: "available" }),
   entry("headroom", "mcp_server", "context", true, { state: "on" }, { license: "Apache-2.0" }),
   entry("serena", "mcp_server", "optional", false, { state: "available" }),
 ];
 
-test("the pack starts with the on-by-default entries ticked and names every ticked MCP server before approval", () => {
-  assert.deepEqual(intake.packTicks(pack), ["graphify", "superpowers", "context-mode", "headroom"]);
+test("the pack starts with the on-by-default entries that are not installed yet ticked and names every ticked MCP server before approval", () => {
+  assert.deepEqual(intake.packTicks(pack), ["graphify", "superpowers", "context-mode"]);
+  assert.deepEqual(intake.packTicks([entry("graphify", "skill", "graph", true, { state: "off" }), entry("x", "skill", "workflow", true, { state: "failed", reason: "no" })]), ["x"]);
   assert.equal(intake.approvalLine(pack, ["superpowers", "context-mode", "headroom"]),
     "Continuing lets your agents run these MCP servers: context-mode, headroom. You can turn any of them off later.");
   assert.equal(intake.approvalLine(pack, ["superpowers"]), null);
@@ -230,21 +269,27 @@ test("pack states read in plain words and only on or off entries count as instal
 test("the pack groups follow the manifest order and keep pack order inside each group", () => {
   const groups = intake.packGroups([...pack, entry("caveman", "skill", "reply_style", true, { state: "available" }), entry("odd", "skill", "later", false, { state: "available" })]);
   assert.deepEqual(groups.map((group) => [group.title, group.entries.map((item) => item.id)]), [
-    ["Always on", ["graphify"]], ["Workflow skills", ["superpowers"]], ["Reply style", ["caveman"]],
+    ["Code graph", ["graphify"]], ["Workflow skills", ["superpowers"]], ["Reply style", ["caveman"]],
     ["Context plugins", ["context-mode", "headroom"]], ["Optional", ["serena"]], ["Other", ["odd"]],
   ]);
   assert.deepEqual(intake.packGroups([]), []);
 });
 
-test("setup progress counts every tool, the always-on entries and the ticked pack", () => {
+test("setup progress counts every tool and only the ticked pack, so an unticked graphify entry is not waited for", () => {
   const status = {
     dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("uv", { state: "installing" }), dep("graphify", { state: "failed", reason: "no" })],
-    pack: [entry("graphify", "skill", "always", true, { state: "on" }), entry("superpowers", "skill", "workflow", true, { state: "installing" }),
+    pack: [entry("graphify", "skill", "graph", true, { state: "available" }), entry("superpowers", "skill", "workflow", true, { state: "installing" }),
       entry("serena", "mcp_server", "optional", false, { state: "available" })],
     running: true,
   };
-  assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 3, total: 5, failed: 1 });
-  assert.deepEqual(intake.setupProgress(status, []), { done: 3, total: 4, failed: 1 });
+  assert.deepEqual(intake.setupProgress(status, ["superpowers"]), { done: 2, total: 4, failed: 1 });
+  assert.deepEqual(intake.setupProgress(status, []), { done: 2, total: 3, failed: 1 });
+});
+
+test("the graphify command and the graphify pack entry have names that can't be confused", () => {
+  assert.equal(intake.entryName(entry("graphify", "skill", "graph", true, { state: "available" })), "Graphify skill for agents");
+  assert.equal(intake.entryName(entry("superpowers", "skill", "workflow", true, { state: "available" })), "superpowers");
+  assert.equal(intake.dependencyView(dep("graphify", { state: "found", version: "0.9.9" }, "Graphify command")).title, "Graphify command");
 });
 
 test("new routes for adding a project and reviewing its setup parse and format back", () => {
@@ -304,20 +349,34 @@ test("setting up a found folder asks for a pool first", () => {
   assert.match(html(SetUpDialogBody, { folder: folder("found"), pools: ok([]), pool: "", onPool: noop, problem: "" }), /Create a pool first/);
 });
 
-test("adding an existing folder shows Move by default, the Copy size warning and the clone suggestion", () => {
+test("adding an existing folder uses it where it is by default, shows the target before a Move or Copy, the Copy size warning and the clone suggestion", () => {
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
-  const none = html(AddFolderView, { ...base, source: null, size: null, mode: "move" });
+  const none = html(AddFolderView, { ...base, source: null, size: null, mode: "here" });
   assert.match(none, /<h1>Add an existing folder<\/h1>/);
   assert.match(none, />Choose folder<\/button>/);
-  assert.doesNotMatch(none, /Move into projects folder/);
+  assert.doesNotMatch(none, /Set up here|Move into projects folder/);
+  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "here" });
+  assert.match(here, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</);
+  assert.match(here, /role="radio" aria-checked="false"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
+  assert.match(here, /~\/Code\/shop<\/span> stays where it is\./);
+  assert.match(here, /Nothing is moved or copied\./);
+  assert.match(here, />Set up here<\/button>/);
+  assert.doesNotMatch(here, /goes to|into projects folder/);
   const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "move" });
   assert.match(move, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
+  assert.match(move, /goes to <span class="pj-mono">~\/Projects\/shop<\/span>/);
   assert.match(move, /Moves the folder into ~\/Projects\./);
   assert.match(move, />Move into projects folder<\/button>/);
   const big = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 3 * GB }), mode: "copy" });
   assert.match(big, /This copies 3 GB/);
   assert.match(big, /class="notice"/);
   assert.match(big, />Copy into projects folder<\/button>/);
+  assert.doesNotMatch(big, /linked git worktree/);
+  const linked = (worktrees, mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees }), mode });
+  assert.match(linked(3, "copy"), /This folder has 3 linked git worktrees\. They stay with the original folder; the copy gets the main checkout and every branch\./);
+  assert.match(linked(1, "copy"), /This folder has 1 linked git worktree\. It stays with the original folder; the copy gets the main checkout and every branch\./);
+  assert.doesNotMatch(linked(0, "copy"), /linked git worktree/);
+  assert.doesNotMatch(linked(3, "here"), /linked git worktree/);
   const hosted = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
   assert.match(hosted, /mira\/plant-shop/);
   assert.match(hosted, />Clone instead<\/button>/);
@@ -374,31 +433,59 @@ test("the setup review shows the steps, the overview, missing items and a confir
   assert.match(done, /Target platforms[\s\S]*Missing/);
   assert.match(done, /Research is off for existing code/);
   assert.doesNotMatch(done, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
-  assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /graphify isn&#x27;t installed\./);
+  assert.match(html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind: "failed", reason: "graphify isn't installed." }, mapping: { kind: "waiting" } })), draft }), /<span class="pj-small pj-error">graphify isn&#x27;t installed\.<\/span>/);
+  for (const kind of ["off", "not_installed"]) {
+    const markup = html(OnboardingReviewView, { ...base, view: ok(view({ graph: { kind }, mapping: { kind: "running" } })), draft: null });
+    assert.match(markup, /<span class="pj-small pj-secondary">Graphify [^<]*Settings, Pack[^<]*<\/span>/, kind);
+    assert.doesNotMatch(markup, /pj-error/, kind);
+  }
   assert.match(html(OnboardingReviewView, { ...base, view: notReady, draft: null }), /Not ready yet/);
+  const stopped = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { kind: "failed", reason: "Agent stopped: workspace routing discovery failed" } })), draft });
+  assert.match(stopped, /Agent stopped: workspace routing discovery failed/);
+  assert.match(stopped, /<button[^>]*>Retry mapping<\/button>/);
+  assert.match(stopped, /<button[^>]*>Skip mapping<\/button>/);
+  assert.doesNotMatch(stopped, /<button[^>]*disabled=""[^>]*>Confirm and finish setup<\/button>/);
+  const skipped = html(OnboardingReviewView, { ...base, view: ok(view({ mapping: { kind: "failed", reason: "x" } })), draft, skipped: true });
+  assert.doesNotMatch(skipped, /Retry mapping|Skip mapping/);
+  const saved = html(OnboardingReviewView, { ...base, view: ok(view({ finished: true, graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), draft });
+  assert.match(saved, /This project is set up\. Change anything below, then save\./);
+  assert.match(saved, /Map the project[\s\S]*Skipped/);
+  assert.match(saved, /<button[^>]*>Save changes<\/button>/);
+  assert.doesNotMatch(saved, /Retry mapping|Confirm and finish setup/);
 });
 
 test("the tools step lists dependencies and the pack by group, and names the MCP servers it approves", () => {
-  const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("graphify", { state: "missing" })], pack, running: false };
+  const value = { dependencies: [dep("tmux", { state: "found", version: "3.5a" }), dep("graphify", { state: "missing" }, "Graphify command")], pack, running: false };
   const base = { status: ok(value), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop };
   const markup = html(ToolsSetupView, base);
+  const rows = markup.split('<li class="in-row">');
+  const rowWith = (text) => { const found = rows.filter((row) => row.includes(text)); assert.equal(found.length, 1, text); return found[0]; };
   assert.match(markup, /tmux[\s\S]*Version 3\.5a on this Mac\.[\s\S]*Found/);
-  assert.match(markup, /graphify[\s\S]*Not installed/);
-  assert.match(markup, /<legend>Always on<\/legend>[\s\S]*graphify[\s\S]*always on/);
+  assert.match(rowWith("Graphify command"), /Not installed/);
+  assert.match(markup, /<legend>Code graph<\/legend>[\s\S]*Graphify skill for agents/);
+  assert.doesNotMatch(markup, /always on/i);
+  const skill = rowWith("Graphify skill for agents");
+  assert.match(skill, /checked=""/);
+  assert.doesNotMatch(skill, /disabled=""/);
+  const unticked = html(ToolsSetupView, { ...base, ticks: base.ticks.filter((id) => id !== "graphify") }).split('<li class="in-row">').find((row) => row.includes("Graphify skill for agents"));
+  assert.doesNotMatch(unticked, /checked=""/);
+  const present = rowWith("headroom");
+  assert.doesNotMatch(present, /type="checkbox"/);
+  assert.match(present, /Already installed/);
   assert.match(markup, /<legend>Workflow skills<\/legend>[\s\S]*superpowers/);
   assert.match(markup, /<legend>Context plugins<\/legend>[\s\S]*context-mode[\s\S]*MCP server/);
   assert.match(markup, /<legend>Optional<\/legend>[\s\S]*serena[\s\S]*off by default/);
   assert.match(markup, /headroom[\s\S]*>On</);
-  assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode, headroom\./);
+  assert.match(markup, /Continuing lets your agents run these MCP servers: context-mode\./);
   assert.match(markup, />Set up tools<\/button>/);
   assert.match(markup, />Skip for now<\/button>/);
   assert.doesNotMatch(markup, /role="status"/);
   const finished = html(ToolsSetupView, { ...base, started: true });
-  assert.match(finished, /Setup finished: 2 of 6 done\./);
+  assert.match(finished, /Setup finished: 1 of 5 done\./);
   assert.match(finished, />Continue<\/button>/);
   assert.doesNotMatch(finished, /Skip for now/);
   const running = html(ToolsSetupView, { ...base, status: ok({ ...value, running: true }) });
-  assert.match(running, /Installing: 2 of 6 done\. You can continue; setup keeps going\./);
+  assert.match(running, /Installing: 1 of 5 done\. You can continue; setup keeps going\./);
   assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
 });
@@ -429,6 +516,8 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   assert.ok(found.includes(svg("circle-x", 12)), "Folder missing carries its status icon");
 
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "here" });
+  assert.ok(here.includes(`${svg("list-checks", 15)}Set up here</button>`), here);
   const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
   assert.ok(move.includes(`${svg("folder-input", 15)}Move into projects folder</button>`), move);
   assert.ok(move.includes(`${svg("git-branch", 15)}Clone instead</button>`), move);

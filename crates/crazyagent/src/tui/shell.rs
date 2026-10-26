@@ -533,6 +533,17 @@ impl Shell {
                         Err(code) => store.setup = Load::Failed(code.clone()),
                     }
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Settled(outcome) = event.as_ref()
+                {
+                    self.ctx.say(match outcome {
+                        Ok(()) => Message::success("Your earlier change is saved.", ""),
+                        Err(code) => Message::error(
+                            "Your earlier change was not saved.",
+                            super::screens::settings_accounts::plain(code),
+                        ),
+                    });
+                }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
             _ => {}
@@ -1097,6 +1108,12 @@ mod tests {
 
         let mut known = ctx();
         known.store.setup = Load::Ready(crate::tui::screens::home::tests::tools(&[]));
+        known.store.accounts = Load::Ready(vec![crate::tui::seam::AccountRow {
+            id: crate::protocol::CredentialRef::new("account-1").unwrap(),
+            name: "Team key".into(),
+            provider: "Anthropic API".into(),
+            status: crate::accounts::AccountStatus::KeySaved.label().into(),
+        }]);
         let mut shell = at(Place::Home, known);
         assert!(drain(&mut shell).contains(&"Settings".to_owned()));
         shell.arrive(reply(Err("controller_pending_intent".into())));

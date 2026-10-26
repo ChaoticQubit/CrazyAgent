@@ -24,6 +24,13 @@ export function folderLabel(path: string): string {
   return homePath(short);
 }
 
+/** The owner's project folder for a saved setup folder, which for a project set up in an
+ * existing folder names the `.crazyagent` folder inside it.
+ * Input: the saved folder path. Output: the project folder path. */
+export function projectFolder(path: string): string {
+  return path.replace(/[\\/]\.crazyagent[\\/]?$/u, "");
+}
+
 /** Overview tab: what needs the owner, research progress, recent activity and project facts.
  * Input: the project data. Output: the tab. */
 export function OverviewTab({ data }: { data: ProjectData }) {
@@ -71,7 +78,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
       <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
         {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
-        {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research.code)}</p>}
+        {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research)}</p>}
         {data.research?.kind === "ok" && jobs.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
         {rows.length > 0 && <ul className="pj-rows" aria-label="Research">{rows.map(({ job, row }) => <li className="pj-research-row" key={job.id}>
           <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
@@ -94,7 +101,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
       {data.setup?.kind === "not_ready" && <NotReady what="project details aren't in this build." />}
       {data.setup?.kind === "ok" && data.setup.value === null && <p className="pj-muted">This project was created before project setup. It has no folder, research or team details.</p>}
       <dl>
-        {setup && <div><dt>Project folder</dt><dd className="pj-mono" title={setup.folder}>{displayText(folderLabel(setup.folder))}</dd></div>}
+        {setup && <div><dt>Project folder</dt><dd className="pj-mono" title={projectFolder(setup.folder)}>{displayText(folderLabel(projectFolder(setup.folder)))}</dd></div>}
         {setup && <div><dt>Tech stack</dt><dd className="pj-chips">{setup.tech_stack.length ? setup.tech_stack.map((item) => <span className="pj-chip" key={item}>{displayText(item)}</span>) : <span className="pj-muted">None</span>}</dd></div>}
         {setup && <div><dt>Platforms</dt><dd>{setup.platforms.map((platform) => PLATFORM_LABELS[platform] ?? platform).join(", ") || "None"}</dd></div>}
         <div><dt>Pool</dt><dd>{data.assigned

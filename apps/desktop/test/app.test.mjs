@@ -4,7 +4,8 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { App, AppView } = await import("../src/app.tsx");
+const { App, AppView, EngineOutdatedView } = await import("../src/app.tsx");
+const state = await import("../src/state.ts");
 const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
 
 const profile = { name: "Mira Okafor", role: "", bio: "", preferred_stack: [], working_style: { detail: "terse", initiative: "ask_first" } };
@@ -36,6 +37,31 @@ test("an unreachable engine shows one full-window state with Try again and no sh
   assert.doesNotMatch(markup, /class="sidebar"/);
 });
 
+test("an engine of another version asks for a restart with both versions, not the engine-down state", () => {
+  const { engineState } = state;
+  const ok = { kind: "ok", value: { connected: true, pending: false } };
+  assert.equal(engineState(ok), "running");
+  assert.equal(engineState({ kind: "error", code: "engine_version_mismatch", message: "x" }), "outdated");
+  assert.equal(engineState({ kind: "error", code: "engine_unreachable", message: "x" }), "down");
+  assert.equal(engineState({ kind: "error", code: "engine_start_failed", message: "x" }), "down");
+
+  const screen = render({ engine: "outdated" });
+  assert.match(screen, /<h1>CrazyAgent&#x27;s engine needs a restart<\/h1>/);
+  assert.doesNotMatch(screen, /class="sidebar"|isn&#x27;t running/);
+
+  const forbidden = () => { throw new Error("static rendering must not call the engine"); };
+  const versions = { kind: "ok", value: { engine: "0.1.0", app: "0.2.0", message: "Engine is version 0.1.0, this app is 0.2.0; restart the engine" } };
+  const view = (patch) => renderToStaticMarkup(createElement(EngineOutdatedView, { versions, restart: { kind: "idle" }, onRestart: forbidden, onRetry: forbidden, ...patch }));
+  const markup = view();
+  assert.match(markup, /Engine is version 0\.1\.0, this app is 0\.2\.0; restart the engine/);
+  assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Restart engine<\/button>/);
+  assert.match(markup, /Try again<\/button>/);
+  assert.match(view({ restart: { kind: "busy" } }), /Restarting\.\.\./);
+  assert.match(view({ restart: { kind: "failed", message: "CrazyAgent's engine didn't start. Try again." } }), /role="alert"[^>]*>CrazyAgent&#x27;s engine didn&#x27;t start/);
+  const hostile = view({ versions: { kind: "ok", value: { engine: "9\u202e1", app: "0.2.0", message: "Engine is version 9\u202e1, this app is 0.2.0; restart the engine" } } });
+  assert.doesNotMatch(hostile, /\u202e/);
+});
+
 test("an empty engine profile opens Welcome; a saved profile opens Home in the shell", () => {
   assert.match(render({ profile: { kind: "ok", value: null } }), /<h1>Tell CrazyAgent about you<\/h1>/);
   const home = render({});
@@ -54,11 +80,19 @@ test("a profile read that is not in this build yet skips Welcome instead of bloc
   assert.match(markup, /Profile/);
 });
 
-test("an unconfirmed change shows the plain banner with Check again", () => {
-  const markup = render({ unconfirmed: true });
-  assert.match(markup, /We couldn&#x27;t confirm your last change\. Check it and save again\./);
+test("an unconfirmed change shows a banner naming it, with Check again and Retry", () => {
+  const intent = { kind: "setup_project", generation: "3", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "op-1" };
+  const markup = render({ unconfirmed: { intent, outcome: null, busy: false } });
+  assert.match(markup, /We couldn&#x27;t confirm saving the project setup\. Other changes wait until it&#x27;s checked\./);
   assert.match(markup, />Check again<\/button>/);
-  assert.doesNotMatch(markup, /intent|Reconcile|operation/i);
+  assert.match(markup, />Retry<\/button>/);
+  assert.doesNotMatch(markup, /intent|Reconcile|operation|still being saved/i);
+  const unsent = render({ unconfirmed: { intent, outcome: "not_recorded_at_barrier", busy: false } });
+  assert.match(unsent, /Saving the project setup hasn&#x27;t reached the engine\. Retry sends the same change again\./);
+  const checking = render({ unconfirmed: { intent, outcome: null, busy: true } });
+  assert.match(checking, /Checking\.\.\./);
+  assert.match(checking, /<button[^>]*disabled=""[^>]*>[\s\S]*?Retry<\/button>/);
+  assert.doesNotMatch(render({}), /class="banner"/);
 });
 
 test("routes reach Settings tabs and the project screens", () => {
@@ -102,6 +136,35 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   const unknown = setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" });
   assert.equal(unknown.visible, true);
   assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
+});
+
+test("Add an account is done only when an account is ready for agents, and says which; otherwise it links to Accounts", () => {
+  const harnesses = ok([]);
+  const claude = (id, status) => account({ id, name: "ChaoticQubit", provider: "claude", provider_name: "Claude", status });
+  const qwen = account({ id: "q1", name: "Qwen 2.5 - 7B", provider: "local", provider_name: "Local model", method: "url", status: "signed_in" });
+  const step = (accounts) => setupSteps(ok(accounts), ok([]), harnesses, toolsReady).items[0];
+
+  const none = step([claude("c1", "not_signed_in"), claude("c2", "not_signed_in"), claude("c3", "unreachable")]);
+  assert.equal(none.done, false);
+  assert.equal(none.body, "No account is ready for agents yet. Sign one in or check its key or URL.");
+  assert.equal(none.action, "Open accounts");
+  assert.equal(none.href, "#/settings/accounts");
+
+  assert.equal(step([claude("c1", "not_signed_in")]).href, "#/settings/accounts");
+
+  const one = step([claude("c1", "not_signed_in"), claude("c2", "signing_in"), qwen]);
+  assert.equal(one.done, true);
+  assert.equal(one.body, "Qwen 2.5 - 7B is ready for agents.");
+
+  const two = step([qwen, account({ id: "k1", name: "Key", provider: "openai_api", status: "key_saved" }), claude("c1", "not_signed_in")]);
+  assert.equal(two.done, true);
+  assert.equal(two.body, "2 accounts are ready for agents.");
+
+  const empty = step([]);
+  assert.equal(empty.done, false);
+  assert.equal(empty.body, "Sign in with ChatGPT or Claude, or add an API key or local model.");
+  assert.equal(empty.action, "Add account");
+  assert.equal(empty.href, "#/settings/accounts?action=add");
 });
 
 test("Get set up keeps Install tools until tmux, uv and graphify are found; the pack never blocks", () => {
@@ -235,6 +298,17 @@ test("a project card sums up live agents and research from the team and research
   assert.doesNotMatch(view(new Map()), /class="activity/);
 });
 
+test("Needs you shows one row per account to sign in, and folds accounts that share a name and provider into one", () => {
+  const claude = (id, name, status = "not_signed_in") => account({ id, name, provider: "claude", provider_name: "Claude", status });
+  const accounts = ok([claude("c1", "ChaoticQubit"), claude("c2", "ChaoticQubit"), claude("c3", "ChaoticQubit"), claude("c5", "ChaoticQubit", "signed_in"),
+    account({ id: "g1", name: "ChaoticQubit", status: "not_signed_in" }), claude("c6", "Arman03"), claude("c7", "Arman2000", "signed_in")]);
+  assert.deepEqual(needsYou(accounts).all.map((row) => [row.key, row.text, row.action, row.href]), [
+    ["account-c1", "3 Claude accounts named ChaoticQubit aren't signed in.", "Open accounts", "#/settings/accounts"],
+    ["account-g1", "ChaoticQubit isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=g1"],
+    ["account-c6", "Arman03 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=c6"],
+  ]);
+});
+
 test("Needs you lists accounts to sign in, research waiting for a pool and memories to review", () => {
   const accounts = ok([account({ id: "a1", name: "Claude 1", status: "not_signed_in", status_label: "Not signed in" }), account({ id: "a2", name: "Codex", status: "signed_in" })]);
   const projects = [{ id: "p1", name: "Harbor Notes", repository_count: 0 }, { id: "p 2", name: "Quayside", repository_count: 0 }];
@@ -244,7 +318,7 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   const suggestions = ok([suggestion("p1", "Harbor Notes", "m1"), suggestion("p1", "Harbor Notes", "m2"), suggestion("p 2", "Quayside", "m3")]);
   const needs = needsYou(accounts, projects, activity, suggestions);
   assert.deepEqual(needs.all.map((row) => [row.project, row.text, row.action, row.href]), [
-    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts"],
+    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=a1"],
     ["Quayside", "Research is waiting for a pool.", "Choose pool", "#/projects/p%202/settings?section=pool"],
     ["Harbor Notes", "2 suggested memories to review.", "Review", "#/settings/memory"],
     ["Quayside", "1 suggested memory to review.", "Review", "#/settings/memory"],

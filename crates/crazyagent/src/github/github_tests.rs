@@ -1,5 +1,6 @@
-use super::test_server::{Answer, Seen, Server};
+use super::test_server::{Answer, Seen, Server, base64};
 use super::*;
+use crate::credentials::test_keychain::TestKeychain;
 use crate::credentials::{Keychain, reference};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
@@ -9,6 +10,7 @@ struct Scratch {
     root: tempfile::TempDir,
     namespace: String,
     store: Arc<Keychain>,
+    _keychain: TestKeychain,
 }
 
 impl Scratch {
@@ -17,10 +19,13 @@ impl Scratch {
         getrandom::fill(&mut bytes).unwrap();
         let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         let namespace = format!("dev.crazyagent.test-{suffix}");
+        let mut keychain = TestKeychain::temporary();
+        keychain.serve(&namespace);
         Self {
             root: tempfile::tempdir().unwrap(),
             store: Arc::new(Keychain::new(&namespace).unwrap()),
             namespace,
+            _keychain: keychain,
         }
     }
 
@@ -66,27 +71,6 @@ fn user(seen: &Seen, token: &str) -> Answer {
     } else {
         Answer::json(401, serde_json::json!({ "message": "Bad credentials" }))
     }
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut text = String::new();
-    for chunk in bytes.chunks(3) {
-        let joined = chunk
-            .iter()
-            .enumerate()
-            .fold(0_u32, |value, (index, byte)| {
-                value | (u32::from(*byte) << (16 - 8 * index))
-            });
-        for index in 0..4 {
-            if index <= chunk.len() {
-                text.push(TABLE[((joined >> (18 - 6 * index)) & 63) as usize] as char);
-            } else {
-                text.push('=');
-            }
-        }
-    }
-    text
 }
 
 fn wait_for(account: &GitHub, done: impl Fn(&GitHubStatus) -> bool) -> GitHubStatus {
@@ -588,7 +572,10 @@ fn clone_config_check_refuses_credential_keys_and_a_foreign_origin_by_name() {
         "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = {remote}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"credential\"]\n\tremote = origin\n\tmerge = refs/heads/credential\n"
     );
     std::fs::write(&config, &origin).unwrap();
-    clone::verify_config(&config, &remote).unwrap();
+    let git = Path::new("/usr/bin/git");
+    let home = folder.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    clone::verify_config(git, &home, &config, &remote).unwrap();
     for refused in [
         format!("{origin}[credential]\n\thelper = store\n"),
         format!("{origin}[Credential \"https://github.com\"]\n\tHelper = store\n"),
@@ -601,7 +588,9 @@ fn clone_config_check_refuses_credential_keys_and_a_foreign_origin_by_name() {
     ] {
         std::fs::write(&config, &refused).unwrap();
         assert_eq!(
-            clone::verify_config(&config, &remote).unwrap_err().0,
+            clone::verify_config(git, &home, &config, &remote)
+                .unwrap_err()
+                .0,
             "github_clone_failed",
             "{refused:.120}"
         );
@@ -611,7 +600,9 @@ fn clone_config_check_refuses_credential_keys_and_a_foreign_origin_by_name() {
     std::fs::remove_file(&config).unwrap();
     std::os::unix::fs::symlink(&real, &config).unwrap();
     assert_eq!(
-        clone::verify_config(&config, &remote).unwrap_err().0,
+        clone::verify_config(git, &home, &config, &remote)
+            .unwrap_err()
+            .0,
         "github_clone_failed"
     );
 }
@@ -624,10 +615,13 @@ fn clone_command_holds_no_secret_and_allows_only_its_own_scheme() {
         .store
         .git_credential_helper(&item, "x-access-token")
         .unwrap();
+    let home = tempfile::tempdir().unwrap();
     let (command, remote) = clone::clone_command(
         &Endpoints::github(),
         &helper,
-        Path::new("/var/empty/tool"),
+        Path::new("/usr/bin/git"),
+        home.path(),
+        &home.path().join("tool"),
         "octo-cat/tool",
     )
     .unwrap();

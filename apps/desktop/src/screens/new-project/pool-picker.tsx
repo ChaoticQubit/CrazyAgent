@@ -4,14 +4,16 @@ import { displayText } from "../conversation";
 import { poolReadiness } from "../settings/pools";
 import { poolName, poolSummary, readyCount } from "./wizard";
 
-/** Radio cards for choosing a project's pool, with readiness and an optional "Choose later".
- * Inputs: the pools, their summaries when known, the chosen id (null for later), whether later
- * is offered and a handler. Output: the radio group. */
-export function PoolPicker({ pools, summaries = [], value, later, onChange, name }: {
+/** Radio cards for choosing a project's pool, with readiness and an optional no-pool card.
+ * Inputs: the pools, their summaries when known, the chosen id (null for no pool), whether the
+ * no-pool card is offered with its label and note, and a handler. Output: the radio group. */
+export function PoolPicker({ pools, summaries = [], value, later, laterLabel = "Choose later", laterNote = "Research waits and shows Needs a pool until you choose one.", onChange, name }: {
   pools: PoolChoice[];
   summaries?: PoolSummary[];
   value: string | null;
   later: boolean;
+  laterLabel?: string;
+  laterNote?: string;
   onChange: (pool: string | null) => void;
   name: string;
 }) {
@@ -28,8 +30,8 @@ export function PoolPicker({ pools, summaries = [], value, later, onChange, name
     {later && <label className={`pj-radio-card ${value === null ? "selected" : ""}`}>
       <input type="radio" name={name} value="" checked={value === null} onChange={() => onChange(null)} />
       <span className="pj-radio-body">
-        <strong>Choose later</strong>
-        <span className="pj-secondary">Research waits and shows Needs a pool until you choose one.</span>
+        <strong>{laterLabel}</strong>
+        <span className="pj-secondary">{laterNote}</span>
       </span>
     </label>}
   </div>;

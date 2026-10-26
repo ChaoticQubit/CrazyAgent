@@ -6,6 +6,8 @@ pub(crate) mod claude;
 #[cfg(all(test, unix))]
 #[path = "native_auth_channel/rcli_registry_tests.rs"]
 mod rcli_registry_tests;
+#[path = "native_auth_channel/reproof.rs"]
+mod reproof;
 #[cfg(unix)]
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::bootstrap::runner_binding;
@@ -39,10 +41,7 @@ fn operation_bound(fact: &NativeAuthFact) -> Duration {
 
 #[cfg(unix)]
 fn purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
-    match fact.action {
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-    }
+    fact.action.profile_purpose()
 }
 
 #[cfg(unix)]
@@ -87,6 +86,13 @@ impl NativeAuthSlot {
             && self.dispatch_task.is_none()
             && self.child.is_none()
             && !self.cleaning
+    }
+
+    /// Tells whether the slot's custodian process may still hold the profile: its dispatch
+    /// task has not finished, or its child has not been reaped. Input: the slot. Output: true
+    /// until that process is gone; false for custody that runs without one.
+    fn custodian_running(&self) -> bool {
+        self.dispatch_task.is_some() || self.child.is_some() || self.cleaning
     }
 }
 
@@ -515,6 +521,34 @@ impl OwnerRuntimeHandle {
         Ok(executable)
     }
 
+    /// Names the engine's own registered executable, which serves a tools-on master its
+    /// `delegate` tool. Input: the runtime handle. Output: the executable while its identity
+    /// holds, or `native_auth_host_unavailable` before it is registered.
+    pub(crate) fn registered_engine_executable(
+        &self,
+    ) -> Result<Arc<RegisteredNativeAuthHost>, EngineError> {
+        if !self.authority.usable.load(Ordering::SeqCst) {
+            return Err(failure("owner_runtime_stale"));
+        }
+        self.native_auth_owner_runtime_dir()?;
+        let executable = {
+            let registration = self
+                .authority
+                .native_auth_host
+                .lock()
+                .map_err(|_| failure("native_auth_recovery_required"))?;
+            if registration.disabled {
+                return Err(failure("native_auth_host_unavailable"));
+            }
+            registration
+                .executable
+                .clone()
+                .ok_or_else(|| failure("native_auth_host_unavailable"))?
+        };
+        executable.verified_path()?;
+        Ok(executable)
+    }
+
     pub(crate) fn registered_rcli_master_executable(
         &self,
     ) -> Result<Arc<RegisteredNativeAuthHost>, EngineError> {
@@ -690,6 +724,9 @@ impl OwnerRuntimeHandle {
                 | crate::engine::owner::native_auth::Command::Logout(_)
         ) {
             self.authority
+                .native_auth_released(Instant::now() + CLEANUP_BOUND)
+                .await;
+            self.authority
                 .native_auth_host
                 .lock()
                 .map_err(|_| failure("native_auth_recovery_required"))?
@@ -724,6 +761,25 @@ impl OwnerRuntimeHandle {
 }
 
 impl Authority {
+    /// Waits, up to a deadline, while the host slot still releases an operation whose
+    /// outcome is committed, so a command sent as that operation ends starts once its
+    /// custodian is gone instead of finding the host busy. Input: the deadline. Output: none.
+    async fn native_auth_released(&self, deadline: Instant) {
+        loop {
+            let changed = self.native_auth_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let releasing = self.native_auth.lock().is_ok_and(|current| {
+                current
+                    .as_ref()
+                    .is_some_and(|slot| slot.committed && !slot.expired && !slot.cached())
+            });
+            if !releasing || tokio::time::timeout_at(deadline, changed).await.is_err() {
+                return;
+            }
+        }
+    }
+
     fn native_auth_presentation(&self, reply: &mut NativeAuthReply) -> Result<(), EngineError> {
         let current = self
             .native_auth
@@ -732,6 +788,16 @@ impl Authority {
         let Some(slot) = current.as_ref().filter(|slot| !slot.expired) else {
             return Ok(());
         };
+        if slot.custodian_running()
+            && slot.fact.operation_id == reply.fact.operation_id
+            && slot.fact.generation == reply.fact.generation
+            && reply.fact.phase.releasing() != reply.fact.phase
+        {
+            reply.fact.phase = reply.fact.phase.releasing();
+            reply.fact.code = None;
+            assert!(reply.fact.phase.unfinished());
+            return Ok(());
+        }
         if self.claude_presentation(slot, reply)? {
             return Ok(());
         }
@@ -1094,11 +1160,15 @@ impl Authority {
         result
     }
 
+    /// Waits until the dispatched native auth operation has ended and its custody is released.
+    /// A failed dispatch is reported on the same diagnostic line the owner loop writes, so
+    /// the answer never depends on which waiter joined the dispatch first. Input: the engine.
+    /// Output: Ok once nothing of it is left to release, or the error when the join, the
+    /// child cleanup or the release could not be confirmed.
     pub(super) async fn drain_native_auth_dispatch(
         &self,
         engine: &Engine,
     ) -> Result<(), EngineError> {
-        let mut task_error = None;
         let mut cleanup_deadline = None;
         loop {
             let changed = self.native_auth_changed.notified();
@@ -1110,7 +1180,7 @@ impl Authority {
                     .lock()
                     .map_err(|_| failure("native_auth_recovery_required"))?;
                 let Some(slot) = current.as_ref() else {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 };
                 (
                     slot.dispatch_task.is_some(),
@@ -1128,7 +1198,9 @@ impl Authority {
                     result = tokio::time::timeout_at(deadline, self.native_auth_dispatch_finished()) => {
                         match result {
                             Ok(Ok(())) => {}
-                            Ok(Err(error)) => task_error = Some(error),
+                            Ok(Err(error)) => {
+                                eprintln!("{}", super::native_auth_dispatch_diagnostic(&error));
+                            }
                             Err(_) => return Err(failure("native_auth_dispatch_join_uncertain")),
                         }
                     }
@@ -1148,7 +1220,7 @@ impl Authority {
                     .lock()
                     .map_err(|_| failure("native_auth_recovery_required"))?;
                 let Some(slot) = current.as_ref() else {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 };
                 if slot.dispatch_task.is_some() || slot.cleaning {
                     drop(current);
@@ -1158,17 +1230,17 @@ impl Authority {
                     return Err(failure("native_auth_dispatch_cleanup_uncertain"));
                 }
                 if slot.cached() && !slot.expired {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 }
                 if !slot.retained && !slot.expired {
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 }
                 let Some(dispatch) = (!slot.committed).then(|| slot.dispatch.clone()).flatten()
                 else {
                     current.take();
                     drop(current);
                     self.native_auth_changed.notify_waiters();
-                    return task_error.map_or(Ok(()), Err);
+                    return Ok(());
                 };
                 current.as_mut().unwrap().cleaning = true;
                 dispatch
@@ -1192,7 +1264,7 @@ impl Authority {
             {
                 return Err(error);
             }
-            return task_error.map_or(Ok(()), Err);
+            return Ok(());
         }
     }
 }
@@ -2095,8 +2167,8 @@ mod auth_observation_tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command as ProcessCommand, Stdio};
 
-    const URL: &str = "https://auth.example.test/authorize?state=observation-private-state";
-    const DEVICE_URL: &str = "https://auth.example.test/device/observation-private-state";
+    const URL: &str = "https://auth.openai.com/authorize?state=observation-private-state";
+    const DEVICE_URL: &str = "https://auth.openai.com/device/observation-private-state";
     const USER_CODE: &str = "OBSERVATION-PRIVATE-CODE";
     const EMAIL: &str = "observation-private@example.test";
     const ERROR: &str = "observation-private-native-error";
@@ -2947,7 +3019,7 @@ fallback_allowed = false
             case.open_master().await;
             let prepared = admitted(case.prepare_next_turn("first-signed-in-turn").await);
             let host = case.service.owner_runtime().unwrap();
-            let profile = host
+            let (profile, _) = host
                 .acquire_master_profile(&prepared, &id("first-signed-in-turn"))
                 .await
                 .unwrap();
@@ -3007,6 +3079,44 @@ fallback_allowed = false
             );
             case.complete_sign_in().await;
             admitted(case.prepare_next_turn("turn-after-sign-in").await);
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A master turn names its conversation as a holder of its account while it holds the
+    /// profile, so a refused sign-out can name and close it, and no longer once it ends.
+    #[tokio::test]
+    async fn a_master_turn_names_its_conversation_while_it_holds_the_profile() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_with(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+            )
+            .await;
+            case.complete_sign_in().await;
+            case.open_master().await;
+            let prepared = admitted(case.prepare_next_turn("held-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let account = prepared.profile.binding().connection.id.clone();
+            let agents = host.agents().unwrap();
+            assert!(agents.holders(&account).is_empty());
+            let held = host
+                .acquire_master_profile(&prepared, &id("held-turn"))
+                .await
+                .unwrap();
+            assert_eq!(
+                agents.holders(&account),
+                vec![crate::agents::Holder::Master {
+                    project: prepared.session.project_id.clone(),
+                    session: prepared.session.session_id.clone(),
+                }]
+            );
+            drop(held);
+            assert!(agents.holders(&account).is_empty());
             case.close().await;
         })
         .await

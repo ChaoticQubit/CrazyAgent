@@ -1119,30 +1119,84 @@ async fn owner_candidate_discovery_reports_actual_unavailable_verification() {
     assert!(
         matches!(verify.response,OwnerResponse::Applied {operation:OwnerApplied {result:OwnerResult::VerificationUnavailable {attempt_id},..}} if attempt_id.as_str()=="attempt")
     );
-    let token = std::fs::read(root.path().join("owner-tui.cap")).unwrap();
+    let forms: Vec<Vec<u8>> = ["owner-tui.cap", "owner-desktop.cap"]
+        .into_iter()
+        .flat_map(|name| token_forms(&std::fs::read(root.path().join(name)).unwrap()))
+        .collect();
+    for form in &forms {
+        let row = [b"{\"leaked\":\"".as_slice(), form, b"\"}"].concat();
+        assert!(carries(&row, &forms));
+    }
     stop.send(()).unwrap();
     task.await.unwrap().unwrap();
     engine.close().await.unwrap();
     drop(engine);
     let db = rusqlite::Connection::open(root.path().join("db")).unwrap();
-    for sql in [
-        "SELECT request FROM operations",
-        "SELECT reply FROM operations",
-        "SELECT result FROM owner_operations",
-        "SELECT body FROM events",
-    ] {
-        let mut stmt = db.prepare(sql).unwrap();
-        let rows = stmt
-            .query_map([], |r| Ok(r.get_ref(0)?.as_bytes()?.to_vec()))
-            .unwrap();
-        for row in rows {
-            assert!(
-                !row.unwrap()
-                    .windows(token.len())
-                    .any(|bytes| bytes == token.as_slice())
-            );
+    let tables: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let mut scanned = 0;
+    for table in &tables {
+        let columns: Vec<String> = db
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for column in columns {
+            let mut stmt = db
+                .prepare(&format!(
+                    r#"SELECT CAST("{column}" AS BLOB) FROM "{table}""#
+                ))
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(r.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default())
+                })
+                .unwrap();
+            for row in rows {
+                let row = row.unwrap();
+                assert!(!carries(&row, &forms), "{table}.{column} carries a token");
+                scanned += 1;
+            }
         }
     }
+    assert!(tables.iter().any(|table| table == "owner_operations"));
+    assert!(scanned > 0);
+}
+
+/// Lists the forms a capability token takes when code stores or logs it.
+/// Takes the raw 32-byte token. Returns the raw bytes, lower and upper hex,
+/// unpadded standard and URL-safe base64, and the JSON and Debug byte arrays.
+fn token_forms(token: &[u8]) -> Vec<Vec<u8>> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+    assert_eq!(token.len(), 32);
+    let hex: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
+    vec![
+        token.to_vec(),
+        hex.clone().into_bytes(),
+        hex.to_uppercase().into_bytes(),
+        STANDARD_NO_PAD.encode(token).into_bytes(),
+        URL_SAFE_NO_PAD.encode(token).into_bytes(),
+        serde_json::to_vec(token).unwrap(),
+        format!("{token:?}").into_bytes(),
+    ]
+}
+
+/// Reports whether stored bytes contain any form of a token.
+/// Takes one stored value and the forms from `token_forms`. Returns true on a match.
+fn carries(stored: &[u8], forms: &[Vec<u8>]) -> bool {
+    forms.iter().any(|form| {
+        stored
+            .windows(form.len())
+            .any(|bytes| bytes == form.as_slice())
+    })
 }
 
 async fn host_command(engine: &Engine, revision: &mut u64, id: &str, command: Command) {
@@ -1741,34 +1795,160 @@ async fn worker_socket_rejects_owner_namespace_before_mutation() {
 
 #[test]
 fn worker_decoder_preserves_every_privileged_command_denial() {
+    let project = || ProjectId::new("project").unwrap();
+    let pool = || CredentialRef::new("pool").unwrap();
     let commands = [
-        Command::OwnerVerification {
-            action: OwnerVerification::Revoke {
-                baseline_id: BaselineId::new("baseline").unwrap(),
+        (
+            "OwnerModelAccess",
+            Command::OwnerModelAccess {
+                expected_config_id: ConfigId::new("config").unwrap(),
+                expected_source_hash: "0".repeat(64),
+                edit: crazyagent::config::ModelAccessEdit::RemovePool { id: pool() },
             },
-        },
-        Command::Knowledge {
-            action: KnowledgeAction::Owner {
-                action: HumanReview::Inbox {
-                    project_id: ProjectId::new("project").unwrap(),
-                    after: None,
+        ),
+        (
+            "OwnerConversation",
+            Command::OwnerConversation {
+                mutation: crazyagent::conversation::ConversationMutation::AppendMessage {
+                    project_id: project(),
+                    text: "forged".into(),
                 },
             },
-        },
-        Command::Assets {
-            action: AssetAction::Revoke {
-                source_id: RequestId::new("source").unwrap(),
+        ),
+        (
+            "OwnerProfile",
+            Command::OwnerProfile {
+                profile: crazyagent::owner_profile::OwnerProfile {
+                    name: "Forged".into(),
+                    role: String::new(),
+                    bio: String::new(),
+                    preferred_stack: Vec::new(),
+                    working_style: Default::default(),
+                },
             },
-        },
-        Command::OwnerCoordination {
-            action: OwnerAction::ApprovePlan {
-                plan_id: PlanId::new("plan").unwrap(),
+        ),
+        (
+            "OwnerMemory",
+            Command::OwnerMemory {
+                action: crazyagent::memory::library::LibraryAction::Delete {
+                    memory_id: RequestId::new("memory").unwrap(),
+                },
             },
-        },
+        ),
+        (
+            "ProposeBaseline",
+            Command::ProposeBaseline { draft: baseline() },
+        ),
+        (
+            "OwnerVerification",
+            Command::OwnerVerification {
+                action: OwnerVerification::Revoke {
+                    baseline_id: BaselineId::new("baseline").unwrap(),
+                },
+            },
+        ),
+        (
+            "Knowledge",
+            Command::Knowledge {
+                action: KnowledgeAction::Owner {
+                    action: HumanReview::Inbox {
+                        project_id: project(),
+                        after: None,
+                    },
+                },
+            },
+        ),
+        (
+            "Assets",
+            Command::Assets {
+                action: AssetAction::Revoke {
+                    source_id: RequestId::new("source").unwrap(),
+                },
+            },
+        ),
+        (
+            "ProjectSetup",
+            Command::ProjectSetup {
+                action: crazyagent::project_setup::SetupAction::AddDocuments {
+                    project_id: project(),
+                    documents: vec!["forged.md".into()],
+                },
+            },
+        ),
+        (
+            "ProjectsHome",
+            Command::ProjectsHome {
+                action: crazyagent::projects_home::HomeAction::SetHome {
+                    path: "/tmp/forged-home".into(),
+                },
+            },
+        ),
+        (
+            "OwnerSetup",
+            Command::OwnerSetup {
+                action: crazyagent::setup::SetupAction::Run {
+                    pack: vec!["graphify".into()],
+                },
+            },
+        ),
+        (
+            "Onboarding",
+            Command::Onboarding {
+                action: crazyagent::onboarding::OnboardingAction::Start {
+                    path: "/tmp/forged-project".into(),
+                    pool: pool(),
+                },
+            },
+        ),
+        (
+            "Team",
+            Command::Team {
+                action: crazyagent::team::TeamAction::Message {
+                    project_id: project(),
+                    text: "forged".into(),
+                },
+            },
+        ),
+        (
+            "OwnerCoordination",
+            Command::OwnerCoordination {
+                action: OwnerAction::ApprovePlan {
+                    plan_id: PlanId::new("plan").unwrap(),
+                },
+            },
+        ),
     ];
-    for command in commands {
+    let worker_commands = [
+        "ProposePlan",
+        "CoordinationState",
+        "TaskPlan",
+        "RouteWorkItem",
+        "Mailbox",
+        "CreateProject",
+        "Snapshot",
+        "Events",
+        "PinTask",
+        "MigrateTask",
+        "TaskContext",
+        "TaskConfig",
+        "AdmitRepository",
+        "AllocateWorktree",
+        "WorktreeLeases",
+        "ReleaseWorktree",
+    ];
+    for (name, command) in commands {
         let frame = encode_frame(&request("worker", "forged-owner", command)).unwrap();
-        assert!(decode_request(&frame).is_err());
+        let error = decode_request(&frame).unwrap_err().0;
+        let refused = format!("unknown variant `{name}`, expected one of ");
+        assert!(error.starts_with(&refused), "{name}: {error}");
+        let accepted: Vec<&str> = error[refused.len()..]
+            .split(" at line ")
+            .next()
+            .unwrap()
+            .split(", ")
+            .map(|variant| variant.trim_matches('`'))
+            .collect();
+        assert_eq!(accepted, worker_commands, "{name}");
     }
 }
 

@@ -2,7 +2,8 @@ import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
- * the bridge; such a refusal happens before any action, so repeating it is safe.
+ * the bridge; such a refusal happens before any action, so repeating it is safe. Each pause
+ * is spread at random so calls refused together do not all retry at the same moment again.
  * Inputs: the call and a base pause in milliseconds. Output: the call result or failure. */
 export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
@@ -11,15 +12,59 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
     } catch (failure) {
       const busy = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "busy";
       if (!busy || attempt >= 8) throw failure;
-      await new Promise((resolve) => setTimeout(resolve, pause * attempt));
+      await new Promise((resolve) => setTimeout(resolve, pause * attempt * (0.5 + Math.random())));
     }
   }
 }
 
-/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal.
+export type SettledCall = { ok: true; value: unknown } | { ok: false; failure: unknown };
+
+const unconfirmedWatchers = new Set<() => void>();
+
+/** Whether a bridge reply leaves an owner change unconfirmed: a reply the bridge still marks
+ * pending, or a refusal because an earlier change is still pending.
+ * Input: the settled call. Output: true when the app should check the kept change. */
+export function leavesUnconfirmed(settled: SettledCall): boolean {
+  if (settled.ok) {
+    const value = settled.value;
+    return typeof value === "object" && value !== null && !Array.isArray(value) && "pending" in value && value.pending === true;
+  }
+  const failure = settled.failure;
+  return typeof failure === "object" && failure !== null && "code" in failure && failure.code === "pending_intent";
+}
+
+/** Subscribes to bridge replies that leave an owner change unconfirmed, so the app can name
+ * the change and check it. Input: the listener. Output: a function that unsubscribes it. */
+export function watchUnconfirmed(listener: () => void): () => void {
+  unconfirmedWatchers.add(listener);
+  return () => { unconfirmedWatchers.delete(listener); };
+}
+
+/** Tells every watcher when one settled bridge call left a change unconfirmed.
+ * Input: the settled call. Output: none. */
+export function reportReply(settled: SettledCall): void {
+  if (!leavesUnconfirmed(settled)) return;
+  for (const listener of [...unconfirmedWatchers]) listener();
+}
+
+/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal, and
+ * reports a reply that leaves an owner change unconfirmed.
+ * Inputs: the command name and its arguments. Output: the command result or its failure. */
+export async function bridgeCall<T>(command: string, args?: InvokeArgs): Promise<T> {
+  try {
+    const value = await retryBusy(() => native<T>(command, args));
+    reportReply({ ok: true, value });
+    return value;
+  } catch (failure) {
+    reportReply({ ok: false, failure });
+    throw failure;
+  }
+}
+
+/** Calls one native bridge command through the shared bridge call.
  * Inputs: the command name and its arguments. Output: the command result or its failure. */
 function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
-  return retryBusy(() => native<T>(command, args));
+  return bridgeCall<T>(command, args);
 }
 
 export function startNativeAuth(ticket: string, method: NativeAuthMethod): Promise<NativeAuthView> {
@@ -144,6 +189,17 @@ export function retry(): Promise<ActionReceipt> {
   return invoke<ActionReceipt>("desktop_retry");
 }
 
+const PLAIN_CODE = /^[a-z0-9_]{1,96}$/;
+
+/** Names a failure's code after its sentence in the style every window uses. A code that is
+ * not 1 to 96 lowercase letters, digits or underscores shows as `unknown`, so raw error text
+ * never appears. Inputs: the sentence and the code. Output: "<Sentence>. (<code>)", with no
+ * second full stop when the sentence already ends with one. */
+export function withCode(sentence: string, code: string): string {
+  const stop = sentence.endsWith(".") ? "" : ".";
+  return `${sentence}${stop} (${PLAIN_CODE.test(code) ? code : "unknown"})`;
+}
+
 export function errorMessage(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String(error.code) : "unknown";
@@ -159,7 +215,8 @@ export function errorMessage(error: unknown): string {
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
     pool_member_limit: "A pool can hold up to 15 accounts",
-    pool_in_use: "This pool is used by a project. Remove it from the project first.",
+    pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
+    pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
     owner_profile_name: "Enter your name, up to 100 characters.",
     skill_folder_not_found: "That folder was not found.",
@@ -211,7 +268,6 @@ export function errorMessage(error: unknown): string {
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
     setup_outcome_unknown: "The setup request did not finish. Refresh before continuing.",
     pack_unknown: "This entry is not in the default pack.",
-    pack_required: "This entry is always on and can't be removed.",
     pack_not_installed: "This entry is not installed yet. Run setup first.",
     pack_name_taken: "A skill or server with this name already exists.",
     agent_not_found: "This agent was not found. Refresh the list.",
@@ -276,7 +332,7 @@ export function errorMessage(error: unknown): string {
     invalid_baseline_data: "The engine returned a baseline that could not be validated.",
     unexpected_reply: "The engine returned an unexpected response. Refresh before continuing.",
   };
-  return messages[code] ?? "The owner request failed. Refresh before continuing.";
+  return messages[code] ?? withCode("The owner request failed. Refresh before continuing.", code);
 }
 
 export interface ProjectPage {
@@ -753,11 +809,12 @@ export interface FoundProject {
 export interface FolderSize {
   bytes: number;
   github?: string | null;
+  worktrees?: number;
 }
 
 export type AddFolderMode = "move" | "copy";
 
-export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
+export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
 export interface MappingFacts {
   languages: string[];
@@ -775,6 +832,7 @@ export interface OnboardingView {
   facts: MappingFacts;
   missing: string[];
   overview: string | null;
+  finished: boolean;
 }
 
 export interface GitHubDeviceCode {
@@ -860,7 +918,7 @@ export interface Dependency {
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
-export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
+export type PackGroup = "graph" | "workflow" | "design" | "reply_style" | "context" | "optional";
 
 export type PackState = { state: "available" } | { state: "installing" } | { state: "on" } | { state: "off" } | { state: "failed"; reason: string };
 
@@ -1020,6 +1078,13 @@ export function terminalInput(agent: string, bytes: number[]): Promise<void> {
   return invoke<void>("desktop_terminal_input", { agent, bytes });
 }
 
+/** Sends the owner's explicit prompt to an attached agent terminal as one submission; a
+ * sub-agent's master hears a note of it. Inputs: the terminal name and up to 4096 bytes of
+ * text. Output: resolves once the bridge queued it in order. */
+export function terminalPrompt(agent: string, text: string): Promise<void> {
+  return invoke<void>("desktop_terminal_prompt", { agent, text });
+}
+
 /** Sets an attached agent terminal's size for its app and every viewer. Inputs: the terminal
  * name, columns and rows, each from 2 to 1000. Output: resolves once queued. */
 export function terminalResize(agent: string, cols: number, rows: number): Promise<void> {
@@ -1153,7 +1218,7 @@ export function readAccountProfile(): Promise<AccountProfileView> {
 
 export type ModelAccessRecord = { kind: "account"; account_ref: string } | { kind: "connection"; connection: ModelConnection } | { kind: "pool"; pool: AccountPool };
 
-export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool };
+export type ModelAccessEdit = { kind: "add_account" | "remove_account"; account_ref: string } | { kind: "create_connection" | "replace_connection"; connection: ModelConnection } | { kind: "remove_connection" | "remove_pool"; id: string } | { kind: "create_pool" | "replace_pool"; pool: AccountPool } | { kind: "assign_project_pool"; project: string; pool: string | null };
 
 export interface ModelAccessBasis {
   ticket: string;
@@ -1363,6 +1428,19 @@ export interface AgentView {
   ended_ms: number | null;
 }
 
+/** Something other than an agent that holds an account's sign-in while it runs: a master
+ * conversation's turn, ended by closing that conversation, or a research job, ended by
+ * cancelling it. */
+export type Holder =
+  | { kind: "master"; project: string; session: string }
+  | { kind: "research"; project: string; job: number; title: string };
+
+/** Everything that holds one account's sign-in now: its running agents and other holders. */
+export interface AccountUse {
+  agents: AgentView[];
+  holders: Holder[];
+}
+
 /** Lists launched agents, newest first, for one project or for every project. */
 export function agents(projectId?: string): Promise<AgentView[]> {
   return invoke<AgentView[]>("desktop_agents", { projectId: projectId ?? null });
@@ -1388,12 +1466,30 @@ export function projectPlugins(projectId: string): Promise<EffectivePlugins> {
   return invoke<EffectivePlugins>("desktop_project_plugins", { projectId });
 }
 
+export interface MasterAccount {
+  account_ref: string;
+  connection: string;
+  harness: string;
+  reason: string | null;
+}
+
 export interface MasterTurn {
   id: string;
   ordinal: number;
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
+  attempt?: { connection: { account_ref: string } } | null;
+  accounts?: MasterAccount[];
+  detail?: string | null;
+  cause?: string | null;
+  tasks?: MasterTask[];
+}
+
+/** One task a master turn handed to the project's team, with the engine's note once it ended. */
+export interface MasterTask {
+  task: number;
+  note: string | null;
 }
 
 export interface MasterState {

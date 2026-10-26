@@ -740,7 +740,8 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 other => panic!("the project page never sends {other:?}"),
             }
         }
-        quiet = if moved || connection.busy() {
+        quiet = if moved || connection.busy() || crate::tui::test_home::connecting(&shell.ctx.link)
+        {
             0
         } else {
             quiet + 1

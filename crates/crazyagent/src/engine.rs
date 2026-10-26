@@ -36,6 +36,7 @@ pub use native_auth_host::{
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
+pub(crate) use native_auth_host::RegisteredNativeAuthHost;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -478,6 +479,35 @@ impl Engine {
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
+    /// Runs one storage job for a record that refers to files written before it, and hands
+    /// storage's real answer to `settle` even when the owner stops waiting first, so a late
+    /// commit never loses a file its record refers to. Inputs: the job and the settle step.
+    /// Output: the job's result with any settle error, or the outcome-unknown error while
+    /// storage has not answered in time or went away without answering.
+    async fn settled_job<T: Send + 'static>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+        settle: impl FnOnce(&Result<T, EngineError>) -> Result<(), EngineError> + Send + 'static,
+    ) -> Result<T, EngineError> {
+        let (send, receive) = oneshot::channel();
+        if self.storage.sender.try_send(build(send)).is_err() {
+            let refused = Err(EngineError("owner_queue_not_submitted".into()));
+            settle(&refused)?;
+            return refused;
+        }
+        let answered = tokio::spawn(async move {
+            let result = receive
+                .await
+                .map_err(|_| owner::native_auth::outcome_unknown())?;
+            let settled = settle(&result);
+            result.and_then(|value| settled.map(|()| value))
+        });
+        tokio::time::timeout(self.timeout, answered)
+            .await
+            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| owner::native_auth::outcome_unknown())?
+    }
+
     pub async fn open_with_settings_sources(
         path: &Path,
         global: &Path,
@@ -567,6 +597,10 @@ impl Engine {
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
+    /// Closes the database worker after in-flight deliveries finish. Waits for
+    /// the worker's own reply, sent once the database lock is released, since
+    /// the final checkpoint and queued jobs are not bounded by the request
+    /// timeout. Returns that result, or an error if the worker already stopped.
     pub async fn close(&self) -> Result<(), EngineError> {
         let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
             .await
@@ -576,9 +610,8 @@ impl Engine {
             .sender
             .try_send(Job::Close(send))
             .map_err(|e| EngineError(format!("queue unavailable: {e}")))?;
-        tokio::time::timeout(self.timeout, receive)
+        receive
             .await
-            .map_err(|_| EngineError("database close timeout".into()))?
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
@@ -761,5 +794,43 @@ mod tests {
                 .is_err()
         );
         engine.close().await.unwrap();
+    }
+
+    /// Closes an engine whose database worker is still on a write that waits out
+    /// SQLite's busy timeout behind another connection's write lock, with a 10ms
+    /// request timeout. Close must wait for the worker's reply, which comes once
+    /// the database is released, so it succeeds and the engine opens again.
+    #[tokio::test]
+    async fn close_waits_for_the_database_worker_past_the_request_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 10\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let cfg = crate::config::resolve_config(&global, &root.path().join("p")).unwrap();
+        assert_eq!(cfg.settings.timeout_ms, 10);
+        let path = root.path().join("db");
+        let engine = Engine::open(&path, cfg.clone()).await.unwrap();
+        let holder = rusqlite::Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (send, started) = oneshot::channel();
+        engine
+            .storage
+            .sender
+            .try_send(Job::OwnerStart(send))
+            .unwrap_or_else(|_| panic!("queue unavailable"));
+        let began = std::time::Instant::now();
+        assert_eq!(engine.close().await, Ok(()));
+        assert!(began.elapsed() > engine.timeout);
+        assert!(started.await.unwrap().is_err());
+        holder.execute_batch("ROLLBACK").unwrap();
+        drop(holder);
+        Engine::open(&path, cfg)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
     }
 }

@@ -9,11 +9,11 @@ use crate::protocol::{
     Command, CredentialRef, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId,
 };
 use crate::routing::{ResourceBudget, RouteRequest};
-use crate::storage::{self, OpenedDatabase, native_auth, settings};
+use crate::storage::{self, OpenedDatabase, harness_groups, native_auth, settings};
 use crate::worktrees::{self, LeaseState, WorktreeLease};
 use rusqlite::Connection;
-use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
@@ -109,7 +109,7 @@ fn selection() -> MasterSelection {
 
 struct Case {
     db: Connection,
-    _lock: File,
+    _lock: storage::EngineLock,
     custody: Result<crate::engine::bootstrap::NativeProfileCustody, crate::engine::EngineError>,
     sources: settings::SettingsSources,
     config: EffectiveConfig,
@@ -187,6 +187,182 @@ impl Case {
         assert!(begin.work.is_some());
         begin.reply.fact
     }
+
+    /// Stops this engine run and starts the next on the same data root, the way an app
+    /// update does: the database is reopened, the worktrees are reconciled and the owner
+    /// starts under a new engine epoch. Input: the case. Output: the case on the new run.
+    fn restart(self) -> Self {
+        let Case {
+            db,
+            _lock,
+            custody,
+            sources,
+            config,
+            started,
+            session,
+            repository,
+            root,
+        } = self;
+        drop(custody);
+        drop(db);
+        drop(_lock);
+        let OpenedDatabase {
+            mut connection,
+            lock,
+            custody,
+        } = storage::open_actor_database(&root.path().join("engine.db"), false, None).unwrap();
+        let restarted = storage::owner_start(&mut connection).unwrap();
+        assert_ne!(restarted.host.engine_epoch, started.host.engine_epoch);
+        Self {
+            db: connection,
+            _lock: lock,
+            custody,
+            sources,
+            config,
+            started: restarted,
+            session,
+            repository,
+            root,
+        }
+    }
+
+    /// Gives the session its conversation worktree through the real lease primitives.
+    /// Input: the case. Output: none; the session holds one Ready lease.
+    fn ready_lease(&mut self) {
+        let repository = self.repository.to_str().unwrap().to_owned();
+        let tx = self.db.transaction().unwrap();
+        assert_eq!(
+            worktrees::admit(&tx, &self.session.project_id, &repository).unwrap(),
+            Outcome::Applied
+        );
+        assert_eq!(
+            worktrees::reserve_master_bootstrap(
+                &tx,
+                self.root.path(),
+                &self.session.project_id,
+                &self.session.bootstrap_task_id,
+                &self.session.session_id,
+                &repository
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        worktrees::provision(&self.db, &self.session.bootstrap_task_id, &repository).unwrap();
+        assert_eq!(self.lease_state(), LeaseState::Ready);
+    }
+
+    fn lease_state(&self) -> LeaseState {
+        let leases = leases(&self.db, &self.session);
+        assert_eq!(leases.len(), 1);
+        leases[0].state.clone()
+    }
+
+    /// Sends one owner message to the open session on the current run.
+    /// Input: the request id. Output: the owner result of the send.
+    fn submit(&mut self, id: &str) -> OwnerResult {
+        let action = MasterOwnerAction::Submit {
+            project_id: self.session.project_id.clone(),
+            session_id: self.session.session_id.clone(),
+            text: "Continue after the restart.".into(),
+        };
+        self.act(id, action)
+    }
+
+    /// Cancels the open session's current turn on the current run.
+    /// Inputs: the request id and the turn. Output: the owner result of the cancel.
+    fn cancel(&mut self, id: &str, turn: &str) -> OwnerResult {
+        let action = MasterOwnerAction::Cancel {
+            project_id: self.session.project_id.clone(),
+            session_id: self.session.session_id.clone(),
+            turn_id: RequestId::new(turn).unwrap(),
+        };
+        self.act(id, action)
+    }
+
+    /// Applies one owner master action through the real owner path.
+    /// Inputs: the request id and the action. Output: the owner result.
+    fn act(&mut self, id: &str, action: MasterOwnerAction) -> OwnerResult {
+        let request = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: Cursor::new(
+                storage::owner_revision(&self.db.transaction().unwrap()).unwrap(),
+            ),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster { action },
+            },
+        };
+        storage::master_session::apply(
+            &mut self.db,
+            &self.config,
+            Some(&self.sources),
+            &mut self.custody,
+            &self.started.host,
+            &self.started.owners[0].admission,
+            &request,
+        )
+        .unwrap()
+        .result
+    }
+
+    /// Announces a turn's harness launch before any child starts, as profile acquisition
+    /// does. Input: the turn. Output: none; the launch is recorded with an unknown group.
+    fn launching(&mut self, turn: &str) {
+        let tx = self.db.transaction().unwrap();
+        harness_groups::launching(
+            &tx,
+            &self.session.session_id,
+            &RequestId::new(turn).unwrap(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    /// Announces a turn's launch and records the group its harness started in.
+    /// Inputs: the turn and group. Output: none; the group is recorded.
+    fn record_child(&mut self, turn: &str, group: i32) {
+        self.launching(turn);
+        let tx = self.db.transaction().unwrap();
+        harness_groups::record(
+            &tx,
+            &self.session.session_id,
+            &RequestId::new(turn).unwrap(),
+            group,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn children(&self) -> i64 {
+        self.db
+            .query_row(
+                "SELECT COUNT(*) FROM harness_groups WHERE session=?1",
+                [self.session.session_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+}
+
+/// Starts a real `sleep` leading its own process group, the way the engine starts a
+/// master harness. Input: none. Output: the child and its group.
+fn harness_group() -> (std::process::Child, i32) {
+    let mut command = Process::new("/bin/sleep");
+    command
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    let child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let group = i32::try_from(child.id()).unwrap();
+    (child, group)
+}
+
+fn end(mut child: std::process::Child) {
+    let _ = child.kill();
+    child.wait().unwrap();
 }
 
 fn open(
@@ -353,6 +529,50 @@ fn master_lease_primitive_materializes_committed_source_without_task_authority()
 }
 
 #[test]
+fn a_master_lease_whose_worktree_gains_a_config_worktree_is_no_longer_ready() {
+    let mut case = Case::new();
+    let repository = case.repository.to_str().unwrap();
+    let tx = case.db.transaction().unwrap();
+    assert_eq!(
+        worktrees::admit(&tx, &case.session.project_id, repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        worktrees::reserve_master_bootstrap(
+            &tx,
+            case.root.path(),
+            &case.session.project_id,
+            &case.session.bootstrap_task_id,
+            &case.session.session_id,
+            repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    worktrees::provision(&case.db, &case.session.bootstrap_task_id, repository).unwrap();
+    let ready = leases(&case.db, &case.session);
+    assert_eq!(ready[0].state, LeaseState::Ready);
+    let pointer = std::fs::read_to_string(Path::new(&ready[0].path).join(".git")).unwrap();
+    let metadata = PathBuf::from(
+        pointer
+            .strip_prefix("gitdir: ")
+            .and_then(|path| path.strip_suffix('\n'))
+            .unwrap(),
+    );
+    assert!(metadata.starts_with(case.repository.join(".git/worktrees")));
+    std::fs::write(
+        metadata.join("config.worktree"),
+        b"[core]\n\thooksPath = /private/tmp\n",
+    )
+    .unwrap();
+    assert_eq!(
+        leases(&case.db, &case.session)[0].state,
+        LeaseState::Uncertain
+    );
+}
+
+#[test]
 fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
     let mut case = Case::new();
     let fact = case.starting_auth();
@@ -411,4 +631,123 @@ fn bootstrap_reservation_asserts_its_transaction_invariant() {
         case.repository.to_str().unwrap(),
         &fact,
     );
+}
+
+#[test]
+fn a_send_after_a_restart_returns_a_worktree_no_harness_ran_in_to_ready() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let mut case = case.restart();
+    assert_eq!(case.lease_state(), LeaseState::RecoveryRequired);
+    assert_eq!(case.submit("send-after-restart"), OwnerResult::Applied);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+}
+
+#[test]
+fn a_send_after_a_restart_returns_the_worktree_once_the_recorded_harness_group_is_gone() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let (child, group) = harness_group();
+    case.record_child("earlier-turn", group);
+    end(child);
+    let mut case = case.restart();
+    assert_eq!(case.children(), 1);
+    assert_eq!(case.submit("send-after-gone"), OwnerResult::Applied);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+    assert_eq!(case.children(), 0);
+}
+
+#[test]
+fn a_send_after_a_restart_while_a_recorded_harness_group_runs_asks_for_a_new_conversation() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let (child, group) = harness_group();
+    case.record_child("earlier-turn", group);
+    let mut case = case.restart();
+    let sent = case.submit("send-while-live");
+    let state = case.lease_state();
+    let children = case.children();
+    end(child);
+    assert_eq!(
+        sent,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        }
+    );
+    assert_eq!(state, LeaseState::RecoveryRequired);
+    assert_eq!(children, 1);
+}
+
+#[test]
+fn a_send_after_a_restart_when_a_launch_never_recorded_its_group_asks_for_a_new_conversation() {
+    let mut case = Case::new();
+    case.ready_lease();
+    case.launching("launch-without-group");
+    let mut case = case.restart();
+    assert_eq!(
+        case.submit("send-after-unrecorded"),
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        }
+    );
+    assert_eq!(case.lease_state(), LeaseState::RecoveryRequired);
+    assert_eq!(case.children(), 1);
+}
+
+#[test]
+fn a_group_recorded_for_a_turn_that_never_announced_its_launch_is_refused() {
+    let mut case = Case::new();
+    let (child, group) = harness_group();
+    let tx = case.db.transaction().unwrap();
+    let recorded = harness_groups::record(
+        &tx,
+        &case.session.session_id,
+        &RequestId::new("unannounced-turn").unwrap(),
+        group,
+    );
+    drop(tx);
+    end(child);
+    assert_eq!(recorded.unwrap_err().0, "harness_group_unannounced");
+    assert_eq!(case.children(), 0);
+}
+
+#[test]
+fn a_later_launch_forgets_earlier_groups_that_are_gone_and_keeps_live_ones() {
+    let mut case = Case::new();
+    let (gone, gone_group) = harness_group();
+    case.record_child("earlier-turn", gone_group);
+    end(gone);
+    let (live, live_group) = harness_group();
+    case.record_child("later-turn", live_group);
+    let left = case.children();
+    let (third, third_group) = harness_group();
+    case.record_child("third-turn", third_group);
+    let after = case.children();
+    end(live);
+    end(third);
+    assert_eq!(left, 1);
+    assert_eq!(after, 2);
+}
+
+#[test]
+fn a_session_with_turns_from_before_launch_records_counts_as_launched_with_an_unknown_group() {
+    let mut case = Case::new();
+    assert_eq!(case.submit("turn-before-records"), OwnerResult::Applied);
+    assert_eq!(
+        case.cancel("cancel-before-records", "turn-before-records"),
+        OwnerResult::Applied
+    );
+    case.db.execute_batch("DROP TABLE harness_groups").unwrap();
+    harness_groups::initialize(&case.db).unwrap();
+    let unknown: i64 = case
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM harness_groups WHERE session=?1 AND turn='turn-before-records' AND process_group IS NULL",
+            [case.session.session_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unknown, 1);
+    let tx = case.db.transaction().unwrap();
+    assert!(!harness_groups::quiescent(&tx, &case.session.session_id).unwrap());
 }

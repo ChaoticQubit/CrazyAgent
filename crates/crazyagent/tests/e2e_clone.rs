@@ -1,8 +1,14 @@
 #![cfg(unix)]
 
 mod e2e_support;
+#[cfg(target_os = "macos")]
+mod keychain_support;
 
-use crazyagent::credentials::{SecretString, Store, platform_store, reference};
+#[cfg(target_os = "macos")]
+use crazyagent::credentials::Keychain;
+#[cfg(not(target_os = "macos"))]
+use crazyagent::credentials::platform_store;
+use crazyagent::credentials::{SecretString, Store, reference};
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResult};
 use crazyagent::github::{Endpoints, GitHub, GitHubMethod, namespace};
 use crazyagent::projects_home::FoundState;
@@ -14,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(target_os = "macos"))]
 const STORE_PREREQUISITE: &str = "UNAVAILABLE: this computer's credential store for the signed-in \
 user (macOS Keychain, Linux Secret Service or Windows Credential Manager)";
 const README: &str = "hello from the loopback stand-in\n";
@@ -173,8 +180,16 @@ async fn github(engine: &Engine) -> OwnerClient {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_clone_through_the_engine_credential_helper_lands_in_the_home_with_no_token_on_disk() {
-    let mut engine = Engine::start("ca-e2e-clone-");
+async fn a_sign_in_kept_for_the_engine_clones_through_the_credential_helper_and_the_engine_signs_it_out()
+ {
+    #[cfg(target_os = "macos")]
+    let keychain = keychain_support::TemporaryKeychain::create();
+    let mut engine = Engine::new("ca-e2e-clone-");
+    #[cfg(target_os = "macos")]
+    {
+        engine.home = Some(keychain.home().to_path_buf());
+    }
+    engine.launch();
     let disk = scratch("ca-e2e-git-");
     let home = disk.path().join("Projects");
     std::fs::create_dir(&home).unwrap();
@@ -213,6 +228,9 @@ async fn a_clone_through_the_engine_credential_helper_lands_in_the_home_with_no_
     );
 
     let space = namespace(engine.path());
+    #[cfg(target_os = "macos")]
+    let store: Arc<dyn Store> = Arc::new(Keychain::at(&space, keychain.path()).unwrap());
+    #[cfg(not(target_os = "macos"))]
     let store = platform_store(&space).expect(STORE_PREREQUISITE);
     let kept = Forget {
         store: Arc::clone(&store),
@@ -228,6 +246,10 @@ async fn a_clone_through_the_engine_credential_helper_lands_in_the_home_with_no_
         .use_token(SecretString::new(token.as_bytes().to_vec()).unwrap())
         .unwrap();
     assert!(signed.signed_in);
+    assert!(
+        store.get(&kept.item).is_ok(),
+        "the sign-in is kept under the engine's credential reference"
+    );
     let status = client.github_status().await.unwrap();
     assert!(
         status.signed_in,

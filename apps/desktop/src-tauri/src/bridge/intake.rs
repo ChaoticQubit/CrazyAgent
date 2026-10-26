@@ -1,4 +1,6 @@
-use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, bounded, failure};
+use super::{
+    ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
+};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
@@ -7,8 +9,8 @@ use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::setup::SetupStatus;
 use serde::Serialize;
-use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 pub const FOUND_PROJECTS_MAX: usize = 500;
 pub const GIT_CONFIG_BYTES_MAX: u64 = 64 * 1024;
@@ -17,7 +19,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 50] = [
+pub const INTAKE_CODES: [&str; 57] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -37,12 +39,19 @@ pub const INTAKE_CODES: [&str; 50] = [
     "home_copy_too_large",
     "home_copy_failed",
     "home_copy_unverified",
+    "home_copy_linked_checkout",
     "home_move_failed",
     "home_move_source_left",
     "home_move_same",
     "home_move_nested",
     "home_move_partial",
     "home_move_interrupted",
+    "home_move_worktrees",
+    "home_move_project",
+    "home_move_too_many",
+    "home_move_in_progress",
+    "home_folder_name_invalid",
+    "home_new_project_failed",
     "home_add_unverified",
     "home_add_interrupted",
     "home_record_invalid",
@@ -108,7 +117,7 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 34] = [
+const SETUP_CODES: [&str; 33] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "setup_checksum_mismatch",
     "setup_download_failed",
@@ -136,7 +145,6 @@ const SETUP_CODES: [&str; 34] = [
     "pack_bundled_unavailable",
     "pack_unknown",
     "pack_name_taken",
-    "pack_required",
     "pack_not_installed",
     "pack_id_invalid",
     "pack_too_many",
@@ -145,12 +153,14 @@ const SETUP_CODES: [&str; 34] = [
     "owner_unavailable",
 ];
 
-/// A folder's size before it is copied in, and the GitHub owner/name of its `origin`
-/// remote when that remote is on github.com, so the window can suggest a clone instead.
+/// A folder's size before it is copied in, the GitHub owner/name of its `origin`
+/// remote when that remote is on github.com, so the window can suggest a clone instead,
+/// and how many linked git worktrees it has, which a copy leaves with the original.
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: u64,
     pub github: Option<String>,
+    pub worktrees: usize,
 }
 
 fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
@@ -159,11 +169,12 @@ fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeErr
     } else {
         code
     };
-    failure(
+    caused(
         list.iter()
             .copied()
             .find(|item| *item == code)
             .unwrap_or(fallback),
+        code,
     )
 }
 
@@ -177,8 +188,14 @@ fn intake_failure(error: EngineError) -> BridgeError {
     known(&error.0, &INTAKE_CODES, "owner_read_failed")
 }
 
+/// Names a GitHub failure from its allowlist only, never with the engine code behind it:
+/// this path carries tokens, and a token can look like a plain code.
+/// Input: the engine error. Output: the listed code, or `github_failed` with no cause.
 fn github_failure(error: EngineError) -> BridgeError {
-    known(&error.0, &GITHUB_CODES, "github_failed")
+    BridgeError {
+        cause: None,
+        ..known(&error.0, &GITHUB_CODES, "github_failed")
+    }
 }
 
 fn setup_failure(error: EngineError) -> BridgeError {
@@ -203,24 +220,6 @@ fn pack_ids(pack: Vec<String>) -> Result<Vec<String>, BridgeError> {
         return Err(failure("pack_id_invalid"));
     }
     Ok(pack)
-}
-
-fn plain_file(path: &Path, limit: u64) -> Option<String> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.file_type().is_file() || meta.len() > limit {
-        return None;
-    }
-    let file = std::fs::File::open(path).ok()?;
-    let opened = file.metadata().ok()?;
-    if !opened.is_file() || opened.len() > limit {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > limit {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
 }
 
 fn plain_dir(path: &Path) -> bool {
@@ -277,7 +276,7 @@ pub fn origin_on_github(folder: &Path) -> Option<String> {
     if !plain_dir(&git) {
         return None;
     }
-    let text = plain_file(&git.join("config"), GIT_CONFIG_BYTES_MAX)?;
+    let text = crazyagent::platform::read_plain_file(&git.join("config"), GIT_CONFIG_BYTES_MAX)?;
     let mut origin = false;
     for line in text.lines() {
         let line = line.trim();
@@ -320,7 +319,7 @@ impl NativeBridge {
         self.owner_read(OwnerRead::ProjectsHome).await?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -358,14 +357,20 @@ impl NativeBridge {
         }
     }
 
-    /// Measures a folder before Copy and names its GitHub repository when it has one.
-    /// Input: an absolute folder path. Output: its size and the GitHub owner/name, if any.
+    /// Measures a folder before Copy, names its GitHub repository when it has one and
+    /// counts its linked git worktrees. Input: an absolute folder path. Output: its size,
+    /// the GitHub owner/name, if any, and the linked worktree count.
     pub async fn folder_size(&mut self, path: String) -> Result<FolderSize, BridgeError> {
         crazyagent::projects_home::path_text(&path, "folder_size_path_invalid")
             .map_err(intake_failure)?;
         let github = origin_on_github(Path::new(&path));
+        let worktrees = crazyagent::projects_home::linked_worktrees(Path::new(&path));
         match self.owner_read(OwnerRead::FolderSize { path }).await? {
-            OwnerData::FolderSize { bytes } => bounded(FolderSize { bytes, github }),
+            OwnerData::FolderSize { bytes } => bounded(FolderSize {
+                bytes,
+                github,
+                worktrees,
+            }),
             _ => Err(failure("owner_read_failed")),
         }
     }
@@ -417,98 +422,84 @@ impl NativeBridge {
         }
     }
 
-    fn github_ready(&mut self) -> Result<&OwnerClient, BridgeError> {
+    fn github_client(&mut self) -> Result<Arc<OwnerClient>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        self.controller()?.owner_client().map_err(github_failure)
+        self.controller()?.shared_client().map_err(github_failure)
     }
 
     /// Reads the GitHub sign-in: signed in or not, login, method and any plain problem.
-    pub async fn github_status(&mut self) -> Result<GitHubStatus, BridgeError> {
-        let status = self
-            .github_ready()?
-            .github_status()
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+    pub fn github_status(&mut self) -> Result<Unlocked<GitHubStatus>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_status().await.map_err(github_failure)?)
+        }))
     }
 
     /// Starts the GitHub device sign-in. Output: the code, its page and lifetime.
-    pub async fn github_sign_in(&mut self) -> Result<GitHubDeviceCode, BridgeError> {
-        let code = self
-            .github_ready()?
-            .github_sign_in()
-            .await
-            .map_err(github_failure)?;
-        bounded(code)
+    pub fn github_sign_in(&mut self) -> Result<Unlocked<GitHubDeviceCode>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_sign_in().await.map_err(github_failure)?)
+        }))
     }
 
     /// Sends a pasted GitHub token once through the engine's secret channel; it is never
     /// logged or returned. Input: the token. Output: the status after GitHub checked it.
-    pub async fn github_token(&mut self, token: String) -> Result<GitHubStatus, BridgeError> {
+    pub fn github_token(&mut self, token: String) -> Result<Unlocked<GitHubStatus>, BridgeError> {
         let token = token.trim();
         if token.is_empty() || token.len() > 255 || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(failure("github_token_invalid"));
         }
         let secret = AccountSecret::new(token.as_bytes().to_vec())
             .map_err(|_| failure("github_token_invalid"))?;
-        let status = self
-            .github_ready()?
-            .github_token(secret)
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_token(secret).await.map_err(github_failure)?)
+        }))
     }
 
     /// Reuses a signed-in GitHub CLI on this machine. Output: the new status.
-    pub async fn github_use_cli(&mut self) -> Result<GitHubStatus, BridgeError> {
-        let status = self
-            .github_ready()?
-            .github_use_cli()
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+    pub fn github_use_cli(&mut self) -> Result<Unlocked<GitHubStatus>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_use_cli().await.map_err(github_failure)?)
+        }))
     }
 
     /// Signs CrazyAgent out of GitHub and deletes its keychain item. Output: the new status.
-    pub async fn github_sign_out(&mut self) -> Result<GitHubStatus, BridgeError> {
-        let status = self
-            .github_ready()?
-            .github_sign_out()
-            .await
-            .map_err(github_failure)?;
-        bounded(status)
+    pub fn github_sign_out(&mut self) -> Result<Unlocked<GitHubStatus>, BridgeError> {
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_sign_out().await.map_err(github_failure)?)
+        }))
     }
 
     /// Lists one page of the signed-in owner's repositories. Input: the page, from 1.
-    pub async fn github_repos(&mut self, page: u32) -> Result<GitHubRepoPage, BridgeError> {
+    pub fn github_repos(&mut self, page: u32) -> Result<Unlocked<GitHubRepoPage>, BridgeError> {
         if page == 0 || page > GITHUB_PAGE_MAX {
             return Err(failure("github_repo_page_invalid"));
         }
-        let repos = self
-            .github_ready()?
-            .github_repos(page)
-            .await
-            .map_err(github_failure)?;
-        bounded(repos)
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.github_repos(page).await.map_err(github_failure)?)
+        }))
     }
 
     /// Clones one repository into the projects home through the engine's credential helper.
     /// Input: "owner/name". Output: the repository and the folder it landed in.
-    pub async fn clone_repo(&mut self, full_name: String) -> Result<CloneReceipt, BridgeError> {
+    pub fn clone_repo(&mut self, full_name: String) -> Result<Unlocked<CloneReceipt>, BridgeError> {
         let valid = full_name
             .split_once('/')
             .is_some_and(|(owner, name)| name_part(owner) && name_part(name));
         if !valid {
             return Err(failure("github_repo_name_invalid"));
         }
-        let receipt = self
-            .github_ready()?
-            .clone_repo(full_name)
-            .await
-            .map_err(github_failure)?;
-        bounded(receipt)
+        let client = self.github_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.clone_repo(full_name).await.map_err(github_failure)?)
+        }))
     }
 
     async fn setup_change(
@@ -526,12 +517,12 @@ impl NativeBridge {
             .map_err(setup_failure)?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         let receipt = self.deliver_intent(false).await?;
         match receipt.outcome {
             ActionOutcome::Applied => self.setup_status().await,
             ActionOutcome::Rejected => Err(known(
-                receipt.rejection.unwrap_or("setup_failed"),
+                receipt.rejection.as_deref().unwrap_or("setup_failed"),
                 &SETUP_CODES,
                 "setup_failed",
             )),
@@ -675,6 +666,54 @@ mod tests {
         assert_eq!(origin_on_github(folder.path()), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_git_config_swapped_for_a_link_after_the_check_is_never_followed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let folder = tempfile::tempdir().unwrap();
+        let git = folder.path().join(".git");
+        fs::create_dir(&git).unwrap();
+        let elsewhere = folder.path().join("elsewhere.conf");
+        fs::write(
+            &elsewhere,
+            "[remote \"origin\"]\n\turl = https://github.com/other/secret.git\n",
+        )
+        .unwrap();
+        let plain = "[remote \"origin\"]\n\turl = https://github.com/mira/shop.git\n";
+        let config = git.join("config");
+        fs::write(&config, plain).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let stop = Arc::clone(&stop);
+            let (git, config, elsewhere) = (git.clone(), config.clone(), elsewhere.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let link = git.join("staged-link");
+                    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+                    fs::rename(&link, &config).unwrap();
+                    let file = git.join("staged-plain");
+                    fs::write(&file, plain).unwrap();
+                    fs::rename(&file, &config).unwrap();
+                }
+            })
+        };
+        let (mut read, mut followed) = (0, 0);
+        for _ in 0..20_000 {
+            match origin_on_github(folder.path()).as_deref() {
+                Some("mira/shop") => read += 1,
+                Some("other/secret") => followed += 1,
+                _ => {}
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        assert!(read > 0, "the plain config was read while the swap ran");
+        assert_eq!(
+            followed, 0,
+            "a link swapped in after the check is never followed ({read} plain reads)"
+        );
+    }
+
     #[test]
     fn a_started_onboarding_names_the_project_the_engine_registers() {
         assert_eq!(
@@ -736,23 +775,70 @@ mod tests {
             github_failure(EngineError("github_sign_in_expired".into())).code,
             "github_sign_in_expired"
         );
+        let leaked = github_failure(EngineError("ghp_leaked".into()));
+        assert_eq!(leaked.code, "github_failed");
+        assert_eq!(leaked.cause, None);
+        let home = intake_failure(EngineError("home_destination_exists".into()));
+        assert_eq!(home.code, "home_destination_exists");
+        assert_eq!(home.cause, None);
+        let weird = intake_failure(EngineError("weird".into()));
+        assert_eq!(weird.code, "owner_read_failed");
+        assert_eq!(weird.cause.as_deref(), Some("weird"));
+        let raw = setup_failure(EngineError("open /Users/mira/setup: denied".into()));
+        assert_eq!(raw.code, "setup_failed");
         assert_eq!(
-            github_failure(EngineError("ghp_leaked".into())).code,
-            "github_failed"
+            raw.cause.as_deref(),
+            Some(crazyagent::protocol::TEXT_WITHHELD)
         );
         assert_eq!(
-            intake_failure(EngineError("home_destination_exists".into())).code,
-            "home_destination_exists"
+            serde_json::to_value(&weird).unwrap(),
+            serde_json::json!({ "code": "owner_read_failed", "cause": "weird" })
         );
         assert_eq!(
-            intake_failure(EngineError("weird".into())).code,
-            "owner_read_failed"
+            serde_json::to_value(&home).unwrap(),
+            serde_json::json!({ "code": "home_destination_exists" })
         );
         assert_eq!(intake_code("home_move_partial"), Some("home_move_partial"));
         assert_eq!(intake_code("folder_name_taken"), None);
+        let engine = [
+            include_str!("../../../../../crates/crazyagent/src/projects_home.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
+        ];
+        let mut refusals: Vec<&str> = engine
+            .iter()
+            .flat_map(|source| source.split("refused(\"").skip(1))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|code| !code.starts_with("home_trash_"))
+            .collect();
+        refusals.sort_unstable();
+        refusals.dedup();
+        assert!(refusals.contains(&"home_copy_failed"), "{refusals:?}");
+        for code in refusals
+            .into_iter()
+            .chain(["home_move_in_progress", "home_new_project_failed"])
+        {
+            assert_eq!(intake_code(code), Some(code), "{code}");
+        }
         assert_eq!(
             github_failure(EngineError("clone_destination_exists".into())).code,
             "clone_destination_exists"
         );
+    }
+
+    #[test]
+    fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
+        let refused = |code: &str| {
+            known(
+                &super::super::rejection_code(code),
+                &SETUP_CODES,
+                "setup_failed",
+            )
+            .code
+        };
+        for code in SETUP_CODES {
+            assert_eq!(refused(code), code);
+        }
+        assert_eq!(refused("raw /Users/mira/token"), "setup_failed");
     }
 }

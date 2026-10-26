@@ -1,19 +1,31 @@
 use super::*;
+
 use crate::config::{
     AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
+
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
+
 use crate::project_setup::{HarnessSlot, TeamPlan};
+
 use crate::team::status;
+
 use crate::terminal::FOLDER;
+
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
+
 use std::process::{Command, Stdio};
+
 use std::time::SystemTime;
 
 const PROJECT: &str = "team-panes";
+
 const ENDPOINT: &str = "local-a";
+
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
+
 const TURN_DONE: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}"#;
+
 const WAIT: Duration = Duration::from_secs(30);
 
 fn reference(value: &str) -> CredentialRef {
@@ -487,13 +499,14 @@ fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results()
         "the unanswered owner message outlived the append that pruned history"
     );
     let mut team = fixture.runtime();
-    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, vec![])
+    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, None, vec![])
         .unwrap();
     team.finish_message(
         &project,
         latest,
         "Here is the plan.\nDELEGATE: Write the landing page",
         TurnEnd::Success,
+        None,
         vec![],
     )
     .unwrap();
@@ -597,12 +610,13 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
         fixture.connection.execute(statement, [PROJECT]).unwrap();
     }
     let mut team = fixture.runtime();
-    team.finish_task(task, "page written", TurnEnd::Success)
+    team.finish_task(task, "page written", TurnEnd::Success, None)
         .unwrap();
-    team.finish_task(task, "", TurnEnd::Closed).unwrap();
-    team.finish_message(&project, message, "", TurnEnd::Interrupted, vec![])
+    team.finish_task(task, "", TurnEnd::Closed, Some("launch_closed"))
         .unwrap();
-    team.finish_message(&project, message, "Done", TurnEnd::Success, vec![])
+    team.finish_message(&project, message, "", TurnEnd::Interrupted, None, vec![])
+        .unwrap();
+    team.finish_message(&project, message, "Done", TurnEnd::Success, None, vec![])
         .unwrap();
     for table in ["team_tasks", "team_messages"] {
         assert_eq!(
@@ -614,4 +628,600 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
             "{table}"
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
+    let fixture = Fixture::new(2);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let project = fixture.base.join("project");
+    std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let plan = |id: i64| {
+        runtime
+            .prepare(&fixture.setup, id, AgentRole::Sub, "codex", true, &account)
+            .unwrap()
+            .1
+    };
+    let first = plan(1);
+    let second = plan(2);
+    let object = project.join(".git").join("objects");
+    let head = String::from_utf8(
+        crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&project)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .stdout,
+    )
+    .unwrap();
+    let head = head.trim();
+    let object = object.join(&head[..2]).join(&head[2..]);
+    let fanout = object.parent().unwrap();
+    let before = std::fs::read(&object).unwrap();
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "g='/usr/bin/git -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null'\n\
+         echo mine > mine.txt && $g add mine.txt && $g commit -q -m mine && echo committed\n\
+         (echo x > {sibling}) 2>/dev/null && echo sibling=written || echo sibling=refused\n\
+         (echo x >> {owner}) 2>/dev/null && echo owner=written || echo owner=refused\n\
+         (echo x > {fresh}) 2>/dev/null && echo project=written || echo project=refused\n\
+         (ln {owner} linked.txt) 2>/dev/null && echo link=made || echo link=refused\n\
+         (rm -f {object}; echo junk > {object}) 2>/dev/null; echo object=tried\n\
+         (mv {fanout} {moved}) 2>/dev/null; echo fanout=tried\n",
+        sibling = quoted(&second.working_dir.join("escaped.txt")),
+        owner = quoted(&project.join("owner.txt")),
+        fresh = quoted(&project.join("fresh.txt")),
+        object = quoted(&object),
+        fanout = quoted(fanout),
+        moved = quoted(&fanout.with_extension("moved")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&first.sandbox_profile)
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&first.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(1).join("home"))
+            .env("TMPDIR", runtime.agent_folder(1).join("tmp"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        text,
+        "committed\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\nobject=tried\nfanout=tried\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!second.working_dir.join("escaped.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("owner.txt")).unwrap(),
+        "owner\n"
+    );
+    assert!(!project.join("fresh.txt").exists());
+    assert_eq!(
+        std::fs::read(&object).unwrap(),
+        before,
+        "the worker replaced a git object"
+    );
+    assert!(!fanout.with_extension("moved").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(managed.join("auth.json"), "{}").unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
+        let (_, plan, mode) = runtime
+            .prepare(&fixture.setup, id, role, "codex", true, &account)
+            .unwrap();
+        let own = runtime.agent_folder(id).join("home");
+        match mode {
+            Mode::PerTurn { home } => assert_eq!(home, own),
+            Mode::Kept { .. } => panic!("a managed agent must take its account per turn"),
+        }
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let script = format!(
+            "(echo x > {planted}) 2>/dev/null && echo plant=written || echo plant=refused\n\
+             (cat {credential} > /dev/null) 2>/dev/null && echo read=done || echo read=refused\n\
+             (echo x > {mine}) 2>/dev/null && echo own=written || echo own=refused\n",
+            planted = quoted(&managed.join("AGENTS.md")),
+            credential = quoted(&managed.join("auth.json")),
+            mine = quoted(&own.join("note.txt")),
+        );
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&plan.sandbox_profile)
+                .args(["/bin/sh", "-c", &script])
+                .current_dir(&plan.working_dir)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &own)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "plant=refused\nread=refused\nown=written\n",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!managed.join("AGENTS.md").exists());
+    }
+}
+
+#[test]
+fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    let secret = base.join("secret.md");
+    std::fs::write(&secret, "outside the project").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Panes".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![HarnessSlot {
+                harness: "codex".into(),
+                agents: 1,
+                tools: false,
+            }],
+            min_agents: 1,
+            max_agents: 2,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let brief = folder.join("context").join("brief.md");
+    let frame = || {
+        let (sent, got) = channel();
+        let setup = setup.clone();
+        std::thread::spawn(move || sent.send(framing(&setup, false)));
+        got.recv_timeout(Duration::from_secs(5)).ok()
+    };
+    let mut wrong = Vec::new();
+
+    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    let framed = frame();
+    if !framed
+        .as_deref()
+        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+    {
+        wrong.push(("normal", framed));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    std::os::unix::fs::symlink(&secret, &brief).unwrap();
+    let framed = frame();
+    if !framed.as_deref().is_some_and(|text| {
+        text.contains("context/brief.md is not a regular file") && !text.contains("outside")
+    }) {
+        wrong.push(("link", framed));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    assert!(
+        crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&brief))
+            .unwrap()
+            .success()
+    );
+    let framed = frame();
+    if !framed
+        .as_deref()
+        .is_some_and(|text| text.contains("context/brief.md is not a regular file"))
+    {
+        wrong.push(("fifo", framed));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    let huge = 64 * 1024 * 1024;
+    let mut text = String::from("# Panes\n\n");
+    text.push_str(&"a".repeat(2 * crate::project_setup::CONTEXT_CHUNK_BYTES));
+    std::fs::write(&brief, &text).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&brief)
+        .unwrap()
+        .set_len(huge)
+        .unwrap();
+    let framed = frame();
+    if !framed.as_deref().is_some_and(|text| {
+        text.contains("Project brief:\n# Panes\n\naaaa")
+            && text.contains(&format!("The brief is {huge} bytes"))
+            && text.len() < BRIEF_BYTES_MAX + 2048
+    }) {
+        wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
+    }
+
+    std::fs::remove_file(&brief).unwrap();
+    let framed = frame();
+    if !framed
+        .as_deref()
+        .is_some_and(|text| text.contains("context/brief.md is missing"))
+    {
+        wrong.push(("missing", framed));
+    }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
+    assert_eq!(
+        launch_end(LaunchError("launch_deadline".into())),
+        (TurnEnd::TimedOut, None)
+    );
+    assert_eq!(
+        launch_end(LaunchError("launch_event_limit".into())),
+        (TurnEnd::TooLong, None)
+    );
+    let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into()));
+    assert_eq!(end, TurnEnd::Closed);
+    assert_eq!(
+        with_code(PROCESS_CLOSED, cause.as_deref()),
+        "The agent process closed. (launch_protocol_failed)"
+    );
+    assert_eq!(
+        with_code(
+            "The agent could not start",
+            Some("No such file: /Users/mira/key")
+        ),
+        "The agent could not start. (engine_text_withheld)"
+    );
+    assert_eq!(with_code(PROCESS_CLOSED, None), PROCESS_CLOSED);
+    assert_eq!(
+        with_code(
+            "The master stopped before it replied.",
+            Some("launch_input_closed")
+        ),
+        "The master stopped before it replied. (launch_input_closed)"
+    );
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Write the page','running',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.finish_task(task, "", TurnEnd::Closed, Some("launch_input_closed"))
+        .unwrap();
+    let problem: String = fixture
+        .connection
+        .query_row("SELECT error FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        problem,
+        "The sub-agent stopped unexpectedly. (launch_input_closed)"
+    );
+}
+
+/// The owner stops a sub-agent while its harness has not drawn its screen yet, which a
+/// slow first launch, an update check or a sign-in screen can make last up to the whole
+/// ready wait. The stop ends the agent, its pane and its process group within one bound,
+/// not after the ready wait.
+#[test]
+fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
+    const STOP_BOUND: Duration = Duration::from_secs(5);
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone())
+    .with_terminal(host.clone())
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let member = fixture.status().agents.remove(0);
+    let group = i32::try_from(member.process_group.unwrap()).unwrap();
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    let register = listed[0].id.clone();
+
+    let asked = Instant::now();
+    let stopper = {
+        let agents = agents.clone();
+        std::thread::spawn(move || agents.stop(&register))
+    };
+    while fixture.agent_status(member.id).0 != AgentStatus::Stopped {
+        assert!(
+            asked.elapsed() < STOP_BOUND,
+            "the agent still runs {:?} after the owner's stop: {:#?}",
+            asked.elapsed(),
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stopped = stopper.join().unwrap().unwrap();
+    assert_eq!(stopped.state, RunState::Stopped);
+    assert!(!stopped.can_stop);
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(member.id).unwrap())
+    );
+    assert!(!crate::agents::tests::alive(group));
+    assert!(team.shutdown().unwrap().is_empty());
+}
+
+#[test]
+fn a_conversation_note_names_the_task_its_agent_how_it_ended_and_where_its_result_is() {
+    let ended =
+        |status, result: Option<&str>, problem: Option<&str>, agent: Option<i64>| EndedTask {
+            id: 7,
+            harness: "codex".into(),
+            status,
+            prompt: "Write   the\nREADME".into(),
+            result: result.map(Into::into),
+            problem: problem.map(Into::into),
+            agent,
+            worktree: agent.map(|id| format!(".crazyagent/worktrees/agent-{id}")),
+        };
+    assert_eq!(
+        conversation_note(&ended(
+            TaskStatus::Done,
+            Some("README written.\n\nIt covers setup."),
+            None,
+            Some(3)
+        )),
+        "Task 7 \"Write the README\" (codex, sub-agent 3) is done. Full result in the Team view, files in .crazyagent/worktrees/agent-3. It said: README written. It covers setup."
+    );
+    assert_eq!(
+        conversation_note(&ended(TaskStatus::Done, None, None, None)),
+        "Task 7 \"Write the README\" (codex) is done. Full result in the Team view."
+    );
+    assert_eq!(
+        conversation_note(&ended(
+            TaskStatus::Failed,
+            None,
+            Some("The sub-agent ran out of time"),
+            Some(3)
+        )),
+        "Task 7 \"Write the README\" (codex, sub-agent 3) failed: The sub-agent ran out of time. Details in the Team view."
+    );
+    assert_eq!(
+        conversation_note(&ended(
+            TaskStatus::Cancelled,
+            None,
+            Some("Cancelled by you"),
+            None
+        )),
+        "Task 7 \"Write the README\" (codex) was stopped: Cancelled by you. Details in the Team view."
+    );
+    let long = "word ".repeat(400);
+    let mut huge = ended(TaskStatus::Done, Some(&long), Some(&long), Some(i64::MAX));
+    huge.prompt = long.clone();
+    huge.harness = "h".repeat(64);
+    huge.worktree = Some("w".repeat(400));
+    let note = conversation_note(&huge);
+    assert!(note.len() <= NOTE_BYTES_MAX, "{} bytes", note.len());
+    assert!(note.ends_with("..."), "a cut result says so: {note}");
+}
+
+/// Writes a small owner-only executable at `path`, replacing any file there.
+fn engine_file(path: &Path) {
+    std::fs::write(path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
+    let fixture = Fixture::new(1);
+    let folder = fixture.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let runtime = fixture.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let master = runtime
+        .context(&project, 1, AgentRole::Master, true)
+        .unwrap();
+    let delegate: Vec<&crate::plugins::LaunchServer> = master
+        .plugins()
+        .servers
+        .iter()
+        .filter(|server| server.name == tool::SERVER_NAME)
+        .collect();
+    assert_eq!(delegate.len(), 1);
+    let crate::plugins::ServerSpec::Stdio { command, args } = &delegate[0].spec else {
+        panic!("the delegate server is a stdio server");
+    };
+    assert_eq!(Some(command.as_str()), engine.to_str());
+    assert_eq!(
+        args,
+        &[
+            tool::SERVER_COMMAND.to_owned(),
+            runtime.tool_record(1).to_str().unwrap().to_owned()
+        ]
+    );
+    let sub = runtime.context(&project, 2, AgentRole::Sub, true).unwrap();
+    assert!(
+        sub.plugins()
+            .servers
+            .iter()
+            .all(|server| server.name != tool::SERVER_NAME)
+    );
+
+    let replacement = folder.join("replacement");
+    engine_file(&replacement);
+    std::fs::rename(&replacement, &engine).unwrap();
+    let Err(swapped) = runtime.context(&project, 1, AgentRole::Master, true) else {
+        panic!("a master context was built on a replaced engine");
+    };
+    assert!(
+        swapped.contains("native_auth_host_executable_changed"),
+        "{swapped}"
+    );
+    assert!(runtime.context(&project, 2, AgentRole::Sub, true).is_ok());
+}
+
+#[test]
+fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex.clone())]),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+    };
+    let runtime = open();
+    assert!(
+        runtime
+            .prepare(&fixture.setup, 1, AgentRole::Sub, "codex", true, &account)
+            .is_ok()
+    );
+    drop(runtime);
+    let objects = fixture.base.join("project").join(".git").join("objects");
+    let engine = objects.join("crazyagent");
+    engine_file(&engine);
+    let runtime = open().with_delegation_tool(&engine).unwrap();
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        2,
+        AgentRole::Master,
+        "codex",
+        true,
+        &account,
+    ) else {
+        panic!("a master was prepared with a delegate engine it can write");
+    };
+    assert!(refused.contains("team_delegate_writable"), "{refused}");
+    assert!(
+        runtime
+            .prepare(&fixture.setup, 3, AgentRole::Sub, "codex", true, &account)
+            .is_ok()
+    );
 }

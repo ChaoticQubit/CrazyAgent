@@ -7,6 +7,8 @@ mod master_dispatch_tests;
 mod master_host_launch;
 mod master_rcli;
 mod master_rcli_launch;
+#[cfg(all(test, unix))]
+mod master_rebind_tests;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
@@ -52,7 +54,11 @@ mod native_auth_dispatch_diagnostic_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_lifetime_tests;
 #[cfg(all(test, unix))]
+mod native_auth_restart_tests;
+#[cfg(all(test, unix))]
 mod owner_server_tests;
+#[cfg(all(test, unix))]
+mod secret_storage_wait_tests;
 
 const SOCKET: &str = "owner.sock";
 const CLIENTS_MAX: usize = 2;
@@ -458,6 +464,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
+    reproof: tokio::sync::Mutex<()>,
 }
 
 impl Authority {
@@ -827,29 +834,34 @@ impl Authority {
         result.and(cleanup)
     }
 
+    /// Unlinks the owner socket, both owner keys and every runner key this server made,
+    /// each only while it is still the engine's own file, and tries all of them even after
+    /// one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
-        self.root.unlink_owned(SOCKET, self.socket, true)?;
-        let slots = self
-            .slots
-            .lock()
-            .map_err(|_| failure("owner_authority_unavailable"))?;
-        for (i, slot) in slots.iter().enumerate() {
-            self.root.unlink_owned(KEYS[i], slot.identity, false)?;
-        }
-        let runners = self
-            .runners
-            .lock()
-            .map_err(|_| failure("runner_authority_unavailable"))?;
-        for slot in runners.iter().flatten() {
-            if let Some(key) = &slot.key {
-                self.root.unlink_owned(
-                    &format!("r{:02x}.cap", slot.prepared.slot),
-                    key.identity,
-                    false,
-                )?;
+        let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        match self.slots.lock() {
+            Ok(slots) => {
+                for (i, slot) in slots.iter().enumerate() {
+                    result = result.and(self.root.unlink_owned(KEYS[i], slot.identity, false));
+                }
             }
+            Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
         }
-        Ok(())
+        match self.runners.lock() {
+            Ok(runners) => {
+                for slot in runners.iter().flatten() {
+                    if let Some(key) = &slot.key {
+                        result = result.and(self.root.unlink_owned(
+                            &format!("r{:02x}.cap", slot.prepared.slot),
+                            key.identity,
+                            false,
+                        ));
+                    }
+                }
+            }
+            Err(_) => result = result.and(Err(failure("runner_authority_unavailable"))),
+        }
+        result
     }
 }
 
@@ -1160,6 +1172,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
+                reproof: tokio::sync::Mutex::new(()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1340,7 +1353,7 @@ impl OwnerServer {
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
-            eprintln!("master_dispatch_shutdown cause={}", error.0);
+            eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
         self.authority
             .usable
@@ -1360,42 +1373,27 @@ impl OwnerServer {
             .authority
             .drain_native_auth_dispatch(&self.engine)
             .await;
-        invalidated?;
-        drained?;
-        let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
-            .await
-            .map_err(|_| failure("owner_stop_outcome_unknown"))?;
-        self.engine
-            .owner_job(|reply| Job::OwnerStop(self.authority.host.clone(), reply))
-            .await?;
-        self.authority.cleanup()?;
-        result
+        let stopped = async {
+            invalidated?;
+            drained?;
+            let _barrier = tokio::time::timeout(self.timeout, self.engine.owner_egress.write())
+                .await
+                .map_err(|_| failure("owner_stop_outcome_unknown"))?;
+            self.engine
+                .owner_job(|reply| Job::OwnerStop(self.authority.host.clone(), reply))
+                .await
+                .map(|_| ())
+        }
+        .await;
+        let cleaned = self.authority.cleanup();
+        stopped.and(cleaned).and(result)
     }
 }
 
 impl Engine {
     async fn runner_read(&self, command: Command) -> Result<Outcome, EngineError> {
-        if !matches!(
-            &command,
-            Command::CoordinationState { .. } | Command::TaskContext { .. }
-        ) {
-            return Err(failure("runner_read_kind"));
-        }
-        let request_id = RequestId::new(crate::memory::hash(
-            &serde_json::to_vec(&command).map_err(io_error)?,
-        ))
-        .map_err(io_error)?;
-        let request = WireRequest {
-            protocol_version: PROTOCOL_VERSION,
-            client_id: ClientId::new("trusted-runner-host").map_err(io_error)?,
-            request_id,
-            expected_revision: Cursor::new(0),
-            command,
-        };
-        Ok(self
-            .owner_job(|reply| Job::Apply(request, reply))
-            .await?
-            .outcome)
+        self.owner_job(|reply| Job::RunnerRead(command, reply))
+            .await
     }
 
     async fn runner_attempt(&self, attempt: &AttemptRef) -> Result<WorkerBinding, EngineError> {
@@ -1962,11 +1960,7 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
-            Protocol::Agents => {
-                return agents::serve(stream, engine, authority, auth, &a, body)
-                    .await
-                    .map(|()| None);
-            }
+            Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2055,8 +2049,13 @@ async fn serve_admitted(
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
+        if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
+            return write_owner_reply(stream, Err(error), id, mutation)
+                .await
+                .map(|()| None);
+        }
         let result = engine.dispatch_owner(a, request, None).await;
-        let result = setup::after_owner(engine, authority, &submitted, result, deadline).await;
+        let mut result = setup::after_owner(engine, authority, &submitted, result, deadline).await;
         if let Ok(reply) = &result {
             let runtime = OwnerRuntimeHandle {
                 engine: engine.clone(),
@@ -2069,6 +2068,7 @@ async fn serve_admitted(
                 .committed(runtime, &submitted, reply)
             {
                 eprintln!("master_dispatch_not_started cause={}", error.0);
+                result = Err(failure("master_turn_not_started"));
             }
         }
         write_owner_reply(stream, result, id, mutation)
@@ -2086,6 +2086,10 @@ async fn serve_admitted(
         Ok(Ok(Some(Deferred::Accounts(a)))) => {
             let _ = accounts::serve(stream, engine, authority, auth, &a, body).await;
         }
+        Ok(Ok(Some(Deferred::Agents(a)))) => {
+            let served = agents::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+        }
         _ => {}
     }
 }
@@ -2102,12 +2106,14 @@ struct Tasks {
 
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
-/// clones, and account checks that reach the network. Each carries the admission, and
-/// the projects home its validated request; the others read the request frame.
+/// clones, account checks that reach the network, and agent controls, which wait for an
+/// agent's process group or its host to end it. Each carries the admission, and the
+/// projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
+    Agents(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2182,6 +2188,8 @@ fn owner_reply_frame(
                 | "owner_queue_not_submitted"
                 | "operation_identity_conflict"
                 | "master_transaction_rolled_back"
+                | "master_dispatch_stopped"
+                | "master_dispatch_capacity"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
@@ -2202,18 +2210,40 @@ fn owner_reply_frame(
 /// Input: the dispatch error. Output: the line with the error code when it is a
 /// plain lowercase code, otherwise a redacted marker so private text never leaks.
 fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
+    let cause = plain_cause(error, "native_auth_dispatch_error_redacted");
+    format!("native_auth_dispatch_failed_fence_retained cause={cause}")
+}
+
+/// Renders a single-line engine diagnostic for a master turn that did not complete; a
+/// master turn takes no sign-in fence, so the line claims none. Input: the turn error.
+/// Output: the line with the error code when it is a plain lowercase code, otherwise a
+/// redacted marker so private text never leaks.
+fn master_turn_diagnostic(error: &EngineError) -> String {
+    let cause = plain_cause(error, "master_turn_error_redacted");
+    format!("master_turn_not_completed cause={cause}")
+}
+
+/// Picks the text an engine diagnostic may show for an error. Inputs: the error and the
+/// marker to show instead. Output: the error code when it is at most 192 lowercase
+/// letters, digits, `_`, `:` or `;`, else the marker.
+fn plain_cause<'a>(error: &'a EngineError, redacted: &'a str) -> &'a str {
     let code = error.0.as_str();
     let plain = !code.is_empty()
         && code.len() <= 192
         && code.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
         });
-    let cause = if plain {
-        code
-    } else {
-        "native_auth_dispatch_error_redacted"
-    };
-    format!("native_auth_dispatch_failed_fence_retained cause={cause}")
+    if plain { code } else { redacted }
+}
+
+/// Renders the engine log line for a master dispatch that stopped with an error.
+/// Input: the error. Output: the line naming its plain code, or a redacted marker for
+/// driver or parser text.
+fn master_dispatch_shutdown_line(error: &EngineError) -> String {
+    format!(
+        "master_dispatch_shutdown cause={}",
+        plain_cause(error, "master_dispatch_error_redacted")
+    )
 }
 
 fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Instant> {
@@ -3207,7 +3237,8 @@ fallback_allowed = false
                 let rejected = gateway_actor_unknown(connection.clone(), "invalid-sequence", sequence);
                 assert!(host.observe_model_connection(&rejected).await.is_err());
             }
-            assert_eq!(db.query_row("SELECT COUNT(*) FROM model_gateway_observations", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+            let kept: Vec<(String, i64)> = db.prepare("SELECT id, sequence FROM model_gateway_observations ORDER BY sequence").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+            assert_eq!(kept, [("after-abort".to_owned(), 2)]);
             host.observe_model_connection(&next).await.unwrap();
         }).await;
     }
@@ -3255,10 +3286,15 @@ fallback_allowed = false
         std::fs::create_dir(&long).unwrap();
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = long.join(SOCKET);
+        let address = crate::socket_address::address(&path).unwrap();
+        let link = address.parent().unwrap();
+        std::fs::remove_file(link).unwrap();
+        std::fs::create_dir(link).unwrap();
         let expected = crate::spawn_gate::bind_unix(&path)
             .err()
             .unwrap()
             .to_string();
+        assert_eq!(expected, "socket_alias_unsafe");
         let config =
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Arc::new(
@@ -3272,6 +3308,7 @@ fallback_allowed = false
             .unwrap();
         assert_eq!(error.0, expected);
         assert_eq!(std::fs::read_dir(&long).unwrap().count(), 0);
+        std::fs::remove_dir(link).unwrap();
         let (server, _) = OwnerServer::bind(root.path(), engine.clone(), &config)
             .await
             .unwrap();

@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod account_profile;
 pub(crate) mod accounts;
+mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
@@ -24,7 +25,7 @@ mod migrations;
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    native_sign_in, validate_configured_initial_conversation_receipt,
+    close_master_for_removal, native_sign_in, validate_configured_initial_conversation_receipt,
 };
 mod native_auth;
 #[cfg(all(test, unix))]
@@ -33,7 +34,11 @@ pub(crate) mod plugins;
 pub(crate) mod setup;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
+#[cfg(all(test, unix))]
+pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
+#[cfg(all(test, unix))]
+mod model_access_page_tests;
 #[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
@@ -44,6 +49,13 @@ pub(crate) mod worker_dispatch;
 /// a Git worktree inside the storage actor, which can outlast the owner request timeout
 /// on a busy machine.
 pub(crate) const MASTER_RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Recent wire operations kept per client and kind (reads, mutations) for replay and
+/// request identity checks. Older finished rows are pruned when a newer one is stored.
+const OPERATIONS_PER_CLIENT_MAX: usize = 64;
+
+/// Recent wire operations kept across all clients; the oldest finished rows go first.
+const OPERATIONS_MAX: usize = 1024;
 
 pub(crate) enum Job {
     Accounts(
@@ -94,6 +106,11 @@ pub(crate) enum Job {
         Admission,
         Box<NativeAuthWork>,
         oneshot::Sender<Result<NativeAuthReply, EngineError>>,
+    ),
+    NativeAuthStale(
+        HostStamp,
+        Option<SessionId>,
+        oneshot::Sender<Result<Vec<NativeAuthStart>, EngineError>>,
     ),
     PrepareNativeProfile(
         HostStamp,
@@ -179,6 +196,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    RunnerRead(Command, oneshot::Sender<Result<Outcome, EngineError>>),
     Plugins(
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
@@ -264,14 +282,14 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
-                let mut home_watch = if readonly {
-                    None
-                } else {
+                let mut model_access_snapshot = None;
+                let mut home_watch = projects_home::WatchSlot::default();
+                if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
                     }
-                    projects_home::watch_saved(&connection)
-                };
+                    home_watch.restart(&connection);
+                }
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::Accounts(admission, command, reply) => {
@@ -391,6 +409,20 @@ impl Storage {
                                     work,
                                 );
                             }
+                        }
+                        Job::NativeAuthStale(host, session, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::stale_sign_ins(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    &host,
+                                    session.as_ref(),
+                                )
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::NativeAuthFinish(admission, work, reply) => {
                             let result = if readonly {
@@ -523,11 +555,11 @@ impl Storage {
                             } else {
                                 projects_home::settle_pending(&mut connection, &path, Some(exchange), ran)
                             };
-                            if matches!(result, Ok(true)) {
-                                drop(home_watch.take());
-                                home_watch = projects_home::watch_saved(&connection);
-                            }
+                            let restart = matches!(result, Ok(true));
                             let _ = reply.send(result.map(|_| ()));
+                            if restart {
+                                home_watch.restart(&connection);
+                            }
                         }
                         Job::HomeRecord(admission, request, effect, reply) => {
                             let moved_home = matches!(
@@ -539,11 +571,11 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Home(&effect)))
                             });
-                            if moved_home && result.is_ok() {
-                                drop(home_watch.take());
-                                home_watch = projects_home::watch_saved(&connection);
-                            }
+                            let restart = moved_home && result.is_ok();
                             let _ = reply.send(result);
+                            if restart {
+                                home_watch.restart(&connection);
+                            }
                         }
                         Job::SetupPlan(admission, request, reply) => {
                             let result = if readonly {
@@ -632,11 +664,11 @@ impl Storage {
                             );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
-                            if set_home && result.is_ok() {
-                                drop(home_watch.take());
-                                home_watch = projects_home::watch_saved(&connection);
-                            }
+                            let restart = set_home && result.is_ok();
                             let _ = reply.send(result);
+                            if restart {
+                                home_watch.restart(&connection);
+                            }
                         }
                         Job::OwnerRead(admission, query, reply) => {
                             if matches!(
@@ -662,6 +694,7 @@ impl Storage {
                                     &mut connection,
                                     &config,
                                     sources.as_ref(),
+                                    &mut model_access_snapshot,
                                     &admission,
                                     &query,
                                 ));
@@ -673,7 +706,7 @@ impl Storage {
                                     &config,
                                     &admission,
                                     &query,
-                                    home_watch.as_ref(),
+                                    &mut home_watch,
                                 ));
                                 continue;
                             }
@@ -716,6 +749,13 @@ impl Storage {
                                 continue;
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
+                        }
+                        Job::RunnerRead(command, reply) => {
+                            if let Err(e) = settings::ensure_clear(&connection) {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
+                            let _ = reply.send(runner_read(&mut connection, &config, &path, &command));
                         }
                         Job::Plugins(command, reply) => {
                             let result = if readonly {
@@ -780,14 +820,14 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Takes a database path and read-only mode and returns connection ownership.
 /// Rejects unsafe filesystem metadata and competing engine ownership.
 #[cfg(all(test, unix))]
-fn open_database(path: &Path, readonly: bool) -> Result<(Connection, std::fs::File), EngineError> {
+fn open_database(path: &Path, readonly: bool) -> Result<(Connection, EngineLock), EngineError> {
     let opened = open_actor_database(path, readonly, None)?;
     Ok((opened.connection, opened.lock))
 }
 
 struct OpenedDatabase {
     connection: Connection,
-    lock: std::fs::File,
+    lock: EngineLock,
     custody: Result<NativeProfileCustody, EngineError>,
 }
 
@@ -884,6 +924,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
+    crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
     setup::initialize(connection)?;
@@ -895,7 +936,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
     native_auth::initialize(connection)?;
-    master_bootstrap::initialize(connection)
+    master_bootstrap::initialize(connection)?;
+    harness_groups::initialize(connection)
 }
 
 fn finish_native_auth_without_host(
@@ -1059,8 +1101,21 @@ fn gateway_connection_state(
     Ok(state)
 }
 
+/// The engine's exclusive hold on its database. Dropping it unlocks the file before closing
+/// it, so a child forked meanwhile that still shares the file until its exec cannot keep the
+/// database locked after the hold ends (a restart in the same process then locks at once).
+struct EngineLock {
+    file: std::fs::File,
+}
+
+impl Drop for EngineLock {
+    fn drop(&mut self) {
+        let _ = unlock_database(&self.file);
+    }
+}
+
 #[cfg(unix)]
-fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
+fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
     let lock_path = path.with_extension("engine-lock");
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -1083,21 +1138,26 @@ fn lock_database(path: &Path) -> Result<std::fs::File, EngineError> {
         .map_err(|e| error(format!("database_lock_acquire_failed: {e}")))?;
     assert_eq!(lock.metadata().map_err(error)?.ino(), lock_metadata.ino());
     assert_eq!(lock.metadata().map_err(error)?.dev(), lock_metadata.dev());
-    Ok(lock)
+    Ok(EngineLock { file: lock })
 }
 
-/// Releases the engine database lock taken with the standard library file lock.
-/// Takes the locked file. Returns once the lock is released, or
-/// `database_lock_release_failed`.
+/// Releases the engine database lock and reports whether the unlock succeeded.
+/// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
+fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
+    unlock_database(&lock.file)
+}
+
+/// Unlocks the engine database lock file with the standard library file lock.
+/// Takes the locked file. Returns `database_lock_release_failed` when the unlock fails.
 #[cfg(not(unix))]
-fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
-    lock.unlock()
+fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
+    file.unlock()
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
 #[cfg(unix)]
-fn release_database_lock(lock: std::fs::File) -> Result<(), EngineError> {
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock)
+fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
+    rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock)
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
@@ -1140,6 +1200,32 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
 /// Applies one revision-checked operation through the storage transaction.
 /// Takes current config, storage path and an identified request.
 /// Returns a durable reply while preserving replay and sensitive input hashes.
+/// Serves one engine-internal runner read, CoordinationState or TaskContext, at the
+/// current revision without touching the caller-keyed operations ledger, so no socket
+/// peer can pre-claim, replay or conflict with it.
+/// Output: the read's outcome, or `runner_read_kind` for any other command.
+fn runner_read(
+    connection: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    command: &Command,
+) -> Result<Outcome, EngineError> {
+    if !matches!(
+        command,
+        Command::CoordinationState { .. } | Command::TaskContext { .. }
+    ) {
+        return Err(error("runner_read_kind"));
+    }
+    let transaction = connection.transaction().map_err(error)?;
+    let revision: i64 = transaction
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    let revision = u64::try_from(revision).map_err(error)?;
+    execute(&transaction, config, path, command, revision)
+}
+
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
@@ -1255,13 +1341,16 @@ fn apply(
         bytes,
         reply,
         replay,
+        mutation,
         revision,
     )
 }
 
-/// Atomically records an operation reply, revision and retained event.
-/// Takes an open transaction and its bounded operation outcome.
-/// Sensitive authority reads are reevaluated rather than cached as replies.
+/// Atomically records an operation reply, revision and retained event, and prunes
+/// operation rows past the per-client and total windows in the same transaction.
+/// Takes an open transaction and its bounded operation outcome. Reads keep no reply,
+/// since only mutation replies are replayed; reads are always reevaluated.
+#[allow(clippy::too_many_arguments)]
 fn finish_operation(
     transaction: Transaction<'_>,
     config: &EffectiveConfig,
@@ -1269,6 +1358,7 @@ fn finish_operation(
     bytes: Vec<u8>,
     reply: WireReply,
     replay: bool,
+    mutation: bool,
     revision: u64,
 ) -> Result<WireReply, EngineError> {
     let next = reply.revision.value();
@@ -1278,10 +1368,7 @@ fn finish_operation(
         persist_event(&transaction, config, request, next)?;
     }
     if !replay {
-        let sensitive_read = matches!(&request.command, Command::Knowledge { action } if !crate::memory::is_mutation(action))
-            || matches!(&request.command, Command::Assets { action } if !crate::assets::is_mutation(action))
-            || matches!(&request.command, Command::OwnerVerification { .. } if !crate::verification::is_mutation(&request.command));
-        let reply_bytes = if sensitive_read { &[][..] } else { &frame[4..] };
+        let reply_bytes = if mutation { &frame[4..] } else { &[][..] };
         transaction
             .execute(
                 "INSERT INTO operations VALUES (?1,?2,?3,?4)",
@@ -1291,6 +1378,22 @@ fn finish_operation(
                     bytes,
                     reply_bytes
                 ],
+            )
+            .map_err(error)?;
+        transaction
+            .execute(
+                "DELETE FROM operations WHERE rowid IN (SELECT rowid FROM operations WHERE client=?1 AND (length(reply)>0)=?2 ORDER BY rowid DESC LIMIT -1 OFFSET ?3)",
+                params![
+                    request.client_id.as_str(),
+                    mutation,
+                    OPERATIONS_PER_CLIENT_MAX as i64
+                ],
+            )
+            .map_err(error)?;
+        transaction
+            .execute(
+                "DELETE FROM operations WHERE rowid IN (SELECT rowid FROM operations ORDER BY rowid DESC LIMIT -1 OFFSET ?1)",
+                [OPERATIONS_MAX as i64],
             )
             .map_err(error)?;
     }
@@ -2969,6 +3072,98 @@ mod owner_actor_tests {
     }
 
     #[test]
+    fn operation_history_keeps_a_recent_window_and_replays_recent_mutations() {
+        let (_root, path, cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let request = |client: &str, id: String, revision: u64, command: Command| WireRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: ClientId::new(client).unwrap(),
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: Cursor::new(revision),
+            command,
+        };
+        let create = |id: &str| Command::CreateProject {
+            project_id: ProjectId::new(id).unwrap(),
+            spec: ProjectSpec {
+                name: "Project".into(),
+                repositories: vec![],
+            },
+        };
+        let rows = |db: &Connection, client: &str| -> (usize, usize) {
+            db.query_row(
+                "SELECT count(*), count(*) FILTER (WHERE length(reply)>0) FROM operations WHERE client=?1",
+                [client],
+                |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)),
+            )
+            .unwrap()
+        };
+        let created = request("tui-a", "create".into(), 0, create("p"));
+        let first = apply(&mut db, &cfg, &path, created.clone()).unwrap();
+        assert_eq!(first.outcome, Outcome::Applied);
+        for n in 0..OPERATIONS_PER_CLIENT_MAX + 8 {
+            let poll = request("tui-a", format!("poll-{n}"), 1, Command::Snapshot);
+            assert!(matches!(
+                apply(&mut db, &cfg, &path, poll).unwrap().outcome,
+                Outcome::Snapshot { .. }
+            ));
+        }
+        assert_eq!(rows(&db, "tui-a"), (OPERATIONS_PER_CLIENT_MAX + 1, 1));
+        assert_eq!(apply(&mut db, &cfg, &path, created).unwrap(), first);
+        let newest = request(
+            "tui-a",
+            format!("poll-{}", OPERATIONS_PER_CLIENT_MAX + 7),
+            1,
+            create("q"),
+        );
+        assert_eq!(
+            apply(&mut db, &cfg, &path, newest).unwrap_err().0,
+            "operation_identity_conflict"
+        );
+        for n in 0..OPERATIONS_PER_CLIENT_MAX + 8 {
+            let stale = request("tui-a", format!("stale-{n}"), 0, create("r"));
+            assert_eq!(
+                apply(&mut db, &cfg, &path, stale).unwrap().outcome,
+                Outcome::Rejected {
+                    code: "stale_revision".into()
+                }
+            );
+        }
+        assert_eq!(
+            rows(&db, "tui-a"),
+            (2 * OPERATIONS_PER_CLIENT_MAX, OPERATIONS_PER_CLIENT_MAX)
+        );
+        let clients = OPERATIONS_MAX / OPERATIONS_PER_CLIENT_MAX + 1;
+        for client in 0..clients {
+            for n in 0..OPERATIONS_PER_CLIENT_MAX {
+                let poll = request(
+                    &format!("tui-{client}"),
+                    format!("poll-{n}"),
+                    1,
+                    Command::Snapshot,
+                );
+                assert!(matches!(
+                    apply(&mut db, &cfg, &path, poll).unwrap().outcome,
+                    Outcome::Snapshot { .. }
+                ));
+            }
+        }
+        let total: i64 = db
+            .query_row("SELECT count(*) FROM operations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total as usize, OPERATIONS_MAX);
+        assert_eq!(
+            rows(&db, &format!("tui-{}", clients - 1)),
+            (OPERATIONS_PER_CLIENT_MAX, 0)
+        );
+        assert_eq!(rows(&db, "tui-a"), (0, 0));
+        assert_eq!(
+            db.query_row("SELECT revision FROM state", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn owner_schema_is_additive_and_unknown_schema_is_preserved() {
         let (_root, path, _cfg) = fixture();
         let (mut db, _lock) = open_database(&path, false).unwrap();
@@ -3358,7 +3553,7 @@ mod database_lock_tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let lock = lock_database(&path).unwrap();
-        let stale_alias = lock.try_clone().unwrap();
+        let stale_alias = lock.file.try_clone().unwrap();
         assert!(lock_database(&path).is_err());
 
         release_database_lock(lock).unwrap();
@@ -3369,6 +3564,22 @@ mod database_lock_tests {
         release_database_lock(new_owner).unwrap();
         let final_owner = lock_database(&path).unwrap();
         release_database_lock(final_owner).unwrap();
+    }
+
+    #[test]
+    fn dropping_the_lock_frees_it_while_a_forked_alias_still_shares_its_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let lock = lock_database(&path).unwrap();
+        let forked_alias = lock.file.try_clone().unwrap();
+
+        drop(lock);
+        let next_owner = lock_database(&path).unwrap();
+        drop(forked_alias);
+        assert!(lock_database(&path).is_err());
+
+        drop(next_owner);
+        release_database_lock(lock_database(&path).unwrap()).unwrap();
     }
 }
 

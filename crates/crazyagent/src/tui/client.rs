@@ -4,7 +4,7 @@ use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerPageCursor, OwnerRead, OwnerReadReply,
-    OwnerResponse, OwnerSummary, OwnerView,
+    OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
 use crate::engine::{Client, ClientError};
 use crate::protocol::{
@@ -178,6 +178,7 @@ pub(super) enum OwnerEvent {
         generation: u64,
         result: Result<OwnerProgress, String>,
     },
+    Settled(Result<(), String>),
 }
 
 struct OwnerReply {
@@ -259,15 +260,33 @@ impl Connection {
                     if worker_stop.load(Ordering::Relaxed) {
                         break;
                     }
+                    if let Some(native) = native.as_mut() {
+                        let was_ready = native.ready;
+                        if let Some(outcome) = runtime.block_on(native.settle_stray())
+                            && owner_replies
+                                .send(OwnerReply {
+                                    finished: false,
+                                    event: OwnerEvent::Settled(outcome),
+                                })
+                                .is_err()
+                        {
+                            break;
+                        }
+                        if !report_loss(was_ready, native, None, &mut client, &owner_replies) {
+                            break;
+                        }
+                    }
                     match job {
                         Job::Creation(job) => {
                             let native = native
                                 .as_mut()
                                 .expect("creation requires paired configuration");
+                            let was_ready = native.ready;
                             let event = runtime.block_on(native.creation(*job));
-                            if event.result.is_err() {
-                                native.detach();
-                                client = native.ordinary();
+                            let problem = event.result.as_ref().err().map(String::as_str);
+                            if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
+                            {
+                                break;
                             }
                             if owner_replies
                                 .send(OwnerReply {
@@ -325,24 +344,33 @@ impl Connection {
                             let native = native
                                 .as_mut()
                                 .expect("metadata requires paired configuration");
+                            let was_ready = native.ready;
                             let event = runtime.block_on(native.model_access(*job));
-                            let failed = matches!(
-                                &event,
-                                model_access::Event::Read { result: Err(_), .. }
-                                    | model_access::Event::Mutation {
-                                        result: Err(_),
-                                        retained: true,
-                                        ..
-                                    }
-                                    | model_access::Event::AccountProfile {
-                                        result: Err(_),
-                                        retained: true,
-                                        ..
-                                    }
-                            );
-                            if failed {
-                                native.detach();
-                                client = native.ordinary();
+                            let problem = match &event {
+                                model_access::Event::Read {
+                                    result: Err(problem),
+                                    ..
+                                }
+                                | model_access::Event::Mutation {
+                                    result: Err(problem),
+                                    ..
+                                }
+                                | model_access::Event::AccountProfile {
+                                    result: Err(problem),
+                                    ..
+                                }
+                                | model_access::Event::AccountProfileCapabilities {
+                                    result: Err(problem),
+                                    ..
+                                } => Some(problem.as_str()),
+                                model_access::Event::NativeAuth(event) => {
+                                    event.result.as_ref().err().map(String::as_str)
+                                }
+                                _ => None,
+                            };
+                            if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
+                            {
+                                break;
                             }
                             if owner_replies
                                 .send(OwnerReply {
@@ -358,14 +386,16 @@ impl Connection {
                             let native = native
                                 .as_mut()
                                 .expect("conversation requires native configuration");
+                            let was_ready = native.ready;
                             let event = runtime.block_on(native.conversation(*job));
-                            let failed = match &event {
-                                ConversationEvent::Read { result, .. } => result.is_err(),
-                                ConversationEvent::Mutation { result, .. } => result.is_err(),
-                            };
-                            if failed {
-                                native.detach();
-                                client = native.ordinary();
+                            let problem = match &event {
+                                ConversationEvent::Read { result, .. } => result.as_ref().err(),
+                                ConversationEvent::Mutation { result, .. } => result.as_ref().err(),
+                            }
+                            .map(String::as_str);
+                            if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
+                            {
+                                break;
                             }
                             if owner_replies
                                 .send(OwnerReply {
@@ -381,15 +411,26 @@ impl Connection {
                             let native = native
                                 .as_mut()
                                 .expect("master requires paired configuration");
+                            let was_ready = native.ready;
                             let event = runtime.block_on(native.master(*job));
-                            let failed = matches!(
-                                &event,
-                                master_session::Event::Read { result: Err(_), .. }
-                                    | master_session::Event::Mutation { result: Err(_), .. }
-                            );
-                            if failed {
-                                native.detach();
-                                client = native.ordinary();
+                            let problem = match &event {
+                                master_session::Event::Catalog {
+                                    result: Err(problem),
+                                    ..
+                                }
+                                | master_session::Event::Read {
+                                    result: Err(problem),
+                                    ..
+                                }
+                                | master_session::Event::Mutation {
+                                    result: Err(problem),
+                                    ..
+                                } => Some(problem.as_str()),
+                                _ => None,
+                            };
+                            if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
+                            {
+                                break;
                             }
                             if owner_replies
                                 .send(OwnerReply {
@@ -405,23 +446,12 @@ impl Connection {
                             let native = native
                                 .as_mut()
                                 .expect("dispatch read requires paired configuration");
+                            let was_ready = native.ready;
                             let event = runtime.block_on(native.dispatch(*query));
-                            if let Err(problem) = &event.result {
-                                native.detach();
-                                client = native.ordinary();
-                                if owner_replies
-                                    .send(OwnerReply {
-                                        finished: false,
-                                        event: OwnerEvent::Access {
-                                            ready: false,
-                                            problem: problem.clone(),
-                                            identity: None,
-                                        },
-                                    })
-                                    .is_err()
-                                {
-                                    break;
-                                }
+                            let problem = event.result.as_ref().err().map(String::as_str);
+                            if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
+                            {
+                                break;
                             }
                             if owner_replies
                                 .send(OwnerReply {
@@ -435,7 +465,21 @@ impl Connection {
                         }
                         Job::Setup(query) => {
                             let event = match native.as_mut() {
-                                Some(native) => runtime.block_on(native.project_setup(*query)),
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.project_setup(*query));
+                                    let problem = event.result.as_ref().err().map(String::as_str);
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
                                 None => SetupEvent {
                                     query: *query,
                                     result: Err("trusted_connection_unavailable".into()),
@@ -456,21 +500,15 @@ impl Connection {
                                 Some(native) => {
                                     let was_ready = native.ready;
                                     let event = runtime.block_on(native.shell(*request));
-                                    if was_ready && !native.ready {
-                                        client = native.ordinary();
-                                        if owner_replies
-                                            .send(OwnerReply {
-                                                finished: false,
-                                                event: OwnerEvent::Access {
-                                                    ready: false,
-                                                    problem: "trusted_connection_lost".into(),
-                                                    identity: None,
-                                                },
-                                            })
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
+                                    let problem = None;
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
                                     }
                                     event
                                 }
@@ -491,21 +529,15 @@ impl Connection {
                                 Some(native) => {
                                     let was_ready = native.ready;
                                     let event = runtime.block_on(native.settings(*job));
-                                    if was_ready && !native.ready {
-                                        client = native.ordinary();
-                                        if owner_replies
-                                            .send(OwnerReply {
-                                                finished: false,
-                                                event: OwnerEvent::Access {
-                                                    ready: false,
-                                                    problem: "trusted_connection_lost".into(),
-                                                    identity: None,
-                                                },
-                                            })
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
+                                    let problem = None;
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
                                     }
                                     event
                                 }
@@ -523,7 +555,21 @@ impl Connection {
                         }
                         Job::TeamGraph(project) => {
                             let result = match native.as_mut() {
-                                Some(native) => runtime.block_on(native.team_graph(&project)),
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let result = runtime.block_on(native.team_graph(&project));
+                                    let problem = result.as_ref().err().map(String::as_str);
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    result
+                                }
                                 None => Err("trusted_connection_unavailable".into()),
                             };
                             if owner_replies
@@ -544,21 +590,15 @@ impl Connection {
                                 Some(native) => {
                                     let was_ready = native.ready;
                                     let event = runtime.block_on(native.intake(*job));
-                                    if was_ready && !native.ready {
-                                        client = native.ordinary();
-                                        if owner_replies
-                                            .send(OwnerReply {
-                                                finished: false,
-                                                event: OwnerEvent::Access {
-                                                    ready: false,
-                                                    problem: "trusted_connection_lost".into(),
-                                                    identity: None,
-                                                },
-                                            })
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
+                                    let problem = None;
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
                                     }
                                     event
                                 }
@@ -582,11 +622,13 @@ impl Connection {
                             let native = native
                                 .as_mut()
                                 .expect("owner read requires native configuration");
+                            let was_ready = native.ready;
                             let result =
                                 runtime.block_on(native.step(project.clone(), generation, first));
-                            if result.is_err() {
-                                native.detach();
-                                client = native.ordinary();
+                            let problem = result.as_ref().err().map(String::as_str);
+                            if !report_loss(was_ready, native, problem, &mut client, &owner_replies)
+                            {
+                                break;
                             }
                             let event = OwnerEvent::Read {
                                 project,
@@ -884,6 +926,48 @@ impl NativeOwner {
                         identity: None,
                     },
                 )
+            }
+        }
+    }
+
+    /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
+    /// reply deadline, so it stops blocking every later change: a change never sent is
+    /// dropped, a recorded one is confirmed, and one the engine never recorded is sent once
+    /// more with its original identity and revision.
+    /// Takes the owner; creation, master, conversation and model access settle their own.
+    /// Returns the outcome to tell the owner, or none while nothing was settled.
+    async fn settle_stray(&mut self) -> Option<Result<(), String>> {
+        if !self.ready
+            || self.master_pending.is_some()
+            || self.creation_pending.is_some()
+            || self.conversation_pending.is_some()
+            || self.model_pending.is_some()
+        {
+            return None;
+        }
+        let controller = self.controller.as_mut()?;
+        if !controller.pending()?.uncertain() {
+            controller.discard_refused().ok()?;
+            return None;
+        }
+        let response = match controller.reconcile_pending().await {
+            Ok(OwnerResponse::NotRecordedAtBarrier { .. }) => controller.retry_pending().await,
+            other => other,
+        };
+        match response {
+            Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
+                Some(match operation.result {
+                    OwnerResult::Applied => Ok(()),
+                    OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
+                    _ => Err("change_outcome_unknown".into()),
+                })
+            }
+            Ok(_) => None,
+            Err(error) => {
+                if job_lost(&error.0) {
+                    self.detach();
+                }
+                None
             }
         }
     }
@@ -1239,6 +1323,16 @@ impl NativeOwner {
                 .await
                 .map(|reply| native_auth::Output::Inspected(Box::new(reply)))
                 .map_err(|_| "native_auth_inspection_unavailable".into()),
+            native_auth::Command::Using => controller
+                .account_use(job.context.connection.id.clone())
+                .await
+                .map(native_auth::Output::Using)
+                .map_err(|error| native_auth::public_problem(&error.0)),
+            native_auth::Command::Release => controller
+                .release_account(job.context.connection.id.clone(), job.context.generation)
+                .await
+                .map(native_auth::Output::Using)
+                .map_err(|error| native_auth::public_problem(&error.0)),
             command => {
                 let reply = match command {
                     native_auth::Command::Start(request) => {
@@ -1253,11 +1347,13 @@ impl NativeOwner {
                     native_auth::Command::Logout(request) => {
                         controller.logout_native_auth(request.clone()).await
                     }
-                    native_auth::Command::Inspect => unreachable!(),
+                    native_auth::Command::Inspect
+                    | native_auth::Command::Using
+                    | native_auth::Command::Release => unreachable!(),
                 };
                 reply
                     .map(|reply| native_auth::Output::Auth(Box::new(reply)))
-                    .map_err(|error| native_auth::public_problem(&error.0).into())
+                    .map_err(|error| native_auth::public_problem(&error.0))
             }
         }
     }
@@ -1855,6 +1951,43 @@ impl NativeOwner {
     }
 }
 
+/// Tells whether a failed owner job means the trusted connection is gone.
+/// Takes the job's problem: a plain code, possibly followed by "; " and advice.
+/// Returns true only for a lost, replaced or unreachable engine connection.
+fn job_lost(problem: &str) -> bool {
+    settings::connection_lost(problem.split(';').next().unwrap_or(problem))
+}
+
+/// Detaches the owner after a job that failed because the engine connection is gone,
+/// and tells the shell once, with `Access { ready: false }`, so it reconnects.
+/// Inputs: readiness before the job, the owner, the failed job's problem, the ordinary
+/// client to replace and the owner reply channel. Output: false once the shell is gone.
+fn report_loss(
+    was_ready: bool,
+    native: &mut NativeOwner,
+    problem: Option<&str>,
+    client: &mut Client,
+    replies: &SyncSender<OwnerReply>,
+) -> bool {
+    if problem.is_some_and(job_lost) {
+        native.detach();
+    }
+    if !was_ready || native.ready {
+        return true;
+    }
+    *client = native.ordinary();
+    replies
+        .send(OwnerReply {
+            finished: false,
+            event: OwnerEvent::Access {
+                ready: false,
+                problem: "trusted_connection_lost".into(),
+                identity: None,
+            },
+        })
+        .is_ok()
+}
+
 fn bounded_problem(problem: &str) -> String {
     if !problem.is_empty()
         && problem.len() <= 96
@@ -1871,6 +2004,10 @@ fn bounded_problem(problem: &str) -> String {
 #[cfg(all(test, unix))]
 #[path = "dispatch_wiring_tests.rs"]
 mod dispatch_wiring_tests;
+
+#[cfg(all(test, unix))]
+#[path = "connection_loss_tests.rs"]
+mod connection_loss_tests;
 
 #[cfg(all(test, unix))]
 mod creation_recovery_tests {
@@ -2036,6 +2173,97 @@ mod creation_recovery_tests {
         assert!(
             matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
             if operation.result == OwnerResult::Applied)
+        );
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_creation_the_engine_refuses_frees_its_slot_for_the_next_creation_and_master_change()
+    {
+        let mut h = RealNative::new().await;
+        let refused = h.submission();
+        h.native.prepare_creation(&refused).await.unwrap();
+        let owner_socket = std::fs::read_dir(h.root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("owner.sock"))
+            .find(|path| path.exists())
+            .expect("the engine serves its owner socket in a generation under the root");
+        let mut silent = Vec::new();
+        for _ in 0..3 {
+            silent.push(
+                crate::spawn_gate::connect_unix(&owner_socket)
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let result = h
+            .native
+            .deliver_creation(MutationDelivery::Submit)
+            .await
+            .map(Box::new);
+        let event = h.native.creation_event(refused.clone(), result);
+        assert!(
+            matches!(event.result.as_deref(), Ok(OwnerResponse::Rejected { code }) if code == "owner_busy"),
+            "the engine refuses the creation while its owner queue is full: {:?}",
+            event.result
+        );
+        assert!(!event.retained, "a refused creation is not kept");
+        assert!(h.native.creation_pending.is_none());
+        assert!(h.native.controller.as_ref().unwrap().pending().is_none());
+        drop(silent);
+        let mut served = false;
+        for _ in 0..50 {
+            if h.native
+                .controller
+                .as_mut()
+                .unwrap()
+                .read(OwnerRead::Capabilities)
+                .await
+                .is_ok()
+            {
+                served = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(served, "the engine serves again once the queue empties");
+
+        let created = h
+            .native
+            .creation(CreationJob {
+                submission: refused.clone(),
+                delivery: MutationDelivery::Submit,
+            })
+            .await;
+        assert!(
+            matches!(created.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+                if operation.result == OwnerResult::Applied),
+            "the same project can be created again without a restart"
+        );
+        assert!(!created.retained);
+
+        let master = h
+            .native
+            .master(master_session::Job::Mutation {
+                submission: master_session::Submission {
+                    identity: refused.identity.clone(),
+                    generation: 8,
+                    action: crate::master_session::MasterOwnerAction::Close {
+                        project_id: refused.project_id.clone(),
+                        session_id: crate::protocol::SessionId::new("absent-session").unwrap(),
+                    },
+                },
+                delivery: MutationDelivery::Submit,
+            })
+            .await;
+        let master_session::Event::Mutation { result, .. } = master else {
+            panic!("a master change answers as a mutation");
+        };
+        assert!(
+            result.is_ok(),
+            "the master change reaches the engine instead of waiting on the refused creation: {:?}",
+            result.err()
         );
         h.close().await;
     }

@@ -802,6 +802,142 @@ async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
 }
 
 #[tokio::test]
+async fn team_plan_writes_refuse_harnesses_that_cannot_run_team_agents_but_saved_plans_read() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let opencode = TeamPlan {
+        master: "opencode".into(),
+        master_tools: true,
+        sub_harnesses: vec![],
+        min_agents: 1,
+        max_agents: 1,
+    };
+    let refused = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            ProjectSetup {
+                team: Some(opencode),
+                ..pooled_setup(vec![])
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(refused), rejected("team_harness_unavailable"));
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='setup-pooled'"),
+        0
+    );
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let written_before = rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "UPDATE project_setups SET body=json_set(body,'$.team.master','opencode')
+            WHERE project='setup-pooled'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(written_before, 1);
+
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        saved.team.master, "opencode",
+        "a saved plan still reads back"
+    );
+    let status = owner.team_status(project.clone()).await.unwrap();
+    assert_eq!(
+        (
+            status.harnesses[0].harness.as_str(),
+            status.harnesses[0].runnable
+        ),
+        ("opencode", false)
+    );
+    let renamed = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision,
+            Some("Meals".into()),
+            ProjectSetup {
+                team: Some(saved.team.clone()),
+                ..pooled_setup(vec![])
+            },
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(renamed),
+        OwnerResult::Applied,
+        "an unchanged saved plan still saves"
+    );
+    let added = TeamPlan {
+        sub_harnesses: vec![HarnessSlot {
+            harness: "gemini-cli".into(),
+            agents: 1,
+            tools: true,
+        }],
+        max_agents: 2,
+        ..saved.team.clone()
+    };
+    let refused = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision + 1,
+            Some("Other".into()),
+            ProjectSetup {
+                team: Some(added),
+                ..pooled_setup(vec![])
+            },
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(refused), rejected("team_harness_unavailable"));
+    let kept = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            kept.revision,
+            kept.name.as_str(),
+            kept.team.sub_harnesses.len()
+        ),
+        (saved.revision + 1, "Meals", 0)
+    );
+    let codex = TeamPlan {
+        master: "codex".into(),
+        ..kept.team.clone()
+    };
+    let fixed = owner
+        .update_project_setup(
+            project.clone(),
+            kept.revision,
+            None,
+            ProjectSetup {
+                team: Some(codex),
+                ..pooled_setup(vec![])
+            },
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(fixed), OwnerResult::Applied);
+    let status = owner.team_status(project).await.unwrap();
+    assert!(status.harnesses[0].runnable);
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
 async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
@@ -950,6 +1086,85 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     engine.stop().await;
 }
 
+/// Releasing an account cancels the research job and closes the master conversation that
+/// hold it, does not fail on a holder whose conversation already ended, and reads the
+/// account free once the remaining holds end.
+#[tokio::test]
+async fn releasing_an_account_cancels_its_research_and_closes_its_master() {
+    use crate::agents::Holder;
+    use crate::protocol::{CredentialRef, SessionId};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let job = owner.research_jobs(project.clone()).await.unwrap()[0].id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let claimed = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, job);
+    let agents = engine
+        .service
+        .as_ref()
+        .unwrap()
+        .owner_runtime()
+        .unwrap()
+        .agents()
+        .unwrap();
+    let account = CredentialRef::new("a-codex").unwrap();
+    let research = Holder::Research {
+        project: project.clone(),
+        job,
+        title: "Market research".into(),
+    };
+    let ended = Holder::Master {
+        project: project.clone(),
+        session: SessionId::new("master-ended").unwrap(),
+    };
+    let held = agents.hold(account.clone(), research.clone());
+    let closed = agents.hold(account.clone(), ended.clone());
+
+    let used = owner.account_use(account.clone()).await.unwrap();
+    assert!(used.agents.is_empty());
+    assert_eq!(used.holders, vec![ended.clone(), research]);
+
+    let runner = std::thread::spawn(move || {
+        let asked = std::time::Instant::now();
+        while !store.heartbeat(&claimed, 0).unwrap() {
+            assert!(
+                asked.elapsed() < Duration::from_secs(10),
+                "no cancel reached the job"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(held);
+    });
+    let left = owner
+        .release_within(account.clone(), 2, Duration::from_secs(1))
+        .await
+        .unwrap();
+    runner.join().unwrap();
+    assert!(left.agents.is_empty());
+    assert_eq!(left.holders, vec![ended]);
+    drop(closed);
+    assert!(owner.account_use(account).await.unwrap().is_free());
+    let job = owner.research_jobs(project).await.unwrap().remove(0);
+    assert!(job.cancel_requested);
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn owner_removes_a_project_and_keeps_its_folder() {
     let engine = Engine::start().await;
@@ -975,6 +1190,14 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
         1
     );
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms)
+            VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0)",
+            [],
+        )
+        .unwrap();
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
@@ -990,6 +1213,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
         0,
         "the project's research jobs go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_owner_prompts WHERE project='setup-pooled'"),
+        0,
+        "the owner's prompts to its agents go with it"
     );
     assert!(
         Path::new(&folder)

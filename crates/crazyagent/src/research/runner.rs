@@ -1,15 +1,16 @@
 use super::accounts::PROFILE_BUSY;
 use super::jobs::{JobError, ResearchJob, ResearchJobs, ResearchStatus, valid_kind};
+use crate::agents::{Agents, Hold, Holder};
 use crate::config::ModelConnection;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
 };
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
-use crate::protocol::{ProjectId, RequestId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host};
 use std::fmt;
@@ -20,20 +21,30 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
-const GIT_SAFE: [&str; 6] = [
+const GIT_SAFE: [&str; 10] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=false",
     "-c",
     "core.pager=cat",
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "protocol.allow=never",
 ];
-static REPOSITORY_SETUP: Mutex<()> = Mutex::new(());
+#[cfg(unix)]
+const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
+#[cfg(unix)]
+const FILTER_DRIVERS_MAX: usize = 64;
+static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 const LINKS_MAX: usize = 100;
@@ -47,6 +58,9 @@ const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
+const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
+const DRAIN_WAIT: Duration = Duration::from_secs(5);
+const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 const CONTEXT_BUSY: &str = "launch_home_busy";
@@ -245,14 +259,28 @@ pub struct ResearchRunner {
     setup: Mutex<()>,
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
     terminal: Option<Arc<dyn Host>>,
+    agents: Option<Arc<Agents>>,
 }
 
+/// Where one launch of a claimed research job runs: the canonical project folder, its
+/// id and launch context, the run's name, worktree and agent folder.
+struct JobPlace {
+    root: PathBuf,
+    project: ProjectId,
+    context: AgentContext,
+    name: String,
+    worktree: PathBuf,
+    agent: PathBuf,
+}
+
+#[derive(Debug)]
 enum Ending {
     Exited(bool),
     TimedOut,
     Overflowed,
     Cancelled,
     Interrupted,
+    RateLimited,
 }
 
 impl ResearchRunner {
@@ -329,6 +357,7 @@ impl ResearchRunner {
             setup: Mutex::new(()),
             custody: Mutex::new(custody),
             terminal: None,
+            agents: None,
         })
     }
 
@@ -350,6 +379,14 @@ impl ResearchRunner {
         }
         self.terminal = Some(host);
         Ok(self)
+    }
+
+    /// Names each running research job in the engine's agent register as a holder of the
+    /// account it signs in with, so a refused sign-out can name and cancel it. Takes the
+    /// register. Returns the runner.
+    pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
+        self.agents = Some(agents);
+        self
     }
 
     /// Lets the runner run Claude Code jobs with the absolute `claude`
@@ -404,19 +441,24 @@ impl ResearchRunner {
         let Some(job) = jobs.claim(project.id, &self.claimer, self.limits.running_max)? else {
             return Ok(None);
         };
-        self.run_claimed(&jobs, job, project).map(Some)
+        self.run_claimed(&jobs, job, project, None).map(Some)
     }
 
     /// Claims every job of `project` for the account's harness that the
     /// per-project limit allows right now, at most `running_max` in one call
-    /// even while runs hand busy jobs back, and runs each on its own thread.
+    /// even while runs hand busy jobs back, and runs each on its own thread. `account` is
+    /// the picked pool account's connection and account; a run refused for a rate or usage
+    /// limit pauses that connection and hands its job back without spending an attempt.
     pub fn spawn_ready(
         self: &Arc<Self>,
         project: String,
         harness: &str,
         root: PathBuf,
-        account: Option<ResearchAccount>,
+        account: Option<(CredentialRef, ResearchAccount)>,
     ) -> Vec<JoinHandle<Result<ResearchRun, RunError>>> {
+        let (member, account) = account.map_or((None, None), |(member, account)| {
+            (Some(member), Some(account))
+        });
         let mut handles = Vec::new();
         let Ok(jobs) = ResearchJobs::open(&self.database) else {
             return handles;
@@ -434,6 +476,7 @@ impl ResearchRunner {
             let project = project.clone();
             let root = root.clone();
             let account = account.clone();
+            let member = member.clone();
             handles.push(std::thread::spawn(move || {
                 let jobs = ResearchJobs::open(&runner.database)?;
                 runner.run_claimed(
@@ -444,6 +487,7 @@ impl ResearchRunner {
                         root: &root,
                         account,
                     },
+                    member.as_ref(),
                 )
             }));
         }
@@ -451,11 +495,16 @@ impl ResearchRunner {
         handles
     }
 
+    /// Runs a claimed job to its end and records how it ended: done with its report,
+    /// failed, cancelled, parked for a pool, or handed back. Takes the job store, the job,
+    /// its project and the pool connection of the project's account, if known; a run
+    /// refused for a rate or usage limit pauses it, else spends an attempt.
     fn run_claimed(
         &self,
         jobs: &ResearchJobs,
         job: ResearchJob,
         project: &ResearchProject<'_>,
+        member: Option<&CredentialRef>,
     ) -> Result<ResearchRun, RunError> {
         assert_eq!(job.status, ResearchStatus::Running);
         assert_eq!(job.project, project.id);
@@ -506,9 +555,14 @@ impl ResearchRunner {
                         .map_or(ResearchStatus::Queued, |job| job.status);
                     return Ok(run(status, None, Some(group)));
                 }
+                if let (Ending::RateLimited, Some(member)) = (&ending, member) {
+                    let (status, _) = jobs.rate_limited(&job, member)?;
+                    return Ok(run(status, None, Some(group)));
+                }
                 let reason = match ending {
                     Ending::TimedOut => "Agent ran out of time",
                     Ending::Overflowed => "Agent output exceeded the limit",
+                    Ending::RateLimited => "The account hit its rate limit",
                     _ => "Agent stopped with an error",
                 };
                 let status = jobs.fail(&job, reason, self.limits.attempts_max)?;
@@ -549,6 +603,33 @@ impl ResearchRunner {
         project: &ResearchProject<'_>,
         account: &ResearchAccount,
     ) -> Result<(Ending, u32, PathBuf), RunError> {
+        let place = self.job_place(jobs, job, project)?;
+        let lease = match account {
+            ResearchAccount::ManagedCodex { connection, .. }
+            | ResearchAccount::ManagedClaude { connection, .. } => {
+                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
+                    if code == PROFILE_BUSY {
+                        RunError::Busy
+                    } else {
+                        RunError::Account(code)
+                    }
+                })?;
+                Some(self.held_lease(&host, &fact.binding, &place.name, &place.project, job)?)
+            }
+            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+        };
+        self.launch_leased(jobs, job, account, place, lease)
+    }
+
+    /// Checks that a claimed job can launch and names its run: the canonical project
+    /// folder, the project's launch context and a free run name and worktree.
+    /// Inputs: the job store, the claimed job and its project. Output: where it runs.
+    fn job_place(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        project: &ResearchProject<'_>,
+    ) -> Result<JobPlace, RunError> {
         if !valid_kind(&job.kind) {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
@@ -561,30 +642,58 @@ impl ResearchRunner {
         let context = jobs.project_context(&id).map_err(RunError::Context)?;
         let (name, worktree) = self.free_run(&root, job)?;
         let agent = self.state.join("agents").join(&name);
-        let lease = match account {
-            ResearchAccount::ManagedCodex { connection, .. }
-            | ResearchAccount::ManagedClaude { connection, .. } => {
-                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
-                    if code == PROFILE_BUSY {
-                        RunError::Busy
-                    } else {
-                        RunError::Account(code)
-                    }
-                })?;
-                Some(self.lease(&host, &fact.binding, &name, u64::from(job.attempts))?)
-            }
-            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
-        };
-        let home = match &lease {
-            Some(lease) => lease_home(lease)?,
-            None => {
-                private_directory(&agent)?;
-                let home = agent.join("home");
-                private_directory(&home)?;
-                home
-            }
-        };
+        Ok(JobPlace {
+            root,
+            project: id,
+            context,
+            name,
+            worktree,
+            agent,
+        })
+    }
+
+    /// Runs a claimed job's agent once its account is taken: the managed credential copy
+    /// in the agent's home, the project context, the sandboxed worktree and the harness.
+    /// Inputs: the job store, the job, its account, where it runs and the held lease, none
+    /// for an endpoint account. Output: how the agent ended, its process group and output.
+    fn launch_leased(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        account: &ResearchAccount,
+        place: JobPlace,
+        lease: Option<(NativeProfileUse, Option<Hold>)>,
+    ) -> Result<(Ending, u32, PathBuf), RunError> {
+        let JobPlace {
+            root,
+            context,
+            name,
+            worktree,
+            agent,
+            ..
+        } = place;
+        private_directory(&agent)?;
+        let home = agent.join("home");
+        private_directory(&home)?;
         let harness = account.harness();
+        let executable = match harness {
+            ResearchHarness::Codex => self
+                .codex
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
+            ResearchHarness::ClaudeCode => self
+                .claude
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
+        };
+        let credential = match &lease {
+            Some((lease, _)) => Some(
+                lease
+                    .hand_to_agent(&home, self.limits.wall_time, executable)
+                    .map_err(|problem| RunError::Account(problem.0))?,
+            ),
+            None => None,
+        };
         let installed = context
             .install(harness.id(), &home, job.tools)
             .map_err(|problem| {
@@ -597,16 +706,6 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let executable = match harness {
-            ResearchHarness::Codex => self
-                .codex
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
-            ResearchHarness::ClaudeCode => self
-                .claude
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
-        };
         let network = if job.tools {
             SandboxNetwork::Open
         } else {
@@ -624,6 +723,8 @@ impl ResearchRunner {
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
+        let sandbox = sandbox.confine_to_worktree(&worktree)?;
+        sandbox.install(&profile)?;
         drop(setup);
         still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
@@ -665,6 +766,7 @@ impl ResearchRunner {
             let _ = session.stop();
             #[cfg(unix)]
             lifeline.release();
+            drop(credential);
             drop(lease);
             return Ok((ending?, group, output));
         }
@@ -691,7 +793,9 @@ impl ResearchRunner {
         let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
-        for (stream, name) in [
+        let limited = Arc::new(AtomicBool::new(false));
+        let mut drains = Vec::new();
+        for (stream, name, watch) in [
             (
                 running
                     .child
@@ -699,6 +803,7 @@ impl ResearchRunner {
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 stdout_log,
+                None,
             ),
             (
                 running
@@ -707,20 +812,36 @@ impl ResearchRunner {
                     .take()
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
                 "stderr.log",
+                (harness == ResearchHarness::Codex).then(|| limited.clone()),
             ),
         ] {
             let Some(stream) = stream else { continue };
             let log = create_private(&agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
-            std::thread::spawn(move || drain(stream, &counted, log, log_max));
+            drains.push(std::thread::spawn(move || {
+                drain_watching(stream, &counted, log, log_max, watch.as_deref())
+            }));
         }
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &mut running, &counted)?;
+        let ending = self.supervise(jobs, job, &mut running, &counted, &limited)?;
         drop(running);
+        let draining = Instant::now();
+        while drains.iter().any(|drain| !drain.is_finished()) && draining.elapsed() < DRAIN_WAIT {
+            std::thread::sleep(POLL);
+        }
+        #[cfg(unix)]
+        let ending = if matches!(ending, Ending::Exited(false))
+            && refused_for_limit(harness, &agent, &output, self.limits.output_bytes_max)
+        {
+            Ending::RateLimited
+        } else {
+            ending
+        };
         drop(installed);
+        drop(credential);
         drop(lease);
         Ok((ending, group, output))
     }
@@ -761,16 +882,50 @@ impl ResearchRunner {
             })
     }
 
+    /// Takes a research job's profile lease and names the job in the agent register as a
+    /// holder of the lease's account until both are dropped together. Takes the engine
+    /// host, the sign-in binding, the launch name, the project and the claimed job.
+    /// Returns the lease and its hold, none without a register, or the lease's refusal.
+    fn held_lease(
+        &self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        name: &str,
+        project: &ProjectId,
+        job: &ResearchJob,
+    ) -> Result<(NativeProfileUse, Option<Hold>), RunError> {
+        let lease = self.lease(host, binding, name, u64::from(job.attempts))?;
+        let hold = self.agents.as_ref().map(|agents| {
+            agents.hold(
+                binding.connection.id.clone(),
+                Holder::Research {
+                    project: project.clone(),
+                    job: job.id,
+                    title: kind_label(&job.kind),
+                },
+            )
+        });
+        Ok((lease, hold))
+    }
+
+    /// Follows a direct agent process until it exits, its stderr shows it waiting out a
+    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes, then
+    /// stops its process group. Takes the job store, the job, the process, its output count
+    /// and the limit flag its stderr drain sets. Returns how the run ended.
     fn supervise(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
         agent: &mut AgentProcess,
         counted: &AtomicU64,
+        limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
+            if limited.load(Ordering::SeqCst) {
+                break Ending::RateLimited;
+            }
             if let Some(status) = agent.child.try_wait()? {
                 break Ending::Exited(status.success());
             }
@@ -799,9 +954,9 @@ impl ResearchRunner {
     }
 
     /// Types the research prompt into the agent's pane and follows its session record until
-    /// the turn ends, the job is cancelled, the runner stops or a limit passes. The agent's
-    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
-    /// Returns how the run ended.
+    /// the turn ends or reports a rate or usage limit, the job is cancelled, the runner
+    /// stops or a limit passes. The agent's last reply becomes the report at `output`, as
+    /// `codex exec -o` and `claude -p` give. Returns how the run ended.
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
@@ -812,7 +967,10 @@ impl ResearchRunner {
     ) -> Result<Ending, RunError> {
         let mut last = String::new();
         let mut counted: u64 = 0;
-        if session.send(prompt).is_err() {
+        if let Err(problem) = session.send_or_cancel(prompt, &self.stopping) {
+            if problem.0 == "launch_cancelled" {
+                return Ok(Ending::Interrupted);
+            }
             return Ok(Ending::Exited(false));
         }
         let mut beat = Instant::now();
@@ -837,6 +995,9 @@ impl ResearchRunner {
                     last = text;
                 }
                 Ok(Some(LaunchEvent::TurnFinished { success })) => break Ending::Exited(success),
+                Ok(Some(LaunchEvent::TurnError { rate_limited: true })) => {
+                    break Ending::RateLimited;
+                }
                 Ok(Some(LaunchEvent::Exited { .. })) => break Ending::Exited(false),
                 Ok(_) => {}
                 Err(problem) => {
@@ -923,7 +1084,7 @@ pub(crate) enum ReadOnlyEnding {
     #[cfg(unix)]
     Answered(String),
     #[cfg(unix)]
-    Failed(&'static str),
+    Failed(String),
     #[cfg(unix)]
     TimedOut,
     #[cfg(unix)]
@@ -972,18 +1133,8 @@ impl ResearchRunner {
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
         private_directory(&agent)?;
-        let home = match &lease {
-            Some(lease) => lease_home(lease)?,
-            None => {
-                let home = agent.join("home");
-                private_directory(&home)?;
-                home
-            }
-        };
-        let work = agent.join("work");
-        private_directory(&work)?;
-        let tmp = agent.join("tmp");
-        private_directory(&tmp)?;
+        let home = agent.join("home");
+        private_directory(&home)?;
         let harness = run.account.harness();
         let executable = match harness {
             ResearchHarness::Codex => self
@@ -995,6 +1146,18 @@ impl ResearchRunner {
                 .as_deref()
                 .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
         };
+        let credential = match &lease {
+            Some(lease) => Some(
+                lease
+                    .hand_to_agent(&home, run.wall_time, executable)
+                    .map_err(|problem| RunError::Account(problem.0))?,
+            ),
+            None => None,
+        };
+        let work = agent.join("work");
+        private_directory(&work)?;
+        let tmp = agent.join("tmp");
+        private_directory(&tmp)?;
         let mut sandbox = ProjectSandbox::new(
             &work,
             &home,
@@ -1059,10 +1222,11 @@ impl ResearchRunner {
             let _ = stdin.write_all(run.prompt.as_bytes());
         }
         let started = Instant::now();
+        let mut exited_failing = false;
         let ending = loop {
             if let Some(status) = running.child.try_wait()? {
-                break (!status.success())
-                    .then_some(ReadOnlyEnding::Failed("Agent stopped with an error"));
+                exited_failing = !status.success();
+                break None;
             }
             if started.elapsed() >= run.wall_time {
                 break Some(ReadOnlyEnding::TimedOut);
@@ -1071,7 +1235,7 @@ impl ResearchRunner {
                 break Some(ReadOnlyEnding::Stopped);
             }
             if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Some(ReadOnlyEnding::Failed("Agent wrote too much output"));
+                break Some(ReadOnlyEnding::Failed("Agent wrote too much output".into()));
             }
             std::thread::sleep(POLL);
         };
@@ -1080,7 +1244,15 @@ impl ResearchRunner {
         for handle in drains {
             let _ = handle.join();
         }
+        drop(credential);
         drop(lease);
+        if exited_failing {
+            return Ok(ReadOnlyEnding::Failed(agent_failure(
+                &agent.join(stdout_log),
+                harness,
+                self.limits.output_bytes_max,
+            )));
+        }
         if let Some(ending) = ending {
             return Ok(ending);
         }
@@ -1088,7 +1260,7 @@ impl ResearchRunner {
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         Ok(if answer.is_empty() {
-            ReadOnlyEnding::Failed("Agent returned no answer")
+            ReadOnlyEnding::Failed("Agent returned no answer".into())
         } else {
             ReadOnlyEnding::Answered(answer)
         })
@@ -1122,20 +1294,6 @@ fn valid_run_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-/// The agent home a managed launch runs in: the held lease's profile path,
-/// which is a configured profile folder when the owner set one and the
-/// engine-owned `native-profiles/<key>/home` otherwise. Takes the lease.
-/// Returns the canonical home, or an error once the lease no longer verifies.
-fn lease_home(lease: &NativeProfileUse) -> Result<PathBuf, RunError> {
-    let home = lease
-        .profile_path()
-        .map_err(|problem| RunError::Account(problem.0))?;
-    if !home.is_absolute() || home.canonicalize()? != home {
-        return Err(RunError::Invalid("managed home must be canonical".into()));
-    }
-    Ok(home)
 }
 
 /// Lists the folders an agent's sandbox must let it read beyond its home:
@@ -1251,7 +1409,8 @@ fn codex_arguments(
         } else {
             "read-only"
         })
-        .env("CODEX_HOME", home);
+        .env("CODEX_HOME", home)
+        .env("RUST_LOG", CODEX_LOG);
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
             let url = endpoint_url(base_url)?;
@@ -1273,7 +1432,14 @@ fn codex_arguments(
                 .arg(model);
         }
         ResearchAccount::ManagedCodex { model, .. } => {
-            command.args(["-c", "cli_auth_credentials_store=\"file\""]);
+            command.args([
+                "-c",
+                "cli_auth_credentials_store=\"file\"",
+                "-c",
+                "features.apps=false",
+                "-c",
+                "features.plugins=false",
+            ]);
             if let Some(model) = model {
                 if !valid_model(model) {
                     return Err(RunError::Invalid("managed model name".into()));
@@ -1449,15 +1615,45 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// The setup lock of one project repository; dropping it lets the next setup of that
+/// repository run.
+struct RepositorySetup(PathBuf);
+
+impl Drop for RepositorySetup {
+    fn drop(&mut self) {
+        REPOSITORIES_SETTING_UP
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+        REPOSITORY_FREED.notify_all();
+    }
+}
+
+/// Waits for and takes the setup lock of one project repository, so git init, the start
+/// commit and worktree adds on that repository never race, while other projects set up
+/// at the same time. Takes the project folder, compared after resolving links.
+/// Output: the lock, held until dropped.
+fn repository_setup(root: &Path) -> RepositorySetup {
+    let key = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut busy = REPOSITORIES_SETTING_UP
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    while busy.contains(&key) {
+        busy = REPOSITORY_FREED
+            .wait(busy)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    assert!(busy.insert(key.clone()));
+    RepositorySetup(key)
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
-/// once per process at a time. A folder with any `.git` entry is the owner's repository and
+/// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
 /// gets a repository from the engine. Takes the project folder and a private home for git.
 /// Returns Ok once the folder is a repository, or a plain refusal for an owner's folder.
 pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError> {
-    let _setup = REPOSITORY_SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _setup = repository_setup(root);
     if fs::symlink_metadata(root.join(".git")).is_ok() {
         return Ok(());
     }
@@ -1522,8 +1718,10 @@ pub(crate) fn add_worktree(
     )))
 }
 
-/// Adds a detached git worktree at `worktree` inside the sandbox's project
-/// folder, running git under the installed profile with hooks disabled.
+/// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
+/// git under the installed profile so that no command the repository configures runs: the
+/// worktree is added without a checkout, its effective config is listed in the worktree's
+/// own context, and the checkout blanks every filter driver that listing names.
 /// Takes the sandbox, its installed profile and the new worktree path.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
@@ -1531,27 +1729,130 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
-    let _setup = REPOSITORY_SETUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _setup = repository_setup(sandbox.project_root());
     let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
     }
     fs::create_dir_all(&worktrees)?;
-    let mut git = sandbox.command(profile, Path::new(GIT));
-    git.args(GIT_SAFE)
-        .args(["worktree", "add", "-q", "--detach"])
+    let mut add = worktree_git(sandbox, profile);
+    add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
-        .arg("HEAD")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if !wait_bounded(crate::spawn_gate::spawn(&mut git)?, SETUP_TIMEOUT)? {
+        .arg("HEAD");
+    if !wait_bounded(crate::spawn_gate::spawn(&mut add)?, SETUP_TIMEOUT)? {
         return Err(RunError::Invalid("git worktree add failed".into()));
+    }
+    let mut listing = worktree_git(sandbox, profile);
+    listing
+        .arg("-C")
+        .arg(worktree)
+        .args(["config", "--list", "--name-only", "-z"]);
+    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let mut checkout = worktree_git(sandbox, profile);
+    checkout
+        .args(&overrides)
+        .arg("-C")
+        .arg(worktree)
+        .args(["reset", "-q", "--hard", "HEAD"]);
+    if !wait_bounded(crate::spawn_gate::spawn(&mut checkout)?, SETUP_TIMEOUT)? {
+        return Err(RunError::Invalid(
+            "git could not check out the worktree".into(),
+        ));
     }
     assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
+}
+
+/// A git command for the engine's own worktree steps under the agent's installed profile:
+/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
+#[cfg(unix)]
+fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
+    let mut git = sandbox.command(profile, Path::new(GIT));
+    git.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(GIT_SAFE)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    git
+}
+
+/// Runs a setup git command whose output fits in [`GIT_CONFIG_LISTING_BYTES_MAX`] within
+/// the setup time limit. Takes the command. Returns what it printed, or `Invalid` when it
+/// fails, runs past the limit or prints more.
+#[cfg(unix)]
+fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
+    let refused = || RunError::Invalid("git could not list the worktree's config".into());
+    command.stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(command)?;
+    let stdout = child.stdout.take().ok_or_else(refused)?;
+    if !wait_bounded(child, SETUP_TIMEOUT)? {
+        return Err(refused());
+    }
+    let mut bytes = Vec::new();
+    stdout
+        .take(GIT_CONFIG_LISTING_BYTES_MAX as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > GIT_CONFIG_LISTING_BYTES_MAX {
+        return Err(refused());
+    }
+    Ok(bytes)
+}
+
+/// The `-c` arguments that switch off every filter driver a config listing names: empty
+/// smudge, clean and process commands and `required=false`, so a checkout runs none of them
+/// and still succeeds. Takes the NUL-separated keys of `git config --list --name-only -z`.
+/// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
+#[cfg(unix)]
+fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
+    let refused = || {
+        RunError::Invalid(
+            "the repository configures a git filter the engine cannot switch off; name its filters with letters, digits, dots, dashes or underscores".into(),
+        )
+    };
+    let mut drivers: Vec<&str> = Vec::new();
+    for key in listing
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = std::str::from_utf8(key).map_err(|_| refused())?;
+        let Some((driver, _)) = key
+            .strip_prefix("filter.")
+            .and_then(|rest| rest.rsplit_once('.'))
+        else {
+            continue;
+        };
+        if driver.is_empty()
+            || !driver
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(refused());
+        }
+        if !drivers.contains(&driver) {
+            drivers.push(driver);
+        }
+        if drivers.len() > FILTER_DRIVERS_MAX {
+            return Err(refused());
+        }
+    }
+    let mut arguments = Vec::with_capacity(drivers.len() * 8);
+    for driver in &drivers {
+        for setting in ["smudge=", "clean=", "process=", "required=false"] {
+            arguments.push("-c".to_owned());
+            arguments.push(format!("filter.{driver}.{setting}"));
+        }
+    }
+    assert_eq!(arguments.len(), drivers.len() * 8);
+    assert!(
+        arguments
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|argument| argument.starts_with("filter."))
+    );
+    Ok(arguments)
 }
 
 fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
@@ -1750,14 +2051,24 @@ fn await_group_exit(group: u32) {
 
 /// Copies an agent stream into its log, counting every byte read and logging
 /// at most `log_max` bytes, until the stream ends.
-pub(crate) fn drain(
+#[cfg(unix)]
+pub(crate) fn drain(stream: Box<dyn Read + Send>, counted: &AtomicU64, log: File, log_max: u64) {
+    drain_watching(stream, counted, log, log_max, None);
+}
+
+/// Drains like [`drain`]. With `limited`, it sets the flag once a line shows
+/// Codex waiting to retry a request refused for a rate or usage limit; a line
+/// is checked on at most its first 16 KiB.
+fn drain_watching(
     mut stream: Box<dyn Read + Send>,
     counted: &AtomicU64,
     mut log: File,
     log_max: u64,
+    limited: Option<&AtomicBool>,
 ) {
     let mut buffer = [0_u8; 8192];
     let mut logged = 0_u64;
+    let mut line = Vec::new();
     while let Ok(read) = stream.read(&mut buffer) {
         if read == 0 {
             break;
@@ -1768,6 +2079,46 @@ pub(crate) fn drain(
             logged += room as u64;
         }
         assert!(logged <= log_max);
+        let Some(limited) = limited else { continue };
+        for &byte in &buffer[..read] {
+            if byte == b'\n' {
+                if codex_retry_limited(&String::from_utf8_lossy(&line)) {
+                    limited.store(true, Ordering::SeqCst);
+                }
+                line.clear();
+            } else if line.len() < LOG_LINE_BYTES_MAX {
+                line.push(byte);
+            }
+        }
+        assert!(line.len() <= LOG_LINE_BYTES_MAX);
+    }
+}
+
+/// Tells whether one Codex log line is Codex waiting to retry a request the provider
+/// refused for a rate or usage limit. Takes the line. Returns true only for the retry
+/// target with a limit cause, never for ids or other targets holding the same digits.
+fn codex_retry_limited(line: &str) -> bool {
+    line.contains("codex_core::responses_retry")
+        && line
+            .split_once("sampling_error=")
+            .is_some_and(|(_, cause)| rate_limited(cause))
+}
+
+/// Tells whether a research agent that exited failing was refused for a rate or usage
+/// limit: Codex's own failure message in its stdout log, or the first line of Claude
+/// Code's printed reply. Takes the harness, the agent state folder, the report path and
+/// the log bound; both are read bounded and never through a link.
+#[cfg(unix)]
+fn refused_for_limit(harness: ResearchHarness, agent: &Path, output: &Path, max: u64) -> bool {
+    match harness {
+        ResearchHarness::Codex => {
+            rate_limited(&agent_failure(&agent.join("events.jsonl"), harness, max))
+        }
+        ResearchHarness::ClaudeCode => read_bounded(output, max).is_ok_and(|text| {
+            text.lines()
+                .find(|line| !line.trim().is_empty())
+                .is_some_and(rate_limited)
+        }),
     }
 }
 
@@ -1793,6 +2144,43 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// The plain reason a read-only agent stopped with an error: Codex's own
+/// message from its last `turn.failed` event, else its last `error` event,
+/// else the generic reason; a message that is a provider's JSON error body
+/// gives its inner message. Takes the agent's stdout log, its harness and
+/// the log bound; the log is read bounded and never through a link.
+#[cfg(unix)]
+fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
+    const GENERIC: &str = "Agent stopped with an error";
+    if harness != ResearchHarness::Codex {
+        return GENERIC.to_owned();
+    }
+    let Ok(text) = read_bounded(log, max) else {
+        return GENERIC.to_owned();
+    };
+    let (mut turn, mut error) = (None, None);
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (slot, message) = match event["type"].as_str() {
+            Some("turn.failed") => (&mut turn, &event["error"]["message"]),
+            Some("error") => (&mut error, &event["message"]),
+            _ => continue,
+        };
+        if let Some(message) = message.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            let inner = serde_json::from_str::<serde_json::Value>(message)
+                .ok()
+                .and_then(|body| body["error"]["message"].as_str().map(str::to_owned));
+            *slot = Some(inner.unwrap_or_else(|| message.to_owned()));
+        }
+    }
+    turn.or(error).map_or_else(
+        || GENERIC.to_owned(),
+        |message| format!("Agent stopped: {message}"),
+    )
 }
 
 fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
@@ -1976,7 +2364,9 @@ fn write_report(root: &Path, kind: &str, report: &str) -> io::Result<PathBuf> {
     Ok(target)
 }
 
-fn utc_date(time: SystemTime) -> String {
+/// Formats an instant as a UTC minute for plain status text. Takes the instant.
+/// Returns `YYYY-MM-DD HH:MM UTC`; an instant before the epoch reads as the epoch.
+pub(crate) fn utc_date(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2011,6 +2401,30 @@ mod tests {
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    /// Setting up one project's repository must not wait for another project's setup:
+    /// the lock covers one repository, so unrelated projects set up at the same time.
+    #[test]
+    fn a_project_repository_sets_up_while_another_projects_setup_holds_its_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let (busy, free, tmp) = (base.join("busy"), base.join("free"), base.join("tmp"));
+        for folder in [&busy, &free, &tmp] {
+            fs::create_dir(folder).unwrap();
+        }
+        let _held = repository_setup(&busy);
+        let (done, finished) = std::sync::mpsc::channel();
+        let root = free.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(ensure_repository(&root, &tmp).map_err(|e| e.to_string()));
+        });
+        finished
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the free project waited for the busy project's setup lock")
+            .unwrap();
+        assert!(free.join(".git").is_dir());
+        assert!(!busy.join(".git").exists());
+    }
 
     struct EngineRoot {
         _temp: tempfile::TempDir,
@@ -2059,6 +2473,118 @@ mod tests {
         }
     }
 
+    /// The managed Codex connection these lease tests sign in with.
+    fn codex_connection() -> ModelConnection {
+        ModelConnection {
+            id: reference("codex-connection"),
+            provider: reference("openai"),
+            harness: reference("codex"),
+            protocol: reference("native"),
+            account_ref: reference("codex-account"),
+            endpoint: ModelEndpoint::Native {},
+            model: ModelReference {
+                id: "native-default".into(),
+                author: reference("openai"),
+            },
+            auth: ModelAuthentication::NativeManaged {
+                profile_ref: reference("codex-profile"),
+            },
+        }
+    }
+
+    /// A research agent on a managed ChatGPT account gets neither the account's ChatGPT
+    /// apps nor its remote plugins, with tools on or off, as team agents and the master.
+    #[test]
+    fn a_managed_codex_research_agent_gets_no_chatgpt_apps_or_plugins() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        for tools in [false, true] {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                Path::new("/work"),
+                Path::new("/work/report.md"),
+                Path::new("/home"),
+                tools,
+                &account,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap())
+                .collect();
+            for setting in ["features.apps=false", "features.plugins=false"] {
+                assert!(
+                    args.windows(2).any(|pair| pair == ["-c", setting]),
+                    "{tools} {setting}: {args:?}"
+                );
+            }
+        }
+    }
+
+    /// A research job's lease names the job as a holder of its account in the agent
+    /// register while the lease lives, and no longer once it ends.
+    #[test]
+    fn a_research_lease_names_its_job_as_a_holder_of_the_account_until_it_ends() {
+        let root = engine_root();
+        let agents = Arc::new(Agents::open(root.database.parent().unwrap()).unwrap());
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits::default(),
+        )
+        .unwrap()
+        .with_agents(agents.clone());
+        let host = host();
+        let connection = codex_connection();
+        let custody_id = {
+            let mut custody = runner.custody.lock().unwrap();
+            custody
+                .as_mut()
+                .unwrap()
+                .prepare(&host, &connection)
+                .unwrap()
+                .0
+        };
+        let binding = binding(&host, &connection, custody_id);
+        let job = ResearchJob {
+            id: 7,
+            project: "alpha".into(),
+            kind: "market_research".into(),
+            harness: "codex".into(),
+            tools: false,
+            status: ResearchStatus::Running,
+            attempts: 1,
+            claimer: Some("runner-test".into()),
+            report_path: None,
+            error: None,
+            cancel_requested: false,
+            output_bytes: 0,
+            created_ms: 1,
+            started_ms: Some(1),
+            heartbeat_ms: None,
+            finished_ms: None,
+        };
+        let project = ProjectId::new("alpha").unwrap();
+        let held = runner
+            .held_lease(&host, &binding, "job-7-1", &project, &job)
+            .unwrap();
+        assert_eq!(
+            agents.holders(&connection.id),
+            vec![Holder::Research {
+                project,
+                job: 7,
+                title: kind_label("market_research"),
+            }]
+        );
+        assert!(agents.holders(&reference("other-connection")).is_empty());
+        drop(held);
+        assert!(agents.holders(&connection.id).is_empty());
+    }
+
     fn binding(
         host: &HostStamp,
         connection: &ModelConnection,
@@ -2076,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn two_research_launches_never_hold_one_managed_profile_at_once() {
+    fn three_research_launches_share_one_managed_profile_while_a_sign_in_waits() {
         let root = engine_root();
         let runner = ResearchRunner::new(
             &root.database,
@@ -2086,21 +2612,7 @@ mod tests {
         )
         .unwrap();
         let host = host();
-        let connection = ModelConnection {
-            id: reference("codex-connection"),
-            provider: reference("openai"),
-            harness: reference("codex"),
-            protocol: reference("native"),
-            account_ref: reference("codex-account"),
-            endpoint: ModelEndpoint::Native {},
-            model: ModelReference {
-                id: "native-default".into(),
-                author: reference("openai"),
-            },
-            auth: ModelAuthentication::NativeManaged {
-                profile_ref: reference("codex-profile"),
-            },
-        };
+        let connection = codex_connection();
         let (custody_id, default_home) = {
             let mut custody = runner.custody.lock().unwrap();
             let custody = custody.as_mut().unwrap();
@@ -2111,13 +2623,38 @@ mod tests {
             )
         };
         let binding = binding(&host, &connection, custody_id);
-        let first = runner.lease(&host, &binding, "job-1-1", 1).unwrap();
-        assert_eq!(lease_home(&first).unwrap(), default_home);
+        let leases = (1..=3)
+            .map(|job| {
+                runner
+                    .lease(&host, &binding, &format!("job-{job}-1"), 1)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for lease in &leases {
+            assert_eq!(lease.profile_path().unwrap(), default_home);
+        }
+        let mut sign_in =
+            NativeProfileCustody::capture(&root.database, &fs::metadata(&root.database).unwrap())
+                .unwrap();
+        let operation = RequestId::new("sign-in").unwrap();
+        let authentication = NativeProfileUsePurpose::Authentication;
+        assert_eq!(
+            sign_in
+                .acquire_use(&host, &binding, &operation, 1, authentication)
+                .err()
+                .expect("a sign-in waits for running agents")
+                .0,
+            PROFILE_BUSY
+        );
+        drop(leases);
+        let signing_in = sign_in
+            .acquire_use(&host, &binding, &operation, 1, authentication)
+            .unwrap();
         assert!(matches!(
-            runner.lease(&host, &binding, "job-2-1", 1),
+            runner.lease(&host, &binding, "job-4-1", 1),
             Err(RunError::Busy)
         ));
-        drop(first);
+        drop(signing_in);
         let holding = AtomicU64::new(0);
         let most = AtomicU64::new(0);
         let granted = AtomicU64::new(0);
@@ -2147,12 +2684,9 @@ mod tests {
                 });
             }
         });
-        assert_eq!(most.load(Ordering::SeqCst), 1);
-        assert!(granted.load(Ordering::SeqCst) > 0);
-        assert_eq!(
-            granted.load(Ordering::SeqCst) + refused.load(Ordering::SeqCst),
-            120
-        );
+        assert!(most.load(Ordering::SeqCst) >= 1);
+        assert_eq!(refused.load(Ordering::SeqCst), 0);
+        assert_eq!(granted.load(Ordering::SeqCst), 120);
         assert!(runner.lease(&host, &binding, "job-3-1", 1).is_ok());
     }
 
@@ -2201,8 +2735,11 @@ mod tests {
         let lease = custody
             .acquire_configured_rcli_use(&host, &binding, &profile, &operation, 1)
             .unwrap();
-        assert_eq!(lease_home(&lease).unwrap(), home);
-        assert_ne!(lease_home(&lease).unwrap(), custody.profile_home(&profile));
+        assert_eq!(lease.profile_path().unwrap(), home);
+        assert_ne!(
+            lease.profile_path().unwrap(),
+            custody.profile_home(&profile)
+        );
         drop(lease);
     }
 
@@ -2307,6 +2844,26 @@ mod tests {
         assert_eq!(utc_date(instant), "2026-10-23 04:32 UTC");
         let leap = UNIX_EPOCH + Duration::from_secs(951_782_400);
         assert_eq!(utc_date(leap), "2000-02-29 00:00 UTC");
+    }
+
+    /// The retry line is Codex 0.164's own stderr record of a provider 429 in a real
+    /// research run; ids that happen to hold 429 and other log targets never count.
+    #[test]
+    fn a_codex_retry_after_a_limit_counts_as_a_rate_limit_and_its_ids_never_do() {
+        const RETRY: &str = r#"2026-10-26T09:47:31.137351Z  WARN session_loop{thread_id=01a1779b-98a8-72d0-97aa-dd1317b20845}:submission_dispatch{otel.name="op.dispatch.turn_input" submission.id="01a1779b-9a6e-73e0-b67d-9282fb1fdcd6" codex.op="turn_input"}:turn{otel.name="session_task.turn" thread.id=01a1779b-98a8-72d0-97aa-dd1317b20845 turn.id=01a1779b-9a6e-73e0-b67d-9282fb1fdcd6 model=gpt-6.1-sol codex.turn.reasoning_effort=low}: codex_core::responses_retry: stream disconnected - retrying sampling request (1/5 in 102.999894334s)... turn_id=01a1779b-9a6e-73e0-b67d-9282fb1fdcd6 retries=1 max_retries=5 sampling_error=exceeded retry limit, last status: 429 Too Many Requests"#;
+        assert!(codex_retry_limited(RETRY));
+        let other_cause = RETRY
+            .replace(
+                "last status: 429 Too Many Requests",
+                "stream closed before response.completed",
+            )
+            .replace("9282fb1fdcd6", "9282fb1f4296");
+        assert!(other_cause.contains("429"));
+        assert!(!codex_retry_limited(&other_cause));
+        assert!(!codex_retry_limited(
+            &RETRY.replace("codex_core::responses_retry", "codex_core::client")
+        ));
+        assert!(!codex_retry_limited(""));
     }
 
     #[test]
@@ -2418,6 +2975,193 @@ mod tests {
         );
     }
 
+    fn repository_git(project: &Path, arguments: &[&str]) {
+        let status = crate::spawn_gate::status(
+            Command::new(GIT)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "core.hooksPath=/dev/null"])
+                .args(["-c", "user.name=Test", "-c", "user.email=test@invalid"])
+                .arg("-C")
+                .arg(project)
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    }
+
+    #[test]
+    fn filter_overrides_blank_each_named_driver_and_refuse_names_a_flag_cannot_carry() {
+        let listing = b"core.bare\0filter.lfs.smudge\0filter.lfs.clean\0filter.a.b.process\0filter.required\0";
+        let overrides = filter_overrides(listing).unwrap();
+        assert_eq!(overrides.len(), 16);
+        for expected in [
+            "filter.lfs.smudge=",
+            "filter.lfs.clean=",
+            "filter.lfs.process=",
+            "filter.lfs.required=false",
+            "filter.a.b.smudge=",
+            "filter.a.b.required=false",
+        ] {
+            assert!(
+                overrides.iter().any(|argument| argument == expected),
+                "{expected}"
+            );
+        }
+        assert!(filter_overrides(b"core.bare\0").unwrap().is_empty());
+        for refused in [
+            &b"filter.x=y.smudge\0"[..],
+            b"filter..smudge\0",
+            b"filter.a b.smudge\0",
+            b"filter.\xff.smudge\0",
+        ] {
+            assert!(filter_overrides(refused).is_err(), "{refused:?}");
+        }
+        let many: Vec<u8> = (0..=FILTER_DRIVERS_MAX)
+            .flat_map(|index| format!("filter.d{index}.smudge\0").into_bytes())
+            .collect();
+        assert!(filter_overrides(&many).is_err());
+    }
+
+    #[test]
+    fn adding_an_agent_worktree_runs_no_command_the_repository_configures() {
+        let mut problems = Vec::new();
+        for hostile in [
+            "smudge",
+            "process",
+            "required",
+            "dotted include",
+            "worktree include",
+            "info attributes",
+            "agent global config",
+            "post-checkout hook",
+            "unsafe driver name",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let project = base.join("project");
+            let home = base.join("agent").join("home");
+            let tmp = base.join("agent").join("tmp");
+            let profiles = base.join("profiles");
+            for folder in [&project, &home, &tmp, &profiles] {
+                fs::create_dir_all(folder).unwrap();
+            }
+            ensure_repository(&project, &tmp).unwrap();
+            let marker = tmp.join("ran");
+            let command = format!("/usr/bin/touch '{}'; /bin/cat", marker.display());
+            fs::write(project.join("a.txt"), "plain\n").unwrap();
+            let attributes = match hostile {
+                "dotted include" => Some("* filter=a.b\n"),
+                "worktree include" => Some("* filter=late\n"),
+                "unsafe driver name" => Some("* filter=x=y\n"),
+                "info attributes" | "agent global config" | "post-checkout hook" => None,
+                _ => Some("* filter=hostile\n"),
+            };
+            if let Some(attributes) = attributes {
+                fs::write(project.join(".gitattributes"), attributes).unwrap();
+            }
+            repository_git(&project, &["add", "-A"]);
+            repository_git(&project, &["commit", "-q", "-m", "files"]);
+            let git_dir = project.join(".git");
+            match hostile {
+                "smudge" => {
+                    repository_git(&project, &["config", "filter.hostile.smudge", &command])
+                }
+                "process" => {
+                    repository_git(&project, &["config", "filter.hostile.process", &command])
+                }
+                "required" => {
+                    repository_git(&project, &["config", "filter.hostile.smudge", &command]);
+                    repository_git(&project, &["config", "filter.hostile.required", "true"]);
+                }
+                "dotted include" => {
+                    fs::write(
+                        git_dir.join("hostile.config"),
+                        format!("[filter \"a.b\"]\n\tsmudge = {command}\n"),
+                    )
+                    .unwrap();
+                    repository_git(&project, &["config", "include.path", "hostile.config"]);
+                }
+                "worktree include" => {
+                    fs::write(
+                        git_dir.join("late.config"),
+                        format!("[filter \"late\"]\n\tsmudge = {command}\n"),
+                    )
+                    .unwrap();
+                    repository_git(
+                        &project,
+                        &[
+                            "config",
+                            "includeIf.gitdir:**/worktrees/**.path",
+                            &git_dir.join("late.config").display().to_string(),
+                        ],
+                    );
+                }
+                "info attributes" => {
+                    fs::write(
+                        git_dir.join("info").join("attributes"),
+                        "* filter=hostile\n",
+                    )
+                    .unwrap();
+                    repository_git(&project, &["config", "filter.hostile.smudge", &command]);
+                }
+                "agent global config" => {
+                    fs::write(home.join("attributes"), "* filter=h\n").unwrap();
+                    fs::write(
+                        home.join(".gitconfig"),
+                        format!(
+                            "[core]\n\tattributesFile = {}\n[filter \"h\"]\n\tsmudge = {command}\n",
+                            home.join("attributes").display()
+                        ),
+                    )
+                    .unwrap();
+                }
+                "post-checkout hook" => {
+                    let hooks = git_dir.join("hooks");
+                    fs::create_dir_all(&hooks).unwrap();
+                    let hook = hooks.join("post-checkout");
+                    fs::write(
+                        &hook,
+                        format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+                    )
+                    .unwrap();
+                    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                "unsafe driver name" => {
+                    repository_git(&project, &["config", "filter.x=y.smudge", &command])
+                }
+                other => panic!("no setup for {other}"),
+            }
+            let sandbox =
+                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+                    .unwrap();
+            let profile = profiles.join("agent.sb");
+            sandbox.install(&profile).unwrap();
+            let worktree = project.join("worktrees").join("agent-one");
+            let added = add_worktree(&sandbox, &profile, &worktree);
+            if marker.exists() {
+                problems.push(format!("{hostile}: the repository's command ran"));
+            }
+            let checked_out = fs::read_to_string(worktree.join("a.txt")).ok();
+            match (hostile, &added) {
+                ("unsafe driver name", Ok(())) => {
+                    problems.push(format!("{hostile}: the worktree was added"))
+                }
+                ("unsafe driver name", Err(_)) => {}
+                (_, Err(error)) => problems.push(format!("{hostile}: {error}")),
+                (_, Ok(())) if checked_out.as_deref() != Some("plain\n") => {
+                    problems.push(format!("{hostile}: checked out {checked_out:?}"))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(problems, Vec::<String>::new());
+    }
+
     #[test]
     fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
         let temp = tempfile::tempdir().unwrap();
@@ -2461,3 +3205,10 @@ mod tests {
         ensure_repository(&created, &home).unwrap();
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runner/live_claude_tests.rs"]
+mod live_claude_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runner/live_codex_tests.rs"]
+mod live_codex_tests;

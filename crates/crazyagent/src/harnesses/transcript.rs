@@ -34,6 +34,7 @@ pub struct TranscriptReader {
     source: Transcript,
     cwd: String,
     since: SystemTime,
+    earlier: Vec<FileKey>,
     file: Option<File>,
     pending: Vec<u8>,
     in_turn: bool,
@@ -41,14 +42,44 @@ pub struct TranscriptReader {
 }
 
 impl TranscriptReader {
-    /// Starts following a session record that may not exist yet.
-    /// Inputs: where the harness writes it, the canonical working folder of the session and
-    /// the time the harness started. Output: the reader, positioned at the record's start.
+    /// Starts following the session record of a harness about to start, which does not exist
+    /// yet. Every Codex rollout already present is remembered and never taken as this
+    /// session's record, whatever its time or working folder, since another writer of a shared
+    /// home may have left it. Inputs: where the harness writes it, the canonical working folder
+    /// of the session and the time the harness starts. Output: the reader at the record's start.
     pub fn new(source: Transcript, cwd: &Path, since: SystemTime) -> Self {
+        let earlier = match &source {
+            Transcript::CodexRollouts { sessions } => {
+                let mut keys: Vec<FileKey> = rollouts(sessions)
+                    .into_iter()
+                    .map(|(_, _, key)| key)
+                    .collect();
+                keys.sort();
+                keys
+            }
+            _ => Vec::new(),
+        };
+        Self::with_earlier(source, cwd, since, earlier)
+    }
+
+    /// Follows the session record of a harness that is already running, such as a pane the
+    /// engine adopts after a restart, whose record may already exist. Inputs: as for `new`.
+    /// Output: the reader at the record's start.
+    pub fn adopted(source: Transcript, cwd: &Path, since: SystemTime) -> Self {
+        Self::with_earlier(source, cwd, since, Vec::new())
+    }
+
+    fn with_earlier(
+        source: Transcript,
+        cwd: &Path,
+        since: SystemTime,
+        earlier: Vec<FileKey>,
+    ) -> Self {
         Self {
             source,
             cwd: cwd.to_string_lossy().into_owned(),
             since,
+            earlier,
             file: None,
             pending: Vec::new(),
             in_turn: false,
@@ -69,7 +100,7 @@ impl TranscriptReader {
         if self.file.is_none() {
             self.file = match &self.source {
                 Transcript::CodexRollouts { sessions } => {
-                    find_rollout(sessions, &self.cwd, self.since)
+                    find_rollout(sessions, &self.cwd, self.since, &self.earlier)
                 }
                 Transcript::ClaudeSession { file } => open_plain(file),
                 Transcript::Unavailable => None,
@@ -152,9 +183,24 @@ fn open_plain(path: &Path) -> Option<File> {
     file.metadata().ok()?.is_file().then_some(file)
 }
 
-fn find_rollout(sessions: &Path, cwd: &str, since: SystemTime) -> Option<File> {
-    let earliest = since.checked_sub(ROLLOUT_CLOCK_SLACK).unwrap_or(since);
-    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
+#[cfg(unix)]
+type FileKey = (u64, u64);
+#[cfg(not(unix))]
+type FileKey = PathBuf;
+
+#[cfg(unix)]
+fn file_key(metadata: &std::fs::Metadata, _path: &Path) -> FileKey {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn file_key(_metadata: &std::fs::Metadata, path: &Path) -> FileKey {
+    path.to_path_buf()
+}
+
+fn rollouts(sessions: &Path) -> Vec<(SystemTime, PathBuf, FileKey)> {
+    let mut found = Vec::new();
     let mut scanned = 0;
     for year in newest(sessions, 2) {
         for month in newest(&year, 2) {
@@ -175,18 +221,43 @@ fn find_rollout(sessions: &Path, cwd: &str, since: SystemTime) -> Option<File> {
                     let Ok(metadata) = entry.metadata() else {
                         continue;
                     };
-                    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    if metadata.is_file() && modified >= earliest {
-                        candidates.push((modified, entry.path()));
+                    if metadata.is_file() {
+                        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                        let path = entry.path();
+                        let key = file_key(&metadata, &path);
+                        found.push((modified, path, key));
                     }
                 }
             }
         }
     }
+    found
+}
+
+fn find_rollout(
+    sessions: &Path,
+    cwd: &str,
+    since: SystemTime,
+    earlier: &[FileKey],
+) -> Option<File> {
+    let earliest = since.checked_sub(ROLLOUT_CLOCK_SLACK).unwrap_or(since);
+    let mut candidates: Vec<(SystemTime, PathBuf)> = rollouts(sessions)
+        .into_iter()
+        .filter(|(modified, _, key)| *modified >= earliest && earlier.binary_search(key).is_err())
+        .map(|(modified, path, _)| (modified, path))
+        .collect();
     candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
     candidates
         .into_iter()
-        .find_map(|(_, path)| open_plain(&path).filter(|file| started_in(file, cwd)))
+        .find_map(|(_, path)| {
+            open_plain(&path)
+                .filter(|file| {
+                    file.metadata().is_ok_and(|metadata| {
+                        earlier.binary_search(&file_key(&metadata, &path)).is_err()
+                    })
+                })
+                .filter(|file| started_in(file, cwd))
+        })
         .and_then(rewound)
 }
 

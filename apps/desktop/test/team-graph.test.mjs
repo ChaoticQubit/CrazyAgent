@@ -190,12 +190,15 @@ test("terminal sizes stay inside the engine limits", () => {
 test("queued input reaches the agent in order, one chunk at a time", async () => {
   const sent = [];
   let inFlight = 0;
+  let allSent;
+  const finished = new Promise((resolve) => { allSent = resolve; });
   const send = async (chunk) => {
     inFlight += 1;
     assert.equal(inFlight, 1);
     await new Promise((resolve) => setTimeout(resolve, chunk.length > 1 ? 5 : 0));
     sent.push(chunk.length === 1 ? String.fromCharCode(chunk[0]) : chunk.length);
     inFlight -= 1;
+    if (sent.length === 4) allSent();
     return true;
   };
   let stops = 0;
@@ -203,7 +206,11 @@ test("queued input reaches the agent in order, one chunk at a time", async () =>
   type(io.encodeTyped("x".repeat(5000)));
   type(io.encodeTyped("b"));
   type(io.encodeTyped("\r"));
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  let timer;
+  await Promise.race([finished, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`only ${JSON.stringify(sent)} reached the agent`)), 5000);
+  })]).finally(() => clearTimeout(timer));
+  await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(sent, [4096, 904, "b", "\r"]);
   assert.equal(stops, 0);
 });
@@ -257,23 +264,68 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.doesNotMatch(none, /Connecting/);
 });
 
+test("a failed background read keeps the last graph, so an open terminal stays mounted", () => {
+  const ok = { kind: "ok", value: team };
+  const busy = { kind: "error", code: "busy", message: "The engine is busy. Try again." };
+  let state = view.graphRead(view.GRAPH_UNREAD, ok);
+  assert.deepEqual(state, { shown: ok, stale: null });
+  state = view.graphRead(state, busy);
+  assert.equal(state.shown, ok, "the graph that holds the open terminal is still shown");
+  assert.equal(state.stale, "The engine is busy. Try again.");
+  state = view.graphRead(state, { kind: "not_ready" });
+  assert.equal(state.shown, ok);
+  assert.equal(state.stale, "The team graph isn't ready in this build.");
+  state = view.graphRead(state, ok);
+  assert.deepEqual(state, { shown: ok, stale: null });
+  assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null }, "with no graph yet the error is the view");
+});
+
 test("the graph view waits for its first read before drawing", () => {
   const html = renderToStaticMarkup(createElement(view.TeamGraphView, { projectId: "chores" }));
   assert.match(html, /aria-busy="true"/);
   assert.match(html, /aria-label="Team graph"/);
 });
 
-test("a prompt from the composer reaches the agent as its text and Enter", () => {
-  const text = (bytes) => new TextDecoder().decode(bytes);
-  assert.equal(text(io.promptBytes("run the tests", false)), "run the tests\r");
-  assert.equal(text(io.promptBytes("run the tests  \n\n", true)), "run the tests\r");
-  assert.equal(text(io.promptBytes("first\nsecond", false)), "first\rsecond\r");
-  assert.equal(text(io.promptBytes("first\r\nsecond", true)), "\x1b[200~first\rsecond\x1b[201~\r");
-  assert.equal(text(io.promptBytes("one line", true)), "one line\r");
-  assert.equal(text(io.promptBytes("a\x1b[201~b\x07\tc", true)), "a[201~b\tc\r");
-  assert.equal(io.promptBytes("   \n ", true).length, 0);
-  assert.equal(text(io.promptBytes("é", false)), "é\r");
-  assert.equal(io.promptBytes("x".repeat(io.PROMPT_CHARS_MAX + 50), false).length, io.PROMPT_CHARS_MAX + 1);
+test("a composer prompt is checked against the engine's limits before it is sent", () => {
+  assert.equal(io.PROMPT_BYTES_MAX, 4096);
+  assert.deepEqual(io.promptText("  run the tests \n\n"), { kind: "ok", text: "run the tests" });
+  assert.deepEqual(io.promptText("first\r\nsecond"), { kind: "ok", text: "first\r\nsecond" });
+  assert.deepEqual(io.promptText(" \n "), { kind: "blank" });
+  assert.deepEqual(io.promptText("x".repeat(4096)), { kind: "ok", text: "x".repeat(4096) });
+  assert.deepEqual(io.promptText("x".repeat(4097)), { kind: "too_long", reason: "Too long: 4097 of 4096 bytes." });
+  assert.deepEqual(io.promptText("\u00e9".repeat(2049)), { kind: "too_long", reason: "Too long: 4098 of 4096 bytes." });
+});
+
+test("typed keys and a sent prompt go out in order on one queue, and only the prompt is a prompt", async () => {
+  const sent = [];
+  let stops = 0;
+  const run = io.jobQueue(() => { stops += 1; });
+  const type = io.keyQueue(run, async (chunk) => {
+    await new Promise((resolve) => setTimeout(resolve, chunk.length > 1 ? 5 : 0));
+    sent.push(["keys", chunk.length]);
+    return true;
+  });
+  type(io.encodeTyped("x".repeat(5000)));
+  assert.equal(run(async () => { sent.push(["prompt", "run the tests"]); return true; }), true);
+  type(io.encodeTyped("\r"));
+  const settle = async (done) => {
+    for (let waited = 0; !done() && waited < 2000; waited += 5) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  await settle(() => sent.length >= 4);
+  assert.deepEqual(sent, [["keys", 4096], ["keys", 904], ["prompt", "run the tests"], ["keys", 1]]);
+  assert.equal(stops, 0);
+  const halted = io.jobQueue(() => { stops += 1; });
+  assert.equal(halted(async () => false), true);
+  await settle(() => stops === 1);
+  assert.equal(halted(async () => true), false);
+  assert.equal(stops, 1);
+});
+
+test("the note under a live terminal says typed keys are not kept or told to the master", async () => {
+  const panel = await import("../src/screens/team/terminal-panel.tsx");
+  assert.equal(panel.typingNote(team.nodes[2]), "Typing goes straight to the master.");
+  assert.equal(panel.typingNote(team.nodes[0]),
+    "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
 });
 
 test("the composer names who reads the prompt and says a sub-agent's master is told", () => {

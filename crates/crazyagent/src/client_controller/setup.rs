@@ -5,7 +5,7 @@ use crate::setup::SetupStatus;
 impl OwnerController {
     fn github_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
@@ -47,7 +47,7 @@ impl OwnerController {
         self.send_pending().await
     }
 
-    /// Removes one installed default-pack entry; an always-on entry is refused.
+    /// Removes one installed default-pack entry; an entry that is not installed is refused.
     /// Takes the entry id and the client generation.
     /// Returns the actual owner response; a rejection carries a plain code.
     pub async fn remove_pack_entry(

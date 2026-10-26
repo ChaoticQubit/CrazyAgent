@@ -1,16 +1,16 @@
- [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Claude         
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Anthropic      
 ────────────────────────────────────────────────────────────────────────────────
   @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
 ──━━━━━━━━━━────────────────────────────────────────────────────────────────────
-  Claude                                                                        
+  Anthropic                                                                     
   How do you want to connect?                                                   
                                                                                 
   ▌ Sign in with your Claude subscription                                       
-  ▌   Uses your Claude Pro or Max plan. Claude opens in your browser.           
+  ▌   Recommended. Uses your Claude Pro or Max plan. Claude opens in your       
+  ▌   browser.                                                                  
                                                                                 
     Use an API key                                                              
       Pay per use with an Anthropic key.                                        
-                                                                                
                                                                                 
                                                                                 
                                                                                 

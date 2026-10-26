@@ -5,15 +5,14 @@ use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
 use super::{Step, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
+use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
 #[cfg(unix)]
 use crate::research::runner::ReadOnlyEnding;
 #[cfg(unix)]
 use crate::research::runner::ResearchLimits;
-use crate::research::runner::{
-    ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchRunner, RunError,
-};
+use crate::research::runner::{ReadOnlyRun, ResearchHarness, ResearchRunner, RunError};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -102,8 +101,8 @@ struct Claimed {
 
 /// Picks the research account for a pool and the harnesses the runner can
 /// start. Input: the pool reference and the usable harnesses. Output: the
-/// account, or `None` when no pool member fits.
-type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send;
+/// account, or why there is none, such as every fitting member paused.
+type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send;
 
 /// What the account and graphify lookups resolve to on every step, so a
 /// newly assigned pool member or a newly installed graphify takes effect
@@ -139,7 +138,7 @@ impl OnboardingService {
         tick: Duration,
     ) -> Self
     where
-        A: Fn(&CredentialRef, &[ResearchHarness]) -> Option<ResearchAccount> + Send + 'static,
+        A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
         assert!(!tick.is_zero());
@@ -234,18 +233,21 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 }
 
 /// Claims the oldest waiting step: a graph build, or a mapping once its
-/// graph step has finished either way. Marks it running under `claimer`
-/// and counts the attempt. Returns `None` when nothing waits.
+/// graph step has finished either way and while the owner has not saved
+/// the setup. Marks it running under `claimer` and counts the attempt.
+/// Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding
+            "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed')))
+                OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
+                    AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
+                        AND json_extract(s.body,'$.revision')>?1)))
              ORDER BY created_ms,project LIMIT 1",
-            [],
+            [crate::project_setup::FIRST_REVISION as i64],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -377,7 +379,7 @@ fn run_step(
             (step, Some(drafted))
         }
     };
-    let waits = step == Step::Waiting;
+    let waits = matches!(step, Step::Waiting { .. });
     let _ = finish(database, &work.claimer, claimed, &step, drafted.as_ref());
     waits
 }
@@ -400,7 +402,7 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         #[cfg(unix)]
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
         #[cfg(unix)]
-        Ok(GraphEnding::Stopped) => Step::Waiting,
+        Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(_) => Step::failed(GRAPH_NOT_STARTED),
     }
 }
@@ -408,7 +410,8 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
 /// Maps the project: collects the bounded evidence, saves the draft the
 /// manifests alone give, then asks a tools-off agent on the pool for an
 /// overview and the remaining fields and merges its answer into the gaps.
-/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with.
+/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with,
+/// and waits while every pool member that fits is paused after a limit.
 /// Returns the step's ending and the draft to keep.
 fn mapping_step(
     work: &Work,
@@ -433,10 +436,17 @@ fn mapping_step(
     if harnesses.is_empty() {
         return (Step::failed(CODEX_MISSING), base);
     }
-    let Some(account) = (work.accounts)(&claimed.pool, &harnesses)
-        .filter(|account| harnesses.contains(&account.harness()))
-    else {
-        return (Step::failed(NO_ACCOUNT), base);
+    let account = match (work.accounts)(&claimed.pool, &harnesses) {
+        AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => *account,
+        AccountPick::Paused { until_ms } => {
+            return (
+                Step::Waiting {
+                    until_ms: Some(until_ms),
+                },
+                base,
+            );
+        }
+        _ => return (Step::failed(NO_ACCOUNT), base),
     };
     let name = run_name(claimed);
     #[cfg(unix)]
@@ -454,12 +464,12 @@ fn mapping_step(
         #[cfg(unix)]
         Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
         #[cfg(unix)]
-        Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(reason), base),
+        Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
         #[cfg(unix)]
-        Ok(ReadOnlyEnding::Stopped) => (Step::Waiting, base),
-        Err(RunError::Busy) => (Step::Waiting, base),
+        Ok(ReadOnlyEnding::Stopped) => (Step::WAITING, base),
+        Err(RunError::Busy) => (Step::WAITING, base),
         Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
         Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
     }
@@ -588,8 +598,17 @@ pub fn start_for_engine(
         move |pool: &CredentialRef, harnesses: &[ResearchHarness]| {
             resolver.pool_pick(pool, harnesses)
         },
-        installed_graphify,
+        move || engine_graphify(&runtime),
         OnboardingLimits::default(),
         ENGINE_TICK,
     ))
+}
+
+/// The graphify an engine's graph step runs, looked up again on each step the way
+/// setup finds it: `<engine root>/setup/bin`, where setup installs it, first, then
+/// the system folders setup searches. Input: the engine root. Output: the program,
+/// or `None` when neither has one.
+#[cfg(unix)]
+pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
+    crate::setup::platform_installer(runtime).program(crate::setup::Dependency::Graphify.program())
 }

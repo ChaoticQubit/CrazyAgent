@@ -25,30 +25,50 @@ enum Focus {
     Add,
 }
 
-/// The Existing folder page: brings a folder on this computer into the
-/// projects folder, moved by default or copied with its size shown first and a
-/// warning above 1 GB. The added folder then opens its setup.
+/// How the owner adds the folder: set up where it is (the default, nothing
+/// on disk moves), or explicitly moved or copied into the projects folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Way {
+    Here,
+    Into(AddMode),
+}
+
+const WAYS: [(Way, &str); 3] = [
+    (Way::Here, "Use where it is"),
+    (Way::Into(AddMode::Move), "Move"),
+    (Way::Into(AddMode::Copy), "Copy"),
+];
+
+/// The Existing folder page: sets up a folder on this computer where it is
+/// by default, or moves or copies it into the projects folder with the target
+/// shown first, a Move confirmed with a second Enter, and a Copy with its size
+/// shown first, a warning above 1 GB and the linked git worktrees it leaves with
+/// the original. The folder then opens its setup.
 pub struct AddFolder {
     field: TextField,
-    mode: AddMode,
+    way: Way,
+    confirming: bool,
     focus: Focus,
     home: Option<String>,
     size: Option<(String, Load<u64>)>,
+    worktrees: usize,
     sent: Option<String>,
     problem: Option<String>,
 }
 
 impl AddFolder {
-    /// An empty Existing folder page set to Move.
+    /// An empty Existing folder page set to use the folder where it is.
     /// Takes the context.
     /// Returns the screen; the projects folder path arrives from the engine.
     pub fn new(_ctx: &Ctx) -> Self {
         Self {
             field: TextField::new("Folder", PATH_BYTES_MAX).placeholder("~/Code/my-app"),
-            mode: AddMode::Move,
+            way: Way::Here,
+            confirming: false,
             focus: Focus::Folder,
             home: None,
             size: None,
+            worktrees: 0,
             sent: None,
             problem: None,
         }
@@ -74,6 +94,57 @@ impl AddFolder {
         Ok(path)
     }
 
+    fn name(source: &str) -> String {
+        Path::new(source)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn target(&self, source: &str) -> Option<String> {
+        let name = Self::name(source);
+        self.home
+            .as_ref()
+            .filter(|_| !name.is_empty())
+            .map(|home| format!("{home}/{name}"))
+    }
+
+    fn step(&mut self, forward: bool) {
+        let at = WAYS
+            .iter()
+            .position(|(way, _)| *way == self.way)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % WAYS.len()
+        } else {
+            (at + WAYS.len() - 1) % WAYS.len()
+        };
+        self.way = WAYS[next].0;
+        self.confirming = false;
+    }
+
+    fn here(&mut self, source: &str, ctx: &mut Ctx) -> Flow {
+        let real = match std::fs::canonicalize(source) {
+            Ok(real) if real.is_dir() => real,
+            _ => {
+                self.problem = Some("That folder does not exist.".into());
+                self.focus = Focus::Folder;
+                return Flow::Handled;
+            }
+        };
+        let path = real.to_string_lossy().into_owned();
+        let name = Self::name(&path);
+        Flow::Replace(open(
+            &Place::Onboarding {
+                path,
+                name,
+                project: None,
+            },
+            ctx,
+        ))
+    }
+
     fn sized(&self, source: &str) -> Option<&Load<u64>> {
         self.size
             .as_ref()
@@ -81,46 +152,52 @@ impl AddFolder {
             .map(|(_, size)| size)
     }
 
-    fn submit(&mut self, ctx: &mut Ctx) {
+    fn submit(&mut self, ctx: &mut Ctx) -> Flow {
         let source = match self.source(ctx) {
             Ok(source) => source,
             Err(problem) => {
                 self.problem = Some(problem.into());
                 self.focus = Focus::Folder;
-                return;
+                return Flow::Handled;
             }
         };
         self.problem = None;
-        if self.mode == AddMode::Copy {
+        let mode = match self.way {
+            Way::Here => return self.here(&source, ctx),
+            Way::Into(mode) => mode,
+        };
+        if mode == AddMode::Move && !self.confirming {
+            self.confirming = true;
+            return Flow::Handled;
+        }
+        if mode == AddMode::Copy {
             match self.sized(&source) {
                 Some(Load::Ready(_)) => {}
-                Some(Load::Loading) => return,
+                Some(Load::Loading) => return Flow::Handled,
                 _ => {
                     self.size = Some((source.clone(), Load::Loading));
                     ask(ctx, IntakeQuery::FolderSize { path: source });
-                    return;
+                    return Flow::Handled;
                 }
             }
         }
+        self.confirming = false;
         self.sent = Some(source.clone());
         let generation = ctx.next_generation();
         ask(
             ctx,
             IntakeQuery::AddExisting {
                 source,
-                mode: self.mode,
+                mode,
                 generation,
             },
         );
+        Flow::Handled
     }
 
-    fn added(&self, source: &str, ctx: &mut Ctx) -> Flow {
-        let name = Path::new(source)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned();
-        let verb = match self.mode {
+    fn added(&self, source: &str, mode: AddMode, ctx: &mut Ctx) -> Flow {
+        let name = Self::name(source);
+        let verb = match mode {
             AddMode::Move => "Moved",
             AddMode::Copy => "Copied",
         };
@@ -142,9 +219,11 @@ impl AddFolder {
     }
 
     fn button(&self, ctx: &Ctx) -> &'static str {
-        match self.mode {
-            AddMode::Move => "Move into projects folder",
-            AddMode::Copy => {
+        match self.way {
+            Way::Here => "Set up here",
+            Way::Into(AddMode::Move) if self.confirming => "Move it now",
+            Way::Into(AddMode::Move) => "Move into projects folder",
+            Way::Into(AddMode::Copy) => {
                 let size = self
                     .source(ctx)
                     .ok()
@@ -176,7 +255,7 @@ impl Screen for AddFolder {
                 hint("Esc", "Back"),
             ],
             Focus::Mode => vec![
-                hint(&arrows, "Move or copy"),
+                hint(&arrows, "How to add it"),
                 hint("Enter", self.button(ctx)),
                 hint("Esc", "Back"),
             ],
@@ -196,11 +275,11 @@ impl Screen for AddFolder {
         if self.sent.is_some() {
             return Flow::Handled;
         }
+        if self.confirming && *key != Key::Enter {
+            self.confirming = false;
+        }
         match (self.focus, key) {
-            (_, Key::Enter) => {
-                self.submit(ctx);
-                Flow::Handled
-            }
+            (_, Key::Enter) => self.submit(ctx),
             (Focus::Folder, Key::Tab) => {
                 match complete(self.field.value(), Self::user_home(ctx), true) {
                     Some(completed) => self.field.set(&completed),
@@ -220,11 +299,12 @@ impl Screen for AddFolder {
                 self.focus = Focus::Folder;
                 Flow::Handled
             }
-            (Focus::Mode, Key::Left | Key::Right | Key::Char(' ')) => {
-                self.mode = match self.mode {
-                    AddMode::Move => AddMode::Copy,
-                    AddMode::Copy => AddMode::Move,
-                };
+            (Focus::Mode, Key::Right | Key::Char(' ')) => {
+                self.step(true);
+                Flow::Handled
+            }
+            (Focus::Mode, Key::Left) => {
+                self.step(false);
                 Flow::Handled
             }
             (_, Key::Esc) => Flow::Ignored,
@@ -251,6 +331,7 @@ impl Screen for AddFolder {
                 if let Some((sized, size)) = &mut self.size
                     && sized.as_str() == path.as_str()
                 {
+                    self.worktrees = crate::projects_home::linked_worktrees(Path::new(path));
                     *size = match result {
                         Ok(IntakeView::FolderSize(bytes)) => Load::Ready(*bytes),
                         Ok(_) => Load::Failed("intake_change_outcome_unknown".into()),
@@ -259,18 +340,18 @@ impl Screen for AddFolder {
                 }
                 Flow::Handled
             }
-            (IntakeQuery::AddExisting { source, .. }, result)
+            (IntakeQuery::AddExisting { source, mode, .. }, result)
                 if self.sent.as_ref() == Some(source) =>
             {
                 self.sent = None;
                 match result {
-                    Ok(IntakeView::Changed(OwnerResult::Applied)) => self.added(source, ctx),
+                    Ok(IntakeView::Changed(OwnerResult::Applied)) => self.added(source, *mode, ctx),
                     Ok(_) => {
-                        self.problem = Some(copy("intake_change_outcome_unknown").into());
+                        self.problem = Some(copy("intake_change_outcome_unknown"));
                         Flow::Handled
                     }
                     Err(code) => {
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         Flow::Handled
                     }
                 }
@@ -294,7 +375,7 @@ impl Screen for AddFolder {
         ];
         lines.extend(
             wrap(
-                "Pick a folder on this computer. Move keeps one copy in your projects folder. Copy leaves the original where it is.",
+                "Pick a folder on this computer. CrazyAgent sets it up where it is. Move puts it in your projects folder instead; Copy leaves the original where it is.",
                 limit,
             )
             .into_iter()
@@ -311,12 +392,40 @@ impl Screen for AddFolder {
         } else {
             theme.text
         };
-        lines.push(Line::from(vec![
-            Span::styled(radio(self.mode == AddMode::Move, "Move"), mode_style),
-            Span::raw("   "),
-            Span::styled(radio(self.mode == AddMode::Copy, "Copy"), mode_style),
-        ]));
-        if self.mode == AddMode::Copy {
+        let mut ways = Vec::with_capacity(WAYS.len() * 2);
+        for (way, label) in WAYS {
+            if !ways.is_empty() {
+                ways.push(Span::raw("   "));
+            }
+            ways.push(Span::styled(radio(self.way == way, label), mode_style));
+        }
+        lines.push(Line::from(ways));
+        let source = self.source(ctx).ok();
+        match (
+            self.way,
+            source.as_deref().and_then(|source| self.target(source)),
+        ) {
+            (Way::Here, _) if source.is_some() => {
+                lines.push(Line::raw("Stays where it is. Nothing is moved or copied."));
+            }
+            (Way::Into(_), Some(target)) => lines.extend(
+                wrap(&format!("Goes to {target}"), limit)
+                    .into_iter()
+                    .map(Line::raw),
+            ),
+            _ => {}
+        }
+        if self.confirming {
+            lines.extend(
+                wrap(
+                    "The folder won't stay at its old place. Press Enter again to move it, or any other key to keep it here.",
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Warning, theme)),
+            );
+        }
+        if self.way == Way::Into(AddMode::Copy) {
             let size = self
                 .source(ctx)
                 .ok()
@@ -324,6 +433,13 @@ impl Screen for AddFolder {
             match size {
                 Some(Load::Ready(bytes)) => {
                     lines.push(Line::raw(format!("Size: {}", size_label(bytes))));
+                    if self.worktrees > 0 {
+                        lines.extend(
+                            wrap(&worktrees_line(self.worktrees), limit)
+                                .into_iter()
+                                .map(Line::raw),
+                        );
+                    }
                     if bytes > COPY_WARN_BYTES {
                         lines.extend(
                             wrap(
@@ -354,9 +470,9 @@ impl Screen for AddFolder {
             lines.push(Line::default());
         }
         if self.sent.is_some() {
-            lines.push(ctx.loading(match self.mode {
-                AddMode::Move => "Moving the folder",
-                AddMode::Copy => "Copying the folder",
+            lines.push(ctx.loading(match self.way {
+                Way::Into(AddMode::Copy) => "Copying the folder",
+                _ => "Moving the folder",
             }));
         } else {
             lines.push(buttons(
@@ -389,5 +505,18 @@ impl Screen for AddFolder {
 
     fn place(&self) -> Option<Place> {
         Some(Place::AddFolder)
+    }
+}
+
+/// Says that a Copy leaves the folder's linked git worktrees with the original.
+/// Takes how many linked worktrees the folder has.
+/// Returns the sentence.
+fn worktrees_line(count: usize) -> String {
+    if count == 1 {
+        "This folder has 1 linked git worktree. It stays with the original folder; the copy gets the main checkout and every branch.".into()
+    } else {
+        format!(
+            "This folder has {count} linked git worktrees. They stay with the original folder; the copy gets the main checkout and every branch."
+        )
     }
 }

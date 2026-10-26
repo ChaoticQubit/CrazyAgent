@@ -6,6 +6,7 @@ use crate::adapters::NativeHarness;
 #[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
+use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 #[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
@@ -15,12 +16,12 @@ use crate::sandbox::InstalledSandbox;
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(unix)]
 use std::sync::mpsc::{SyncSender, sync_channel};
 #[cfg(unix)]
@@ -28,6 +29,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(in crate::engine) mod diagnostic;
 #[cfg(unix)]
 mod process;
 
@@ -37,6 +39,29 @@ const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 #[cfg(unix)]
 const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
+#[cfg(unix)]
+const TOOL_STEPS_MAX: &str = "24";
+#[cfg(unix)]
+const TOOLS_SHELL: &str = "/bin/zsh";
+/// Turns off Claude Code's background Bash commands and background agents for a tools-on
+/// master. In Claude Code 2.1.309 `claude -p` keeps running after a turn's result while a
+/// background task runs and then answers that task's `task_notification` with another turn,
+/// which would outlive the master turn; this variable makes the Bash tool ignore
+/// `run_in_background` and refuses background agent launches.
+#[cfg(unix)]
+const BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+const NO_SERVERS: &str = "{\"mcpServers\":{}}";
+const MCP_CONFIG_FLAG: &str = "--mcp-config";
+const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
+
+/// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
+/// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
+/// in the turn's private temporary folder where that tool records each proposed task.
+#[derive(Clone, Copy)]
+pub(in crate::engine) struct MasterTools<'a> {
+    pub(in crate::engine) engine: &'a Path,
+    pub(in crate::engine) drop: &'a Path,
+}
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -96,6 +121,74 @@ pub(in crate::engine) fn launch_command(
     model: &str,
     instructions: Option<&Path>,
 ) -> Result<Command, EngineError> {
+    command_for(
+        executable,
+        project_root,
+        profile_home,
+        model,
+        instructions,
+        None,
+    )
+}
+
+/// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
+/// agents' tool flags, a bounded number of steps, hooks and setting sources still off, and
+/// only the engine's `delegate` MCP server. Input: as `launch_command`, plus the engine
+/// executable and drop file. Output: the command, or a plain refusal for an unsafe input.
+#[cfg(unix)]
+pub(in crate::engine) fn tools_launch_command(
+    executable: &Path,
+    project_root: &Path,
+    profile_home: &Path,
+    model: &str,
+    instructions: Option<&Path>,
+    tools: MasterTools<'_>,
+) -> Result<Command, EngineError> {
+    command_for(
+        executable,
+        project_root,
+        profile_home,
+        model,
+        instructions,
+        Some(tools),
+    )
+}
+
+/// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
+/// executable serving `team-mcp` on the drop file. Input: the tools. Output: the JSON text,
+/// or `claude_host_invalid_launch` for a relative path or one with a control character.
+fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
+    let plain = |path: &Path| {
+        path.is_absolute()
+            .then(|| path.to_str())
+            .flatten()
+            .filter(|text| !text.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let (Some(engine), Some(drop)) = (plain(tools.engine), plain(tools.drop)) else {
+        return Err(failure("claude_host_invalid_launch"));
+    };
+    let config = serde_json::json!({"mcpServers": {crate::team::tool::SERVER_NAME: {
+        "type": "stdio",
+        "command": engine,
+        "args": [crate::team::tool::SERVER_COMMAND, drop],
+    }}});
+    Ok(config.to_string())
+}
+
+#[cfg(unix)]
+fn command_for(
+    executable: &Path,
+    project_root: &Path,
+    profile_home: &Path,
+    model: &str,
+    instructions: Option<&Path>,
+    tools: Option<MasterTools<'_>>,
+) -> Result<Command, EngineError> {
+    let servers = match tools {
+        Some(tools) => delegate_config(tools)?,
+        None => NO_SERVERS.to_owned(),
+    };
     if !executable.is_absolute()
         || !project_root.is_absolute()
         || !profile_home.is_absolute()
@@ -146,12 +239,22 @@ pub(in crate::engine) fn launch_command(
     if model != ACCOUNT_DEFAULT_MODEL {
         command.args(["--model", model]);
     }
+    match tools {
+        Some(_) => command
+            .args([
+                "--tools",
+                "default",
+                "--permission-mode",
+                "bypassPermissions",
+                CLAUDE_DENY_FLAG,
+            ])
+            .args(CLAUDE_BUILT_IN_AGENTS),
+        None => command.args(["--tools", ""]),
+    };
     command.args([
-        "--tools",
-        "",
         "--strict-mcp-config",
-        "--mcp-config",
-        "{\"mcpServers\":{}}",
+        MCP_CONFIG_FLAG,
+        servers.as_str(),
         "--setting-sources",
         "",
         "--settings",
@@ -159,7 +262,7 @@ pub(in crate::engine) fn launch_command(
         "--disable-slash-commands",
         "--no-session-persistence",
         "--max-turns",
-        "1",
+        if tools.is_some() { TOOL_STEPS_MAX } else { "1" },
     ]);
     if let Some(file) = instructions {
         command.arg(INSTRUCTIONS_FLAG).arg(file);
@@ -171,6 +274,11 @@ pub(in crate::engine) fn launch_command(
         .env("CLAUDE_CONFIG_DIR", profile_home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
+    if tools.is_some() {
+        command
+            .env("SHELL", TOOLS_SHELL)
+            .env(BACKGROUND_TASKS_OFF.0, BACKGROUND_TASKS_OFF.1);
+    }
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
     Ok(command)
@@ -190,6 +298,21 @@ pub(in crate::engine) fn launch_command(
     Err(failure("claude_host_unavailable"))
 }
 
+/// Refuses the tools-on Claude Code master command where the profile home's Unix owner and
+/// mode cannot be checked. Takes the executable, project, home, model, instruction file and
+/// tools, all unused. Returns `claude_host_unavailable`.
+#[cfg(not(unix))]
+pub(in crate::engine) fn tools_launch_command(
+    _executable: &Path,
+    _project_root: &Path,
+    _profile_home: &Path,
+    _model: &str,
+    _instructions: Option<&Path>,
+    _tools: MasterTools<'_>,
+) -> Result<Command, EngineError> {
+    Err(failure("claude_host_unavailable"))
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum Fault {
@@ -203,10 +326,27 @@ impl Fault {
     fn error(self) -> EngineError {
         match self {
             Self::Host(code) => failure(code),
-            Self::Protocol(error) => EngineError(format!("claude_host_protocol_{error:?}")),
-            Self::Exit(code) => EngineError(format!("claude_host_native_exit_{code:?}")),
+            Self::Protocol(error) => protocol_error(error),
+            Self::Exit(Some(code)) => EngineError(format!("claude_host_native_exit_{code}")),
+            Self::Exit(None) => failure("claude_host_native_exit_signal"),
         }
     }
+}
+
+/// Names a Claude protocol fault as a plain lowercase code that engine logs can show.
+/// Input: the protocol error. Output: `claude_host_protocol_` followed by the error's
+/// name in snake case, for example `claude_host_protocol_stale_message`.
+#[cfg(unix)]
+fn protocol_error(error: ProtocolError) -> EngineError {
+    let name = format!("{error:?}");
+    let mut code = String::from("claude_host_protocol");
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            code.push('_');
+        }
+        code.push(character.to_ascii_lowercase());
+    }
+    EngineError(code)
 }
 
 #[cfg(unix)]
@@ -238,6 +378,8 @@ pub(in crate::engine) struct ClaudeHost {
     events: mpsc::Receiver<ObservedEvent>,
     status: watch::Receiver<Status>,
     stop: Arc<AtomicBool>,
+    group: Arc<AtomicU32>,
+    diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
     expires: tokio::time::Instant,
 }
@@ -248,6 +390,7 @@ impl ClaudeHost {
         command: Command,
         sandbox: InstalledSandbox,
         profile: NativeProfileUse,
+        home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
         budget: ResourceBudget,
@@ -262,11 +405,15 @@ impl ClaudeHost {
             fault: None,
         });
         let stop = Arc::new(AtomicBool::new(false));
+        let group = Arc::new(AtomicU32::new(0));
+        let kept = Arc::new(std::sync::Mutex::new(None));
         let mut host = Self {
             turns,
             events,
             status,
             stop: Arc::clone(&stop),
+            group: Arc::clone(&group),
+            diagnostic: Arc::clone(&kept),
             close_time: limits.cleanup_time,
             expires: tokio::time::Instant::now() + limits.run_time,
         };
@@ -277,6 +424,7 @@ impl ClaudeHost {
                     command,
                     sandbox,
                     profile,
+                    home,
                     protocol,
                     limits,
                     process::Channels {
@@ -284,6 +432,8 @@ impl ClaudeHost {
                         output,
                         report,
                         stop,
+                        group,
+                        diagnostic: kept,
                     },
                 );
             })
@@ -381,6 +531,24 @@ impl ClaudeHost {
         }
     }
 
+    /// Names the process group the harness was started in, which can outlive this host when
+    /// the engine stops. Input: the host. Output: the group, or none before the harness
+    /// started.
+    pub(in crate::engine) fn process_group(&self) -> Option<u32> {
+        Some(self.group.load(Ordering::Acquire)).filter(|group| *group > 1)
+    }
+
+    /// What the harness stream left for the engine log once the custodian retired it: its
+    /// fault, the kind of the line the protocol refused, the lines after the turn's result
+    /// and the last raw bytes. Input: the host. Output: the diagnostic, or none before the
+    /// harness is retired.
+    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
+        self.diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
         self.stop.store(true, Ordering::Release);
         self.close().await
@@ -417,12 +585,13 @@ pub(in crate::engine) enum ClaudeHost {}
 
 #[cfg(not(unix))]
 impl ClaudeHost {
-    /// Never starts: takes the command, boundary, uninhabited profile lease, action,
-    /// account and budget. Returns nothing because the lease cannot exist.
+    /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
+    /// action, account and budget. Returns nothing because the lease cannot exist.
     pub(in crate::engine) async fn spawn(
         _command: Command,
         _sandbox: InstalledSandbox,
         profile: NativeProfileUse,
+        _home: PathBuf,
         _action: NativeAction,
         _account_ref: CredentialRef,
         _budget: ResourceBudget,
@@ -444,6 +613,16 @@ impl ClaudeHost {
         match *self {}
     }
 
+    /// Never names a group: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn process_group(&self) -> Option<u32> {
+        match *self {}
+    }
+
+    /// Never keeps a stream: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
+        match *self {}
+    }
+
     /// Never cancels: takes the host. Unreachable without a host value.
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
         match *self {}
@@ -459,11 +638,103 @@ fn failure(code: &'static str) -> EngineError {
     EngineError(code.into())
 }
 
+/// Reads the delegate server a tools-on master command names, so the command can be built
+/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable
+/// and drop file, or none when the text is not one engine server.
 #[cfg(unix)]
-fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(), Fault> {
-    let home = profile
-        .profile_path()
-        .map_err(|_| Fault::Host("claude_host_profile_changed"))?;
+fn named_tools(config: &str) -> Option<(PathBuf, PathBuf)> {
+    let config: serde_json::Value = serde_json::from_str(config).ok()?;
+    let server = config
+        .get("mcpServers")?
+        .get(crate::team::tool::SERVER_NAME)?;
+    let engine = server.get("command")?.as_str()?;
+    let drop = server.get("args")?.as_array()?.get(1)?.as_str()?;
+    Some((PathBuf::from(engine), PathBuf::from(drop)))
+}
+
+/// Confirms a Claude Code master command names exactly the delegate server the engine gave
+/// its turn: with `tools`, one MCP configuration whose only server is that engine executable
+/// serving `team-mcp` on that drop file, and one deny list of exactly Claude Code's own
+/// sub-agent tools; without, an empty server list and no deny list. Input: the command and
+/// the expected tools. Output: Ok, or `master_delegate_unverified`.
+pub(in crate::engine) fn require_delegate(
+    command: &Command,
+    tools: Option<MasterTools<'_>>,
+) -> Result<(), EngineError> {
+    let refused = || failure("master_delegate_unverified");
+    let expected = match tools {
+        Some(tools) => delegate_config(tools).map_err(|_| refused())?,
+        None => NO_SERVERS.to_owned(),
+    };
+    let expected: serde_json::Value = serde_json::from_str(&expected).map_err(|_| refused())?;
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    let inline = format!("{MCP_CONFIG_FLAG}=");
+    if args
+        .iter()
+        .any(|arg| arg.as_encoded_bytes().starts_with(inline.as_bytes()))
+    {
+        return Err(refused());
+    }
+    let mut configs = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| **arg == std::ffi::OsStr::new(MCP_CONFIG_FLAG))
+        .map(|(index, _)| args.get(index + 1).and_then(|config| config.to_str()));
+    let (Some(Some(config)), None) = (configs.next(), configs.next()) else {
+        return Err(refused());
+    };
+    let named: serde_json::Value = serde_json::from_str(config).map_err(|_| refused())?;
+    if named != expected {
+        return Err(refused());
+    }
+    if args.iter().any(|arg| {
+        DENY_FLAG_SPELLINGS.iter().any(|flag| {
+            arg.as_encoded_bytes()
+                .starts_with(format!("{flag}=").as_bytes())
+        })
+    }) {
+        return Err(refused());
+    }
+    let mut denies = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| {
+            DENY_FLAG_SPELLINGS
+                .iter()
+                .any(|flag| **arg == std::ffi::OsStr::new(flag))
+        })
+        .map(|(index, _)| index);
+    match (tools, denies.next(), denies.next()) {
+        (None, None, _) => {}
+        (Some(_), Some(index), None) => {
+            let listed = args.get(index + 1..).unwrap_or_default();
+            let names = listed
+                .iter()
+                .copied()
+                .take(CLAUDE_BUILT_IN_AGENTS.len())
+                .eq(CLAUDE_BUILT_IN_AGENTS.map(std::ffi::OsStr::new));
+            let ends = listed
+                .get(CLAUDE_BUILT_IN_AGENTS.len())
+                .is_none_or(|next| next.as_encoded_bytes().starts_with(b"-"));
+            if args[index] != std::ffi::OsStr::new(CLAUDE_DENY_FLAG) || !names || !ends {
+                return Err(refused());
+            }
+        }
+        _ => return Err(refused()),
+    }
+    Ok(())
+}
+
+/// Confirms a master command is exactly one the engine builds: tools off, or tools on with
+/// only the engine's delegate server, for this directory, home, model and instruction file.
+/// Input: the command, the profile lease and the turn home. Output: whether the tools are
+/// on, or the fault that refuses the command.
+#[cfg(unix)]
+fn validate_command(
+    command: &Command,
+    profile: &NativeProfileUse,
+    home: &Path,
+) -> Result<bool, Fault> {
     let directory = command
         .get_current_dir()
         .ok_or(Fault::Host("claude_host_project_unavailable"))?;
@@ -485,12 +756,28 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
         )),
         None => None,
     };
-    let expected = launch_command(
+    let tools = args.contains(&OsStr::new("--permission-mode"));
+    let named = if tools {
+        let named = args
+            .iter()
+            .position(|arg| *arg == OsStr::new(MCP_CONFIG_FLAG))
+            .and_then(|index| args.get(index + 1))
+            .and_then(|config| config.to_str())
+            .and_then(named_tools)
+            .ok_or(Fault::Host("claude_host_invalid_command"))?;
+        Some(named)
+    } else {
+        None
+    };
+    let expected = command_for(
         Path::new(command.get_program()),
         directory,
-        &home,
+        home,
         model,
         instructions,
+        named
+            .as_ref()
+            .map(|(engine, drop)| MasterTools { engine, drop }),
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
     if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {
@@ -501,7 +788,8 @@ fn validate_command(command: &Command, profile: &NativeProfileUse) -> Result<(),
         .map_err(|_| Fault::Host("claude_host_profile_changed"))?;
     assert!(directory.is_absolute());
     assert_eq!(args.len(), expected.get_args().count());
-    Ok(())
+    assert_eq!(tools, named.is_some());
+    Ok(tools)
 }
 
 #[cfg(all(test, unix))]

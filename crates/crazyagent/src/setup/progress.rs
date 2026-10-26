@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-/// What one engine's setup run is doing now: whether it runs, the dependencies it touched
-/// with their states, and the pack entries still installing or failed with a reason. It
-/// also keeps the last background version check, so a status read never waits on one.
+/// What one engine's setup run is doing now: whether it runs, whether it installs the
+/// graphify command (only while the code graph entry is ticked or on), the dependencies it
+/// touched with their states, and the pack entries still installing or failed with a
+/// reason. It also keeps the last background version check, so a status read never waits.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     pub running: bool,
+    pub graph_tool: bool,
     pub dependencies: BTreeMap<Dependency, DependencyState>,
     pub pack: BTreeMap<String, PackState>,
     pub checking: bool,

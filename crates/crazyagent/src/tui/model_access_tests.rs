@@ -825,9 +825,8 @@ fn pool_refusals_read_as_plain_sentences_and_other_codes_stay_visible() {
         "A pool can hold up to 15 accounts; values retained; Ctrl-P refreshes"
     );
     assert_eq!(
-        super::rejection_notice("pool_in_use"),
-        "This pool is used by a project. Remove it from the project first.; values retained; Ctrl-P refreshes"
-            .replace(".;", ";")
+        super::rejection_notice("pool_needs_account"),
+        "A pool needs at least one account. Add another account first, or delete the pool; values retained; Ctrl-P refreshes"
     );
     assert_eq!(
         super::rejection_notice("invalid_model_access"),

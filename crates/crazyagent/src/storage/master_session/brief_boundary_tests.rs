@@ -403,6 +403,7 @@ async fn later_oversized_brief_rejects_before_physical_bootstrap() {
         assert_eq!(*returned, turn);
         assert_eq!(turn.phase, MasterTurnPhase::Blocked);
         assert_eq!(turn.reason, Some(MasterReason::CapacityUnavailable));
+        assert_eq!(turn.cause.as_deref(), Some("master_input_too_large"));
         assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
         assert!(session.current_turn.is_none());
         assert_eq!(turn.id.as_str(), id.as_str());
@@ -448,6 +449,9 @@ async fn prepared_replay_rechecks_latest_without_new_attempt_or_workspace() {
         Ok(MasterRuntimeResult::Profile(_)) => Err(String::from(
             "variant=Profile phase=not_applicable reason=not_applicable",
         )),
+        Ok(MasterRuntimeResult::Checkout(_)) => Err(String::from(
+            "variant=Checkout phase=not_applicable reason=not_applicable",
+        )),
         Err(_) => Err(String::from(
             "variant=Err(EngineError) phase=not_applicable reason=not_applicable",
         )),
@@ -482,6 +486,7 @@ async fn prepared_replay_rechecks_latest_without_new_attempt_or_workspace() {
     assert_eq!(*returned, turn);
     assert_eq!(turn.phase, MasterTurnPhase::Failed);
     assert_eq!(turn.reason, Some(MasterReason::CapacityUnavailable));
+    assert_eq!(turn.cause.as_deref(), Some("master_input_too_large"));
     assert!(turn.runtime.is_none() && turn.reply.is_none());
     assert!(session.current_turn.is_none());
     let attempt = turn.attempt.as_ref().unwrap();

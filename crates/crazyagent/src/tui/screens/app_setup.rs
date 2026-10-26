@@ -3,9 +3,8 @@ use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
-use crate::setup::{
-    DependencyState, PackEntry, PackGroup, PackKind, PackState, SetupStatus, plain_reason,
-};
+use crate::setup::pack::entry_title;
+use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, known_reason};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
@@ -13,7 +12,8 @@ use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, NOT_READY};
 use crate::tui::text::{
-    cells, indent, join, list_row, pad, row, status, styled, thumb, with_bar, wrap,
+    cells, coded, indent, join, list_row, pad, plain_code, row, status, styled, thumb, with_bar,
+    wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, checkbox};
@@ -25,8 +25,8 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 mod tests;
 
-const TOOL_WIDTH: usize = 12;
-const NAME_WIDTH: usize = 24;
+const TOOL_WIDTH: usize = 16;
+const NAME_WIDTH: usize = 26;
 const KIND_WIDTH: usize = 10;
 const LICENSE_WIDTH: usize = 12;
 const LABEL_WIDTH: usize = 15;
@@ -39,8 +39,9 @@ const SETTINGS_TEXT: &str = "The tools CrazyAgent needs on this computer, the sk
 
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
-/// request, otherwise the setup sentence for the code.
-pub fn setup_plain(code: &str) -> &'static str {
+/// request, otherwise the setup, projects home or GitHub sentence for the code,
+/// or a general setup sentence naming a code none of them knows.
+pub fn setup_plain(code: &str) -> String {
     match code {
         NOT_READY => "Not ready yet.",
         "trusted_connection_unavailable" | "controller_disconnected" => {
@@ -50,7 +51,26 @@ pub fn setup_plain(code: &str) -> &'static str {
         "owner_outcome_unknown_reconcile_same_identity" => {
             "CrazyAgent did not answer in time. Try again."
         }
-        _ => plain_reason(code),
+        _ => {
+            return known_reason(code)
+                .or_else(|| super::intake::known(code))
+                .map_or_else(
+                    || coded("Something went wrong during setup.", code),
+                    str::to_owned,
+                );
+        }
+    }
+    .to_owned()
+}
+
+/// The sentence for why a tool or default skill did not install.
+/// Input: the reason the engine sent, which is the setup sentence it already chose.
+/// Output: that sentence; a plain code instead gets the setup sentence for the code.
+fn setup_reason(reason: &str) -> String {
+    if plain_code(reason) {
+        setup_plain(reason)
+    } else {
+        reason.to_owned()
     }
 }
 
@@ -199,9 +219,6 @@ impl AppSetup {
     }
 
     fn ticked(&self, entry: &PackEntry) -> bool {
-        if entry.group == PackGroup::Always {
-            return true;
-        }
         if Self::installed(&entry.state) && !self.first_run {
             return entry.state != PackState::Off;
         }
@@ -255,20 +272,21 @@ impl AppSetup {
         let Some(entry) = self.picked().cloned() else {
             return;
         };
-        if entry.group == PackGroup::Always {
-            ctx.say(Message::warning(&format!("{} is always on.", entry.id), ""));
+        let title = entry_title(&entry.id);
+        if entry.state == PackState::Installing {
+            ctx.say(Message::warning(&format!("{title} is installing now."), ""));
             return;
         }
-        if entry.state == PackState::Installing {
+        if Self::installed(&entry.state) && self.first_run {
             ctx.say(Message::warning(
-                &format!("{} is installing now.", entry.id),
-                "",
+                &format!("{title} is already installed."),
+                "Switch it on or off in Settings, Setup.",
             ));
             return;
         }
-        if Self::installed(&entry.state) && !self.first_run {
+        if Self::installed(&entry.state) {
             let on = entry.state == PackState::Off;
-            let done = format!("{} is {}.", entry.id, if on { "on" } else { "off" });
+            let done = format!("{title} is {}.", if on { "on" } else { "off" });
             let job = AppSetupJob::Pack {
                 change: PackChange::Switch { id: entry.id, on },
                 generation: ctx.next_generation(),
@@ -291,13 +309,13 @@ impl AppSetup {
             _ => return Flow::Handled,
         };
         if running || self.started || self.sent.is_some() {
-            ctx.say(Message::warning(setup_plain("setup_busy"), ""));
+            ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
         let pack: Vec<String> = self
             .entries()
             .iter()
-            .filter(|entry| self.ticked(entry))
+            .filter(|entry| self.ticked(entry) && !Self::installed(&entry.state))
             .map(|entry| entry.id.clone())
             .collect();
         self.finished_with_problems = false;
@@ -390,7 +408,7 @@ impl AppSetup {
                 self.started = true;
                 self.read(0, AppSetupJob::Status, ctx);
             }
-            Err(code) => ctx.say(Message::error(setup_plain(code), "")),
+            Err(code) => ctx.say(Message::error(&setup_plain(code), "")),
         }
     }
 
@@ -407,7 +425,7 @@ impl AppSetup {
                 ctx.say(Message::success(&done, ""));
                 self.reload(ctx);
             }
-            Err(code) => ctx.say(Message::error(setup_plain(code), "")),
+            Err(code) => ctx.say(Message::error(&setup_plain(code), "")),
         }
     }
 
@@ -416,12 +434,11 @@ impl AppSetup {
             return;
         };
         let id = entry.id.clone();
-        let problem = if entry.group == PackGroup::Always {
-            Some(format!("{id} is always on and can't be removed."))
-        } else if entry.state == PackState::Installing {
-            Some(format!("{id} is installing now."))
+        let title = entry_title(&id);
+        let problem = if entry.state == PackState::Installing {
+            Some(format!("{title} is installing now."))
         } else if !Self::installed(&entry.state) {
-            Some(format!("{id} is not installed."))
+            Some(format!("{title} is not installed."))
         } else {
             None
         };
@@ -461,7 +478,7 @@ impl AppSetup {
     fn submit_home(&mut self, typed: &str, field: TextField, ctx: &mut Ctx) {
         let path = expand(typed, ctx);
         if path_text(&path, "home_path_invalid").is_err() {
-            ctx.say(Message::error(setup_plain("home_path_invalid"), ""));
+            ctx.say(Message::error(&setup_plain("home_path_invalid"), ""));
             self.ask = Some(Ask::HomePath(field));
             return;
         }
@@ -585,7 +602,7 @@ impl AppSetup {
             if let DependencyState::Failed { reason } = &tool.state {
                 let gap = " ".repeat(2 + TOOL_WIDTH + 2);
                 lines.extend(
-                    wrap(plain_reason(reason), rest).into_iter().map(|part| {
+                    wrap(&setup_reason(reason), rest).into_iter().map(|part| {
                         join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])
                     }),
                 );
@@ -644,7 +661,7 @@ impl AppSetup {
             .take(window)
             .map(|(index, entry)| {
                 let values = vec![
-                    Line::raw(checkbox(self.ticked(entry), &entry.id)),
+                    Line::raw(checkbox(self.ticked(entry), entry_title(&entry.id))),
                     Line::raw(kind_word(entry.kind)),
                     Line::raw(entry.license.clone()),
                     status(pack_word(&entry.state), theme, glyphs),
@@ -677,9 +694,12 @@ impl AppSetup {
         }) = self.picked()
         {
             lines.extend(
-                wrap(&format!("{id}: {}", plain_reason(reason)), limit)
-                    .into_iter()
-                    .map(|part| styled(part, Role::Muted, theme)),
+                wrap(
+                    &format!("{}: {}", entry_title(id), setup_reason(reason)),
+                    limit,
+                )
+                .into_iter()
+                .map(|part| styled(part, Role::Muted, theme)),
             );
         }
         let servers: Vec<&str> = self
@@ -688,7 +708,7 @@ impl AppSetup {
             .filter(|entry| {
                 entry.kind == PackKind::McpServer
                     && self.ticked(entry)
-                    && (self.first_run || !Self::installed(&entry.state))
+                    && !Self::installed(&entry.state)
             })
             .map(|entry| entry.id.as_str())
             .collect();
@@ -785,7 +805,8 @@ impl AppSetup {
         match &self.ask {
             None => return (Vec::new(), None),
             Some(Ask::Remove { id }) => lines.extend(sentence(&format!(
-                "Remove {id}? Agents in every project stop getting it."
+                "Remove {}? Agents in every project stop getting it.",
+                entry_title(id)
             ))),
             Some(Ask::SignOut) => lines.extend(sentence(
                 "Sign out of GitHub? CrazyAgent deletes the GitHub token it keeps. Cloned projects stay.",

@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge, bounded, failure};
+use super::{BridgeError, NativeBridge, bounded, caused, failure};
 use crazyagent::config::ModelConnection;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
@@ -82,7 +82,7 @@ impl NativeBridge {
             NativeAuthMethod::CodexBrowser
             | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting => "codex",
-            NativeAuthMethod::ClaudeOfficial => "claude",
+            NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting => "claude",
         };
         if connection.harness.as_str() != valid {
             return Err(failure("native_auth_method_mismatch"));
@@ -169,19 +169,21 @@ impl NativeBridge {
         assert!(operation.unresolved);
     }
 
-    fn auth_operation(&self, scope: &NativeAuthScope) -> Result<RequestId, BridgeError> {
+    fn auth_operation(&mut self, scope: &NativeAuthScope) -> Result<RequestId, BridgeError> {
         let operation = self
             .native_auth
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| failure("native_auth_operation_missing"))?;
         let original = operation.original.scope();
         if original.expected_database_instance != scope.expected_database_instance {
+            operation.unresolved = false;
             return Err(failure("native_auth_database_mismatch"));
         }
         if original.connection != scope.connection {
             return Err(failure("native_auth_operation_scope_conflict"));
         }
         if original != scope {
+            operation.unresolved = false;
             return Err(failure("native_profile_source_conflict"));
         }
         Ok(operation.original.id().clone())
@@ -214,7 +216,15 @@ impl NativeBridge {
                 if let Some(operation) = self.native_auth.as_mut() {
                     if error.code == "native_auth_outcome_unknown_read_same_operation" {
                         operation.unresolved = true;
-                    } else if operation.generation.is_none() {
+                    } else if operation.generation.is_none()
+                        || matches!(
+                            error.code,
+                            "native_auth_not_active"
+                                | "native_auth_operation_missing"
+                                | "native_auth_database_mismatch"
+                                | "native_profile_source_conflict"
+                        )
+                    {
                         operation.unresolved = false;
                     }
                 }
@@ -229,12 +239,7 @@ impl NativeBridge {
         }
         let operation = self.native_auth.as_mut().expect("validated auth operation");
         operation.generation = Some(reply.fact.generation);
-        operation.unresolved = !matches!(
-            reply.fact.phase,
-            NativeAuthPhase::Unavailable
-                | NativeAuthPhase::AuthenticatedObserved
-                | NativeAuthPhase::UnauthenticatedObserved
-        );
+        operation.unresolved = reply.fact.phase.unfinished();
         let view = presentation::project(ticket, reply)?;
         if view.display_error.is_none()
             && let Some(presentation::Challenge::ClaudeOfficial {
@@ -310,34 +315,37 @@ fn auth_id() -> Result<RequestId, BridgeError> {
 }
 
 pub(super) fn auth_error(error: EngineError) -> BridgeError {
-    failure(match error.0.as_str() {
-        "controller_disconnected" => "not_connected",
-        "native_auth_database_mismatch" => "native_auth_database_mismatch",
-        "native_auth_method_mismatch" => "native_auth_method_mismatch",
-        "native_auth_operation_conflict" => "native_auth_operation_conflict",
-        "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
-        "native_auth_operation_missing" => "native_auth_operation_missing",
-        "native_auth_operation_capacity" => "native_auth_operation_capacity",
-        "native_auth_not_active" => "native_auth_not_active",
-        "native_auth_recovery_required" => "native_auth_recovery_required",
-        "native_auth_readonly" => "native_auth_readonly",
-        "native_profile_source_invalid" => "native_profile_source_invalid",
-        "native_profile_source_conflict" => "native_profile_source_conflict",
-        "native_profile_connection_missing" => "native_profile_connection_missing",
-        "native_profile_not_managed" => "native_profile_not_managed",
-        "native_profile_binding_conflict" => "native_profile_binding_conflict",
-        "native_profile_custody_unsafe" => "native_profile_custody_unsafe",
-        "native_profile_incomplete" => "native_profile_incomplete",
-        "native_profile_identity_bounds" => "native_profile_identity_bounds",
-        "native_profile_identity_changed" => "native_profile_identity_changed",
-        "native_profile_identity_invalid" => "native_profile_identity_invalid",
-        "native_profile_capacity" => "native_profile_capacity",
-        "native_profile_new_home_not_empty" => "native_profile_new_home_not_empty",
-        "native_profile_in_use" => "native_profile_in_use",
-        "native_profile_lock_unavailable" => "native_profile_lock_unavailable",
-        "owner_grant_stale_or_revoked" => "owner_revoked",
-        "owner_revoked" => "owner_revoked",
-        "owner_queue_not_submitted" => "owner_queue_not_submitted",
-        _ => "native_auth_outcome_unknown_read_same_operation",
-    })
+    caused(
+        match error.0.as_str() {
+            "controller_disconnected" => "not_connected",
+            "native_auth_database_mismatch" => "native_auth_database_mismatch",
+            "native_auth_method_mismatch" => "native_auth_method_mismatch",
+            "native_auth_operation_conflict" => "native_auth_operation_conflict",
+            "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
+            "native_auth_operation_missing" => "native_auth_operation_missing",
+            "native_auth_operation_capacity" => "native_auth_operation_capacity",
+            "native_auth_not_active" => "native_auth_not_active",
+            "native_auth_recovery_required" => "native_auth_recovery_required",
+            "native_auth_readonly" => "native_auth_readonly",
+            "native_profile_source_invalid" => "native_profile_source_invalid",
+            "native_profile_source_conflict" => "native_profile_source_conflict",
+            "native_profile_connection_missing" => "native_profile_connection_missing",
+            "native_profile_not_managed" => "native_profile_not_managed",
+            "native_profile_binding_conflict" => "native_profile_binding_conflict",
+            "native_profile_custody_unsafe" => "native_profile_custody_unsafe",
+            "native_profile_incomplete" => "native_profile_incomplete",
+            "native_profile_identity_bounds" => "native_profile_identity_bounds",
+            "native_profile_identity_changed" => "native_profile_identity_changed",
+            "native_profile_identity_invalid" => "native_profile_identity_invalid",
+            "native_profile_capacity" => "native_profile_capacity",
+            "native_profile_new_home_not_empty" => "native_profile_new_home_not_empty",
+            "native_profile_in_use" => "native_profile_in_use",
+            "native_profile_lock_unavailable" => "native_profile_lock_unavailable",
+            "owner_grant_stale_or_revoked" => "owner_revoked",
+            "owner_revoked" => "owner_revoked",
+            "owner_queue_not_submitted" => "owner_queue_not_submitted",
+            _ => "native_auth_outcome_unknown_read_same_operation",
+        },
+        &error.0,
+    )
 }

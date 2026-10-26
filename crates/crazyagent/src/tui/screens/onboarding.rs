@@ -1,5 +1,6 @@
 use super::intake::{NOT_READY, ask, copy, event, not_ready};
 use super::new_project::{NAME_BYTES_MAX, PLATFORM_ORDER};
+use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
 use crate::onboarding::{OnboardingView, Step};
@@ -11,7 +12,7 @@ use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::{Arrival, PoolChange, Request};
 use crate::tui::text::{join, list_row, row, status, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, checkbox};
@@ -24,6 +25,9 @@ const ABOUT_CHARS_MAX: usize = 2_000;
 const STACK_CHARS_MAX: usize = 1_000;
 const STACK_ITEMS_MAX: usize = 32;
 const PLATFORMS_PER_ROW: usize = 3;
+const GRAPH_OFF: &str = "Graphify is off in Setup, so no code graph is built.";
+const GRAPH_MISSING: &str =
+    "Graphify isn't installed, so no code graph is built. Install it in Setup.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -155,6 +159,7 @@ enum Phase {
     Running(Load<Box<OnboardingView>>),
     Review(Box<Review>),
     Confirming(Box<Review>),
+    Assigning(String),
 }
 
 /// The onboarding page for a found, cloned or added folder: picks the pool,
@@ -223,8 +228,31 @@ impl OnboardingPage {
     }
 
     fn settled(onboarding: &OnboardingView) -> bool {
-        let done = |step: &Step| matches!(step, Step::Done | Step::Failed { .. });
-        done(&onboarding.graph) && done(&onboarding.mapping)
+        let done = |step: &Step| {
+            matches!(
+                step,
+                Step::Done | Step::Off | Step::NotInstalled | Step::Failed { .. }
+            )
+        };
+        onboarding.finished || (done(&onboarding.graph) && done(&onboarding.mapping))
+    }
+
+    /// Whether the review offers to map again: the mapping agent failed and
+    /// the owner has not saved the setup yet.
+    fn retryable(onboarding: &OnboardingView) -> bool {
+        matches!(onboarding.mapping, Step::Failed { .. }) && !onboarding.finished
+    }
+
+    /// Starts the onboarding again on the draft's pool so the failed mapping
+    /// runs once more; the review's edits are dropped for the new draft.
+    fn retry(&mut self, ctx: &mut Ctx) {
+        let Phase::Review(review) = &self.phase else {
+            return;
+        };
+        match review.onboarding.draft.pool.clone() {
+            Some(pool) => self.start(pool, ctx),
+            None => self.problem = Some("Pick a pool for this project first.".into()),
+        }
     }
 
     fn read_revision(project: &ProjectId, review: &mut Review, ctx: &mut Ctx) {
@@ -274,11 +302,11 @@ impl OnboardingPage {
                         self.poll(ctx);
                     }
                     Ok(_) => {
-                        self.problem = Some(copy("intake_change_outcome_unknown").into());
+                        self.problem = Some(copy("intake_change_outcome_unknown"));
                         self.phase = Phase::Pool { selected: 0 };
                     }
                     Err(code) => {
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         self.phase = Phase::Pool { selected: 0 };
                     }
                 }
@@ -339,15 +367,22 @@ impl OnboardingPage {
                 match result {
                     Ok(SetupView::Changed(OwnerResult::Applied)) => {
                         let name = review.name.value().trim().to_owned();
-                        ctx.say(Message::success("Set up.", &format!("{name} is ready.")));
-                        Flow::Replace(open(
-                            &Place::Project {
-                                id: project,
-                                name,
-                                tab: ProjectTab::Overview,
-                            },
-                            ctx,
-                        ))
+                        match review.onboarding.draft.pool.clone() {
+                            Some(pool) => {
+                                ctx.request(Request::EditPool {
+                                    change: PoolChange::Assign {
+                                        pool: Some(pool),
+                                        project,
+                                    },
+                                });
+                                self.phase = Phase::Assigning(name);
+                                Flow::Handled
+                            }
+                            None => {
+                                ctx.say(Message::success("Set up.", &format!("{name} is ready.")));
+                                Self::opened(project, name, ctx)
+                            }
+                        }
                     }
                     other => {
                         let code = match other {
@@ -355,7 +390,7 @@ impl OnboardingPage {
                             Ok(SetupView::Changed(OwnerResult::Rejected { code })) => code.as_str(),
                             Ok(_) => "intake_change_outcome_unknown",
                         };
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         let mut review = review;
                         if code == "stale_revision" {
                             Self::read_revision(&project, &mut review, ctx);
@@ -369,18 +404,74 @@ impl OnboardingPage {
         }
     }
 
+    /// Finishes an assignment of the setup's pool to the project's master the way
+    /// New project does: a refused assignment is said plainly and the project opens
+    /// either way. Takes the pool edit reply and the context. Returns the project page.
+    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) -> Flow {
+        let Phase::Assigning(name) = std::mem::replace(&mut self.phase, Phase::Starting) else {
+            unreachable!("only an assigning onboarding takes a pool edit reply");
+        };
+        let project = self
+            .project
+            .clone()
+            .expect("an assigning onboarding names its project");
+        match result {
+            Ok(()) => {
+                ctx.request(Request::PoolProjects);
+                ctx.say(Message::success("Set up.", &format!("{name} is ready.")));
+            }
+            Err(_) => ctx.say(Message::error(
+                &format!("{name} is set up, but its pool is not assigned."),
+                "Open the project's Settings tab to assign it.",
+            )),
+        }
+        Self::opened(project, name, ctx)
+    }
+
+    fn opened(project: ProjectId, name: String, ctx: &mut Ctx) -> Flow {
+        Flow::Replace(open(
+            &Place::Project {
+                id: project,
+                name,
+                tab: ProjectTab::Overview,
+            },
+            ctx,
+        ))
+    }
+
     fn step_line(label: &str, step: &Step, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let state = match step {
-            Step::Waiting => status("Waiting", theme, ctx.glyphs),
+            Step::Waiting { until_ms: None } => status("Waiting", theme, ctx.glyphs),
+            Step::Waiting {
+                until_ms: Some(until),
+            } => status(
+                &format!("Rate limited until {}", clock(*until, local_offset(*until))),
+                theme,
+                ctx.glyphs,
+            ),
             Step::Running => Line::from(vec![
                 Span::styled(ctx.spinner(), theme.running),
                 Span::styled(" Running", theme.running),
             ]),
             Step::Done => status("Done", theme, ctx.glyphs),
+            Step::Off => status("Turned off", theme, ctx.glyphs),
+            Step::NotInstalled => status("Not installed", theme, ctx.glyphs),
             Step::Failed { .. } => status("Failed", theme, ctx.glyphs),
         };
         let mut lines = vec![row(limit, Line::raw(label.to_owned()), state, ctx.glyphs)];
+        let why = match step {
+            Step::Off => Some(GRAPH_OFF),
+            Step::NotInstalled => Some(GRAPH_MISSING),
+            _ => None,
+        };
+        if let Some(why) = why {
+            lines.extend(
+                wrap(why, limit.saturating_sub(2))
+                    .into_iter()
+                    .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+            );
+        }
         if let Step::Failed { reason } = step {
             lines.extend(
                 wrap(reason, limit.saturating_sub(2))
@@ -441,9 +532,34 @@ impl OnboardingPage {
         ctx: &Ctx,
     ) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
-        let mut lines = Vec::new();
+        let mut lines =
+            Self::step_line("Build the code graph", &review.onboarding.graph, limit, ctx);
+        lines.push(Line::default());
+        if let Step::Failed { reason } = &review.onboarding.mapping
+            && !review.onboarding.finished
+        {
+            lines.extend(
+                wrap(&format!("Mapping failed: {reason}"), limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Error, theme)),
+            );
+            lines.extend(
+                wrap(
+                    "Fill in the setup yourself to skip it, or press r on Confirm to map again.",
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+            );
+            lines.push(Line::default());
+        }
         let missing = review.missing_labels();
-        if missing.is_empty() {
+        if review.onboarding.finished {
+            lines.push(status("Saved", theme, ctx.glyphs));
+            lines.push(Line::raw(
+                "This project is set up. Change anything, then save.",
+            ));
+        } else if missing.is_empty() {
             lines.push(status("Ready", theme, ctx.glyphs));
             lines.push(Line::raw("Check the setup and confirm it."));
         } else {
@@ -543,6 +659,7 @@ impl OnboardingPage {
         } else {
             let label = match review.revision {
                 Load::Loading => "Loading",
+                _ if review.onboarding.finished => "Save changes",
                 _ => "Confirm setup",
             };
             lines.push(buttons(
@@ -578,11 +695,21 @@ impl Screen for OnboardingPage {
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
                 ],
-                Focus::Confirm => vec![
-                    hint("Enter", "Confirm setup"),
-                    hint("Shift-Tab", "Previous"),
-                    hint("Esc", "Back"),
-                ],
+                Focus::Confirm => {
+                    let mut hints = vec![hint(
+                        "Enter",
+                        if review.onboarding.finished {
+                            "Save changes"
+                        } else {
+                            "Confirm setup"
+                        },
+                    )];
+                    if Self::retryable(&review.onboarding) {
+                        hints.push(hint("r", "Retry mapping"));
+                    }
+                    hints.extend([hint("Shift-Tab", "Previous"), hint("Esc", "Back")]);
+                    hints
+                }
                 _ => vec![
                     hint("Tab", "Next"),
                     hint("Shift-Tab", "Previous"),
@@ -625,6 +752,10 @@ impl Screen for OnboardingPage {
                 match (review.focus, key) {
                     (Focus::Confirm, Key::Enter) => {
                         self.confirm(ctx);
+                        return Flow::Handled;
+                    }
+                    (Focus::Confirm, Key::Char('r')) if Self::retryable(&review.onboarding) => {
+                        self.retry(ctx);
                         return Flow::Handled;
                     }
                     (_, Key::Tab | Key::Enter) => review.focus = review.focus.step(true),
@@ -674,6 +805,11 @@ impl Screen for OnboardingPage {
             let (query, result) = (setup.query.clone(), setup.result.clone());
             return self.setup(&query, &result, ctx);
         }
+        if let Arrival::PoolEdited(result) = arrival
+            && matches!(self.phase, Phase::Assigning(_))
+        {
+            return self.assigned(result, ctx);
+        }
         Flow::Handled
     }
 
@@ -696,6 +832,9 @@ impl Screen for OnboardingPage {
         match &self.phase {
             Phase::Pool { selected } => lines.extend(self.pool_lines(*selected, limit, ctx)),
             Phase::Starting => lines.push(ctx.loading("Starting the setup")),
+            Phase::Assigning(_) => {
+                lines.push(ctx.loading("Giving the pool to the project's master"))
+            }
             Phase::Running(load) => match load {
                 Load::Ready(onboarding) => {
                     lines.extend(Self::step_line(
@@ -747,7 +886,7 @@ impl Screen for OnboardingPage {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         match &self.phase {
-            Phase::Starting | Phase::Confirming(_) => true,
+            Phase::Starting | Phase::Confirming(_) | Phase::Assigning(_) => true,
             Phase::Running(load) => !matches!(load, Load::Failed(_) | Load::NotReady),
             _ => false,
         }

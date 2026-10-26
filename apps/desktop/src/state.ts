@@ -5,7 +5,7 @@ import type { EngineState } from "./ui/shell";
 import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
-  revokeBaseline, sendMessage, status,
+  revokeBaseline, sendMessage, status, watchUnconfirmed,
   modelAccessPage, inspectModelAccess, editModelAccess, createProject,
   startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth, submitClaudeAuthCode,
   prepareManagedAccount, prepareConfiguredAccount, accountAuthCapabilities,
@@ -995,20 +995,31 @@ export function applyTheme(choice: ThemeChoice): void {
 }
 
 /** Reads the engine state from a connect or status reply.
- * Input: the reply. Output: running when connected, otherwise down. */
+ * Input: the reply. Output: running when connected, outdated when the engine is another
+ * version than this app, otherwise down. */
 export function engineState(result: Result<api.ConnectionStatus>): EngineState {
+  if (result.kind === "error" && result.code === "engine_version_mismatch") return "outdated";
   return result.kind === "ok" && result.value.connected ? "running" : "down";
+}
+
+/** The change the bridge still keeps unconfirmed, the last check's outcome, and whether a
+ * check or retry is running. */
+export interface Unconfirmed {
+  intent: PendingIntent;
+  outcome: ActionReceipt["outcome"] | null;
+  busy: boolean;
 }
 
 export interface Session {
   engine: EngineState;
-  unconfirmed: boolean;
+  unconfirmed: Unconfirmed | null;
   profile: Loaded<OwnerProfile | null>;
   projects: Loaded<ProjectRow[]>;
   toast: string;
   revision: number;
   retry: () => void;
   checkUnconfirmed: () => Promise<void>;
+  retryUnconfirmed: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   refreshProjects: () => Promise<void>;
   showToast: (message: string) => void;
@@ -1016,11 +1027,13 @@ export interface Session {
 }
 
 /** The app session: connects to the engine on launch, reads the profile and projects, keeps
- * the unconfirmed-change banner, the toast and a revision counter screens reload on.
+ * the unconfirmed-change banner, the toast and a revision counter screens reload on. A reply
+ * that leaves a change unconfirmed starts a few spaced automatic checks of that change.
  * Output: the session. */
 export function useSession(): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
-  const [unconfirmed, setUnconfirmed] = useState(false);
+  const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
+  const tracking = useRef(false);
   const [profile, setProfile] = useState<Loaded<OwnerProfile | null>>({ kind: "loading" });
   const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
   const [toast, setToast] = useState("");
@@ -1029,8 +1042,51 @@ export function useSession(): Session {
 
   function noteResult<T>(result: Result<T>): Result<T> {
     if (result.kind === "error" && result.code === "engine_unreachable") setEngine("down");
-    if (result.kind === "error" && result.code === "uncertain") setUnconfirmed(true);
     return result;
+  }
+
+  function showToast(message: string) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(message);
+    toastTimer.current = setTimeout(() => setToast(""), 4000);
+  }
+
+  async function loadUnconfirmed(outcome?: ActionReceipt["outcome"] | null): Promise<PendingIntent | null> {
+    const kept = noteResult(await api.keptChange());
+    const intent = kept.kind === "ok" ? kept.value : null;
+    setUnconfirmed((old) => intent && {
+      intent,
+      outcome: outcome !== undefined ? outcome : old?.intent.operation_id === intent.operation_id ? old.outcome : null,
+      busy: false,
+    });
+    return intent;
+  }
+
+  async function settle(send: () => Promise<Result<IntentReceipt>>): Promise<boolean> {
+    setUnconfirmed((old) => old && { ...old, busy: true });
+    const result = noteResult(await send());
+    const intent = await loadUnconfirmed(result.kind === "ok" ? result.value.outcome : undefined);
+    const line = result.kind === "ok" ? api.settledLine(result.value) : null;
+    if (line) showToast(line);
+    if (!intent) {
+      await Promise.all([refreshProfile(), refreshProjects()]);
+      setRevision((value) => value + 1);
+    }
+    return intent === null || (result.kind === "ok" && result.value.outcome === "not_recorded_at_barrier");
+  }
+
+  async function track() {
+    if (tracking.current) return;
+    tracking.current = true;
+    try {
+      if (!(await loadUnconfirmed())) return;
+      for (const pause of api.UNCONFIRMED_CHECKS_MS) {
+        await new Promise((resolve) => setTimeout(resolve, pause));
+        if (await settle(api.checkUnconfirmed)) return;
+      }
+    } finally {
+      tracking.current = false;
+    }
   }
 
   async function refreshProfile() {
@@ -1049,32 +1105,24 @@ export function useSession(): Session {
     const state = engineState(result);
     setEngine(state);
     if (state !== "running") return;
-    setUnconfirmed(result.kind === "ok" && result.value.pending);
     await Promise.all([refreshProfile(), refreshProjects()]);
     setRevision((value) => value + 1);
   }
 
-  useEffect(() => { void start(); }, []);
+  useEffect(() => {
+    const stop = watchUnconfirmed(() => { void track(); });
+    void start();
+    return stop;
+  }, []);
 
   return {
     engine, unconfirmed, profile, projects, toast, revision,
     retry: () => { void start(); },
-    checkUnconfirmed: async () => {
-      const result = noteResult(await api.checkUnconfirmed());
-      if (result.kind === "ok" || (result.kind === "error" && result.code !== "uncertain")) {
-        const current = noteResult(await api.status());
-        setUnconfirmed(current.kind === "ok" && current.value.pending);
-      }
-      await Promise.all([refreshProfile(), refreshProjects()]);
-      setRevision((value) => value + 1);
-    },
+    checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
+    retryUnconfirmed: async () => { await settle(api.retryUnconfirmed); },
     refreshProfile,
     refreshProjects,
-    showToast: (message: string) => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
-      setToast(message);
-      toastTimer.current = setTimeout(() => setToast(""), 4000);
-    },
+    showToast,
     noteResult,
   };
 }

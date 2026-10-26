@@ -9,13 +9,14 @@ use crate::adapters::codex::{AuthControl, State};
 use crate::adapters::events::ObservedEvent;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
 use process::{CodexHostOutput, CodexHostProcess};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const EVENTS_MAX: usize = 128;
@@ -27,20 +28,29 @@ pub(in crate::engine) struct CodexHost {
     auth: VecDeque<AuthControl>,
     outbound: VecDeque<Vec<u8>>,
     disconnected: bool,
+    diagnostic: StreamDiagnostic,
 }
 
 impl CodexHost {
+    /// Names the process group the harness was started in, which can outlive this host when
+    /// the engine stops. Input: the host. Output: the group.
+    pub(in crate::engine) fn process_group(&self) -> u32 {
+        self.process.pid()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
         sandbox: InstalledSandbox,
         profile: NativeProfileUse,
+        home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
         budget: ResourceBudget,
         instructions: &str,
     ) -> Result<Self, EngineError> {
         let protocol = CodexHostProtocol::new(action, account_ref)?;
-        let (command, cwd) = prepare_command(command, &profile)?;
+        let (command, cwd, tools) = prepare_command(command, &profile, &home)?;
         let command = sandbox
             .wrap(&command)
             .map_err(|_| EngineError("codex_host_sandbox_refused".into()))?;
@@ -54,14 +64,24 @@ impl CodexHost {
             auth: VecDeque::new(),
             outbound: VecDeque::new(),
             disconnected: false,
+            diagnostic: StreamDiagnostic::default(),
         };
         let bytes = host.protocol.initialize()?;
         host.process.send(&bytes).await?;
         host.wait_for(State::Ready).await?;
-        let bytes = host.protocol.start_instructed_thread(&cwd, instructions)?;
+        let bytes = host
+            .protocol
+            .start_instructed_thread(&cwd, instructions, tools)?;
         host.process.send(&bytes).await?;
         host.wait_for(State::Idle).await?;
         Ok(host)
+    }
+
+    /// What this host kept about its app-server stream for the engine log: the protocol
+    /// fault that ended it, the frame that fault was found on and the last raw bytes.
+    /// Input: the host. Output: a copy of the diagnostic.
+    pub(in crate::engine) fn diagnostic(&self) -> StreamDiagnostic {
+        self.diagnostic.clone()
     }
 
     pub(in crate::engine) async fn observe_account(&mut self) -> Result<AuthControl, EngineError> {
@@ -139,7 +159,11 @@ impl CodexHost {
         }
         match self.process.next_output().await? {
             CodexHostOutput::Stdout(bytes) => {
-                let batch = self.protocol.receive(&bytes)?;
+                self.diagnostic.keep(&bytes);
+                let batch = self.protocol.receive(&bytes).inspect_err(|error| {
+                    self.diagnostic.fault = Some(error.0.clone());
+                    self.diagnostic.message = self.protocol.refused().map(str::to_owned);
+                })?;
                 if self.events.len() + batch.events.len() > EVENTS_MAX
                     || self.auth.len() + batch.auth.len() > EVENTS_MAX
                     || self.outbound.len() + batch.outbound.len() > EVENTS_MAX
@@ -176,10 +200,16 @@ impl Drop for CodexHost {
     }
 }
 
+/// Takes the master command as the engine built it and keeps only its own environment, with
+/// the home it runs in: the account's managed home, or a private turn home outside it that
+/// holds a credential copy. The command must name that same home. Inputs: the command, the
+/// profile lease and the home. Output: the command, its working directory and whether it is
+/// the tools-on master (Codex's own sandbox off), or a plain code.
 fn prepare_command(
     command: Command,
     profile: &NativeProfileUse,
-) -> Result<(Command, PathBuf), EngineError> {
+    home: &Path,
+) -> Result<(Command, PathBuf, bool), EngineError> {
     let cwd = command
         .get_current_dir()
         .filter(|path| path.is_absolute() && path.is_dir())
@@ -203,7 +233,20 @@ fn prepare_command(
     {
         return Err(EngineError("codex_host_file_auth_required".into()));
     }
-    let home = profile.profile_path()?;
+    let managed = profile.profile_path()?;
+    let named = command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new("CODEX_HOME"))
+        .and_then(|(_, value)| value);
+    if named != Some(home.as_os_str())
+        || !home.is_absolute()
+        || (home != managed && (home.starts_with(&managed) || managed.starts_with(home)))
+    {
+        return Err(EngineError("codex_host_home_unsafe".into()));
+    }
+    let tools = args.windows(2).any(|pair| {
+        pair[0] == OsStr::new("-c") && pair[1] == OsStr::new("sandbox_mode=\"danger-full-access\"")
+    });
     let mut selected = Command::new(program);
     selected.args(args).current_dir(&cwd).env_clear();
     for (key, value) in command.get_envs() {
@@ -211,8 +254,8 @@ fn prepare_command(
             selected.env(key, value);
         }
     }
-    selected.env("HOME", &home).env("CODEX_HOME", &home);
-    Ok((selected, cwd))
+    selected.env("HOME", home).env("CODEX_HOME", home);
+    Ok((selected, cwd, tools))
 }
 
 #[cfg(test)]

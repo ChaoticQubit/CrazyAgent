@@ -4,7 +4,7 @@ use super::accounts::SettingsResolver;
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
 #[cfg(unix)]
 use super::runner::ResearchLimits;
-use super::runner::{ResearchHarness, ResearchRun, ResearchRunner, RunError, kind_label};
+use super::runner::{ResearchHarness, ResearchRun, ResearchRunner, RunError, kind_label, utc_date};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -71,8 +71,9 @@ pub fn progress(jobs: &ResearchJobs, project: &str) -> Result<Vec<ResearchProgre
 
 /// Background loop that keeps every project's research moving: for each
 /// project and job harness it parks jobs whose pool has no account that
-/// harness can use, resumes them once one is assigned, and starts queued jobs
-/// up to the per-project limit.
+/// harness can use, or only accounts paused after a rate limit with the
+/// `rate_limited` code and the pause's end, resumes them once one is free, and
+/// starts queued jobs up to the per-project limit.
 pub struct ResearchService {
     runner: Arc<ResearchRunner>,
     stop: Arc<AtomicBool>,
@@ -148,9 +149,27 @@ where
                 Some((_, pick @ AccountPick::NoUsableAccount)) => {
                     let _ = jobs.park_waiting(&project, &harness, Some(pick.label()));
                 }
-                Some((root, AccountPick::Account { account, .. })) => {
+                Some((_, pick @ AccountPick::Paused { until_ms })) => {
+                    let until = UNIX_EPOCH
+                        + Duration::from_millis(u64::try_from(until_ms).unwrap_or_default());
+                    let detail =
+                        format!("rate_limited until {}: {}", utc_date(until), pick.label());
+                    let _ = jobs.park_waiting(&project, &harness, Some(&detail));
+                }
+                Some((
+                    root,
+                    AccountPick::Account {
+                        connection,
+                        account,
+                    },
+                )) => {
                     let _ = jobs.resume_waiting(&project, &harness);
-                    runs.extend(runner.spawn_ready(project, &harness, root, Some(*account)));
+                    runs.extend(runner.spawn_ready(
+                        project,
+                        &harness,
+                        root,
+                        Some((connection, *account)),
+                    ));
                 }
             }
         }
@@ -165,8 +184,9 @@ where
 /// Starts research for a running engine: jobs claimed from the engine
 /// database's `research_jobs` table that project creation fills, agent state
 /// in `<runtime>/research`, one folder per project in `<runtime>/projects`,
-/// pool assignment read live from the engine's settings files and, with a
-/// terminal host, every agent in its own pane.
+/// pool assignment read live from the engine's settings files, with a
+/// terminal host every agent in its own pane, and with the engine's agent
+/// register each running job named as a holder of the account it signs in with.
 #[cfg(unix)]
 pub fn start_for_engine(
     runtime: &Path,
@@ -175,6 +195,7 @@ pub fn start_for_engine(
     codex: &Path,
     claude: Option<&Path>,
     terminal: Option<Arc<dyn crate::terminal::Host>>,
+    agents: Option<Arc<crate::agents::Agents>>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -213,6 +234,9 @@ pub fn start_for_engine(
             .with_terminal(host)
             .map_err(|error| error.to_string())?;
     }
+    if let Some(agents) = agents {
+        runner = runner.with_agents(agents);
+    }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(ResearchService::start(
         Arc::new(runner),
@@ -222,8 +246,8 @@ pub fn start_for_engine(
 }
 
 /// Refuses engine research where its 0700 state folders and private database cannot be
-/// made or checked. Takes the runtime, settings files, harness paths and terminal host,
-/// all unused. Returns `research_runtime_unavailable`.
+/// made or checked. Takes the runtime, settings files, harness paths, terminal host and
+/// agent register, all unused. Returns `research_runtime_unavailable`.
 #[cfg(not(unix))]
 pub fn start_for_engine(
     _runtime: &Path,
@@ -232,6 +256,7 @@ pub fn start_for_engine(
     _codex: &Path,
     _claude: Option<&Path>,
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
+    _agents: Option<Arc<crate::agents::Agents>>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
 }

@@ -3,18 +3,18 @@ use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
 };
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +29,9 @@ const MONITOR_POLL: Duration = Duration::from_millis(250);
 const REPLY_WAIT: Duration = Duration::from_secs(40);
 #[cfg(unix)]
 const KILL_WAIT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const LSOF: &str = "/usr/sbin/lsof";
+const STOP_INCOMPLETE: &str = "agent_stop_incomplete";
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
 const HOST_WAIT: Duration = Duration::from_secs(10);
@@ -302,7 +305,8 @@ struct HostedSpec {
 
 /// What the register shows for one agent that another engine part starts and drives,
 /// such as a team agent: its project, role, owner-facing label and harness, the host's
-/// name and the host's own reference for it, handed back with every owner restart.
+/// name, the host's own reference for it, handed back with every owner restart, and the
+/// account it signs in with, so a refused sign-out can name and stop it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedAgent {
     pub project: ProjectId,
@@ -311,6 +315,7 @@ pub struct HostedAgent {
     pub harness: String,
     pub host: &'static str,
     pub reference: String,
+    pub account: Option<CredentialRef>,
 }
 
 /// What the owner asked of a hosted agent. A restart also stops it; once it ends, the
@@ -329,12 +334,65 @@ pub struct HostedRestart {
     pub reference: String,
 }
 
+/// Something other than a hosted agent that holds an account's native profile while it
+/// runs, so a refused sign-out can name it and the owner can end it: a master
+/// conversation's turn, ended by closing that conversation, or a research job, ended by
+/// cancelling it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Holder {
+    Master {
+        project: ProjectId,
+        session: SessionId,
+    },
+    Research {
+        project: ProjectId,
+        job: i64,
+        title: String,
+    },
+}
+
+/// What holds one account's native profile now: its running hosted agents and its other
+/// holders, so a refused sign-out can name them and the owner can end them all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountUse {
+    pub agents: Vec<AgentView>,
+    pub holders: Vec<Holder>,
+}
+
+impl AccountUse {
+    /// Whether nothing holds the account, so it can be signed out. Input: the use.
+    /// Output: true when no agent and no other holder is listed.
+    pub fn is_free(&self) -> bool {
+        self.agents.is_empty() && self.holders.is_empty()
+    }
+}
+
+type Holds = Arc<Mutex<BTreeMap<u64, (CredentialRef, Holder)>>>;
+
+/// One holder's place in the register, kept beside the profile lease it names. Dropping
+/// it, on every path that ends the lease, removes the holder.
+pub struct Hold {
+    holds: Holds,
+    key: u64,
+}
+
+impl Drop for Hold {
+    /// Removes this holder from the register. Input: the hold being dropped. Output: none.
+    fn drop(&mut self) {
+        let mut holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = holds.remove(&self.key);
+    }
+}
+
 #[derive(Default)]
 struct Control {
     stop: AtomicBool,
     restart: AtomicBool,
     busy: AtomicBool,
     interrupt: Arc<AtomicBool>,
+    account: Option<CredentialRef>,
 }
 
 /// A hosted agent's place in the register, kept by the engine part that drives it.
@@ -443,6 +501,7 @@ enum Live {
     #[cfg(unix)]
     Reattached {
         group: u32,
+        output: Arc<PathBuf>,
         probe: Arc<File>,
         quit: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -480,6 +539,23 @@ impl Recorder {
         }
     }
 
+    /// Records how a stopped agent ended: the given state and reason once no process
+    /// holding its output log is left, otherwise Failed with `agent_stop_incomplete`.
+    /// Inputs: the state, exit code and reason, and whether the stop completed.
+    fn ended(
+        &self,
+        state: AgentState,
+        exit_code: Option<i32>,
+        reason: Option<&str>,
+        complete: bool,
+    ) {
+        if complete {
+            self.finish(state, exit_code, reason);
+        } else {
+            self.finish(AgentState::Failed, exit_code, Some(STOP_INCOMPLETE));
+        }
+    }
+
     fn text(&self, text: &str) {
         if let Ok(db) = self.db.lock() {
             let _ = db.execute(
@@ -507,6 +583,8 @@ pub struct Agents {
     keys: Mutex<HashMap<String, Secret>>,
     restarts: Mutex<Vec<HostedRestart>>,
     hosts: Mutex<Vec<String>>,
+    holds: Holds,
+    next_hold: AtomicU64,
 }
 
 impl Agents {
@@ -547,6 +625,8 @@ impl Agents {
             keys: Mutex::new(HashMap::new()),
             restarts: Mutex::new(Vec::new()),
             hosts: Mutex::new(Vec::new()),
+            holds: Arc::default(),
+            next_hold: AtomicU64::new(0),
         };
         agents.recover()?;
         Ok(agents)
@@ -629,23 +709,12 @@ impl Agents {
 
     #[cfg(unix)]
     fn probe(&self, id: &str) -> Option<File> {
-        let path = self.folder(id).join(launch::DURABLE_OUTPUT);
-        let file = rustix::fs::open(
-            &path,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .ok()
-        .map(File::from)?;
-        let metadata = file.metadata().ok()?;
-        (metadata.is_file()
-            && metadata.uid() == rustix::process::geteuid().as_raw()
-            && launch::holder_alive(&file))
-        .then_some(file)
+        log_probe(&self.folder(id).join(launch::DURABLE_OUTPUT)).filter(launch::holder_alive)
     }
 
     #[cfg(unix)]
     fn watch(&self, id: String, group: u32, probe: File, attempt: u32) -> Result<(), LaunchError> {
+        let output = Arc::new(self.folder(&id).join(launch::DURABLE_OUTPUT));
         let probe = Arc::new(probe);
         let quit = Arc::new(AtomicBool::new(false));
         let recorder = Recorder {
@@ -656,7 +725,7 @@ impl Agents {
         };
         let limit = LaunchLimits::default().output_bytes as u64;
         let thread = {
-            let (probe, quit) = (probe.clone(), quit.clone());
+            let (output, probe, quit) = (output.clone(), probe.clone(), quit.clone());
             std::thread::Builder::new()
                 .name("agent-reattached".into())
                 .spawn(move || {
@@ -669,8 +738,12 @@ impl Agents {
                             .metadata()
                             .is_ok_and(|metadata| metadata.len() > limit)
                         {
-                            kill_group(group, &probe);
-                            recorder.finish(AgentState::Failed, None, Some("launch_output_limit"));
+                            recorder.ended(
+                                AgentState::Failed,
+                                None,
+                                Some("launch_output_limit"),
+                                kill_holders(group, &output, &probe),
+                            );
                             return;
                         }
                         std::thread::sleep(MONITOR_POLL);
@@ -682,6 +755,7 @@ impl Agents {
             id,
             Live::Reattached {
                 group,
+                output,
                 probe,
                 quit,
                 thread: Some(thread),
@@ -758,9 +832,12 @@ impl Agents {
                 )
                 .map_err(database)
         });
+        let output = self
+            .folder(id)
+            .join(crate::harnesses::launch::DURABLE_OUTPUT);
         if let Err(error) = prepared {
-            let _ = session.stop();
-            recorder.finish(AgentState::Failed, None, Some(&error.0));
+            let (_, complete) = end_session(session, &output);
+            recorder.ended(AgentState::Failed, None, Some(&error.0), complete);
             return Err(error);
         }
         busy.store(spec.prompt.is_some(), Ordering::Release);
@@ -770,7 +847,7 @@ impl Agents {
             let busy = busy.clone();
             std::thread::Builder::new()
                 .name("agent".into())
-                .spawn(move || drive(session, inbox, busy, recorder))
+                .spawn(move || drive(session, &output, inbox, busy, recorder))
                 .map_err(|_| {
                     failed.finish(AgentState::Failed, None, Some("agent_thread_unavailable"));
                     failure("agent_thread_unavailable")
@@ -925,16 +1002,91 @@ impl Agents {
     }
 
     /// Stops one agent: its whole process group gets TERM, then KILL after the grace
-    /// time. Other agents are untouched. Input: id. Output: the stopped agent.
+    /// time, and whatever still holds its output log, such as a child that left the
+    /// group, is ended too; the agent is recorded Failed when that cannot be done.
+    /// Other agents are untouched. Input: id. Output: the stopped agent.
     pub fn stop(&self, id: &str) -> Result<AgentView, LaunchError> {
         if let Some(control) = self.hosted(id)? {
             control.stop.store(true, Ordering::Release);
-            self.await_host(id, &control);
+            self.await_host(id, &control, Instant::now() + HOST_WAIT);
             return self.view(id);
         }
         let live = self.take(id)?.ok_or_else(|| failure("agent_not_running"))?;
         end(live, AgentState::Stopped, self.recorder(id)?);
         self.view(id)
+    }
+
+    /// Lists the running hosted agents that sign in with one account, newest first, so a
+    /// refused sign-out can name them. Input: the account. Output: the agents.
+    pub fn using(&self, account: &CredentialRef) -> Result<Vec<AgentView>, LaunchError> {
+        let mut views = self
+            .hosted_using(account)?
+            .iter()
+            .map(|(id, _)| self.view(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        views.sort_by(|a, b| {
+            b.started_ms
+                .cmp(&a.started_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        views.truncate(LIST_MAX);
+        Ok(views)
+    }
+
+    /// Stops every running hosted agent that signs in with one account and waits, at most
+    /// `HOST_WAIT` in all, for their hosts to end them. Input: the account. Output: those
+    /// agents as they are after the wait.
+    pub fn stop_using(&self, account: &CredentialRef) -> Result<Vec<AgentView>, LaunchError> {
+        let hosted = self.hosted_using(account)?;
+        for (_, control) in &hosted {
+            control.stop.store(true, Ordering::Release);
+        }
+        let deadline = Instant::now() + HOST_WAIT;
+        for (id, control) in &hosted {
+            self.await_host(id, control, deadline);
+        }
+        hosted.iter().map(|(id, _)| self.view(id)).collect()
+    }
+
+    /// Registers one holder of an account's profile until the returned hold is dropped.
+    /// Inputs: the account and the holder. Output: the hold to keep beside the lease.
+    pub fn hold(&self, account: CredentialRef, holder: Holder) -> Hold {
+        let key = self.next_hold.fetch_add(1, Ordering::Relaxed);
+        let mut holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds.insert(key, (account, holder));
+        Hold {
+            holds: self.holds.clone(),
+            key,
+        }
+    }
+
+    /// The holders of one account's profile other than hosted agents, newest first, at
+    /// most `LIST_MAX`. Input: the account. Output: the holders.
+    pub fn holders(&self, account: &CredentialRef) -> Vec<Holder> {
+        let holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds
+            .values()
+            .rev()
+            .filter(|(held, _)| held == account)
+            .map(|(_, holder)| holder.clone())
+            .take(LIST_MAX)
+            .collect()
+    }
+
+    fn hosted_using(
+        &self,
+        account: &CredentialRef,
+    ) -> Result<Vec<(String, Arc<Control>)>, LaunchError> {
+        Ok(self
+            .live()?
+            .iter()
+            .filter_map(|(id, live)| match live {
+                Live::Hosted { control } if control.account.as_ref() == Some(account) => {
+                    Some((id.clone(), control.clone()))
+                }
+                _ => None,
+            })
+            .collect())
     }
 
     /// Restarts one agent from its spec with the same id: a live agent is stopped first,
@@ -1059,7 +1211,10 @@ impl Agents {
             }
         };
         drop(db);
-        let control = Arc::new(Control::default());
+        let control = Arc::new(Control {
+            account: agent.account.clone(),
+            ..Control::default()
+        });
         self.live()?.insert(
             id.clone(),
             Live::Hosted {
@@ -1136,7 +1291,7 @@ impl Agents {
         if let Some(control) = self.hosted(id)? {
             control.restart.store(true, Ordering::Release);
             control.stop.store(true, Ordering::Release);
-            self.await_host(id, &control);
+            self.await_host(id, &control, Instant::now() + HOST_WAIT);
             return self.view(id);
         }
         let served = self
@@ -1161,8 +1316,7 @@ impl Agents {
         })
     }
 
-    fn await_host(&self, id: &str, control: &Arc<Control>) {
-        let deadline = Instant::now() + HOST_WAIT;
+    fn await_host(&self, id: &str, control: &Arc<Control>, deadline: Instant) {
         while Instant::now() < deadline {
             let held = match self.live() {
                 Ok(live) => {
@@ -1239,6 +1393,7 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
         #[cfg(unix)]
         Live::Reattached {
             group,
+            output,
             probe,
             quit,
             mut thread,
@@ -1247,8 +1402,7 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
             if let Some(thread) = thread.take() {
                 let _ = thread.join();
             }
-            kill_group(group, &probe);
-            recorder.finish(state, None, None);
+            recorder.ended(state, None, None, kill_holders(group, &output, &probe));
         }
         Live::Hosted { control } => {
             control.stop.store(true, Ordering::Release);
@@ -1257,32 +1411,195 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
     }
 }
 
+/// Stops an owned agent's session, then ends what still holds its output log, such as a
+/// child that left the agent's group with setsid. Inputs: the session and its log path.
+/// Output: the exit code, and true once no holder of the log is left.
 #[cfg(unix)]
-fn kill_group(group: u32, probe: &File) {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .filter(|group| *group > 1)
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return;
-    };
+fn end_session(session: Session, output: &Path) -> (Option<i32>, bool) {
+    let group = session.process_group();
+    let code = session.stop();
+    let complete = log_probe(output).is_some_and(|probe| kill_holders(group, output, &probe));
+    (code, complete)
+}
+
+/// Stops an owned agent's session where no output log lock exists. Inputs: the session
+/// and the log path, unused. Output: the exit code and true.
+#[cfg(not(unix))]
+fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
+    (session.stop(), true)
+}
+
+/// Opens an agent output log read-only to probe its lock, refusing a link, anything but
+/// a regular file and a file another user owns. Input: the log path. Output: the open.
+#[cfg(unix)]
+fn log_probe(path: &Path) -> Option<File> {
+    let file = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()
+    .map(File::from)?;
+    let metadata = file.metadata().ok()?;
+    (metadata.is_file() && metadata.uid() == rustix::process::geteuid().as_raw()).then_some(file)
+}
+
+/// Ends what still holds a reattached agent's output log: TERM, then KILL after the
+/// grace time, each sent only to a process found holding the log for writing, or to its
+/// group when the holder leads it or sits in the agent's recorded group.
+/// Inputs: the recorded group, the log path and a read-only open of the log.
+/// Output: true once no holder is left; false when holders survive or cannot be found.
+#[cfg(unix)]
+fn kill_holders(group: u32, output: &Path, probe: &File) -> bool {
+    let own = rustix::process::getpgrp();
     for (signal, wait) in [
         (rustix::process::Signal::TERM, STOP_GRACE),
         (rustix::process::Signal::KILL, KILL_WAIT),
     ] {
         if !launch::holder_alive(probe) {
-            return;
+            return true;
         }
-        let _ = rustix::process::kill_process_group(pid, signal);
+        let Some(writers) = writers(output, probe) else {
+            return false;
+        };
+        for writer in writers {
+            match rustix::process::getpgid(Some(writer)) {
+                Err(rustix::io::Errno::SRCH) => {}
+                Ok(leader)
+                    if leader != own
+                        && (leader == writer
+                            || u32::try_from(leader.as_raw_nonzero().get()) == Ok(group)) =>
+                {
+                    let _ = rustix::process::kill_process_group(leader, signal);
+                }
+                _ => {
+                    let _ = rustix::process::kill_process(writer, signal);
+                }
+            }
+        }
         let until = Instant::now() + wait;
         while launch::holder_alive(probe) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    !launch::holder_alive(probe)
+}
+
+/// Lists the other processes that hold the agent output log open for writing, through
+/// `lsof`, while the path still names the probed file. Inputs: the log path and a
+/// read-only open of it. Output: the writers, or None when the path changed, `lsof`
+/// failed or did not list this engine's own open of the log.
+#[cfg(target_os = "macos")]
+fn writers(output: &Path, probe: &File) -> Option<Vec<rustix::process::Pid>> {
+    let probed = probe.metadata().ok()?;
+    let names_probe = || {
+        std::fs::symlink_metadata(output)
+            .is_ok_and(|named| (named.dev(), named.ino()) == (probed.dev(), probed.ino()))
+    };
+    if !names_probe() {
+        return None;
+    }
+    let listed = crate::spawn_gate::output(
+        std::process::Command::new(LSOF)
+            .args(["-w", "-n", "-P", "-F", "pa", "--"])
+            .arg(output)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .ok()?;
+    if !listed.status.success() || !names_probe() {
+        return None;
+    }
+    listed_writers(std::str::from_utf8(&listed.stdout).ok()?)
+}
+
+/// Reads `lsof -F pa` output into the processes with a write open, leaving out this
+/// engine. Input: the output text. Output: the writers, or None when the text is not
+/// that format or does not list this engine, whose read-only probe it must show.
+#[cfg(target_os = "macos")]
+fn listed_writers(text: &str) -> Option<Vec<rustix::process::Pid>> {
+    let own = rustix::process::getpid();
+    let (mut current, mut seen_own, mut found) = (None, false, Vec::new());
+    for line in text.lines() {
+        let (tag, value) = line.split_at_checked(1)?;
+        match tag {
+            "p" => {
+                let pid = rustix::process::Pid::from_raw(value.parse().ok()?)?;
+                seen_own |= pid == own;
+                current = Some(pid);
+            }
+            "a" if matches!(value, "w" | "u") => {
+                let pid = current?;
+                if pid != own && !found.contains(&pid) {
+                    found.push(pid);
+                }
+            }
+            "f" | "a" => {}
+            _ => return None,
+        }
+    }
+    seen_own.then_some(found)
+}
+
+/// Lists the other processes that hold the agent output log open for writing, by
+/// matching every readable `/proc/<pid>/fd` entry against the probed file. Inputs: the
+/// log path, unused, and a read-only open of it. Output: the writers, or None when
+/// `/proc` is unreadable or does not show this engine's own open of the log.
+#[cfg(target_os = "linux")]
+fn writers(_output: &Path, probe: &File) -> Option<Vec<rustix::process::Pid>> {
+    let probed = probe.metadata().ok()?;
+    let own = rustix::process::getpid();
+    let (mut seen_own, mut found) = (false, Vec::new());
+    for process in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        let Ok(descriptors) = std::fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        for descriptor in descriptors.flatten() {
+            let held = std::fs::metadata(descriptor.path())
+                .is_ok_and(|held| (held.dev(), held.ino()) == (probed.dev(), probed.ino()));
+            if !held {
+                continue;
+            }
+            if pid == own {
+                seen_own = true;
+                continue;
+            }
+            let flags =
+                std::fs::read_to_string(process.path().join("fdinfo").join(descriptor.file_name()))
+                    .ok()
+                    .and_then(|info| {
+                        info.lines()
+                            .find_map(|line| line.strip_prefix("flags:"))
+                            .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok())
+                    });
+            if flags.is_some_and(|flags| flags & 3 != 0) && !found.contains(&pid) {
+                found.push(pid);
+            }
+        }
+    }
+    seen_own.then_some(found)
+}
+
+/// Reports that no other platform can list what holds the agent output log, so nothing
+/// is signalled. Inputs: the log path and probe, unused. Output: None.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn writers(_output: &Path, _probe: &File) -> Option<Vec<rustix::process::Pid>> {
+    None
 }
 
 fn drive(
     mut session: Session,
+    output: &Path,
     inbox: Receiver<Command>,
     busy: Arc<AtomicBool>,
     recorder: Recorder,
@@ -1302,14 +1619,14 @@ fn drive(
                 let _ = reply.send(session.interrupt());
             }
             Ok(Command::Stop(state, reply)) => {
-                let code = session.stop();
-                recorder.finish(state, code, None);
+                let (code, complete) = end_session(session, output);
+                recorder.ended(state, code, None, complete);
                 let _ = reply.send(Ok(()));
                 return;
             }
             Err(TryRecvError::Disconnected) => {
-                let code = session.stop();
-                recorder.finish(AgentState::Closed, code, None);
+                let (code, complete) = end_session(session, output);
+                recorder.ended(AgentState::Closed, code, None, complete);
                 return;
             }
             Err(TryRecvError::Empty) => {}
@@ -1336,8 +1653,8 @@ fn drive(
             Ok(_) => {}
             Err(error) => {
                 busy.store(false, Ordering::Release);
-                let _ = session.stop();
-                recorder.finish(AgentState::Failed, None, Some(&error.0));
+                let (_, complete) = end_session(session, output);
+                recorder.ended(AgentState::Failed, None, Some(&error.0), complete);
                 return;
             }
         }
@@ -1397,6 +1714,12 @@ impl Stored {
             Some(Live::Hosted { control }) => control.busy.load(Ordering::Acquire),
             _ => false,
         };
+        let asked = match live {
+            Some(Live::Hosted { control }) if control.stop.load(Ordering::Acquire) => {
+                Some(control.restart.load(Ordering::Acquire))
+            }
+            _ => None,
+        };
         let can_restart = if self.hosted {
             live.is_some() || (!running && served)
         } else {
@@ -1406,6 +1729,8 @@ impl Stored {
             AgentState::Running if self.reattached => {
                 "Running, reconnected after CrazyAgent restarted".to_owned()
             }
+            AgentState::Running if asked == Some(true) => "Restarting".to_owned(),
+            AgentState::Running if asked == Some(false) => "Stopping".to_owned(),
             AgentState::Running if busy => "Working".to_owned(),
             AgentState::Running => "Running".to_owned(),
             AgentState::Stopped => "Stopped".to_owned(),
@@ -1427,7 +1752,7 @@ impl Stored {
             reattached: self.reattached,
             busy,
             attempt: self.attempt,
-            can_stop: running && live.is_some(),
+            can_stop: running && live.is_some() && asked.is_none(),
             can_interrupt: running && driven && busy,
             can_restart,
             exit_code: self.exit_code,

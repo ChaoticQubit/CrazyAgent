@@ -1,11 +1,62 @@
 use super::*;
-use crate::agents::{AgentView, Agents};
+use crate::agents::{AccountUse, AgentView, Agents, Holder, LIST_MAX};
+use crate::protocol::CredentialRef;
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const AGENTS_PAGE: usize = 8;
+const USING_PAGES_MAX: usize = LIST_MAX.div_ceil(AGENTS_PAGE);
+pub const HOLDERS_MAX: usize = 64;
+pub const RELEASE_WAIT: Duration = Duration::from_secs(20);
+const FREE_POLL: Duration = Duration::from_millis(100);
+
+/// Every code an agent control can answer an owner client with: the agent register's
+/// refusals, this protocol's own, and the owner connection's it travels on. Launch
+/// failures, `launch_*`, are not listed; a client shows them as one launch failure.
+pub const AGENT_CONTROL_CODES: &[&str] = &[
+    "agent_account_invalid",
+    "agent_busy",
+    "agent_hosted",
+    "agent_identity_unavailable",
+    "agent_label_invalid",
+    "agent_not_busy",
+    "agent_not_found",
+    "agent_not_running",
+    "agent_prompt_invalid",
+    "agent_reconnected_read_only",
+    "agent_registry_unavailable",
+    "agent_restart_conflict",
+    "agent_restart_limit",
+    "agent_restart_needs_key",
+    "agent_restart_unavailable",
+    "agent_root_unavailable",
+    "agent_root_unsafe",
+    "agent_run_time_invalid",
+    "agent_spec_invalid",
+    "agent_state_unavailable",
+    "agent_thread_unavailable",
+    "agents_outcome_unknown",
+    "agents_owner_unavailable",
+    "agents_reply_bounds",
+    "agents_request_bounds",
+    "agents_request_invalid",
+    "agents_unavailable",
+    "owner_authentication_failed",
+    "owner_authority_unavailable",
+    "owner_busy",
+    "owner_capability_content_changed",
+    "owner_capability_replaced_or_unsafe",
+    "owner_entropy_unavailable",
+    "owner_grant_stale_or_revoked",
+    "owner_request_failed",
+    "owner_root_replaced_or_unsafe",
+    "owner_root_unavailable",
+    "owner_socket_replaced",
+    "owner_socket_unsafe",
+    "peer_owner_mismatch",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -22,6 +73,16 @@ enum Action {
     },
     Restart {
         id: String,
+    },
+    Using {
+        account: CredentialRef,
+        offset: u16,
+    },
+    StopUsing {
+        account: CredentialRef,
+    },
+    Holders {
+        account: CredentialRef,
     },
 }
 
@@ -44,6 +105,7 @@ pub struct AgentPage {
 enum Reply {
     Page { page: AgentPage },
     Agent { agent: AgentView },
+    Holders { holders: Vec<Holder> },
     Done,
     Rejected { code: String },
 }
@@ -62,7 +124,10 @@ fn valid_id(id: &str) -> bool {
 impl Action {
     fn validate(&self) -> Result<(), EngineError> {
         match self {
-            Self::List { .. } => Ok(()),
+            Self::List { .. }
+            | Self::Using { .. }
+            | Self::StopUsing { .. }
+            | Self::Holders { .. } => Ok(()),
             Self::Stop { id } | Self::Interrupt { id } | Self::Restart { id } if valid_id(id) => {
                 Ok(())
             }
@@ -111,6 +176,90 @@ impl OwnerClient {
         match self.agents_exchange(Action::Restart { id }).await? {
             Reply::Agent { agent } => Ok(agent),
             _ => Err(unknown()),
+        }
+    }
+
+    /// Reads every running agent that signs in with one account, newest first, up to
+    /// `LIST_MAX`, so a refused sign-out can name them. Input: the account. Output: the
+    /// agents with their project, label and plain status.
+    pub async fn agents_using(
+        &self,
+        account: CredentialRef,
+    ) -> Result<Vec<AgentView>, EngineError> {
+        let mut agents = Vec::new();
+        let mut offset = 0;
+        for _ in 0..USING_PAGES_MAX {
+            let action = Action::Using {
+                account: account.clone(),
+                offset,
+            };
+            let page = match self.agents_exchange(action).await? {
+                Reply::Page { page } if page.agents.len() <= AGENTS_PAGE => page,
+                _ => return Err(unknown()),
+            };
+            agents.extend(page.agents);
+            match page.next {
+                Some(next) if next > offset && agents.len() < LIST_MAX => offset = next,
+                _ => break,
+            }
+        }
+        agents.truncate(LIST_MAX);
+        Ok(agents)
+    }
+
+    /// Stops every running agent that signs in with one account, so it can be signed out,
+    /// then reads those still using it. Input: the account. Output: the agents still using
+    /// it, none once all have stopped.
+    pub async fn stop_agents_using(
+        &self,
+        account: CredentialRef,
+    ) -> Result<Vec<AgentView>, EngineError> {
+        let action = Action::StopUsing {
+            account: account.clone(),
+        };
+        match self.agents_exchange(action).await? {
+            Reply::Done => self.agents_using(account).await,
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads what else holds one account's profile now, newest first, up to `HOLDERS_MAX`:
+    /// master conversations with a turn running and research jobs, so a refused sign-out
+    /// can name them. Input: the account. Output: the holders.
+    pub async fn account_holders(
+        &self,
+        account: CredentialRef,
+    ) -> Result<Vec<Holder>, EngineError> {
+        match self.agents_exchange(Action::Holders { account }).await? {
+            Reply::Holders { holders } if holders.len() <= HOLDERS_MAX => Ok(holders),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads everything that holds one account's profile now. Input: the account.
+    /// Output: its running agents and its other holders.
+    pub async fn account_use(&self, account: CredentialRef) -> Result<AccountUse, EngineError> {
+        Ok(AccountUse {
+            agents: self.agents_using(account.clone()).await?,
+            holders: self.account_holders(account).await?,
+        })
+    }
+
+    /// Waits until nothing holds one account's profile, reading it every `FREE_POLL`, at
+    /// most `wait`. Inputs: the account and the wait. Output: the last read, free once
+    /// every holder has ended.
+    pub async fn await_account_free(
+        &self,
+        account: CredentialRef,
+        wait: Duration,
+    ) -> Result<AccountUse, EngineError> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let used = self.account_use(account.clone()).await?;
+            if used.is_free() || tokio::time::Instant::now() >= deadline {
+                return Ok(used);
+            }
+            tokio::time::sleep(FREE_POLL).await;
         }
     }
 
@@ -266,8 +415,72 @@ async fn handle(
             Action::Restart { id } => Reply::Agent {
                 agent: agents.restart(&id).map_err(plain)?,
             },
+            Action::Using { account, offset } => {
+                let offset = usize::from(offset);
+                let listed = agents.using(&account).map_err(plain)?;
+                let next = (listed.len() > offset + AGENTS_PAGE)
+                    .then(|| u16::try_from(offset + AGENTS_PAGE).ok())
+                    .flatten();
+                Reply::Page {
+                    page: AgentPage {
+                        agents: listed.into_iter().skip(offset).take(AGENTS_PAGE).collect(),
+                        next,
+                    },
+                }
+            }
+            Action::StopUsing { account } => {
+                agents.stop_using(&account).map_err(plain)?;
+                Reply::Done
+            }
+            Action::Holders { account } => {
+                let mut holders = agents.holders(&account);
+                holders.truncate(HOLDERS_MAX);
+                Reply::Holders { holders }
+            }
         })
     })
     .await
     .map_err(|_| failure("agents_unavailable"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads the plain codes a source file refuses with through `failure`, before its
+    /// tests. Input: the file text. Output: each code once.
+    fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
+        let code = source.split("mod tests").next().unwrap();
+        code.match_indices("failure(\"")
+            .filter_map(|(at, call)| {
+                let rest = &code[at + call.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect()
+    }
+
+    /// The listed codes cover every refusal the agent register and this protocol make,
+    /// so a client that passes listed codes through never hides a real one.
+    #[test]
+    fn agent_control_codes_cover_every_refusal_of_the_register_and_protocol() {
+        let register = refusals(include_str!("../../../agents.rs"));
+        let protocol = refusals(include_str!("agents.rs"));
+        assert!(register.len() >= 20 && protocol.len() >= 5);
+        for code in register.iter().chain(&protocol) {
+            assert!(
+                code.starts_with("launch_") || AGENT_CONTROL_CODES.contains(code),
+                "{code} is not in AGENT_CONTROL_CODES"
+            );
+        }
+        let mut sorted = AGENT_CONTROL_CODES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, AGENT_CONTROL_CODES);
+        assert!(AGENT_CONTROL_CODES.iter().all(|code| {
+            !code.starts_with("launch_")
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }));
+    }
 }

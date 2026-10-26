@@ -244,6 +244,25 @@ impl TeamPlan {
         Ok(())
     }
 
+    /// Refuses a plan the owner writes when it adds a harness that cannot run team agents.
+    /// Takes the written plan and the saved plan it replaces; a harness the saved plan already
+    /// names is kept, so an old plan still saves unchanged. Returns `team_harness_unavailable`.
+    fn check_writable(&self, saved: Option<&TeamPlan>) -> Result<(), &'static str> {
+        let added = self.harnesses().any(|id| {
+            crate::team::launch_harness(id).is_none()
+                && !saved.is_some_and(|saved| saved.harnesses().any(|known| known == id))
+        });
+        if added {
+            return Err("team_harness_unavailable");
+        }
+        Ok(())
+    }
+
+    fn harnesses(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.master.as_str())
+            .chain(self.sub_harnesses.iter().map(|slot| slot.harness.as_str()))
+    }
+
     /// Counts the master and every sub-harness agent.
     /// Takes the team plan.
     /// Returns the total number of agents the plan describes.
@@ -363,12 +382,38 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
+/// The revision a project setup is recorded at; only the owner's
+/// `UpdateProjectSetup` raises it.
+pub(crate) const FIRST_REVISION: u64 = 1;
+
 impl StoredSetup {
+    /// Whether the owner saved this setup after it was recorded: only
+    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
+    /// an onboarding whose setup was saved is finished.
+    pub fn saved(&self) -> bool {
+        self.revision > FIRST_REVISION
+    }
+
+    /// The setup as the owner edits it: every stored field except the
+    /// documents, which keep their own add and delete actions.
+    pub fn editable(&self) -> ProjectSetup {
+        ProjectSetup {
+            about: self.about.clone(),
+            tech_stack: self.tech_stack.clone(),
+            platforms: self.platforms.clone(),
+            research: self.research.clone(),
+            pool: self.pool.clone(),
+            team: Some(self.team.clone()),
+            documents: Vec::new(),
+        }
+    }
+
     /// The folder holding this project's context and agent worktrees:
-    /// `.crazyagent/` inside the project for projects in the projects home,
-    /// or the project folder itself for projects made before it.
+    /// `.crazyagent/` inside the project folder for projects in the projects
+    /// home and onboarded ones, or the project folder itself for projects made
+    /// before it. A `.crazyagent/` nested in the recorded folder never counts.
     pub fn state_folder(&self) -> PathBuf {
-        crate::projects_home::state_folder(Path::new(&self.folder))
+        crate::projects_home::state_folder(&self.project_folder())
     }
 
     /// The project's own folder: the recorded folder, or the folder holding
@@ -474,6 +519,53 @@ pub struct ResearchJob {
     pub started_ms: Option<i64>,
     pub heartbeat_ms: Option<i64>,
     pub finished_ms: Option<i64>,
+}
+
+const RATE_LIMITED: &str = "rate_limited until ";
+const RATE_LIMITED_LABEL: &str = "Rate limited";
+
+impl ResearchJob {
+    /// Reads the wait of a job parked because every pool account that can run it hit a rate
+    /// or usage limit: the research service's `rate_limited until YYYY-MM-DD HH:MM UTC: <reason>`
+    /// detail on a job that needs a pool. Takes the job. Returns when the limit ends in ms
+    /// since the epoch and the plain reason, or `None` for any other job.
+    pub fn rate_limited(&self) -> Option<(i64, &str)> {
+        if self.status != ResearchStatus::NeedsPool {
+            return None;
+        }
+        let rest = self.error.as_deref()?.strip_prefix(RATE_LIMITED)?;
+        let (until, reason) = rest.split_once(" UTC: ")?;
+        Some((utc_minute_ms(until)?, reason))
+    }
+}
+
+/// Reads a `YYYY-MM-DD HH:MM` UTC minute, the inverse of the research service's date.
+/// Takes the text. Returns its ms since the epoch, or `None` for any other text.
+fn utc_minute_ms(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 16 || [bytes[4], bytes[7], bytes[10], bytes[13]] != *b"-- :" {
+        return None;
+    }
+    let number = |at: usize, len: usize| {
+        let digits = &bytes[at..at + len];
+        digits.iter().all(u8::is_ascii_digit).then(|| {
+            digits
+                .iter()
+                .fold(0, |value, digit| value * 10 + i64::from(digit - b'0'))
+        })
+    };
+    let (year, month, day) = (number(0, 4)?, number(5, 2)?, number(8, 2)?);
+    let (hour, minute) = (number(11, 2)?, number(14, 2)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let year_of_era = shifted - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(((days * 24 + hour) * 60 + minute) * 60_000)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1314,7 +1406,8 @@ fn effective(status: ResearchStatus, has_pool: bool) -> ResearchStatus {
     }
 }
 
-/// Lists a project's research jobs with the current pool assignment applied.
+/// Lists a project's research jobs with the current pool assignment applied; a job of an
+/// assigned pool waiting out a rate limit keeps its wait and reads "Rate limited".
 /// Takes a read transaction, the configuration and the project.
 /// Returns at most 64 jobs in creation order with plain labels.
 pub fn list_jobs(
@@ -1325,8 +1418,16 @@ pub fn list_jobs(
     let has_pool = project_has_pool(config, project);
     let mut jobs = load_jobs(tx, "project", &project.as_str())?;
     for job in &mut jobs {
-        job.status = effective(job.status, has_pool);
-        job.status_label = job.status.label().into();
+        let limited = has_pool && job.rate_limited().is_some();
+        if !limited {
+            job.status = effective(job.status, has_pool);
+        }
+        job.status_label = if limited {
+            RATE_LIMITED_LABEL
+        } else {
+            job.status.label()
+        }
+        .into();
         assert_eq!(&job.project_id, project);
     }
     Ok(jobs)
@@ -1636,7 +1737,7 @@ pub(crate) fn execute(
             name.as_deref(),
             setup,
         ),
-        SetupAction::Remove { project_id } => remove(tx, project_id),
+        SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
@@ -1816,6 +1917,11 @@ fn update(
             .is_some_and(|pool| !pool_exists(config, pool))
     {
         return Ok(rejected("pool_missing"));
+    }
+    if let Some(team) = &setup.team
+        && let Err(code) = team.check_writable(Some(&stored.team))
+    {
+        return Ok(rejected(code));
     }
     let Ok(context) = open_beneath(&stored.state_folder(), &[CONTEXT_DIRECTORY]) else {
         return Ok(rejected("project_folder_missing"));
@@ -2033,33 +2139,33 @@ const REMOVED_WITH_PROJECT: [&str; 8] = [
     "onboarding",
     "team_messages",
     "team_tasks",
-    "team_direct_inputs",
+    "team_owner_prompts",
     "team_settings",
     "team_paused_projects",
     "project_setups",
 ];
 
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
-/// Takes the transaction and the project. Its onboarding, research jobs, team conversation,
-/// tasks, settings and ended agents are deleted, so a waiting step is never claimed, a
-/// running step or job stops when it finds its row gone, and the folder can be added again.
-/// Returns `project_master_open` while its master conversation is open, since ending it
-/// releases the master's worktree, and `invalid_project` for an unknown project.
-fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, EngineError> {
-    let (exists, master_open): (bool, bool) = tx
+/// Takes the transaction, the project and the revision before the removal. Its open master
+/// conversation ends in the same change; its onboarding, research jobs, team conversation,
+/// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
+/// running one stops. Returns `invalid_project` for an unknown project.
+fn remove(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let exists: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1),
-            EXISTS(SELECT 1 FROM master_sessions WHERE project=?1 AND phase='configured')",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
             [project_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .map_err(error)?;
     if !exists {
         return Ok(rejected("invalid_project"));
     }
-    if master_open {
-        return Ok(rejected("project_master_open"));
-    }
+    crate::storage::close_master_for_removal(tx, project_id, revision)?;
     for table in REMOVED_WITH_PROJECT {
         tx.execute(
             &format!("DELETE FROM {table} WHERE project=?1"),
@@ -2075,6 +2181,11 @@ fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, Engin
     .map_err(error)?;
     tx.execute(
         "DELETE FROM team_agents WHERE project=?1 AND status IN ('stopped','failed')",
+        [project_id.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "DELETE FROM onboarding WHERE project=?1",
         [project_id.as_str()],
     )
     .map_err(error)?;
@@ -2125,6 +2236,9 @@ fn check_new(
         }
     };
     team.validate()?;
+    if let Err(code) = team.check_writable(None) {
+        return Ok(Err(code.into()));
+    }
     let Some(home) = crate::projects_home::load(tx)? else {
         return Ok(Err("projects_home_unset".into()));
     };
@@ -2285,10 +2399,6 @@ pub(crate) fn record(
     documents: Vec<StoredDocument>,
     folder: &Path,
 ) -> Result<Outcome, EngineError> {
-    let outcome = crate::storage::create_project(tx, project_id, spec)?;
-    if outcome != Outcome::Applied {
-        return Ok(outcome);
-    }
     let now = now_ms();
     let stored = StoredSetup {
         project_id: project_id.clone(),
@@ -2309,8 +2419,13 @@ pub(crate) fn record(
             .ok_or_else(|| failure("project_folder_unwritable"))?
             .to_owned(),
         created_ms: now,
-        revision: 1,
+        revision: FIRST_REVISION,
     };
+    let spec = declared(spec, &stored)?;
+    let outcome = crate::storage::create_project(tx, project_id, &spec)?;
+    if outcome != Outcome::Applied {
+        return Ok(outcome);
+    }
     tx.execute(
         "INSERT INTO project_setups VALUES (?1,?2)",
         params![
@@ -2329,6 +2444,66 @@ pub(crate) fn record(
     )?;
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
+}
+
+/// The specification a set-up project is recorded with: the client's, with
+/// the project's own folder as its repository when the client declared none,
+/// so the master works in it. Takes the specification and the setup.
+/// Returns the checked specification or its bound failure.
+fn declared(spec: &ProjectSpec, stored: &StoredSetup) -> Result<ProjectSpec, EngineError> {
+    let mut spec = spec.clone();
+    if spec.repositories.is_empty() {
+        let folder = stored.project_folder();
+        let folder = folder
+            .to_str()
+            .ok_or_else(|| failure("project_folder_unwritable"))?;
+        spec.repositories.push(folder.to_owned());
+    }
+    spec.validate().map_err(|problem| failure(&problem.0))?;
+    assert!(!spec.repositories.is_empty());
+    Ok(spec)
+}
+
+/// Gives each project with no declared repository its setup's project
+/// folder, repairing projects recorded before the folder was declared. Runs
+/// when the engine opens its database, at most 256 projects. Takes the
+/// connection. Returns any storage failure.
+#[cfg(unix)]
+pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineError> {
+    const REPAIRED_MAX: i64 = 256;
+    let tx = connection.unchecked_transaction().map_err(error)?;
+    let rows: Vec<(String, String)> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT p.body, s.body FROM projects p JOIN project_setups s ON s.project=p.id
+                 WHERE json_array_length(p.body,'$.spec.repositories')=0
+                 ORDER BY p.id LIMIT ?1",
+            )
+            .map_err(error)?;
+        statement
+            .query_map([REPAIRED_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for (project, setup) in rows {
+        let mut project: crate::protocol::StoredProject =
+            serde_json::from_str(&project).map_err(error)?;
+        let setup: StoredSetup = serde_json::from_str(&setup).map_err(error)?;
+        assert_eq!(project.project_id, setup.project_id);
+        project.spec = declared(&project.spec, &setup)?;
+        let changed = tx
+            .execute(
+                "UPDATE projects SET body=?2 WHERE id=?1",
+                params![
+                    project.project_id.as_str(),
+                    serde_json::to_string(&project).map_err(error)?
+                ],
+            )
+            .map_err(error)?;
+        assert_eq!(changed, 1);
+    }
+    tx.commit().map_err(error)
 }
 
 /// Loads the stored setup of one project.

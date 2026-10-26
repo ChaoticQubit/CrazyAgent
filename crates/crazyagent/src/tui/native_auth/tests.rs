@@ -1165,12 +1165,12 @@ async fn unit_transport_error_is_fixed_safe_text_and_keeps_unresolved_operation(
 fn unit_codex_challenge_rendering_preserves_exact_safe_url_and_code_without_login_id() {
     let challenge = codex::owner_login_challenge(
         "unit-secret-login-id",
-        "https://auth.example.invalid/device?state=unit%2Bstate",
+        "https://auth.openai.com/device?state=unit%2Bstate",
         Some("UNIT-CODE"),
     )
     .unwrap();
     let rendered = render_challenge(&challenge);
-    assert!(rendered.contains("https://auth.example.invalid/device?state=unit%2Bstate"));
+    assert!(rendered.contains("https://auth.openai.com/device?state=unit%2Bstate"));
     assert!(rendered.contains("UNIT-CODE"));
     assert!(!rendered.contains("unit-secret-login-id"));
     assert!(rendered.len() <= 65536);
@@ -1178,11 +1178,11 @@ fn unit_codex_challenge_rendering_preserves_exact_safe_url_and_code_without_logi
 
 #[test]
 fn unit_unsafe_challenge_is_not_silently_rewritten_into_an_exact_action_url() {
-    let url = "https://auth.example.invalid/\u{202e}unit-reversed";
+    let url = "https://auth.openai.com/\u{202e}unit-reversed";
     let challenge = codex::owner_login_challenge("unit-login", url, None).unwrap();
     let rendered = render_challenge(&challenge);
     assert!(!rendered.contains(url));
-    assert!(!rendered.contains("auth.example.invalid"));
+    assert!(!rendered.contains("auth.openai.com"));
     assert!(rendered.contains("cannot display safely"));
     assert!(!rendered.contains('\u{202e}'));
 }
@@ -1256,3 +1256,181 @@ mod pool_assignment;
 mod claude_code;
 mod managed_setup;
 mod preview;
+
+fn unit_agent(label: &str, project: &str) -> crate::agents::AgentView {
+    crate::agents::AgentView {
+        id: "a".repeat(32),
+        project: crate::protocol::ProjectId::new(project).unwrap(),
+        role: crate::agents::AgentRole::SubAgent,
+        label: label.into(),
+        harness: "codex".into(),
+        state: crate::agents::AgentState::Running,
+        status: "Working".into(),
+        reattached: false,
+        busy: true,
+        attempt: 1,
+        can_stop: true,
+        can_interrupt: true,
+        can_restart: true,
+        exit_code: None,
+        reason: None,
+        last_text: None,
+        started_ms: 1,
+        ended_ms: None,
+    }
+}
+
+/// Unit input: the refusal and agent lists below are synthetic; the engine's own listing
+/// and stop are covered over a real owner connection in client_controller::agents.
+#[tokio::test]
+async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_before_signing_out()
+{
+    run(|case| async move {
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = unit_inspected(basis, connection);
+        advance(&mut state, 4);
+        state.reduce(&UiEvent::Submit).unwrap();
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let logout = state.request().unwrap();
+        let Command::Logout(first) = &logout.command else {
+            panic!("logout required")
+        };
+        let first = first.request_id.clone();
+        state
+            .apply(Event {
+                job: logout,
+                result: Err("native_profile_in_use".into()),
+            })
+            .unwrap();
+        assert!(
+            !state.has_pending(),
+            "a refused logout leaves nothing pending"
+        );
+
+        let using = state.request().unwrap();
+        assert!(matches!(using.command, Command::Using));
+        state
+            .apply(Event {
+                job: using,
+                result: Ok(Output::Using(crate::agents::AccountUse {
+                    agents: vec![
+                        unit_agent("Team sub-agent 3", "alpha"),
+                        unit_agent("Team sub-agent 5", "beta"),
+                    ],
+                    holders: Vec::new(),
+                })),
+            })
+            .unwrap();
+        let shown = state.render(false);
+        assert!(shown.contains(
+            "In use by: Team sub-agent 3 (project alpha), Team sub-agent 5 (project beta)"
+        ));
+        assert!(shown.contains("> Back |   Stop agents and sign out"));
+
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        assert!(
+            state
+                .render(false)
+                .contains("  Back | > Stop agents and sign out")
+        );
+        state.reduce(&UiEvent::Submit).unwrap();
+        let stop = state.request().unwrap();
+        assert!(matches!(stop.command, Command::Release));
+        assert_eq!(stop.context.connection.id.as_str(), "a-codex");
+        state
+            .apply(Event {
+                job: stop,
+                result: Ok(Output::Using(crate::agents::AccountUse::default())),
+            })
+            .unwrap();
+        let again = state.request().unwrap();
+        let Command::Logout(second) = &again.command else {
+            panic!("logout again required")
+        };
+        assert_ne!(second.request_id, first);
+        assert!(!state.render(false).contains("In use by"));
+    })
+    .await;
+}
+
+/// Unit input: synthetic holder lists into the real reducer and label. A refused sign-out
+/// names a master conversation and a research job with their projects, and the one owner
+/// action is named by what it ends.
+#[tokio::test]
+async fn unit_refused_logout_names_a_master_conversation_and_a_research_job_and_ends_them() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = unit_inspected(basis, connection);
+        advance(&mut state, 4);
+        state.reduce(&UiEvent::Submit).unwrap();
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let logout = state.request().unwrap();
+        state
+            .apply(Event {
+                job: logout,
+                result: Err("native_profile_in_use".into()),
+            })
+            .unwrap();
+        let using = state.request().unwrap();
+        let project = |id: &str| crate::protocol::ProjectId::new(id).unwrap();
+        let master = crate::agents::Holder::Master {
+            project: project("alpha"),
+            session: crate::protocol::SessionId::new("master-1").unwrap(),
+        };
+        let research = crate::agents::Holder::Research {
+            project: project("beta"),
+            job: 7,
+            title: "Market research".into(),
+        };
+        state
+            .apply(Event {
+                job: using,
+                result: Ok(Output::Using(crate::agents::AccountUse {
+                    agents: Vec::new(),
+                    holders: vec![master.clone(), research.clone()],
+                })),
+            })
+            .unwrap();
+        let shown = state.render(false);
+        assert!(shown.contains(
+            "In use by: Master conversation (project alpha), Market research (project beta)"
+        ));
+        assert!(shown.contains("> Back |   Stop agents, end conversation and sign out"));
+
+        let only_master = crate::agents::AccountUse {
+            agents: Vec::new(),
+            holders: vec![master],
+        };
+        assert_eq!(
+            super::release_label(&only_master),
+            "End conversation and sign out"
+        );
+        let only_research = crate::agents::AccountUse {
+            agents: Vec::new(),
+            holders: vec![research],
+        };
+        assert_eq!(
+            super::release_label(&only_research),
+            "Stop agents and sign out"
+        );
+
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let release = state.request().unwrap();
+        assert!(matches!(release.command, Command::Release));
+        assert!(release.context.generation > 0);
+        state
+            .apply(Event {
+                job: release,
+                result: Ok(Output::Using(crate::agents::AccountUse::default())),
+            })
+            .unwrap();
+        assert!(matches!(
+            state.request().unwrap().command,
+            Command::Logout(_)
+        ));
+    })
+    .await;
+}

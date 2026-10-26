@@ -7,14 +7,77 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 const FOUND_REPLY_BYTES: usize = 48 * 1024;
-const REGISTERED_MAX: usize = 256;
 
-/// Starts the folder watch for the saved projects home, when there is one.
-/// Input: the engine connection. Output: the running watch, or None when no
-/// home is saved or the OS refuses the watch; reads then scan the folder.
-pub(super) fn watch_saved(connection: &Connection) -> Option<HomeWatch> {
-    let saved = home::load(connection).ok().flatten()?;
-    match HomeWatch::start(&saved) {
+/// The storage actor's watch of the saved projects home. The OS watch starts, and the
+/// one it replaces stops, on a thread of their own, so no owner request ever waits on
+/// the folder watch setup; a read takes a finished start without waiting for one.
+#[derive(Default)]
+pub(super) struct WatchSlot {
+    live: Option<HomeWatch>,
+    starting: Option<(PathBuf, std::sync::mpsc::Receiver<Option<HomeWatch>>)>,
+}
+
+impl WatchSlot {
+    /// Replaces the watch with one of the home saved now, started on its own thread.
+    /// Input: the engine connection. Output: none; with no saved home, or when the
+    /// thread cannot start, there is no watch and reads scan the folder.
+    pub(super) fn restart(&mut self, connection: &Connection) {
+        let stale = (self.live.take(), self.starting.take());
+        let saved = home::load(connection).ok().flatten();
+        if saved.is_none() && stale.0.is_none() && stale.1.is_none() {
+            return;
+        }
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let home = saved.clone();
+        let spawned = std::thread::Builder::new()
+            .name("projects-home-watch".into())
+            .spawn(move || {
+                drop(stale);
+                if let Some(saved) = saved {
+                    let _ = send.send(start_watch(&saved));
+                }
+            });
+        match (spawned, home) {
+            (Ok(_), Some(home)) => self.starting = Some((home, receive)),
+            (Ok(_), None) => {}
+            (Err(_), _) => {
+                eprintln!("projects_home_watch_not_started cause=projects_home_watch_thread");
+            }
+        }
+        assert!(self.live.is_none());
+    }
+
+    /// The watch of the saved home as a read sees it, after taking a start that has
+    /// finished. Input: the home saved now. Output: its live watch, and whether its
+    /// watch is still starting; a watch of another home counts as neither.
+    fn observe(&mut self, saved: Option<&Path>) -> (Option<&HomeWatch>, bool) {
+        if let Some((_, receive)) = &self.starting {
+            match receive.try_recv() {
+                Ok(watch) => {
+                    self.live = watch;
+                    self.starting = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.starting = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        assert!(self.live.is_none() || self.starting.is_none());
+        let starting = self
+            .starting
+            .as_ref()
+            .is_some_and(|(home, _)| saved == Some(home.as_path()));
+        let live = self
+            .live
+            .as_ref()
+            .filter(|watch| saved == Some(watch.home()) && watch.watching());
+        (live, starting)
+    }
+}
+
+/// Starts the OS watch of a saved projects home. Input: the home folder. Output: the
+/// running watch, or None when the OS refuses it; reads then scan the folder.
+fn start_watch(saved: &Path) -> Option<HomeWatch> {
+    match HomeWatch::start(saved) {
         Ok(watch) => Some(watch),
         Err(e) => {
             eprintln!("projects_home_watch_not_started cause={}", e.0);
@@ -30,22 +93,23 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(parent).map_err(error)
 }
 
-/// Lists the set-up projects for the projects home: each project's own
-/// folder and whether its onboarding is still under way, read from the
-/// onboarding table. An onboarded project is Ready once both its graph and
-/// mapping steps are done; a project made with New Project has no
-/// onboarding row and is Ready at once.
+/// Lists every set-up project, none left out, so the trash guard and the
+/// Found list see them all: each project's folder and whether onboarding is
+/// still under way. An onboarded project is Ready once the owner saved its
+/// setup, or its graph step is done or off and its mapping is done; a project
+/// made with New Project has no onboarding row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
+    let off = crate::onboarding::Step::Off.columns().0;
     let mut statement = tx
         .prepare(
             "SELECT s.body, o.graph_state, o.mapping_state FROM project_setups s
              LEFT JOIN onboarding o ON o.project=s.project
-             ORDER BY s.project LIMIT ?1",
+             ORDER BY s.project",
         )
         .map_err(error)?;
     let rows = statement
-        .query_map([REGISTERED_MAX as i64], |row| {
+        .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -58,9 +122,10 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
         let (body, graph, mapping) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
-        let onboarding = graph
-            .zip(mapping)
-            .is_some_and(|(graph, mapping)| graph != done || mapping != done);
+        let onboarding = !stored.saved()
+            && graph
+                .zip(mapping)
+                .is_some_and(|(graph, mapping)| (graph != done && graph != off) || mapping != done);
         projects.push(Registered {
             folder: stored.project_folder(),
             project_id: stored.project_id,
@@ -68,7 +133,6 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
             onboarding,
         });
     }
-    assert!(projects.len() <= REGISTERED_MAX);
     Ok(projects)
 }
 
@@ -81,18 +145,18 @@ pub(super) fn read(
     config: &EffectiveConfig,
     a: &Admission,
     query: &OwnerRead,
-    watch: Option<&HomeWatch>,
+    watch: &mut WatchSlot,
 ) -> Result<OwnerReadReply, EngineError> {
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
     let saved = home::load(&tx)?;
-    let live = watch.filter(|watch| saved.as_deref() == Some(watch.home()) && watch.watching());
+    let (live, starting) = watch.observe(saved.as_deref());
     let data = match query {
         OwnerRead::ProjectsHome => OwnerData::ProjectsHome {
             home: ProjectsHome {
                 path: saved.map(|path| path.to_string_lossy().into_owned()),
-                watching: live.is_some(),
+                watching: live.is_some() || starting,
             },
         },
         OwnerRead::FoundProjects => {
@@ -142,7 +206,7 @@ pub(super) fn add_plan(
         return Err(error("stale_revision"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_add(&saved, &engine_root(path)?, source, mode)
+    home::plan_add(&saved, &engine_root(path)?, source, mode, &registered(&tx)?)
 }
 
 /// Plans a MoveProjectsHome that moves the project folders and records the

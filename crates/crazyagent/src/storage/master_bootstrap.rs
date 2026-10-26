@@ -123,7 +123,7 @@ fn current_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<
         tx,
         &Admission {
             db_instance: instance,
-            engine_epoch: session.owner.engine_epoch.clone(),
+            engine_epoch: session.engine_epoch().to_owned(),
             owner_id: session.owner.owner_id.clone(),
             owner_epoch: session.owner.resulting_epoch,
         },
@@ -309,7 +309,7 @@ fn validate_receipt(
         || receipt.config_id != session.config_id
         || receipt.source_hash != session.source_hash
         || receipt.owner != session.owner
-        || receipt.proof != *proof
+        || !receipt_proof_matches(&receipt.proof, proof)
         || receipt.at_revision.value() < session.owner.revision_after.value()
         || receipt.at_revision.value() > owner_revision(tx)?
         || receipt.lease.state != LeaseState::Reserved
@@ -333,9 +333,20 @@ fn validate_receipt(
     if expected != actual {
         return Err(error("master_bootstrap_receipt_conflict"));
     }
-    assert!(receipt.proof == *proof);
+    assert!(receipt_proof_matches(&receipt.proof, proof));
     assert_eq!(expected, actual);
     Ok(actual)
+}
+
+/// Tells whether a turn's proof may use a workspace reserved under another proof: any
+/// native sign-in may, since each turn proves its own pool member in full before it uses
+/// the workspace; an RCLI configured proof must be the reserving one. Inputs: the
+/// receipt's proof and the turn's proof. Output: true when the workspace may be used.
+fn receipt_proof_matches(receipt: &MasterBootstrapAuth, proof: &MasterBootstrapAuth) -> bool {
+    match (receipt, proof) {
+        (MasterBootstrapAuth::NativeSignIn(_), MasterBootstrapAuth::NativeSignIn(_)) => true,
+        _ => receipt == proof,
+    }
 }
 
 pub(super) fn reserve(
@@ -458,6 +469,37 @@ pub(super) fn ready(
     assert_eq!(lease.state, LeaseState::Ready);
     assert_eq!(lease.owner_session, session.session_id);
     Ok((receipt.allocation, lease))
+}
+
+/// Returns a master session's conversation worktree to Ready on the first send after an
+/// engine restart, when the worktree still verifies and nothing an earlier run launched in
+/// it can still write (LB-23). Inputs: the transaction and the session. Output: true when
+/// the session has no worktree or a Ready one; false sends it to a new conversation.
+pub(super) fn requalify(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+) -> Result<bool, EngineError> {
+    assert!(!tx.is_autocommit());
+    let Outcome::Worktrees { leases } = worktrees::leases(tx, &session.bootstrap_task_id)? else {
+        return Err(error("master_bootstrap_receipt_conflict"));
+    };
+    if leases.is_empty() {
+        return Ok(true);
+    }
+    let lease = only_lease(tx, session)?;
+    match lease.state {
+        LeaseState::Ready => return Ok(true),
+        LeaseState::RecoveryRequired => {}
+        LeaseState::Reserved | LeaseState::Uncertain => return Ok(false),
+    }
+    if !super::harness_groups::quiescent(tx, &session.session_id)?
+        || !worktrees::requalify(tx, &lease.task_id, &lease.repository)?
+    {
+        return Ok(false);
+    }
+    super::harness_groups::clear(tx, &session.session_id)?;
+    assert_eq!(only_lease(tx, session)?.state, LeaseState::Ready);
+    Ok(true)
 }
 
 #[cfg(all(test, unix))]

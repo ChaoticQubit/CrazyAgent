@@ -26,7 +26,7 @@ test("plugin refusals from the engine read as the plugin sentences, not the gene
   assert.equal(api.plainError("plugin_switch_global_only"), "Only items from global settings can be switched here.");
   assert.equal(api.classifyFailure({ code: "server_secret_invalid" }).message, "Enter the secret on one line, up to 8192 characters.");
   assert.equal(api.plainError("picker_failed"), "Couldn't open the folder chooser. Type the full path instead.");
-  assert.equal(api.plainError("skillful <b>"), "Something went wrong. Try again.");
+  assert.equal(api.plainError("skillful <b>"), "Something went wrong. Try again. (unknown)");
 });
 
 test("the skills list shows each skill from the engine with its folder, switch and remove action", () => {
@@ -145,7 +145,7 @@ test("every plugins and folder chooser command the settings call is registered i
 
 test("refusals from the native open commands read as plain sentences", () => {
   for (const code of ["link_not_allowed", "open_failed", "project_folder_missing", "context_item_not_openable", "picker_failed"]) {
-    assert.notEqual(api.plainError(code), "Something went wrong. Try again.", code);
+    assert.doesNotMatch(api.plainError(code), / \([a-z0-9_]+\)$/, code);
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
 });

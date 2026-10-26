@@ -65,6 +65,7 @@ pub(crate) enum ClaudeAuthFailure {
     LaunchFailed,
     InputInvalid,
     DestinationUnsupported,
+    CredentialExpiring,
 }
 
 impl ClaudeAuthFailure {
@@ -79,6 +80,7 @@ impl ClaudeAuthFailure {
             Self::LaunchFailed => "native_auth_claude_launch_failed",
             Self::InputInvalid => "native_auth_claude_input_invalid",
             Self::DestinationUnsupported => "native_auth_claude_destination_unsupported",
+            Self::CredentialExpiring => "native_auth_claude_credential_expiring",
         }
     }
 }
@@ -120,7 +122,7 @@ impl ClaudeAuthObservation {
             || !matches!(
                 fact.action,
                 NativeAuthAction::SignIn {
-                    method: NativeAuthMethod::ClaudeOfficial
+                    method: NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting
                 } | NativeAuthAction::Logout
             )
         {

@@ -6,7 +6,7 @@ use crate::master_session::{
     MasterTurnView,
 };
 use crate::routing::{ResourceBudget, RouteRequest};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use tokio::sync::watch;
 
 const CATALOG: &str = r#"
@@ -123,13 +123,21 @@ impl DispatchFixture {
     }
 
     async fn start_with(backend: MasterBackend) -> Self {
+        Self::start_on(backend, "[\"p\"]").await
+    }
+
+    async fn start_on(backend: MasterBackend, projects: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-mdb-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, catalog(backend)).unwrap();
+        std::fs::write(
+            &global,
+            catalog(backend).replace("projects = [\"p\"]", &format!("projects = {projects}")),
+        )
+        .unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -207,12 +215,16 @@ impl DispatchFixture {
     }
 
     async fn create(&self) -> (OwnerRequest, OwnerReply) {
+        self.create_named("p").await
+    }
+
+    async fn create_named(&self, project: &str) -> (OwnerRequest, OwnerReply) {
         let request = request(
-            "dispatch-project",
+            &format!("dispatch-project-{project}"),
             self.revision().await,
             OwnerOperation::Apply {
                 mutation: OwnerMutation::CreateProject {
-                    project_id: ProjectId::new("p").unwrap(),
+                    project_id: ProjectId::new(project).unwrap(),
                     spec: ProjectSpec {
                         name: "dispatch project".into(),
                         repositories: vec![],
@@ -226,6 +238,19 @@ impl DispatchFixture {
     }
 
     async fn open(&self) -> (OwnerRequest, OwnerReply, MasterSessionView) {
+        self.open_named("p").await
+    }
+
+    async fn open_named(&self, project: &str) -> (OwnerRequest, OwnerReply, MasterSessionView) {
+        self.open_as(&format!("dispatch-open-{project}"), project)
+            .await
+    }
+
+    async fn open_as(
+        &self,
+        id: &str,
+        project: &str,
+    ) -> (OwnerRequest, OwnerReply, MasterSessionView) {
         let basis = self
             .read(OwnerRead::ModelAccessPage {
                 collection: ModelAccessCollection::Pools,
@@ -238,9 +263,9 @@ impl DispatchFixture {
         };
         let (request, reply) = self
             .action(
-                "dispatch-open",
+                id,
                 MasterOwnerAction::Open {
-                    project_id: ProjectId::new("p").unwrap(),
+                    project_id: ProjectId::new(project).unwrap(),
                     expected_config_id: basis.config_id,
                     expected_source_hash: source_hash,
                     selection: Box::new(selection(self.backend)),
@@ -248,9 +273,14 @@ impl DispatchFixture {
             )
             .await;
         operation(&reply);
+        let session = self.session(project).await;
+        (request, reply, session)
+    }
+
+    async fn session(&self, project: &str) -> MasterSessionView {
         let state = self
             .read(OwnerRead::ProjectMaster {
-                project_id: ProjectId::new("p").unwrap(),
+                project_id: ProjectId::new(project).unwrap(),
             })
             .await;
         let OwnerData::ProjectMaster {
@@ -259,8 +289,38 @@ impl DispatchFixture {
         else {
             panic!("actual configured master session missing");
         };
-        let session = *session;
-        (request, reply, session)
+        *session
+    }
+
+    async fn submit_served(&self, session: &MasterSessionView, id: &str) -> OwnerReply {
+        let submit = request(
+            id,
+            self.revision().await,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Submit {
+                        project_id: session.project_id.clone(),
+                        session_id: session.session_id.clone(),
+                        text: "Served bounded input, with no admitted native profile.".into(),
+                    },
+                },
+            },
+        );
+        self.owner
+            .request(submit)
+            .await
+            .unwrap_or_else(|error| panic!("the served submit {id} answered {}", error.0))
+    }
+
+    async fn await_settled(&self, session: &MasterSessionView, id: &str) {
+        let project = session.project_id.as_str().to_owned();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.session(&project).await.current_turn.is_some() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the committed master turn {id} was never driven"));
     }
 
     async fn submit(&self, session: &MasterSessionView, id: &str) -> (OwnerRequest, OwnerReply) {
@@ -649,6 +709,7 @@ async fn master_dispatch_blocks_a_codex_turn_without_a_current_sign_in() {
         turn.reason,
         Some(crate::master_session::MasterReason::ReadinessUnknown)
     );
+    assert_eq!(turn.cause.as_deref(), Some("master_authentication_unknown"));
     assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
@@ -673,18 +734,45 @@ async fn master_dispatch_blocks_a_claude_turn_without_a_current_sign_in() {
         turn.reason,
         Some(crate::master_session::MasterReason::ReadinessUnknown)
     );
+    assert_eq!(turn.cause.as_deref(), Some("master_authentication_unknown"));
     assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
 }
 
 #[tokio::test]
-async fn master_dispatch_blocks_a_turn_on_a_master_opened_before_an_engine_restart() {
+async fn a_send_after_a_restart_with_a_turn_left_queued_asks_for_a_new_conversation() {
     let mut fixture = DispatchFixture::start().await;
     fixture.create().await;
-    let (_, _, session) = fixture.open().await;
+    let (_, _, stale) = fixture.open().await;
+    let (_, left) = fixture.submit(&stale, "left-queued").await;
+    operation(&left);
     fixture.restart().await;
-    let (submit, submitted) = fixture.submit(&session, "after-restart").await;
+    let (_, refused) = fixture.submit(&stale, "after-restart").await;
+    let OwnerResponse::Applied { operation: refusal } = &refused.response else {
+        panic!("actual refusal missing: {refused:?}");
+    };
+    assert_eq!(
+        refusal.result,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        }
+    );
+    assert_eq!(fixture.counts(), (1, 0));
+    assert_eq!(fixture.turn(&stale).await.phase, MasterTurnPhase::Queued);
+    let (_, closed) = fixture
+        .action(
+            "close-after-restart",
+            MasterOwnerAction::Close {
+                project_id: stale.project_id.clone(),
+                session_id: stale.session_id.clone(),
+            },
+        )
+        .await;
+    operation(&closed);
+    let (_, _, fresh) = fixture.open_as("reopen-after-restart", "p").await;
+    assert_ne!(fresh.session_id, stale.session_id);
+    let (submit, submitted) = fixture.submit(&fresh, "after-restart-new").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
     assert!(
@@ -692,12 +780,144 @@ async fn master_dispatch_blocks_a_turn_on_a_master_opened_before_an_engine_resta
             .committed(fixture.runtime(), &submit, &submitted)
             .unwrap()
     );
-    let turn = fixture.await_blocked(&session).await;
+    let turn = fixture.await_blocked(&fresh).await;
     assert_eq!(turn.id, submit.request_id);
     assert_eq!(
         turn.reason,
-        Some(crate::master_session::MasterReason::ConnectionChanged)
+        Some(crate::master_session::MasterReason::ReadinessUnknown)
     );
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn master_turns_past_the_dispatch_capacity_keep_being_driven() {
+    let fixture = DispatchFixture::start_on(MasterBackend::Claude, "[\"p\", \"q\"]").await;
+    let mut driven = 0;
+    for (project, turns) in [("p", crate::master_session::TURNS_MAX), ("q", 1)] {
+        fixture.create_named(project).await;
+        let (_, _, session) = fixture.open_named(project).await;
+        for index in 0..turns {
+            let id = format!("turn-{project}-{index}");
+            operation(&fixture.submit_served(&session, &id).await);
+            fixture.await_settled(&session, &id).await;
+            driven += 1;
+        }
+    }
+    assert_eq!(driven, crate::master_session::TURNS_MAX + 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn master_dispatch_room_refuses_a_submit_once_stopped_and_passes_other_requests() {
+    let fixture = DispatchFixture::start().await;
+    let (create, _) = fixture.create().await;
+    let (_, _, session) = fixture.open().await;
+    let submit = request(
+        "room-turn",
+        fixture.revision().await,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Submit {
+                    project_id: session.project_id.clone(),
+                    session_id: session.session_id.clone(),
+                    text: "Room check input.".into(),
+                },
+            },
+        },
+    );
+    let mut dispatcher = MasterDispatch::new();
+    dispatcher.room(&submit).unwrap();
+    dispatcher.room(&create).unwrap();
+    dispatcher.shutdown().await.unwrap();
+    assert_eq!(
+        dispatcher.room(&submit).unwrap_err().0,
+        "master_dispatch_stopped"
+    );
+    dispatcher.room(&create).unwrap();
+    assert_eq!(fixture.counts(), (0, 0));
+    fixture.finish().await;
+}
+
+fn generations(anchor: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(anchor)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.len() == 9
+                && name.starts_with('o')
+                && name[1..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn engine_shutdown_removes_a_leftover_master_turn_folder_and_its_generation() {
+    let mut fixture = DispatchFixture::start().await;
+    let runtime = fixture.runtime();
+    let generation = runtime.authority.root.path.clone();
+    let (runtime_ref, _, capture) = runtime.allocate_master_capture().unwrap();
+    drop((capture, runtime));
+    assert!(
+        generation
+            .join(format!("master-runtime-{}", runtime_ref.as_str()))
+            .is_dir()
+    );
+    fixture
+        .service
+        .shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("shutdown after a master turn failed: {}", error.0));
+    assert!(!generation.exists());
+    assert!(generations(fixture.root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn engine_start_sweeps_generations_an_earlier_run_left_behind() {
+    let mut fixture = DispatchFixture::start().await;
+    let stale = fixture.root.path().join("o0badc0de");
+    let turn = stale.join("master-runtime-0badc0de");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(turn.join("tmp"))
+        .unwrap();
+    std::fs::write(turn.join("capture-0badc0de.jsonl"), b"{}\n").unwrap();
+    fixture.restart().await;
+    assert!(!stale.exists());
+    let current = fixture.runtime().authority.root.path.clone();
+    assert_eq!(
+        generations(fixture.root.path()),
+        [current.file_name().unwrap().to_string_lossy().into_owned()]
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn engine_stop_removes_every_owner_key_even_when_its_socket_was_replaced() {
+    let mut fixture = DispatchFixture::start().await;
+    let generation = fixture.runtime().authority.root.path.clone();
+    for key in ["owner-tui.cap", "owner-desktop.cap"] {
+        assert!(generation.join(key).is_file());
+    }
+    let socket = generation.join("owner.sock");
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::write(&socket, b"replaced").unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let error = fixture.service.shutdown().await.unwrap_err();
+    assert!(
+        error
+            .0
+            .contains("owner_cleanup_replaced_artifact_preserved"),
+        "{}",
+        error.0
+    );
+    for key in ["owner-tui.cap", "owner-desktop.cap"] {
+        assert!(!generation.join(key).exists(), "{key} was left behind");
+    }
+    assert_eq!(std::fs::read(&socket).unwrap(), b"replaced");
 }

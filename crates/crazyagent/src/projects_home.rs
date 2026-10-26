@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub const PATH_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
+pub const LINKED_WORKTREES_MAX: usize = 4096;
 const RESERVED_NAMES: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
 
 /// The owner's projects home folder and whether the engine is watching it.
 /// `path` is None until the owner picks a folder at first run or in Settings;
-/// `watching` is true while a live folder watch reports changes in it.
+/// `watching` is true while a live folder watch reports changes in it or starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectsHome {
@@ -70,12 +71,12 @@ pub struct FoundProject {
     pub project_id: Option<ProjectId>,
 }
 
-/// How an existing folder is brought into the projects home: moved (the
-/// default, a rename on the same disk) or copied with the source left alone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How an existing folder is brought into the projects home when the owner
+/// explicitly asks for that instead of using it where it is: moved (a rename
+/// on the same disk) or copied with the source left alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddMode {
-    #[default]
     Move,
     Copy,
 }
@@ -197,17 +198,65 @@ pub fn check_home(path: &Path, engine_root: &Path) -> Result<PathBuf, EngineErro
     Ok(home)
 }
 
+/// True when moving `folder` would break git links kept outside it: the
+/// folder is a linked worktree or submodule (its `.git` is a file or a link),
+/// or its repository has linked worktrees. An unreadable `.git` counts.
+fn git_links(folder: &Path) -> bool {
+    let git = folder.join(".git");
+    match std::fs::symlink_metadata(&git) {
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        Ok(metadata) if !metadata.is_dir() => true,
+        Ok(_) => match std::fs::read_dir(git.join("worktrees")) {
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            Ok(mut entries) => entries.next().is_some(),
+        },
+    }
+}
+
+/// True when `folder` is itself a checkout whose git data lives in another repository:
+/// its `.git` is a file (a linked worktree or submodule checkout) or a link. A copy of it
+/// would still use that repository's data. An unreadable `.git` counts.
+fn linked_checkout(folder: &Path) -> bool {
+    match std::fs::symlink_metadata(folder.join(".git")) {
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        Ok(metadata) => !metadata.is_dir() || metadata.file_type().is_symlink(),
+    }
+}
+
+/// Counts the git worktrees linked to the repository in `folder`, which a Copy leaves
+/// with the original. Input: the folder. Output: the entries of its `.git/worktrees`,
+/// at most [`LINKED_WORKTREES_MAX`]; 0 without a plain `.git` folder or when unreadable.
+pub fn linked_worktrees(folder: &Path) -> usize {
+    let git = folder.join(".git");
+    let plain = std::fs::symlink_metadata(&git)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !plain {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(git.join("worktrees")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .take(LINKED_WORKTREES_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .count()
+}
+
 /// Plans bringing an existing folder into the projects home.
-/// Input: the canonical home, the engine data folder, the owner's source text
-/// and the mode. Output: the real source and the free destination in the home,
-/// or a refusal for sources inside the home, the home itself, `/`, the user's
-/// home folder, any folder holding the home or engine data, hidden folders and
-/// names already taken in the home.
+/// Input: the canonical home, the engine data folder, the owner's source
+/// text, the mode and the set-up projects. Output: the real source and the
+/// free destination in the home, or a refusal for sources inside the home,
+/// the home itself, `/`, the user's home folder, any folder holding the home
+/// or engine data, hidden folders, names already taken in the home, a Move
+/// of a folder with git worktree links or nested with a set-up project, and a
+/// Copy of a folder that is itself a linked worktree or submodule checkout.
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
     mode: AddMode,
+    registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
     path_text(source, "home_source_invalid")?;
     let real = real_folder(
@@ -230,6 +279,20 @@ pub fn plan_add(
         return Err(refused("home_source_hidden"));
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
+    if mode == AddMode::Move {
+        if git_links(&real) {
+            return Err(refused("home_move_worktrees"));
+        }
+        if registered
+            .iter()
+            .any(|project| overlaps(&real, &project.folder))
+        {
+            return Err(refused("home_move_project"));
+        }
+    }
+    if mode == AddMode::Copy && linked_checkout(&real) {
+        return Err(refused("home_copy_linked_checkout"));
+    }
     let destination = destination(home, name)?;
     Ok(AddPlan::new(real, destination, mode))
 }
@@ -365,9 +428,9 @@ pub fn forgotten(folder: &str) -> String {
 
 /// Plans moving every project folder from the current home to a new one.
 /// Input: the current home, the new folder the owner picked and the engine
-/// data folder. Output: the plan with the top-level folders to move, or a
+/// data folder. Output: the plan with every top-level folder to move, or a
 /// refusal for an unsafe new home, the same home, homes inside one another,
-/// or a folder name already taken in the new home.
+/// more than `FOLDERS_MAX` folders, or a name already taken in the new home.
 pub fn plan_move(
     current: &Path,
     picked: &Path,
@@ -380,7 +443,7 @@ pub fn plan_move(
     if overlaps(&next, current) {
         return Err(refused("home_move_nested"));
     }
-    let folders = scan(current)?;
+    let folders = watch::scan_all(current)?.ok_or_else(|| refused("home_move_too_many"))?;
     if folders
         .iter()
         .any(|name| std::fs::symlink_metadata(next.join(name)).is_ok())
@@ -542,6 +605,15 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "Rename the folder so it has a plain name first."
         }
         "home_destination_exists" => "Your projects folder already has a folder with that name.",
+        "home_move_worktrees" => {
+            "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it."
+        }
+        "home_move_project" => {
+            "This folder holds or sits inside a project you already added. Use it where it is or copy it."
+        }
+        "home_copy_linked_checkout" => {
+            "This folder is a git worktree or submodule of another repository, so a copy would still share that repository. Use it where it is, or copy the main repository folder."
+        }
         "home_copy_special_file" => "The folder holds a device or pipe file that cannot be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
         "home_copy_failed" | "home_move_failed" => {
@@ -554,6 +626,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_add_unverified" => "The folder did not arrive in your projects folder.",
         "home_move_same" => "That is already your projects folder.",
         "home_move_nested" => "Pick a projects folder that is not inside the current one.",
+        "home_move_too_many" => {
+            "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved."
+        }
         "home_move_partial" => {
             "Some projects were moved and could not be moved back. Check both folders."
         }

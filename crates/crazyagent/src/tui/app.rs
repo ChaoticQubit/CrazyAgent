@@ -840,7 +840,11 @@ impl App {
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
             OwnerEvent::Master(event) => {
-                if let Some(submission) = self.master.apply(*event)? {
+                let routine = matches!(*event, master_session::Event::Read { .. });
+                let previous = self.master.notice.clone();
+                let completed = self.master.apply(*event)?;
+                let announce = !routine || completed.is_some() || self.master.notice != previous;
+                if let Some(submission) = completed {
                     self.complete_master_draft(&submission)?;
                     self.invalidate_evidence()?;
                 }
@@ -848,8 +852,10 @@ impl App {
                     self.owner_ready = false;
                     self.owner_problem = Some("master_owner_connection_unavailable".into());
                 }
-                let notice = self.master.notice.clone();
-                self.notice(&notice);
+                if announce {
+                    let notice = self.master.notice.clone();
+                    self.notice(&notice);
+                }
             }
             OwnerEvent::Dispatch(event) => {
                 self.sync_dispatch()?;
@@ -865,7 +871,8 @@ impl App {
             OwnerEvent::Shell(_)
             | OwnerEvent::Settings(_)
             | OwnerEvent::TeamGraph { .. }
-            | OwnerEvent::Intake(_) => {}
+            | OwnerEvent::Intake(_)
+            | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {
                     self.setup_view = Some((event.query, view));
@@ -1995,7 +2002,7 @@ impl App {
         else {
             return Ok(());
         };
-        if self.projects[index].spec != pending.submission.spec {
+        if !created_as(&pending.submission.spec, &self.projects[index].spec) {
             return Err(
                 "Created project identity has different membership; intent retained".into(),
             );
@@ -2115,6 +2122,16 @@ impl App {
     }
 }
 
+/// Whether the project the engine created is the one submitted: the same name and
+/// repositories, or, when a set-up submission declared none, the one project
+/// folder the engine records as its repository.
+/// Returns false for any other membership.
+fn created_as(submitted: &ProjectSpec, created: &ProjectSpec) -> bool {
+    created.name == submitted.name
+        && (created.repositories == submitted.repositories
+            || (submitted.repositories.is_empty() && created.repositories.len() == 1))
+}
+
 #[cfg(test)]
 mod conversation_invariants {
     use super::*;
@@ -2160,6 +2177,23 @@ mod conversation_invariants {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_created_project_joins_only_its_own_submission() {
+        let spec = |name: &str, repositories: &[&str]| ProjectSpec {
+            name: name.into(),
+            repositories: repositories.iter().map(|path| (*path).into()).collect(),
+        };
+        let folder = spec("Notes", &["/home/notes"]);
+        assert!(created_as(&folder, &folder));
+        assert!(created_as(&spec("Notes", &[]), &folder));
+        assert!(!created_as(
+            &spec("Notes", &[]),
+            &spec("Notes", &["/a", "/b"])
+        ));
+        assert!(!created_as(&spec("Other", &[]), &folder));
+        assert!(!created_as(&spec("Notes", &["/other"]), &folder));
+    }
 
     #[test]
     #[should_panic]

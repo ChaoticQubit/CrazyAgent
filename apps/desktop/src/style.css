@@ -248,6 +248,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); }
 .full-state { display: grid; place-items: center; min-height: 100%; padding: var(--space-6); }
 .full-state .box { max-width: 480px; display: grid; gap: var(--space-3); }
+.full-state .box.wide { max-width: 720px; width: 100%; align-self: start; }
 
 .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 .tile { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; align-items: start; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); text-align: left; cursor: pointer; }
@@ -302,4 +303,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .account-line { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; height: 100%; }
 .account-pick { width: 16px; height: 16px; margin: 0 0 0 var(--space-3); accent-color: var(--accent-solid); }
 .accounts-selectable .list-head { padding-left: calc(36px + var(--space-3)); }
+.accounts-actions .account-line { grid-template-columns: 36px minmax(0, 1fr) 44px; }
+.accounts-actions:not(.accounts-selectable) .account-line { grid-template-columns: minmax(0, 1fr) 44px; }
+.accounts-actions .list-head { padding-right: calc(44px + var(--space-3)); }
 .toolbar.selection { padding: var(--space-2) 0; }

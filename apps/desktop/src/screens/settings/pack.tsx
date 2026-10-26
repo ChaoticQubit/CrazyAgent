@@ -78,7 +78,6 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onIns
       {group.about && <p className="pj-help">{group.about}</p>}
       <ul className="in-list">{group.entries.map((entry) => {
         const state = packStateView(entry.state);
-        const required = entry.group === "always";
         const locked = running || busy !== null;
         return <li className="in-row" key={entry.id}>
           <span className="in-row-main">
@@ -89,8 +88,8 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onIns
           </span>
           <span className="pj-row">
             {installed(entry) && <Switch id={`pack-${entry.id}`} label={`Use ${entryName(entry)}`} hideLabel checked={entry.state.state === "on"}
-              disabledReason={required ? "Always on." : locked ? "Wait for the current change." : undefined} onChecked={(on) => onSwitch(entry, on)} />}
-            {installed(entry) && !required && <Button size="small" variant="danger-text" disabled={locked} onClick={() => onAsk({ kind: "remove", entry })}>Remove</Button>}
+              disabledReason={locked ? "Wait for the current change." : undefined} onChecked={(on) => onSwitch(entry, on)} />}
+            {installed(entry) && <Button size="small" variant="danger-text" disabled={locked} onClick={() => onAsk({ kind: "remove", entry })}>Remove</Button>}
             {!installed(entry) && entry.state.state !== "installing" && <Button size="small" disabled={locked} pending={busy === entry.id}
               pendingLabel="Starting..." onClick={() => onAsk({ kind: "install", entry })}>{entry.state.state === "failed" ? "Try again" : "Install"}</Button>}
           </span>
@@ -126,7 +125,7 @@ export function PackSettings() {
     const result = await change();
     setBusy(null);
     setAsk(null);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Changing the pack isn't in this build." : intakeCopy(result.code)); reload(); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Changing the pack isn't in this build." : intakeCopy(result)); reload(); return; }
     setFresh(result.value);
     session.showToast(done);
   };

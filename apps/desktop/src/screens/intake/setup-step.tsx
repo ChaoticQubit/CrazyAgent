@@ -5,18 +5,18 @@ import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_POLL_MS, approvalLine, dependencyView, entryIcon, entryName, packGroups, packStateView, packTicks, setupBusy, setupProgress, toolsChecking } from "./intake";
+import { SETUP_POLL_MS, approvalLine, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, packTicks, setupBusy, setupProgress, toolsChecking } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
 function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: boolean; onTick: (id: string, on: boolean) => void; locked: boolean }) {
   const state = packStateView(entry.state);
-  const required = entry.group === "always";
+  const name = <span className="row"><Icon name={entryIcon(entry)} size={14} />{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}</span>;
   return <li className="in-row">
     <span className="in-row-main">
-      <Checkbox label={<span className="row"><Icon name={entryIcon(entry)} size={14} />{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}</span>}
-        checked={required || ticked} disabled={locked || required} onChecked={(on) => onTick(entry.id, on)} />
-      <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}{required ? ", always on" : entry.on_by_default ? "" : ", off by default"}</span>
+      {installed(entry) ? <>{name}<span className="pj-small pj-secondary">Already installed. Switch it on or off in Settings, Pack.</span></>
+        : <Checkbox label={name} checked={ticked} disabled={locked} onChecked={(on) => onTick(entry.id, on)} />}
+      <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}{entry.on_by_default ? "" : ", off by default"}</span>
       {state.line && <span className="pj-small pj-error">{state.line}</span>}
     </span>
     <StatusBadge word={state.word} tone={state.tone} />
@@ -120,7 +120,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     setProblem("");
     const result = await runSetup(ticks);
     setBusy(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result)); return; }
     setFresh(result.value);
     setStarted(true);
   };

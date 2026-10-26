@@ -38,6 +38,37 @@ pub enum ProtocolError {
 
 const AUTH_STATUS_STRING_BYTES_MAX: usize = 4096;
 
+/// How close to its access token's expiry Claude Code 2.1.309 refreshes it: it renews only
+/// a token that lapses within five minutes, and leaves any other untouched.
+#[cfg(unix)]
+pub(crate) const REFRESH_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The arguments of the one print turn that renews a managed Claude Code account. Claude
+/// Code refreshes a token inside its refresh window, and waits for the refresh, before the
+/// turn's API call; `auth status` only starts it and exits about two seconds later. The
+/// turn asks Haiku for one word with no tools, MCP servers, settings, hooks or saved session.
+#[cfg(unix)]
+pub(crate) const RENEWAL_TURN: [&str; 18] = [
+    "--print",
+    "--output-format",
+    "text",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+    "--no-session-persistence",
+    "--tools",
+    "",
+    "--max-turns",
+    "1",
+    "--model",
+    "haiku",
+    "--system-prompt",
+    "Reply with OK.",
+    "OK",
+];
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct AuthStatus {
     pub logged_in: bool,
@@ -382,11 +413,16 @@ impl ClaudeProtocol {
             return Ok(Vec::new());
         }
         let kinds = if message_type == "system" && subtype.as_deref() == Some("init") {
-            if self.native_session_id.is_some() {
-                return Err(ProtocolError::StaleMessage);
-            }
             let model = identifier(field(value, "model")?)?.to_owned();
             let capabilities = string_list(value, "capabilities")?;
+            if let Some(bound) = self.native_session_id.as_deref() {
+                if bound != session || self.phase != State::Active {
+                    return Err(ProtocolError::StaleMessage);
+                }
+                self.seen_events.insert(uuid.to_owned());
+                self.assert_consistent();
+                return Ok(Vec::new());
+            }
             self.native_session_id = Some(session.to_owned());
             self.phase = if self.active_request.is_some() {
                 State::Active
@@ -474,7 +510,9 @@ fn assistant(value: &Value) -> Result<Vec<EventKind>, ProtocolError> {
     }
     let mut events = Vec::new();
     if let Some(code) = optional_text(value, "error")? {
-        events.push(EventKind::AssistantError { code });
+        events.push(EventKind::AssistantError {
+            code: harness_error(code, blocks),
+        });
     }
     for block in blocks {
         let kind = match identifier(field(block, "type")?)? {
@@ -507,6 +545,25 @@ fn assistant(value: &Value) -> Result<Vec<EventKind>, ProtocolError> {
         events.push(kind);
     }
     Ok(events)
+}
+
+/// Tells a sign-in the Claude harness found missing itself, before any provider call, apart
+/// from a provider rejecting the sign-in: the harness reports both as `authentication_failed`
+/// and only its own message says "Not logged in". Inputs: the reported error code and the
+/// message's content blocks. Output: `not_signed_in` for a missing sign-in, else the code.
+fn harness_error(code: String, blocks: &[Value]) -> String {
+    let missing = code == "authentication_failed"
+        && blocks.iter().any(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with("Not logged in"))
+        });
+    if missing {
+        "not_signed_in".to_owned()
+    } else {
+        code
+    }
 }
 
 fn result(value: &Value) -> Result<EventKind, ProtocolError> {

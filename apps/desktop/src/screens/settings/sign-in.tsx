@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { nextGeneration, plainError, signInRecord } from "../../api";
-import { cancelNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode } from "../../engine-client";
+import { knownError, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
@@ -23,6 +23,7 @@ export type SignInStage =
 
 const ACTIVE_PHASES = ["starting", "awaiting_owner", "checking_account", "cancelling"];
 const EXPIRED = ["native_auth_sign_in_expired", "native_auth_claude_deadline", "native_auth_bootstrap_timeout"];
+const UNFINISHED = ["native_auth_interrupted", "native_auth_login_failed", "native_auth_native_request_failed", "native_auth_not_active"];
 const CHECK = ["native_auth_outcome_unknown_read_same_operation", "native_auth_claude_input_outcome_unknown"];
 export const POLL_MS = 2000;
 
@@ -37,8 +38,79 @@ export function signInFailure(code: string, provider: SubscriptionProvider): { t
   if (CHECK.includes(code)) return { text: plainError(code), hint: "check" };
   if (code === "native_auth_cancelled") return { text: "Sign-in cancelled.", hint: "retry" };
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
-  const known = plainError(code);
-  return { text: known === plainError("") ? "Sign-in didn't finish. Try again." : known, hint: "retry" };
+  if (UNFINISHED.includes(code)) return { text: "Sign-in didn't finish. Try again.", hint: "retry" };
+  return { text: knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
+}
+
+const STUCK = new Set(["native_auth_operation_missing", "native_profile_source_conflict", "native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
+
+/** The sentence when a sign-in could not be cancelled. Input: the refusal code. Output: the
+ * sentence, or undefined when the sign-in had already stopped. */
+export function cancelError(code: string): string | undefined {
+  if (code === "native_auth_not_active") return undefined;
+  if (STUCK.has(code)) return "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.";
+  return plainError(code);
+}
+
+const SETTLE_TRIES = 20;
+const SETTLE_MS = 500;
+
+/** Cancels the running sign-in of one account, outside any open sign-in panel: reads its
+ * sign-in record, asks the engine to cancel that operation and waits up to 10 s for it to
+ * stop, since the app refuses other changes until it has. Input: the account id. Output: ok
+ * once stopped or already stopped, otherwise the refusal in plain words. */
+export async function cancelSignIn(accountId: string): Promise<Result<void>> {
+  const record = await signInRecord(accountId);
+  if (record.kind !== "ok") return record;
+  try {
+    let view = await cancelNativeAuth(record.value.ticket);
+    for (let tries = 0; ACTIVE_PHASES.includes(view.phase); tries += 1) {
+      if (tries === SETTLE_TRIES) return { kind: "error", code: "native_auth_cancel_pending", message: plainError("native_auth_cancel_pending") };
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      const again = await signInRecord(accountId);
+      if (again.kind !== "ok") return again;
+      view = await readNativeAuth(again.value.ticket);
+    }
+    return { kind: "ok", value: undefined };
+  } catch (failure) {
+    const code = nativeAuthFailureCode(failure);
+    const message = cancelError(code);
+    return message === undefined ? { kind: "ok", value: undefined } : { kind: "error", code, message };
+  }
+}
+
+/** Signs one subscription account out: reads its sign-in record, asks the engine to log the
+ * harness out and waits up to 10 s for the engine to see it signed out. Input: the account
+ * id. Output: ok once signed out, otherwise the refusal in plain words, such as
+ * `native_profile_in_use` while an agent uses the account. */
+export async function signOut(accountId: string): Promise<Result<void>> {
+  const record = await signInRecord(accountId);
+  if (record.kind !== "ok") return record;
+  try {
+    let view = await logoutNativeAuth(record.value.ticket);
+    for (let tries = 0; ACTIVE_PHASES.includes(view.phase); tries += 1) {
+      if (tries === SETTLE_TRIES) break;
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      const again = await signInRecord(accountId);
+      if (again.kind !== "ok") return again;
+      view = await readNativeAuth(again.value.ticket);
+    }
+    if (view.phase === "unauthenticated_observed") return { kind: "ok", value: undefined };
+    const code = view.code ?? "native_auth_outcome_unknown_read_same_operation";
+    return { kind: "error", code, message: plainError(code) };
+  } catch (failure) {
+    const code = nativeAuthFailureCode(failure);
+    return { kind: "error", code, message: plainError(code) };
+  }
+}
+
+/** Removes an account Add account created but never signed in, after cancelling its sign-in.
+ * Inputs: the account and the session's result recorder. Output: the line to show. */
+export async function discardAccount(account: AccountView, note: <T>(result: Result<T>) => Result<T>): Promise<string> {
+  await cancelSignIn(account.id);
+  const removed = note(await removeAccount(account.id));
+  return removed.kind === "ok" ? `${account.name} wasn't signed in, so it was removed.`
+    : `Couldn't remove the unfinished account ${account.name}. It stays in your list as Not signed in. Delete it there.`;
 }
 
 function capitalized(text: string): string {

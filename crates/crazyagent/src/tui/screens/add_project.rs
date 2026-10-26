@@ -24,7 +24,7 @@ const CHOICES: [(&str, &str, char); 3] = [
     ),
     (
         "Existing folder",
-        "Move or copy a folder from this computer into your projects folder.",
+        "Set up a folder on this computer where it is, or move or copy it into your projects folder.",
         'e',
     ),
 ];

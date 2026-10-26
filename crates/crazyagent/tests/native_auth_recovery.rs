@@ -27,7 +27,7 @@ impl Case {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-nar-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         private(root.path(), 0o700);
         std::fs::write(

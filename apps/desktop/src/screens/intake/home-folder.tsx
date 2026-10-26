@@ -76,11 +76,11 @@ export function HomeFolderPicker({ onSaved, onContinue }: { onSaved?: () => void
     const result = await setProjectsHome(picked, nextGeneration());
     setBusy(false);
     if (result.kind !== "ok") {
-      setProblem(result.kind === "not_ready" ? "Saving the projects folder isn't in this build." : intakeCopy(result.code));
+      setProblem(result.kind === "not_ready" ? "Saving the projects folder isn't in this build." : intakeCopy(result));
       return;
     }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") { setProblem(intakeCopy(state.code)); return; }
+    if (state.kind === "rejected") { setProblem(intakeCopy(state)); return; }
     if (state.kind === "unconfirmed") { setProblem("We couldn't confirm the folder was saved. Check it and save again."); reload(); return; }
     setPicked(null);
     reload();

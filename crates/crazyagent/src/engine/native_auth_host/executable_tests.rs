@@ -55,7 +55,10 @@ fn native_auth_registered_executable_verified_sha256_rejects_replacement() {
     let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
     let replacement = executable(root.path(), "replacement");
     std::fs::rename(replacement, &path).unwrap();
-    assert!(registered.verified_sha256().is_err());
+    assert_eq!(
+        registered.verified_sha256().unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
 }
 
 #[test]
@@ -156,7 +159,10 @@ fn native_auth_registered_executable_rejects_retained_file_mutation() {
     file.seek(SeekFrom::Start(0)).unwrap();
     file.write_all(b"x").unwrap();
     file.sync_all().unwrap();
-    assert!(registered.verified_path().is_err());
+    assert_eq!(
+        registered.verified_path().unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
 }
 
 #[test]
@@ -190,6 +196,28 @@ fn native_auth_registered_executable_accepts_claude_code_2_1_309_size() {
     let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
     assert_eq!(registered.verified_path().unwrap(), path);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 275_923_296);
+}
+
+#[test]
+fn native_auth_registered_executable_checks_at_harness_size_fit_the_owner_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claude");
+    let file = File::create(&path).unwrap();
+    file.set_len(275_923_296).unwrap();
+    drop(file);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    let digest = registered.verified_sha256().unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..16 {
+        assert_eq!(registered.verified_path().unwrap(), path);
+        assert_eq!(registered.verified_sha256().unwrap(), digest);
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "16 catalog-sized rounds of executable checks took {elapsed:?}"
+    );
 }
 
 #[test]

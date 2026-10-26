@@ -84,7 +84,8 @@ fn read_roots(graphify: &Path) -> Vec<PathBuf> {
 }
 
 /// Runs the free, AST-only `graphify update .` in `repo` under a sandbox with
-/// no network that may read the project and graphify's install but write only
+/// no network that may read the project but not its engine files in `.crazyagent/`,
+/// which stay out of the graph, and graphify's install, and write only
 /// `repo/graphify-out`, its own home and temp dirs. Takes the graphify
 /// executable, the project folder, the engine state folder, a unique run
 /// name, the time limit and `stop`, polled while it runs. Returns how it
@@ -128,6 +129,7 @@ pub(crate) fn update(
     for root in read_roots(&graphify) {
         sandbox = sandbox.allow_read(&root)?;
     }
+    sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
     let profile = state.join("profiles").join(format!("{name}.sb"));
     sandbox.install(&profile)?;
     let mut command = sandbox.command(&profile, &graphify);

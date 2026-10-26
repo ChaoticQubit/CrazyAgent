@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolMember, type PoolSummary, type Result } from "../../api";
+import { projectsUsing } from "../../api-projects";
+import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolBase, type PoolMember, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
   StatusBadge, TextField, WindowedList, navigate, Checkbox,
 } from "../../ui";
+import { andList } from "./account-drawer";
 import { filterAccounts } from "./accounts";
 import { takePoolDraft } from "./pool-draft";
 
@@ -41,12 +43,18 @@ export function notSignedInNote(members: string[], status: Map<string, string>):
     : `${count} accounts aren't signed in. Agents skip them until you sign in again.`;
 }
 
-/** The message when the engine refuses to delete a pool a project uses. Input: the pool.
- * Output: the sentence. */
-export function deleteRefusal(pool: PoolSummary): string {
-  const count = pool.project_count;
-  const users = count === 1 ? "1 project uses it" : count > 1 ? `${count} projects use it` : "A project uses it";
-  return `Can't delete ${pool.name}. ${users}. Choose another pool for ${count === 1 ? "it" : "them"} first.`;
+/** The delete confirm for a pool: deleting takes it off every project that uses it in the same
+ * engine step. Inputs: the pool and the names of its projects (undefined when not read).
+ * Output: the body, the button label and the line shown once deleted. */
+export function deleteCopy(pool: PoolSummary, users: readonly string[] | undefined): { body: string; confirmLabel: string; done: string } {
+  const count = users?.length || pool.project_count;
+  if (count === 0) return { body: "Its accounts stay in your list. Only the pool goes away.", confirmLabel: "Delete pool", done: `${pool.name} deleted.` };
+  const named = users?.length ? andList(users) : `${count} ${count === 1 ? "project" : "projects"}`;
+  return {
+    body: `Used by ${named}. ${count === 1 ? "It" : "They"} will have no pool until you pick one. Its accounts stay in your list.`,
+    confirmLabel: "Unassign and delete",
+    done: `${pool.name} deleted. Its projects have no pool now. Pick a pool to start in each project's Settings.`,
+  };
 }
 
 /** The accounts newly added to a pool that agents can use only after the engine sets them
@@ -71,6 +79,25 @@ export function setupNote(failures: { name: string; message: string }[]): string
   const names = failures.map((failure) => failure.name);
   const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
   return `${list} ${names.length === 1 ? "isn't" : "aren't"} ready for agents yet. ${failures[0]!.message}`;
+}
+
+/** Sets accounts up for agents one at a time. Inputs: the accounts and the session's result
+ * recorder. Output: the accounts that are not ready, each with a plain message. */
+export async function readyEach(targets: { id: string; name: string }[], note: <T>(result: Result<T>) => Result<T>): Promise<{ name: string; message: string }[]> {
+  const failures: { name: string; message: string }[] = [];
+  for (const target of targets) {
+    const ready = note(await readyForAgents(target.id));
+    if (ready.kind !== "ok") failures.push({ name: target.name, message: ready.kind === "not_ready" ? "Setting accounts up for agents isn't ready in this build." : ready.message });
+  }
+  return failures;
+}
+
+/** The setup step after any save that adds pool members, from the pool editor or Add to
+ * pool: each newly added saved-key or URL account is set up for agents. Inputs: the members
+ * before and after the save, the known accounts and the session's result recorder. Output:
+ * the note naming the accounts that are not ready, or undefined when all are. */
+export async function readyAdded(previous: string[], members: string[], accounts: AccountView[], note: <T>(result: Result<T>) => Result<T>): Promise<string | undefined> {
+  return setupNote(await readyEach(setupTargets(previous, members, accounts), note));
 }
 
 /** The pool list as a pure view. Inputs: the pools read and the new, edit, delete and retry
@@ -233,9 +260,10 @@ export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
   const [pools, reload] = useLoad(poolSummaries);
   const [accounts] = useLoad(listAccounts);
-  const [editing, setEditing] = useState<{ id?: string } | undefined>(creating ? {} : undefined);
+  const [editing, setEditing] = useState<{ id?: string; opened?: PoolBase } | undefined>(creating ? {} : undefined);
   const [draft, setDraft] = useState<string[]>([]);
   const [deleting, setDeleting] = useState<PoolSummary>();
+  const [users, setUsers] = useState<string[]>();
   const [removing, setRemoving] = useState(false);
   const [refusal, setRefusal] = useState<string>();
   useEffect(() => {
@@ -245,20 +273,11 @@ export function Pools({ creating }: { creating: boolean }) {
     if (taken.length) setDraft(taken);
   }, [creating]);
 
-  const prepare = async (targets: { id: string; name: string }[]) => {
-    const failures: { name: string; message: string }[] = [];
-    for (const target of targets) {
-      const ready = session.noteResult(await readyForAgents(target.id));
-      if (ready.kind !== "ok") failures.push({ name: target.name, message: ready.kind === "not_ready" ? "Setting accounts up for agents isn't ready in this build." : ready.message });
-    }
-    return failures;
-  };
-
   const prepareAll = async (pool: PoolSummary) => {
     setRefusal(undefined);
     const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
     const ids = keyedMembers(pool);
-    const failures = await prepare(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })));
+    const failures = await readyEach(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })), session.noteResult);
     setRefusal(setupNote(failures));
     if (failures.length === 0) session.showToast(`${pool.name} is ready for agents.`);
   };
@@ -271,10 +290,9 @@ export function Pools({ creating }: { creating: boolean }) {
   if (editing) {
     const pool = editing.id && pools.kind === "ok" ? pools.value.find((item) => item.id === editing.id) : undefined;
     return <PoolEditorView key={editing.id ?? `new-${draft.join(",")}`} pool={pool} accounts={accounts} initialMembers={editing.id ? [] : draft} onCancel={() => { setDraft([]); leave(); }} onSave={async (name, members) => {
-      const saved = session.noteResult(await savePool(editing.id, name, members));
+      const saved = session.noteResult(await savePool(editing.id, name, members, editing.opened));
       if (saved.kind !== "ok") return saved;
-      const targets = setupTargets(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : []);
-      setRefusal(setupNote(await prepare(targets.map((account) => ({ id: account.id, name: account.name })))));
+      setRefusal(await readyAdded(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : [], session.noteResult));
       session.showToast(`${name.trim()} saved.`);
       reload();
       setDraft([]);
@@ -290,19 +308,28 @@ export function Pools({ creating }: { creating: boolean }) {
     setRemoving(false);
     const pool = deleting;
     setDeleting(undefined);
-    if (result.kind === "ok") { session.showToast(`${pool.name} deleted.`); reload(); }
-    else setRefusal(result.kind === "error" && result.code === "pool_in_use" ? deleteRefusal(pool)
-      : result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
+    if (result.kind === "ok") { session.showToast(deleteCopy(pool, users).done); reload(); }
+    else setRefusal(result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
   };
+
+  const askDelete = async (pool: PoolSummary) => {
+    setRefusal(undefined);
+    setUsers(undefined);
+    setDeleting(pool);
+    if (pool.project_count === 0) return;
+    const names = await projectsUsing(pool.id);
+    if (names.kind === "ok") setUsers(names.value);
+  };
+
+  const copy = deleting && deleteCopy(deleting, users);
 
   return <div className="stack">
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
-    <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id })}
-      onDelete={(pool) => { setRefusal(undefined); setDeleting(pool); }} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
-    <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel="Delete pool" pending={removing}
+    <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
+      onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
+    <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
-      {deleting && deleting.project_count > 0 ? `${poolUse(deleting.project_count)}. The engine refuses while a project uses it.`
-        : "Its accounts stay in your list. Only the pool goes away."}
+      {copy?.body}
     </ConfirmDialog>
   </div>;
 }

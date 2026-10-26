@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
-pub const SOCKET_PATH_BYTES_MAX: usize = 100;
 const HOLDER: &str = "_crazyagent";
+const HOLDER_COMMAND: &str =
+    "while [ -S \"${TMUX%,*,*}\" ]; do sleep 2; done; p=${TMUX%,*}; kill \"${p##*,}\"";
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 const TERMINAL_TYPE: &str = "xterm-256color";
@@ -43,6 +44,8 @@ type Answer = Result<Lines, HostError>;
 /// The engine's terminal host on macOS and Linux: one private tmux server driven in control mode.
 /// The server's socket lives in the engine's own private folder and never the owner's tmux.
 /// Agents keep running when the engine stops; a later host on the same folder finds them again.
+/// The server ends itself, with its agents, once its socket is gone, such as when the engine
+/// home is deleted, so no server outlives the folder that reaches it.
 pub struct Tmux {
     executable: Option<PathBuf>,
     folder: PathBuf,
@@ -118,6 +121,29 @@ impl Tmux {
             .is_ok_and(|metadata| metadata.file_type().is_socket())
     }
 
+    /// Waits until the private server stops listening after kill-server, then
+    /// removes the socket file tmux leaves behind, so `running` reports no server
+    /// and a later `alive` starts none. Output: Ok once it is gone, or
+    /// `terminal_not_answering` when it still listens at the deadline.
+    fn forget_server(&self) -> Result<(), HostError> {
+        let socket = self.socket();
+        let deadline = Instant::now() + REPLY_TIME;
+        while crate::spawn_gate::connect_unix_std(&socket).is_ok() {
+            if Instant::now() >= deadline {
+                return Err(failure("terminal_not_answering"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !self.running() {
+            return Ok(());
+        }
+        match std::fs::remove_file(&socket) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(failure("terminal_folder_unsafe")),
+        }
+    }
+
     fn live_control(&self) -> Result<Arc<Control>, HostError> {
         if self.executable.is_none() {
             return Err(failure("terminal_unavailable"));
@@ -150,10 +176,13 @@ impl Tmux {
             .as_deref()
             .ok_or_else(|| failure("terminal_unavailable"))?;
         private_folder(&self.folder)?;
-        let socket = self.socket();
-        if socket.as_os_str().len() > SOCKET_PATH_BYTES_MAX {
-            return Err(failure("terminal_socket_path_long"));
-        }
+        let socket = crate::socket_address::address(&self.socket()).map_err(|error| {
+            failure(if error.kind() == std::io::ErrorKind::InvalidInput {
+                "terminal_socket_path_long"
+            } else {
+                "terminal_folder_unsafe"
+            })
+        })?;
         if let Ok(metadata) = std::fs::symlink_metadata(&socket)
             && (!metadata.file_type().is_socket() || metadata.uid() != user())
         {
@@ -171,7 +200,7 @@ impl Tmux {
                     SESSION,
                     "-n",
                     HOLDER,
-                    "cat",
+                    HOLDER_COMMAND,
                 ])
                 .env_clear()
                 .env("PATH", SERVER_PATH)
@@ -528,8 +557,26 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
     Ok(line)
 }
 
-fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16)) -> Vec<u8> {
-    let mut bytes = b"\x1b[0m\x1b[H\x1b[2J".to_vec();
+const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
+const CURSOR_KEYS_ON: &[u8] = b"\x1b[?1h";
+
+/// The pane's input modes a new viewer must take on so its keys and pastes reach the agent's
+/// app as a terminal attached from the start would send them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Modes {
+    bracketed_paste: bool,
+    cursor_keys: bool,
+}
+
+fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16), modes: Modes) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if modes.bracketed_paste {
+        bytes.extend_from_slice(BRACKETED_PASTE_ON);
+    }
+    if modes.cursor_keys {
+        bytes.extend_from_slice(CURSOR_KEYS_ON);
+    }
+    bytes.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
     for (row, line) in screen.iter().take(usize::from(rows)).enumerate() {
         if row > 0 {
             bytes.extend_from_slice(b"\r\n");
@@ -548,24 +595,34 @@ struct Located {
     cols: u16,
     rows: u16,
     cursor: (u16, u16),
+    modes: Modes,
 }
 
 fn located(lines: &[Vec<u8>]) -> Option<Located> {
     let text = std::str::from_utf8(lines.first()?).ok()?;
     let fields: Vec<&str> = text.split(' ').collect();
-    let [pane, window, x, y, cols, rows] = fields.as_slice() else {
+    let [pane, window, x, y, cols, rows, paste, keys] = fields.as_slice() else {
         return None;
     };
     if !pane.starts_with('%') || !window.starts_with('@') {
         return None;
     }
     let number = |text: &str| text.parse::<u16>().ok();
+    let flag = |text: &str| match text {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    };
     Some(Located {
         pane: pane.as_bytes().to_vec(),
         window: window.as_bytes().to_vec(),
         cols: number(cols)?,
         rows: number(rows)?,
         cursor: (number(x)?, number(y)?),
+        modes: Modes {
+            bracketed_paste: flag(paste)?,
+            cursor_keys: flag(keys)?,
+        },
     })
 }
 
@@ -581,6 +638,7 @@ fn viewer(
         cols,
         rows,
         cursor,
+        modes,
     } = located(located_lines).ok_or_else(|| failure("terminal_command_failed"))?;
     state.viewers.retain(|viewer| viewer.feed.open());
     if state.viewers.len() >= VIEWERS_MAX {
@@ -593,7 +651,7 @@ fn viewer(
         agent,
         cols,
         rows,
-        screen: render(screen, cols, rows, cursor),
+        screen: render(screen, cols, rows, cursor, modes),
         chunks: receiver,
     })
 }
@@ -656,9 +714,24 @@ fn guard<'a>(line: &'a [u8], word: &[u8]) -> Option<&'a [u8]> {
     line.strip_prefix(word)?.strip_prefix(b" ")
 }
 
+/// How many screen rows the reply block opening now holds, when it is an attach's capture.
+/// capture-pane prints one line per pane row and the pane's own text can look like any
+/// control line, including the block's closing guard, so those rows are counted as data
+/// rather than searched for a guard. Takes the state. Returns the pane height the attach
+/// read just before, or none for every other reply.
+fn capture_rows(state: &State) -> Option<usize> {
+    match state.pending.front()? {
+        Pending::Attach {
+            located: Some(lines),
+            ..
+        } => located(lines).map(|found| usize::from(found.rows)),
+        _ => None,
+    }
+}
+
 fn read(output: ChildStdout, state: &Mutex<State>) {
     let mut output = BufReader::new(output);
-    let mut block: Option<(Vec<u8>, Lines, usize)> = None;
+    let mut block: Option<(Vec<u8>, Lines, usize, Option<usize>)> = None;
     loop {
         let mut line = Vec::new();
         match output
@@ -675,9 +748,11 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         let Ok(mut state) = state.lock() else {
             break;
         };
-        if let Some((opened, lines, bytes)) = &mut block {
-            let ended = guard(&line, b"%end").filter(|rest| *rest == opened.as_slice());
-            let failed = guard(&line, b"%error").filter(|rest| *rest == opened.as_slice());
+        if let Some((opened, lines, bytes, rows)) = &mut block {
+            let counted = rows.is_some_and(|rows| lines.len() < rows);
+            let ended = guard(&line, b"%end").filter(|rest| !counted && *rest == opened.as_slice());
+            let failed =
+                guard(&line, b"%error").filter(|rest| !counted && *rest == opened.as_slice());
             if ended.is_some() || failed.is_some() {
                 let lines = std::mem::take(lines);
                 let answer = if ended.is_some() {
@@ -690,14 +765,14 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
                 continue;
             }
             *bytes += line.len() + 1;
-            if *bytes > REPLY_BYTES_MAX {
+            if *bytes > REPLY_BYTES_MAX || (rows.is_some() && !counted) {
                 break;
             }
             lines.push(line);
             continue;
         }
         if let Some(opened) = guard(&line, b"%begin") {
-            block = Some((opened.to_vec(), Vec::new(), 0));
+            block = Some((opened.to_vec(), Vec::new(), 0, capture_rows(&state)));
         } else if let Some(rest) = guard(&line, b"%output") {
             let (pane, data) = rest
                 .iter()
@@ -769,7 +844,7 @@ impl Host for Tmux {
         let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
-            "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}' ; capture-pane {} -t {target}",
+            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}}' ; capture-pane {} -t {target}",
             control.capture
         );
         let (reply, answer) = sync_channel(1);
@@ -845,13 +920,12 @@ impl Host for Tmux {
             return Ok(());
         }
         let control = self.control()?;
-        let (reply, _answer) = sync_channel(1);
-        let _ = control.send("kill-server", Pending::Reply(reply));
+        let _ = control.run("kill-server");
         control.close();
         if let Ok(mut slot) = self.control.lock() {
             *slot = None;
         }
-        Ok(())
+        self.forget_server()
     }
 }
 

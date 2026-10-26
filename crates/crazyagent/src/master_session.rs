@@ -1,4 +1,6 @@
-use crate::config::{EffectiveConfig, ModelConnection, ModelEndpoint};
+use crate::config::{
+    EffectiveConfig, ModelConnection, ModelEndpoint, Settings, connection_destination,
+};
 use crate::coordination::Role;
 use crate::engine::EngineError;
 use crate::engine::owner::{NativeAuthFact, NativeProfileBinding, OwnerProvenance, is_hex_id};
@@ -10,6 +12,7 @@ use std::path::PathBuf;
 
 pub(crate) const SESSIONS_MAX: usize = 64;
 pub(crate) const TURNS_MAX: usize = 1024;
+pub(crate) const REBINDS_MAX: usize = 32;
 pub(crate) const METADATA_BYTES_MAX: usize = 16384;
 pub(crate) const PAGE_BYTES_MAX: usize = 32768;
 pub(crate) const PAGE_ITEMS_MAX: u8 = 32;
@@ -147,6 +150,8 @@ pub enum MasterReason {
     CaptureIncomplete,
     OutputLimit,
     UnsupportedCapability,
+    RepositoryMissing,
+    RepositoryConfigRefused,
     Cancelled,
     Unknown,
 }
@@ -174,6 +179,149 @@ pub struct MasterSessionView {
     pub version: Cursor,
     pub current_turn: Option<RequestId>,
     pub owner: OwnerProvenance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebound: Vec<MasterBinding>,
+}
+
+/// Settings and engine run an open master session was moved to after a change outside
+/// its own scope or an engine restart (DEC-092, LB-23). Input: the config and source hash
+/// it now runs under, the engine epoch when the send moved it to a new run, and the owner
+/// revision of that send. The Open binding stays in the session itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterBinding {
+    pub config_id: ConfigId,
+    pub source_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_epoch: Option<String>,
+    pub at: Cursor,
+}
+
+impl MasterSessionView {
+    /// The settings the session runs under now: its latest rebinding, else its Open.
+    /// Output: the config id and source hash a send or a turn must match.
+    pub(crate) fn binding(&self) -> (&ConfigId, &str) {
+        self.rebound
+            .last()
+            .map_or((&self.config_id, self.source_hash.as_str()), |binding| {
+                (&binding.config_id, binding.source_hash.as_str())
+            })
+    }
+
+    /// The engine run the session runs under now: the epoch of its latest rebinding that
+    /// moved it to a new run, else the run it was opened in.
+    /// Output: the engine epoch a send, a turn or a bootstrap must match.
+    pub(crate) fn engine_epoch(&self) -> &str {
+        self.rebound
+            .iter()
+            .rev()
+            .find_map(|binding| binding.engine_epoch.as_deref())
+            .unwrap_or(&self.owner.engine_epoch)
+    }
+
+    /// Whether a turn's attempt made under `config` belongs to this session. Input: the
+    /// attempt's config and whether its turn is still live. Output: a live attempt needs the
+    /// current binding; a settled one any binding the session has had.
+    pub(crate) fn admits_attempt(&self, config: &ConfigId, live: bool) -> bool {
+        if live {
+            return self.binding().0 == config;
+        }
+        &self.config_id == config
+            || self
+                .rebound
+                .iter()
+                .any(|binding| &binding.config_id == config)
+    }
+
+    /// Checks the stored rebindings: bounded, never on an RCLI master, well formed, made
+    /// after the Open in revision order up to the session's version, each a real change.
+    /// Output: false when the record cannot have come from `rebind`.
+    pub(crate) fn rebinds_valid(&self) -> bool {
+        let mut previous = (
+            &self.config_id,
+            self.source_hash.as_str(),
+            self.owner.engine_epoch.as_str(),
+            self.owner.revision_after.value(),
+        );
+        if self.rebound.len() > REBINDS_MAX
+            || (self.selection.backend == MasterBackend::Rcli && !self.rebound.is_empty())
+        {
+            return false;
+        }
+        for binding in &self.rebound {
+            let epoch = binding.engine_epoch.as_deref().unwrap_or(previous.2);
+            if !is_hex_id(binding.config_id.as_str())
+                || !is_hex_id(&binding.source_hash)
+                || !is_hex_id(epoch)
+                || binding.engine_epoch.as_deref() == Some(previous.2)
+                || binding.at.value() <= previous.3
+                || binding.at.value() > self.version.value()
+                || (&binding.config_id, binding.source_hash.as_str(), epoch)
+                    == (previous.0, previous.1, previous.2)
+            {
+                return false;
+            }
+            previous = (
+                &binding.config_id,
+                binding.source_hash.as_str(),
+                epoch,
+                binding.at.value(),
+            );
+        }
+        true
+    }
+}
+
+/// The part of the settings an open master runs on (DEC-092): every setting except the
+/// pools, connections, accounts and account approvals outside the session's own pool, and,
+/// when the route pins its target, destinations that are neither the master's targets, its
+/// pool's targets nor knowledge processing destinations.
+/// Input: a config and the session's selection. Output: the settings to compare.
+pub(crate) fn master_scope(config: &EffectiveConfig, selection: &MasterSelection) -> Settings {
+    let mut settings = config.settings.clone();
+    let mut destinations: Vec<CredentialRef> = [
+        Some(&selection.target_profile_ref),
+        selection.route.preferred_target.as_ref(),
+        selection.route.required_target.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(&settings.knowledge.processing_destinations)
+    .cloned()
+    .collect();
+    if let Some(access) = settings.model_access.as_mut() {
+        access.pools.retain(|pool| pool.id == selection.pool_ref);
+        access.connections.retain(|connection| {
+            access
+                .pools
+                .iter()
+                .any(|pool| pool.members.contains(&connection.id))
+        });
+        let accounts: Vec<&CredentialRef> = access
+            .connections
+            .iter()
+            .map(|connection| &connection.account_ref)
+            .chain([&selection.route.account_ref])
+            .collect();
+        access
+            .accounts
+            .retain(|account| accounts.contains(&account));
+        settings
+            .routing
+            .approved_accounts
+            .retain(|account| accounts.contains(&account));
+        destinations.extend(access.connections.iter().filter_map(connection_destination));
+    }
+    if selection.route.required_target.is_some() {
+        for list in [
+            &mut settings.allowed_destinations,
+            &mut settings.revoked_destinations,
+            &mut settings.routing.preference_order,
+        ] {
+            list.retain(|destination| destinations.contains(destination));
+        }
+    }
+    settings
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +378,47 @@ pub struct MasterTurnView {
     pub attempt: Option<Attempt>,
     pub runtime: Option<MasterRuntimeView>,
     pub reply: Option<MasterReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<MasterAccountState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<MasterTask>,
+}
+
+/// One task a master turn handed to the project's team, with the engine's note on how it
+/// ended once it has. Fields: the team task id and the note, none while the task is
+/// still waiting or running. Filled when turns are read; never stored with the turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterTask {
+    pub task: u64,
+    pub note: Option<String>,
+}
+
+impl MasterTask {
+    /// Words this task for the conversation: the engine's note once it ended, otherwise
+    /// that it is still with a sub-agent. Input: none. Output: one line.
+    pub fn line(&self) -> String {
+        match &self.note {
+            Some(note) => note.clone(),
+            None => format!("Task {} is still with a sub-agent.", self.task),
+        }
+    }
+}
+
+/// One pool account named on a master turn that no account of its harness could run.
+/// Fields: the account, its connection, the connection's harness and why it cannot run
+/// the turn; a reason of None marks a ready account of another harness in the pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterAccountState {
+    pub account_ref: CredentialRef,
+    pub connection: CredentialRef,
+    pub harness: CredentialRef,
+    pub reason: Option<MasterReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +472,24 @@ pub enum MasterOwnerAction {
         registration: Box<RcliProfileRegistration>,
     },
 }
+
+/// Turns the engine error that stopped a master turn into the code the turn stores.
+/// Input: the raw error text. Output: the text itself when it is a plain code of at most
+/// 192 lowercase letters, digits, `_`, `:` or `;`, else a redacted marker, so provider
+/// text, paths and secrets never reach the stored turn.
+pub(crate) fn cause_code(raw: &str) -> String {
+    let plain = !raw.is_empty()
+        && raw.len() <= CAUSE_MAX
+        && raw.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
+        });
+    let code = if plain { raw } else { CAUSE_REDACTED };
+    assert!(!code.is_empty() && code.len() <= CAUSE_MAX);
+    code.to_owned()
+}
+
+const CAUSE_MAX: usize = 192;
+const CAUSE_REDACTED: &str = "master_cause_redacted";
 
 pub(crate) fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
@@ -384,24 +591,59 @@ pub(crate) fn validate_selection(
     if !catalog.connections.iter().any(|connection| {
         connection.account_ref == selection.route.account_ref
             && pool.members.contains(&connection.id)
-            && match selection.backend {
-                MasterBackend::Rcli => {
-                    connection.harness.as_str() == "rcli"
-                        && matches!(connection.endpoint, ModelEndpoint::Http { .. })
-                }
-                MasterBackend::Codex => {
-                    connection.harness.as_str() == "codex"
-                        && connection.protocol.as_str() == "native"
-                        && matches!(connection.endpoint, ModelEndpoint::Native {})
-                }
-                MasterBackend::Claude => {
-                    matches!(connection.harness.as_str(), "claude" | "claude-code")
-                        && connection.protocol.as_str() == "native"
-                        && matches!(connection.endpoint, ModelEndpoint::Native {})
-                }
-            }
+            && backend_member(selection.backend, connection)
     }) {
         return Err(error("master_backend_account_denied"));
     }
     Ok(())
+}
+
+/// Tells whether a connection can run a master of this backend.
+/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
+/// for a native connection of the Codex or Claude harness the backend names.
+pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnection) -> bool {
+    match backend {
+        MasterBackend::Rcli => {
+            connection.harness.as_str() == "rcli"
+                && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+        }
+        MasterBackend::Codex => {
+            connection.harness.as_str() == "codex"
+                && connection.protocol.as_str() == "native"
+                && matches!(connection.endpoint, ModelEndpoint::Native {})
+        }
+        MasterBackend::Claude => {
+            matches!(connection.harness.as_str(), "claude" | "claude-code")
+                && connection.protocol.as_str() == "native"
+                && matches!(connection.endpoint, ModelEndpoint::Native {})
+        }
+    }
+}
+
+#[cfg(test)]
+mod cause_code_tests {
+    use super::cause_code;
+
+    #[test]
+    fn only_a_plain_bounded_code_is_stored_and_anything_else_is_redacted() {
+        for plain in [
+            "rcli_profile_configuration_required",
+            "repository_config_refused:core_hookspath",
+            "rcli_master_cleanup_incomplete;rcli_master_wait_failed",
+            &"a".repeat(192),
+        ] {
+            assert_eq!(cause_code(plain), plain);
+        }
+        for private in [
+            "",
+            "Error: token sk-live-123 rejected",
+            "/private/tmp/owner/repo: permission denied",
+            "gateway rate limited",
+            "Rcli_profile",
+            "caf\u{e9}_code",
+            &"a".repeat(193),
+        ] {
+            assert_eq!(cause_code(private), "master_cause_redacted", "{private}");
+        }
+    }
 }

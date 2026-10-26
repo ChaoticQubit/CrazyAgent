@@ -43,7 +43,8 @@ async fn flow(root: &Path) -> Result<(), String> {
             .enabled
     );
 
-    let server_path = root.join("mcp_fixture.py");
+    let server_path = root.join("servers").join("mcp_fixture.py");
+    std::fs::create_dir_all(root.join("servers")).unwrap();
     std::fs::write(&server_path, FIXTURE).unwrap();
     std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let spec = ServerSpec::Stdio {
@@ -76,6 +77,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert_eq!(approved.status, ServerStatus::Approved);
     let checked = bridge
         .check_mcp_server(server.id.clone())
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(checked.tools, vec!["echo", "authorized"]);

@@ -35,6 +35,20 @@ struct Record {
     receipt: Option<Vec<u8>>,
 }
 
+/// Deletes the oldest `?2` operations that no request can still use: settled
+/// (`not_applied`, `uncertain`), started under an earlier engine epoch `?1`, owned by a
+/// rotated or revoked owner, or a committed receipt replaced by a newer one for the
+/// same owner and connection. Unfinished work of this engine run is never deleted.
+const FINISHED_OPERATIONS: &str = "DELETE FROM account_profile_operations WHERE rowid IN (
+    SELECT o.rowid FROM account_profile_operations o
+    WHERE o.phase IN ('not_applied','uncertain')
+    OR (o.phase IN ('reserved','running') AND o.engine_epoch<>?1)
+    OR NOT EXISTS (SELECT 1 FROM owner_identities i WHERE i.owner_id=o.owner_id AND i.owner_epoch=o.owner_epoch AND i.status='active')
+    OR (o.phase='committed' AND EXISTS (SELECT 1 FROM account_profile_operations n
+        WHERE n.rowid>o.rowid AND n.phase='committed' AND n.owner_id=o.owner_id AND n.owner_epoch=o.owner_epoch
+        AND json_extract(CAST(n.request AS TEXT),'$.scope.connection')=json_extract(CAST(o.request AS TEXT),'$.scope.connection')))
+    ORDER BY o.rowid LIMIT ?2)";
+
 pub(crate) fn execute(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -141,7 +155,20 @@ pub(crate) fn execute(
                     |row| row.get(0),
                 )
                 .map_err(error)?;
-            let count = u64::try_from(count).map_err(error)?;
+            let mut count = u64::try_from(count).map_err(error)?;
+            if count >= 1024 {
+                let excess = i64::try_from(count - 1023).map_err(error)?;
+                tx.execute(FINISHED_OPERATIONS, params![admission.engine_epoch, excess])
+                    .map_err(error)?;
+                let left: i64 = tx
+                    .query_row(
+                        "SELECT count(*) FROM account_profile_operations",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(error)?;
+                count = u64::try_from(left).map_err(error)?;
+            }
             if count >= 1024 {
                 return Err(error("account_profile_operations_full"));
             }

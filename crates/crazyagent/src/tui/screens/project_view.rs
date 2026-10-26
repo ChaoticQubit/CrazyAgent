@@ -4,8 +4,8 @@ use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
 use super::project::{
-    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, Speaker, Tab, Transcript,
-    memory_source, research_kind,
+    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, REVIEW_ROWS, Speaker, Tab,
+    Transcript, memory_source, research_kind,
 };
 use super::project_markdown::{MdLine, Role, render};
 use super::project_time::{clock, duration};
@@ -120,6 +120,52 @@ pub(in crate::tui) fn project_screen(
             status: header_status(running, look),
         };
     }
+    if let Some(review) = &screen.review {
+        let lines = review.lines();
+        let end = (review.scroll + REVIEW_ROWS).min(lines.len());
+        let mut body: Vec<Row> = lines[review.scroll.min(end)..end]
+            .iter()
+            .map(|line| Row::of(line.clone(), look.fg))
+            .collect();
+        body.resize(REVIEW_ROWS, Row::default());
+        body.push(Row::default());
+        let at_end = review.at_end();
+        body.push(if at_end {
+            Row::of("End of the memory. y saves all of it.", look.muted)
+        } else {
+            Row::of(
+                format!(
+                    "Lines {}-{end} of {}. Read to the end to save it.",
+                    review.scroll + 1,
+                    lines.len()
+                ),
+                look.muted,
+            )
+        });
+        rows = modal(&rows, width, 58, "Save to memory", body, 2, look);
+        help = if at_end {
+            vec![
+                ("y", "Save to memory"),
+                ("e", "Edit first"),
+                ("n", "Dismiss"),
+                ("Esc", "Back"),
+            ]
+        } else {
+            vec![
+                ("Down", "Read on"),
+                ("e", "Edit first"),
+                ("n", "Dismiss"),
+                ("Esc", "Back"),
+            ]
+        };
+        return Screen {
+            rows,
+            cursor: None,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
     if let Some(adding) = &screen.adding {
         let field = 52;
         let (_, (_, column)) = adding.input.wrap(4096);
@@ -184,7 +230,7 @@ pub(in crate::tui) fn project_screen(
         )];
         body.extend(
             wrap_words(
-                "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
+                "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
                 50,
             )
             .into_iter()
@@ -281,6 +327,22 @@ pub(in crate::tui) fn project_screen(
                 row
             });
         }
+        let none = screen.pool_choices.len();
+        if none < first + PICKER_ROWS {
+            let unassigned = !screen.pool.as_ref().is_some_and(|pool| pool.assigned);
+            let row = Row::of(
+                format!("{} No pool", if unassigned { "(*)" } else { "( )" }),
+                look.fg,
+            )
+            .pad(32)
+            .push("Agents wait", look.muted)
+            .pad(44);
+            body.push(if cursor == none {
+                row.restyle(look.selection)
+            } else {
+                row
+            });
+        }
         rows = modal(&rows, width, 50, "Pick a pool", body, 4, look);
         help = vec![
             ("\u{2191}\u{2193}", "Move"),
@@ -336,7 +398,13 @@ pub(in crate::tui) fn job_status(job: &ResearchJob, now_ms: i64, offset: i64, lo
             )
         }
         ResearchStatus::Queued => Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted),
-        ResearchStatus::NeedsPool => Row::of("! Needs a pool", look.warning),
+        ResearchStatus::NeedsPool => match job.rate_limited() {
+            Some((until, _)) => Row::of(
+                format!("! Rate limited until {}", clock(until, offset)),
+                look.warning,
+            ),
+            None => Row::of("! Needs a pool", look.warning),
+        },
         ResearchStatus::Failed => Row::of(format!("{} Failed", look.glyph("\u{2717}")), look.error)
             .push(
                 match job.attempts {
@@ -544,7 +612,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
             ),
             None => (
                 "This project has no pool, so no agent can start.".to_owned(),
-                "Pick a pool in Settings. Work starts as soon as you do.",
+                "Pick a pool to start. Work starts as soon as you do.",
                 "[> Pick a pool ]".to_owned(),
                 ("Enter", "Pick a pool"),
             ),
@@ -860,7 +928,7 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 Row::of("Press s to open project settings and pick one.", look.fg),
             ],
             true,
-            Row::of("> Pick a pool first", look.muted),
+            Row::of("> Pick a pool to start", look.muted),
             vec![("s", "Project settings"), TABS, ("Esc", "Home")],
         )
     } else if let Some(transcript) = screen.transcript.as_ref() {
@@ -878,14 +946,7 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
             transcript_lines(transcript, content, screen.now_ms, look)
         };
         let empty = transcript.messages.is_empty();
-        let help = if transcript.status.retryable() {
-            vec![
-                ("r", "Try again"),
-                ("Tab", "To input"),
-                TABS,
-                ("Esc", "Home"),
-            ]
-        } else if screen.typing {
+        let mut help = if screen.typing {
             vec![
                 ("Enter", "Send"),
                 ("Ctrl-J", "New line"),
@@ -893,6 +954,13 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 ("PgUp", "Scroll"),
                 TABS,
                 ("Esc", "Leave input"),
+            ]
+        } else if transcript.status.retryable() {
+            vec![
+                ("r", "Try again"),
+                ("Tab", "To input"),
+                TABS,
+                ("Esc", "Home"),
             ]
         } else {
             vec![
@@ -902,6 +970,9 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 ("Esc", "Home"),
             ]
         };
+        if transcript.open && !screen.typing {
+            help.insert(1, ("e", "End conversation"));
+        }
         (body, empty, input_row(screen, look), help)
     } else {
         (
@@ -987,6 +1058,15 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         TABS,
         ("Esc", "Home"),
     ]);
+    if screen.pool_ready && !screen.pool.as_ref().is_some_and(|pool| pool.assigned) {
+        lines.push(Row::of(
+            "This project has no pool. Pick a pool to start.",
+            look.warning,
+        ));
+        if wide {
+            lines.push(Row::default());
+        }
+    }
     let Some(jobs) = &screen.jobs else {
         lines.push(Row::of("Loading...", look.muted));
         return (lines, None, help);
@@ -1142,7 +1222,10 @@ pub(in crate::tui) fn activity(
 ) -> Vec<(Option<i64>, String, Style)> {
     let mut steps = vec![(Some(job.created_ms), "Queued".to_owned(), look.fg)];
     if job.status == ResearchStatus::NeedsPool {
-        steps.push((None, "Waiting for a pool".to_owned(), look.warning));
+        let waiting = job
+            .rate_limited()
+            .map_or("Waiting for a pool", |(_, reason)| reason);
+        steps.push((None, waiting.to_owned(), look.warning));
     }
     if let Some(at) = job.started_ms {
         let harness = harness_name(&job.harness, None);

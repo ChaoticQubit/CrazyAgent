@@ -7,22 +7,24 @@ use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::team::{EdgeState, NodeKind, TaskSource};
 use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
+    AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, agent, channel_message, plain_code, request_valid,
+    Terminals, VIEWERS_MAX, agent, channel_message, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::ipc::InvokeResponseBody;
 
-const COMMANDS: [&str; 5] = [
+const COMMANDS: [&str; 6] = [
     "desktop_team_graph",
     "desktop_terminal_attach",
     "desktop_terminal_input",
+    "desktop_terminal_prompt",
     "desktop_terminal_resize",
     "desktop_terminal_detach",
 ];
@@ -109,7 +111,7 @@ fn only_plain_engine_codes_reach_the_window() {
 }
 
 #[test]
-fn only_input_and_resize_inside_the_engine_limits_are_sent() {
+fn only_input_prompts_and_resize_inside_the_engine_limits_are_sent() {
     let input = |len: usize| TerminalRequest::Input {
         bytes: vec![b'a'; len],
     };
@@ -123,6 +125,11 @@ fn only_input_and_resize_inside_the_engine_limits_are_sent() {
     assert!(!request_valid(&resize(SIZE_MIN - 1, 24)));
     assert!(!request_valid(&resize(80, SIZE_MAX + 1)));
     assert!(!request_valid(&TerminalRequest::Detach));
+    let prompt = |text: String| TerminalRequest::Prompt { text };
+    assert!(request_valid(&prompt("run the tests".into())));
+    assert!(request_valid(&prompt("x".repeat(PROMPT_BYTES_MAX))));
+    assert!(!request_valid(&prompt(" \n\t ".into())));
+    assert!(!request_valid(&prompt("x".repeat(PROMPT_BYTES_MAX + 1))));
     let attach = TerminalRequest::Attach {
         agent_id: AgentId::team(1).unwrap(),
     };
@@ -204,7 +211,7 @@ fn output_goes_to_the_window_as_raw_bytes_and_control_frames_as_json() {
 
 #[tokio::test]
 async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempotent() {
-    let terminals = Terminals::default();
+    let terminals = Arc::new(Terminals::default());
     let team = AgentId::team(4).unwrap();
     terminals.room(&team).unwrap();
     let typed = terminals
@@ -226,6 +233,30 @@ async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempote
     assert_eq!(resized.unwrap_err().code, "terminal_request_invalid");
     terminals.detach(&team).unwrap();
     terminals.detach(&team).unwrap();
+}
+
+#[test]
+fn a_view_holds_its_place_from_the_room_check_until_it_attaches_or_gives_up() {
+    let terminals = Arc::new(Terminals::default());
+    let team = |n| AgentId::team(n).unwrap();
+    let mut held: Vec<_> = (1..=VIEWERS_MAX as i64)
+        .map(|n| terminals.room(&team(n)))
+        .collect();
+    assert!(held.iter().all(Result::is_ok));
+    assert_eq!(
+        terminals.room(&team(9)).err().map(|e| e.code),
+        Some("terminal_viewers_full"),
+        "a view still opening its connection keeps its place, so a fifth is refused before it opens one"
+    );
+    assert!(
+        terminals.room(&team(1)).is_ok(),
+        "a second view of the same agent replaces the first"
+    );
+    held.truncate(VIEWERS_MAX - 1);
+    assert!(
+        terminals.room(&team(9)).is_ok(),
+        "a view that gave up before attaching frees its place"
+    );
 }
 
 fn setup() -> ProjectSetup {

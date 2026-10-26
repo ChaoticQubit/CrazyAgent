@@ -1,6 +1,7 @@
 use super::app::UiEvent;
 use super::model_access::Basis;
 use crate::adapters::{claude, codex};
+use crate::agents::{AccountUse, Holder};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
@@ -9,11 +10,14 @@ use crate::engine::owner::{
     NativeAuthScope, NativeAuthStart, OwnerData, OwnerReadReply,
 };
 use crate::protocol::RequestId;
+use crate::tui::text::plain_code;
+use std::borrow::Cow;
 
 pub(super) mod claude_code;
 
 const DISPLAY_BYTES_MAX: usize = 65536;
 const FIELD_BYTES_MAX: usize = 4096;
+const USING_SHOWN_MAX: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
@@ -29,6 +33,8 @@ pub(super) enum Command {
     Read(NativeAuthQuery),
     Cancel(NativeAuthCancel),
     Logout(NativeAuthLogout),
+    Using,
+    Release,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +46,7 @@ pub(super) struct Job {
 pub(super) enum Output {
     Inspected(Box<OwnerReadReply>),
     Auth(Box<NativeAuthReply>),
+    Using(AccountUse),
 }
 
 pub(super) struct Event {
@@ -66,8 +73,10 @@ pub(super) struct State {
     inspected: bool,
     selected: usize,
     confirmation: Option<bool>,
+    prior: Option<Retained>,
+    using: Option<(AccountUse, bool)>,
     scroll: u16,
-    notice: &'static str,
+    notice: Cow<'static, str>,
     polled: Option<std::time::Instant>,
 }
 
@@ -86,8 +95,10 @@ impl Default for State {
             inspected: false,
             selected: 0,
             confirmation: None,
+            prior: None,
+            using: None,
             scroll: 0,
-            notice: "Select a managed native connection",
+            notice: Cow::Borrowed("Select a managed native connection"),
             polled: None,
         }
     }
@@ -96,7 +107,7 @@ impl Default for State {
 impl Command {
     fn request_id(&self) -> Option<&RequestId> {
         match self {
-            Self::Inspect => None,
+            Self::Inspect | Self::Using | Self::Release => None,
             Self::Start(request) => Some(&request.request_id),
             Self::Read(request) => Some(&request.request_id),
             Self::Cancel(request) => Some(&request.request_id),
@@ -106,7 +117,7 @@ impl Command {
 
     fn operation_id(&self) -> Option<&RequestId> {
         match self {
-            Self::Inspect => None,
+            Self::Inspect | Self::Using | Self::Release => None,
             Self::Start(request) => Some(&request.request_id),
             Self::Read(request) => Some(&request.operation_id),
             Self::Cancel(request) => Some(&request.operation_id),
@@ -116,7 +127,7 @@ impl Command {
 
     fn scope(&self) -> Option<&NativeAuthScope> {
         match self {
-            Self::Inspect => None,
+            Self::Inspect | Self::Using | Self::Release => None,
             Self::Start(request) => Some(&request.scope),
             Self::Read(request) => Some(&request.scope),
             Self::Cancel(request) => Some(&request.scope),
@@ -130,7 +141,7 @@ impl Command {
                 method: request.method,
             }),
             Self::Logout(_) => Some(NativeAuthAction::Logout),
-            Self::Inspect | Self::Read(_) | Self::Cancel(_) => None,
+            Self::Inspect | Self::Read(_) | Self::Cancel(_) | Self::Using | Self::Release => None,
         }
     }
 }
@@ -166,7 +177,7 @@ impl State {
         self.open = true;
         self.selected = 0;
         self.scroll = 0;
-        self.notice = "Reading the exact selected connection; no sign-in requested";
+        self.notice = Cow::Borrowed("Reading the exact selected connection; no sign-in requested");
         self.queue(Job {
             context,
             command: Command::Inspect,
@@ -182,7 +193,8 @@ impl State {
             self.connected = false;
         }
         if !self.connected {
-            self.notice = "Owner disconnected; original operation retained; Ctrl-R reconnects";
+            self.notice =
+                Cow::Borrowed("Owner disconnected; original operation retained; Ctrl-R reconnects");
             return;
         }
         let (Some(identity), Some(retained)) = (identity, self.retained.as_ref()) else {
@@ -191,19 +203,22 @@ impl State {
         if retained.original.context.basis.identity.database_instance()
             != identity.database_instance()
         {
-            self.notice = "Owner database changed; original operation cannot be rebound";
+            self.notice =
+                Cow::Borrowed("Owner database changed; original operation cannot be rebound");
             return;
         }
         let mut context = retained.original.context.clone();
         context.basis.identity = identity;
         context.generation = self.generation;
-        self.notice = match self
-            .query(false)
-            .and_then(|command| self.queue(Job { context, command }))
-        {
-            Ok(()) => "Reconnected; reading the exact original operation",
-            Err(_) => "Original operation retained; owner reconciliation unavailable",
-        };
+        self.notice = Cow::Borrowed(
+            match self
+                .query(false)
+                .and_then(|command| self.queue(Job { context, command }))
+            {
+                Ok(()) => "Reconnected; reading the exact original operation",
+                Err(_) => "Original operation retained; owner reconciliation unavailable",
+            },
+        );
     }
 
     pub(super) fn hide(&mut self) -> Result<(), String> {
@@ -211,6 +226,7 @@ impl State {
         self.claude_code.clear();
         self.presentation = None;
         self.confirmation = None;
+        self.using = None;
         self.generation = self
             .generation
             .checked_add(1)
@@ -254,6 +270,7 @@ impl State {
             || !self.inspected
             || self.loading()
             || self.confirmation.is_some()
+            || self.using.is_some()
             || self.claude_code.accepts_code()
         {
             return false;
@@ -310,6 +327,7 @@ impl State {
         }
         if self.selected == 0
             && self.confirmation.is_none()
+            && self.using.is_none()
             && matches!(
                 event,
                 UiEvent::Character(_) | UiEvent::Backspace | UiEvent::Submit
@@ -338,6 +356,8 @@ impl State {
             UiEvent::SelectionNext | UiEvent::SelectionPrevious => {
                 if let Some(confirm) = &mut self.confirmation {
                     *confirm = !*confirm;
+                } else if let Some((_, stop)) = &mut self.using {
+                    *stop = !*stop;
                 } else {
                     let count = self.choices().len();
                     let step = if matches!(event, UiEvent::SelectionNext) {
@@ -399,6 +419,16 @@ impl State {
         if let Some(confirm) = self.confirmation.take() {
             return if confirm { self.begin(None) } else { Ok(()) };
         }
+        if let Some((_, stop)) = self.using.take() {
+            if !stop {
+                return Ok(());
+            }
+            let context = self.context.clone().ok_or("Select a native connection")?;
+            return self.queue(Job {
+                context,
+                command: Command::Release,
+            });
+        }
         let claude = self
             .context
             .as_ref()
@@ -435,13 +465,15 @@ impl State {
         };
         let job = Job { context, command };
         self.queue(job.clone())?;
+        self.prior = self.retained.take();
         self.retained = Some(Retained {
             original: job,
             fact: None,
             uncertain: true,
         });
         self.presentation = None;
-        self.notice = "Owner request pending; retain its original identity until reconciled";
+        self.notice =
+            Cow::Borrowed("Owner request pending; retain its original identity until reconciled");
         self.assert_consistent();
         Ok(())
     }
@@ -503,6 +535,7 @@ impl State {
         if self.flight.as_ref() != Some(&event.job) {
             return Ok(());
         }
+        let (mut list_using, mut sign_out) = (false, false);
         match event.result {
             Ok(Output::Auth(reply)) if !matches!(event.job.command, Command::Inspect) => {
                 if !self.matches_reply(&event.job, &reply) {
@@ -512,17 +545,37 @@ impl State {
             }
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
-                self.notice = if self.inspected {
+                self.notice = Cow::Borrowed(if self.inspected {
                     "Choose an explicit authentication action"
                 } else {
                     "Selected connection or source changed; close and inspect again"
-                };
+                });
+            }
+            Ok(Output::Using(used))
+                if matches!(event.job.command, Command::Using | Command::Release)
+                    && self.open
+                    && self.context.as_ref() == Some(&event.job.context) =>
+            {
+                sign_out = matches!(event.job.command, Command::Release) && used.is_free();
+                self.notice = Cow::Borrowed(if sign_out {
+                    "Ended what used this account; signing out"
+                } else if used.is_free() {
+                    "native_profile_in_use"
+                } else {
+                    "What is listed below uses this account; end it to sign out"
+                });
+                self.using = (!used.is_free()).then_some((used, false));
             }
             Err(problem) => {
                 self.presentation = None;
                 self.claude_code.clear();
-                self.notice = public_problem(&problem);
-                if problem != "native_auth_not_active"
+                self.notice = Cow::Owned(public_problem(&problem));
+                list_using = problem == "native_profile_in_use"
+                    && matches!(event.job.command, Command::Logout(_));
+                if list_using {
+                    self.retained = self.prior.take();
+                } else if problem != "native_auth_not_active"
+                    && !matches!(event.job.command, Command::Using | Command::Release)
                     && let Some(retained) = &mut self.retained
                 {
                     retained.uncertain = true;
@@ -535,11 +588,20 @@ impl State {
                 self.presentation = None;
                 self.claude_code.clear();
                 self.inspected = false;
-                self.notice = "Owner response context changed; close and inspect again";
+                self.notice =
+                    Cow::Borrowed("Owner response context changed; close and inspect again");
             }
         }
         self.flight = None;
         self.job = None;
+        if list_using {
+            self.queue(Job {
+                context: event.job.context,
+                command: Command::Using,
+            })?;
+        } else if sign_out {
+            self.begin(None)?;
+        }
         self.assert_consistent();
         Ok(())
     }
@@ -598,11 +660,11 @@ impl State {
             .expect("matching reply retains its original operation");
         retained.uncertain = reply.fact.phase == NativeAuthPhase::Uncertain;
         retained.fact = Some(reply.fact.clone());
-        self.notice = if reply.fact.binding.engine_epoch == reply.engine_epoch {
+        self.notice = Cow::Borrowed(if reply.fact.binding.engine_epoch == reply.engine_epoch {
             phase_text(reply.fact.phase)
         } else {
             "Historical operation observed; current account presentation unavailable"
-        };
+        });
         let present = self.open
             && self.connected
             && self.context.as_ref() == Some(&job.context)
@@ -692,7 +754,7 @@ impl State {
                     "Codex"
                 }
             ),
-            self.notice.into(),
+            self.notice.to_string(),
             format!(
                 "Selected account reference: {}",
                 display_text(context.connection.account_ref.as_str(), FIELD_BYTES_MAX)
@@ -733,7 +795,40 @@ impl State {
     }
 
     fn action_lines(&self) -> Vec<String> {
-        if let Some(confirm) = self.confirmation {
+        if let Some((used, stop)) = &self.using {
+            let agents = used
+                .agents
+                .iter()
+                .map(|agent| (agent.label.as_str(), agent.project.as_str()));
+            let holders = used.holders.iter().map(|holder| match holder {
+                Holder::Master { project, .. } => ("Master conversation", project.as_str()),
+                Holder::Research { project, title, .. } => (title.as_str(), project.as_str()),
+            });
+            let listed = used.agents.len() + used.holders.len();
+            let mut names: Vec<String> = agents
+                .chain(holders)
+                .take(USING_SHOWN_MAX)
+                .map(|(label, project)| {
+                    format!(
+                        "{} (project {})",
+                        display_text(label, 256),
+                        display_text(project, 256)
+                    )
+                })
+                .collect();
+            if listed > USING_SHOWN_MAX {
+                names.push(format!("and {} more", listed - USING_SHOWN_MAX));
+            }
+            vec![
+                format!("In use by: {}", names.join(", ")),
+                format!(
+                    "{} Back | {} {}",
+                    if *stop { " " } else { ">" },
+                    if *stop { ">" } else { " " },
+                    release_label(used)
+                ),
+            ]
+        } else if let Some(confirm) = self.confirmation {
             vec![
                 "Request logout for this connection?".into(),
                 format!(
@@ -765,12 +860,33 @@ impl State {
         assert!(!self.open || self.context.is_some());
         assert!(!self.open || self.selected < self.choices().len());
         assert!(self.presentation.is_none() || (self.open && self.connected));
+        assert!(self.using.as_ref().is_none_or(|(used, _)| !used.is_free()));
         if let Some(retained) = &self.retained {
             assert!(retained.original.command.action().is_some());
             assert!(retained.fact.as_ref().is_none_or(|fact| {
                 retained.original.command.operation_id() == Some(&fact.operation_id)
             }));
         }
+    }
+}
+
+/// The one owner action that ends what holds an account and then signs it out, named by
+/// what it ends: agents and research jobs are stopped, master conversations are ended.
+/// Input: what holds the account. Output: the action's label.
+pub(super) fn release_label(used: &AccountUse) -> &'static str {
+    let master = used
+        .holders
+        .iter()
+        .any(|holder| matches!(holder, Holder::Master { .. }));
+    let others = !used.agents.is_empty()
+        || used
+            .holders
+            .iter()
+            .any(|holder| matches!(holder, Holder::Research { .. }));
+    match (others, master) {
+        (true, true) => "Stop agents, end conversation and sign out",
+        (false, true) => "End conversation and sign out",
+        _ => "Stop agents and sign out",
     }
 }
 
@@ -787,28 +903,17 @@ fn new_request_id() -> Result<RequestId, String> {
     RequestId::new(id).map_err(|_| "Authentication request identity invalid".into())
 }
 
-pub(super) fn public_problem(problem: &str) -> &'static str {
+/// Keeps a native authentication problem for the owner without raw error text.
+/// Input: the engine's problem. Output: a plain code as it is, so a code with no
+/// sentence still names itself, the expired sign-in sentence, or a fixed code that
+/// says to read the original operation again when the problem is not a plain code.
+pub(super) fn public_problem(problem: &str) -> String {
     match problem {
-        "native_auth_not_active" => "native_auth_not_active",
-        "native_auth_operation_missing" => "native_auth_operation_missing",
-        "native_auth_recovery_required" => "native_auth_recovery_required",
         "native_auth_sign_in_expired" => {
-            "Sign-in code expired before approval; start sign-in again"
+            "Sign-in code expired before approval; start sign-in again".to_owned()
         }
-        "native_auth_operation_conflict" => "native_auth_operation_conflict",
-        "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
-        "native_auth_operation_capacity" => "native_auth_operation_capacity",
-        "native_auth_database_mismatch" => "native_auth_database_mismatch",
-        "native_auth_readonly" => "native_auth_readonly",
-        "native_auth_host_unavailable" => "native_auth_host_unavailable",
-        "native_auth_method_mismatch" => "native_auth_method_mismatch",
-        "native_profile_source_conflict" => "native_profile_source_conflict",
-        "native_profile_in_use" => "native_profile_in_use",
-        "native_profile_not_managed" => "native_profile_not_managed",
-        "owner_grant_stale_or_revoked" => "owner_grant_stale_or_revoked",
-        "native_auth_owner_identity_changed" => "native_auth_owner_identity_changed",
-        "native_auth_inspection_unavailable" => "native_auth_inspection_unavailable",
-        _ => "native_auth_transport_unavailable_read_original_operation",
+        code if plain_code(code) => code.to_owned(),
+        _ => "native_auth_transport_unavailable_read_original_operation".to_owned(),
     }
 }
 
@@ -821,6 +926,7 @@ fn action_text(action: NativeAuthAction) -> &'static str {
             NativeAuthMethod::CodexDeviceCode => "Codex device-code sign-in",
             NativeAuthMethod::CodexExisting => "Existing Codex sign-in check",
             NativeAuthMethod::ClaudeOfficial => "Claude official sign-in",
+            NativeAuthMethod::ClaudeExisting => "Existing Claude sign-in check",
         },
         NativeAuthAction::Logout => "Logout",
     }

@@ -1,4 +1,5 @@
 import type { AvailableUpdate, UpdateProgress } from "../../api-updates";
+import { withCode } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
 export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -24,11 +25,14 @@ export type UpdateEvent =
 
 const COPY: Record<string, string> = {
   update_check_failed: "Couldn't reach the update server. Check your connection and try again.",
+  update_stable_not_published: "No stable release is published yet.",
+  update_dev_not_published: "No dev release is published yet.",
   update_download_failed: "The download didn't finish. Nothing changed. Try again.",
   update_too_large: "The download was larger than any CrazyAgent release, so it was stopped. Nothing changed.",
   update_signature_invalid: "The download didn't match CrazyAgent's release signature, so nothing was installed.",
   update_install_failed: "The update couldn't be installed. CrazyAgent is still on its current version and the engine was started again.",
   update_service_failed: "Couldn't stop the engine for the update, so nothing was installed. Try again.",
+  update_link_cli_failed: "Couldn't install the command line tool. Try again.",
   update_not_checked: "Check for updates first.",
   update_channel_invalid: "The saved update channel isn't valid. Choose Stable or Dev again.",
   update_no_data_root: "CrazyAgent can't find its data folder on this computer.",
@@ -39,9 +43,9 @@ const COPY: Record<string, string> = {
 };
 
 /** Turns an update error code into one plain sentence for the owner.
- * Input: the code. Output: the copy, or the generic update fallback. */
+ * Input: the code. Output: the copy, or the generic update fallback naming the code. */
 export function updateMessage(code: string): string {
-  return COPY[code] ?? "Something went wrong with the update. Try again.";
+  return COPY[code] ?? withCode("Something went wrong with the update. Try again.", code);
 }
 
 const blocking = (state: UpdatePhase) => state.kind === "installing" || state.kind === "installed";

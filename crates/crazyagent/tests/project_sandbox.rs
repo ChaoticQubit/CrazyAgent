@@ -615,3 +615,139 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         "sandbox unavailable: bubblewrap is missing"
     );
 }
+
+#[test]
+fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let one = case.project.join("worktrees").join("one");
+    let two = case.project.join("worktrees").join("two");
+    for worktree in [&one, &two] {
+        let added = owner_git(
+            &case.project,
+            &case.home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+    }
+    let confine = |worktree: &Path| {
+        sandbox(&case, SandboxNetwork::Only(Vec::new())).confine_to_worktree(worktree)
+    };
+    let refused = |result: Result<ProjectSandbox, SandboxError>| {
+        assert!(
+            matches!(result, Err(SandboxError::Invalid(_))),
+            "{:?}",
+            result.map(|sandbox| sandbox.profile())
+        );
+    };
+    let link = one.join(".git");
+    let original = fs::read_to_string(&link).unwrap();
+    let confined = confine(&one).unwrap();
+    assert!(confined.read_roots().contains(&case.project));
+    assert!(confined.writable_roots().all(|root| root != &case.project));
+    refused(confined.confine_to_worktree(&one));
+    refused(confine(&case.outside));
+    refused(confine(&case.project.join("worktrees")));
+    let git = case.project.join(".git");
+    for forged in [
+        format!("gitdir: {}\n", git.display()),
+        format!("gitdir: {}\n", git.join("worktrees").join("two").display()),
+        format!("gitdir: {}", git.join("worktrees").join("one").display()),
+        String::from("gitdir: \n"),
+    ] {
+        fs::write(&link, forged).unwrap();
+        refused(confine(&one));
+    }
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(two.join(".git"), &link).unwrap();
+    refused(confine(&one));
+    fs::remove_file(&link).unwrap();
+    fs::write(&link, &original).unwrap();
+    assert!(confine(&one).is_ok());
+}
+
+#[test]
+fn an_agent_cannot_plant_the_git_redirect_files_the_engine_rejects() {
+    let plants: [(&str, &str, &str); 12] = [
+        (
+            "commondir",
+            "printf '/x\\n' > .git/commondir",
+            ".git/commondir",
+        ),
+        (
+            "config.worktree",
+            "printf '[core]\\n' > .git/config.worktree",
+            ".git/config.worktree",
+        ),
+        (
+            "alternates",
+            "printf '/x\\n' > .git/objects/info/alternates",
+            ".git/objects/info/alternates",
+        ),
+        (
+            "http-alternates",
+            "printf 'http://x\\n' > .git/objects/info/http-alternates",
+            ".git/objects/info/http-alternates",
+        ),
+        (
+            "grafts",
+            "mkdir -p .git/info; printf 'x\\n' > .git/info/grafts",
+            ".git/info/grafts",
+        ),
+        ("shallow", "printf 'x\\n' > .git/shallow", ".git/shallow"),
+        (
+            "alternates through a staged objects/info",
+            "mkdir s; printf '/x\\n' > s/alternates; mv .git/objects/info .git/objects/i0; mv s .git/objects/info",
+            ".git/objects/info/alternates",
+        ),
+        (
+            "alternates through a staged objects store",
+            "cp -R .git/objects o; mkdir -p o/info; printf '/x\\n' > o/info/alternates; mv .git/objects .git/o0; mv o .git/objects",
+            ".git/objects/info/alternates",
+        ),
+        (
+            "grafts through a staged info folder",
+            "mkdir s; printf 'x\\n' > s/grafts; mv .git/info .git/i0; mv s .git/info",
+            ".git/info/grafts",
+        ),
+        (
+            "grafts through a staged info folder with none before",
+            "rm -rf .git/info; mkdir s; printf 'x\\n' > s/grafts; mv s .git/info",
+            ".git/info/grafts",
+        ),
+        (
+            "commondir through a staged .git",
+            "cp -R .git g; printf '/x\\n' > g/commondir; mv .git .g0; mv g .git",
+            ".git/commondir",
+        ),
+        (
+            "brief through a staged .crazyagent",
+            "cp -R .crazyagent c; echo agent > c/context/brief.md; mv .crazyagent .c0; mv c .crazyagent",
+            ".crazyagent/context/brief.md",
+        ),
+    ];
+    let mut landed = Vec::new();
+    for (name, script, target) in plants {
+        let (case, sandbox, profile, _) = git_case();
+        let target = case.project.join(target);
+        let before = fs::read(&target).ok();
+        let _ = run(&sandbox, &profile, script);
+        if fs::read(&target).ok() != before {
+            landed.push(name);
+        }
+    }
+    assert_eq!(landed, Vec::<&str>::new());
+}

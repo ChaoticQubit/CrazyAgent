@@ -1,4 +1,4 @@
-use super::super::settings_add_account::{AddAccount, choices, key_problem};
+use super::super::settings_add_account::{AddAccount, choices, key_problem, provider_tiles};
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
@@ -546,25 +546,85 @@ fn a_full_load_fills_the_list_and_the_shared_rows() {
     );
 }
 
+fn modal_text(modal: &Modal) -> String {
+    modal
+        .body
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[test]
-fn removing_an_account_in_a_pool_is_refused_with_the_reason() {
+fn removing_an_account_in_a_pool_names_the_pool_and_takes_it_out() {
     let (accounts, pools) = dataset(None);
     let mut ctx = list_ctx(80, 24, pools);
     let mut details = AccountDetails::new(accounts[0].clone(), Accounts::with(accounts.clone()));
     details.key(&Key::Right, &mut ctx);
     details.key(&Key::Right, &mut ctx);
     details.key(&Key::Enter, &mut ctx);
-    assert!(details.modal(&ctx).is_none());
-    assert_eq!(
-        ctx.message().unwrap().lead,
-        "Claude Pro - personal is in pool Research. Remove it from the pool first."
-    );
+    let (modal, _) = details.modal(&ctx).expect("a confirm before removing");
+    assert_eq!(modal.title, "Remove account");
+    let text = modal_text(&modal);
+    assert!(text.contains("It leaves pool Research."), "{text}");
+    assert!(text.contains("Remove from pools and delete"), "{text}");
+    details.key(&Key::Right, &mut ctx);
+    details.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 1, "the confirmed remove goes to the engine");
+    assert!(ctx.next_request().is_some());
     let mut lonely = AccountDetails::new(accounts[1].clone(), Accounts::with(accounts));
     lonely.key(&Key::Left, &mut ctx);
     lonely.key(&Key::Enter, &mut ctx);
     assert_eq!(lonely.modal(&ctx).unwrap().0.title, "Remove account");
     lonely.key(&Key::Enter, &mut ctx);
     assert!(lonely.modal(&ctx).is_none(), "Cancel is focused first");
+    assert_eq!(ctx.queued(), 0);
+}
+
+#[test]
+fn delete_selected_asks_first_and_names_the_pools_its_accounts_leave() {
+    let (accounts, pools) = dataset(None);
+    let mut ctx = list_ctx(80, 24, pools);
+    let mut screen = Accounts::with(accounts.clone());
+    assert!(!screen.hints(&ctx).iter().any(|hint| hint.key == "d"));
+    screen.key(&Key::Char('d'), &mut ctx);
+    assert!(screen.modal(&ctx).is_none());
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Select accounts with Space first."
+    );
+    screen.marked.insert(accounts[0].id.clone());
+    screen.key(&Key::Char('d'), &mut ctx);
+    let (modal, _) = screen
+        .modal(&ctx)
+        .expect("a pooled account is confirmed, not refused");
+    let text = modal_text(&modal);
+    assert!(text.contains("Delete 1 account?"), "{text}");
+    assert!(text.contains("It leaves pool Research."), "{text}");
+    assert!(text.contains("Remove from pools and delete"), "{text}");
+    screen.key(&Key::Esc, &mut ctx);
+    screen.marked.insert(accounts[1].id.clone());
+    screen.marked.insert(accounts[200].id.clone());
+    assert!(
+        screen
+            .hints(&ctx)
+            .iter()
+            .any(|hint| hint.key == "d" && hint.label == "Delete selected")
+    );
+    screen.key(&Key::Char('d'), &mut ctx);
+    let (modal, _) = screen.modal(&ctx).expect("a confirm before deleting");
+    assert_eq!(modal.title, "Delete accounts");
+    let text = modal_text(&modal);
+    assert!(text.contains("Delete 3 accounts?"), "{text}");
+    assert!(text.contains("Saved keys are deleted too."), "{text}");
+    assert!(text.contains("They leave pool Research."), "{text}");
+    screen.key(&Key::Enter, &mut ctx);
+    assert!(screen.modal(&ctx).is_none(), "Cancel is focused first");
+    assert_eq!(ctx.queued(), 0);
+    assert!(!screen.busy(&ctx));
+    screen.key(&Key::Char('d'), &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(screen.modal(&ctx).is_none());
     assert_eq!(ctx.queued(), 0);
 }
 
@@ -609,7 +669,8 @@ fn add_account_provider_and_method_frames_match_the_design() {
 #[test]
 fn api_key_form_masks_the_key_and_counts_it() {
     let mut shell = add_shell(80, 24);
-    for _ in 0..3 {
+    shell.key(Key::Enter);
+    for _ in 0..2 {
         shell.key(Key::Down);
     }
     shell.key(Key::Enter);
@@ -645,8 +706,8 @@ fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
         titles,
         [
             "Sign in with ChatGPT",
-            "Use an API key",
-            "Use the Codex sign-in on this Mac"
+            "Use the Codex sign-in on this Mac",
+            "Use an API key"
         ]
     );
     assert_eq!(
@@ -655,6 +716,38 @@ fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
     );
     assert_eq!(key_problem(Provider::OpenaiApi, 51, true), None);
     assert_eq!(key_problem(Provider::OpenaiCompatible, 0, false), None);
+}
+
+#[test]
+fn without_a_separate_api_provider_a_company_keeps_its_own_key_choice() {
+    let older: Vec<_> = catalog()
+        .into_iter()
+        .filter(|entry| !matches!(entry.provider, Provider::OpenaiApi | Provider::AnthropicApi))
+        .collect();
+    let tiles = provider_tiles(&older);
+    let anthropic = tiles.iter().find(|tile| tile.name == "Anthropic").unwrap();
+    assert_eq!(
+        anthropic
+            .choices
+            .iter()
+            .map(|choice| (choice.provider, choice.method))
+            .collect::<Vec<_>>(),
+        [
+            (Provider::Claude, SignInMethod::Subscription),
+            (Provider::Claude, SignInMethod::ApiKey)
+        ]
+    );
+    assert_eq!(tiles.len(), 5);
+}
+
+#[test]
+#[should_panic(expected = "every Add account entry offers a way to add an account")]
+fn a_catalog_provider_with_no_way_to_add_an_account_trips_the_entry_check() {
+    provider_tiles(&[crate::accounts::ProviderEntry {
+        provider: Provider::Openrouter,
+        name: "OpenRouter".into(),
+        methods: Vec::new(),
+    }]);
 }
 
 #[cfg(unix)]
@@ -972,6 +1065,88 @@ mod replace_key {
             "only the key file holds the new key: {held:?}"
         );
         assert!(held[0].parent().unwrap().ends_with("account-keys"));
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[cfg(unix)]
+mod sign_in_refused {
+    use super::lost_engine::{ready, send, until};
+    use super::*;
+    use crate::engine::Client;
+    use crate::engine::bootstrap::EngineService;
+    use crate::tui::client::Connection;
+    use crate::tui::client::accounts::AccountsRequest;
+    use crate::tui::client::settings::SettingsJob;
+    use crate::tui::test_home::ENGINE_WAIT;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    const CLAUDE: &str = r#"
+[model_access]
+accounts = ["account-claude"]
+[[model_access.connections]]
+id = "acct-000"
+provider = "provider-claude"
+harness = "claude"
+protocol = "native"
+account_ref = "account-claude"
+endpoint = { kind = "native" }
+model = { id = "model-claude", author = "author-claude" }
+auth = { method = "native_managed", profile_ref = "profile-claude" }
+"#;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sign_in_the_engine_refuses_says_why_on_the_add_account_page() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tacc-ro-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = crate::config::resolve_config_bytes(
+            &format!("timeout_ms = {}\n{CLAUDE}", ENGINE_WAIT.as_millis()),
+            "",
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        let mut connection = Connection::connect_paired(
+            Client::new(root.path().join("e.sock"), ENGINE_WAIT).unwrap(),
+        )
+        .unwrap();
+        let claude = account(
+            0,
+            "Work Claude",
+            Provider::Claude,
+            SignInMethod::Subscription,
+            AccountStatus::NotSignedIn,
+        );
+        let mut shell = Shell::with(ctx(100, 30), Box::new(AddAccount::again(claude)));
+        until(&mut shell, &mut connection, ready).await;
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::Accounts(AccountsRequest::Catalog))
+        })
+        .await;
+        shell.refresh();
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::SignIn(_))
+        })
+        .await;
+
+        let page = render(&mut shell, 100, 30).join("\n");
+        assert!(
+            page.contains("Settings are read-only in this engine."),
+            "{page}"
+        );
+        assert!(page.contains("Press n to try again."), "{page}");
+        assert!(!page.contains("model_access_read_only"), "{page}");
+        assert!(!page.contains("read_original_operation"), "{page}");
         drop(connection);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await

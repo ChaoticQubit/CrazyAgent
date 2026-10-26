@@ -11,7 +11,9 @@ const TURNS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;
 pub const DEVELOPER_INSTRUCTIONS_BYTES_MAX: usize = 48 * 1024;
 const LOGINS_MAX: usize = 16;
+const CHILDREN_MAX: usize = 16;
 const AUTH_URL_BYTES_MAX: usize = 2048;
+const AUTH_URL_ORIGIN: &str = "https://auth.openai.com";
 const AUTH_ERROR_BYTES_MAX: usize = 4096;
 const ACCOUNT_EMAIL_BYTES_MAX: usize = 320;
 
@@ -190,6 +192,10 @@ pub enum Event {
     UnsupportedNotification {
         method: String,
     },
+    NativeSubAgentStarted {
+        thread_id: String,
+        turn_id: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +288,9 @@ pub struct CodexProtocol {
     seen_server_ids: BTreeSet<WireId>,
     server_requests: BTreeMap<WireId, Option<ApprovalKind>>,
     login_ids: BTreeMap<String, LoginState>,
+    refused: Option<String>,
+    children: BTreeMap<String, Option<String>>,
+    child_interrupts: BTreeMap<i64, String>,
 }
 
 impl Default for CodexProtocol {
@@ -303,6 +312,9 @@ impl CodexProtocol {
             seen_server_ids: BTreeSet::new(),
             server_requests: BTreeMap::new(),
             login_ids: BTreeMap::new(),
+            refused: None,
+            children: BTreeMap::new(),
+            child_interrupts: BTreeMap::new(),
         };
         protocol.assert_consistent();
         assert_eq!(protocol.phase, State::New);
@@ -402,13 +414,29 @@ impl CodexProtocol {
         cwd: &Path,
         instructions: &str,
     ) -> Result<Vec<u8>, ProtocolError> {
-        if instructions.trim().is_empty()
-            || instructions.contains('\0')
-            || instructions.len() > DEVELOPER_INSTRUCTIONS_BYTES_MAX
-        {
-            return Err(ProtocolError::InvalidInput);
-        }
-        self.start_thread_with(cwd, "on-request", "read-only", Some(instructions))
+        self.start_thread_with(
+            cwd,
+            "on-request",
+            "read-only",
+            Some(instructed(instructions)?),
+        )
+    }
+
+    /// Starts the same tools thread as `start_tool_thread` with `instructions` as the thread's
+    /// developer instructions, for a tools-on master the caller confines in an OS sandbox.
+    /// Input: absolute working directory and non-blank text without NUL, at most
+    /// `DEVELOPER_INSTRUCTIONS_BYTES_MAX` bytes. Output: the encoded `thread/start` request.
+    pub fn start_instructed_tool_thread(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        self.start_thread_with(
+            cwd,
+            "never",
+            "danger-full-access",
+            Some(instructed(instructions)?),
+        )
     }
 
     /// Starts a thread whose tools run without approval prompts and without Codex's
@@ -512,6 +540,37 @@ impl CodexProtocol {
         Ok(bytes)
     }
 
+    /// Interrupts the turn of a sub-agent Codex started on its own from this thread's turn,
+    /// outside the slot of the engine's own request so neither waits for the other. Inputs: the
+    /// child thread and turn ids from `NativeSubAgentStarted`. Output: the encoded
+    /// `turn/interrupt`, `StaleMessage` for a turn that is not a known child's, or `Capacity`.
+    pub fn interrupt_child(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        self.assert_consistent();
+        if self.phase == State::Failed {
+            return Err(ProtocolError::InvalidState);
+        }
+        if self.children.get(thread_id).and_then(Option::as_deref) != Some(turn_id) {
+            return Err(ProtocolError::StaleMessage);
+        }
+        if self.child_interrupts.len() == CHILDREN_MAX {
+            return Err(ProtocolError::Capacity);
+        }
+        let id = self.next_id;
+        let next = id.checked_add(1).ok_or(ProtocolError::Capacity)?;
+        let bytes = encode(json!({
+            "id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}
+        }))?;
+        self.next_id = next;
+        let previous = self.child_interrupts.insert(id, thread_id.to_owned());
+        assert!(previous.is_none());
+        self.assert_consistent();
+        Ok(bytes)
+    }
+
     pub fn deny_request(&mut self, id: &WireId) -> Result<Vec<u8>, ProtocolError> {
         self.assert_consistent();
         if self.phase == State::Failed {
@@ -549,6 +608,13 @@ impl CodexProtocol {
         self.assert_consistent();
         assert!(result.is_ok() || self.phase == State::Failed);
         result
+    }
+
+    /// Names the frame the protocol last refused, for the engine's stream diagnostic: its
+    /// method or `response`, JSON-RPC id and the thread, parent thread and turn ids its params
+    /// carry, or `unreadable`. Input: none. Output: the name, or none before any refusal.
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
     }
 
     pub fn finish(&mut self) -> Result<(), ProtocolError> {
@@ -596,14 +662,21 @@ impl CodexProtocol {
         );
         if let Some((id, _)) = &self.pending {
             assert!(*id > 0 && *id < self.next_id);
+            assert!(!self.child_interrupts.contains_key(id));
         }
+        assert!(self.children.len() <= CHILDREN_MAX);
+        assert!(self.child_interrupts.len() <= CHILDREN_MAX);
+        assert!(self.child_interrupts.iter().all(|(id, thread)| *id > 0
+            && *id < self.next_id
+            && self.children.contains_key(thread)));
+        assert!(
+            self.thread_id
+                .as_ref()
+                .is_none_or(|own| !self.children.contains_key(own))
+        );
         if let Some(turn) = &self.turn {
             assert!(self.thread_id.is_some());
             assert!(self.seen_turns.contains(&turn.id));
-            assert!(
-                turn.status == TurnStatus::InProgress
-                    || self.server_requests.values().all(Option::is_none)
-            );
         }
         if self.phase == State::Active {
             assert_eq!(
@@ -692,10 +765,16 @@ impl CodexProtocol {
                 return Err(ProtocolError::Capacity);
             }
             frames += 1;
-            let envelope: Envelope =
-                serde_json::from_slice(&self.buffer).map_err(|_| ProtocolError::InvalidMessage)?;
+            let Ok(envelope) = serde_json::from_slice::<Envelope>(&self.buffer) else {
+                self.refused = Some(frame_name(&self.buffer));
+                return Err(ProtocolError::InvalidMessage);
+            };
+            let observed = self.message(envelope);
+            if observed.is_err() {
+                self.refused = Some(frame_name(&self.buffer));
+            }
             self.buffer.clear();
-            if let Some(event) = self.message(envelope)? {
+            if let Some(event) = observed? {
                 events.push(event);
             }
             assert!(events.len() <= frames);
@@ -736,6 +815,12 @@ impl CodexProtocol {
         result: Option<Value>,
         error: Option<Value>,
     ) -> Result<Option<Event>, ProtocolError> {
+        if let WireId::Number(number) = &id
+            && self.child_interrupts.remove(number).is_some()
+        {
+            self.assert_consistent();
+            return Ok(None);
+        }
         let (expected, operation) = self.pending.clone().ok_or(ProtocolError::StaleMessage)?;
         if id != WireId::Number(expected) {
             return Err(ProtocolError::StaleMessage);
@@ -944,7 +1029,6 @@ impl CodexProtocol {
             }
         } else {
             self.phase = State::Idle;
-            self.server_requests.clear();
             Event::TurnCompleted {
                 turn_id: turn.id.clone(),
                 status: turn.status,
@@ -1085,6 +1169,9 @@ impl CodexProtocol {
         method: String,
         params: Value,
     ) -> Result<Option<Event>, ProtocolError> {
+        if let Some(event) = self.child_frame(&method, &params)? {
+            return Ok(event);
+        }
         match method.as_str() {
             "account/login/completed" => self
                 .login_completed(&params)
@@ -1134,6 +1221,67 @@ impl CodexProtocol {
         }
     }
 
+    /// Sets apart the frames of sub-agents Codex starts on its own from this thread's turn: a
+    /// thread our `subAgentActivity` item names, a thread whose parent is ours, or a turn on
+    /// another thread whose `rootTurnId` is our turn. A child's turn start becomes
+    /// `NativeSubAgentStarted` and its other frames are dropped. Input: the notification.
+    /// Output: none for any other frame, or the child frame's event, or a plain refusal.
+    fn child_frame(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<Option<Option<Event>>, ProtocolError> {
+        let Some(own) = self.thread_id.clone() else {
+            return Ok(None);
+        };
+        let thread = params["threadId"]
+            .as_str()
+            .or_else(|| params["thread"]["id"].as_str());
+        if thread == Some(own.as_str()) {
+            if method == "item/started" && params["item"]["type"] == "subAgentActivity" {
+                self.adopt_child(identifier(&params["item"]["agentThreadId"])?)?;
+            }
+            return Ok(None);
+        }
+        let Some(thread) = thread else {
+            return Ok(None);
+        };
+        let rooted = self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| params["turn"]["rootTurnId"] == turn.id.as_str())
+            || params["thread"]["parentThreadId"] == own.as_str();
+        if !rooted && !self.children.contains_key(thread) {
+            return Ok(None);
+        }
+        let thread = identifier(&json!(thread))?;
+        self.adopt_child(thread.clone())?;
+        if method != "turn/started" {
+            return Ok(Some(None));
+        }
+        let turn = identifier(&params["turn"]["id"])?;
+        self.children.insert(thread.clone(), Some(turn.clone()));
+        self.assert_consistent();
+        Ok(Some(Some(Event::NativeSubAgentStarted {
+            thread_id: thread,
+            turn_id: turn,
+        })))
+    }
+
+    fn adopt_child(&mut self, thread: String) -> Result<(), ProtocolError> {
+        if self.thread_id.as_ref() == Some(&thread) {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        if !self.children.contains_key(&thread) {
+            if self.children.len() == CHILDREN_MAX {
+                return Err(ProtocolError::Capacity);
+            }
+            self.children.insert(thread, None);
+        }
+        assert!(self.children.len() <= CHILDREN_MAX);
+        Ok(())
+    }
+
     fn check_thread(&self, params: &Value) -> Result<(), ProtocolError> {
         let id = identifier(&params["threadId"])?;
         if self.thread_id.as_ref() != Some(&id) {
@@ -1180,7 +1328,12 @@ impl CodexProtocol {
             _ => None,
         };
         if kind.is_some() {
-            self.check_active(&params)?;
+            if !params["threadId"]
+                .as_str()
+                .is_some_and(|thread| self.children.contains_key(thread))
+            {
+                self.check_active(&params)?;
+            }
             identifier(&params["itemId"])?;
             params["startedAtMs"]
                 .as_i64()
@@ -1348,15 +1501,10 @@ fn auth_url(value: &Value) -> Result<SensitiveAuthText, ProtocolError> {
     {
         return Err(ProtocolError::InvalidMessage);
     }
-    let address = text
-        .strip_prefix("https://")
-        .or_else(|| text.strip_prefix("http://"))
+    let rest = text
+        .strip_prefix(AUTH_URL_ORIGIN)
         .ok_or(ProtocolError::InvalidMessage)?;
-    if address
-        .split(['/', '?', '#'])
-        .next()
-        .is_none_or(str::is_empty)
-    {
+    if !(rest.is_empty() || rest.starts_with(['/', '?', '#'])) {
         return Err(ProtocolError::InvalidMessage);
     }
     Ok(SensitiveAuthText(text.into()))
@@ -1368,6 +1516,53 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
         return Err(ProtocolError::InvalidMessage);
     }
     Ok(text.into())
+}
+
+/// Names one frame by its method (`response` without one), JSON-RPC id and the thread,
+/// parent thread and turn ids its params carry; an absent value shows as `-` and one that is
+/// not a short plain identifier as `?`. Input: the frame bytes. Output: the name, or
+/// `unreadable` for bytes that are not JSON.
+fn frame_name(frame: &[u8]) -> String {
+    let Ok(value) = serde_json::from_slice::<Value>(frame) else {
+        return "unreadable".to_owned();
+    };
+    let plain = |value: &Value| {
+        let text = match value {
+            Value::Null => return "-".to_owned(),
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            _ => return "?".to_owned(),
+        };
+        if (1..=ID_BYTES_MAX).contains(&text.len())
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_/.:".contains(&byte))
+        {
+            text
+        } else {
+            "?".to_owned()
+        }
+    };
+    let params = &value["params"];
+    let either = |first: &'static str, second: &'static str| {
+        if params[first].is_null() {
+            plain(&params[second]["id"])
+        } else {
+            plain(&params[first])
+        }
+    };
+    let method = if value.get("method").is_some() {
+        plain(&value["method"])
+    } else {
+        "response".to_owned()
+    };
+    format!(
+        "{method} id={} thread={} parent={} turn={}",
+        plain(&value["id"]),
+        either("threadId", "thread"),
+        plain(&params["thread"]["parentThreadId"]),
+        either("turnId", "turn"),
+    )
 }
 
 fn message_text(value: &Value) -> Result<String, ProtocolError> {
@@ -1387,6 +1582,18 @@ fn wire_id(value: Value) -> Result<WireId, ProtocolError> {
             .ok_or(ProtocolError::InvalidMessage),
         _ => Err(ProtocolError::InvalidMessage),
     }
+}
+
+/// Admits developer instructions for a thread: non-blank text without NUL, at most
+/// `DEVELOPER_INSTRUCTIONS_BYTES_MAX` bytes. Input: the text. Output: it, or invalid input.
+fn instructed(instructions: &str) -> Result<&str, ProtocolError> {
+    if instructions.trim().is_empty()
+        || instructions.contains('\0')
+        || instructions.len() > DEVELOPER_INSTRUCTIONS_BYTES_MAX
+    {
+        return Err(ProtocolError::InvalidInput);
+    }
+    Ok(instructions)
 }
 
 fn valid_path(path: &Path) -> Option<&str> {
@@ -1445,6 +1652,15 @@ mod tests {
         protocol
             .server_requests
             .insert(WireId::Text("orphan-unit".into()), None);
+        protocol.assert_consistent();
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: self.child_interrupts")]
+    fn child_interrupt_invariant_detects_an_interrupt_for_an_unknown_child() {
+        let mut protocol = CodexProtocol::new();
+        protocol.next_id = 2;
+        protocol.child_interrupts.insert(1, "orphan-child".into());
         protocol.assert_consistent();
     }
 

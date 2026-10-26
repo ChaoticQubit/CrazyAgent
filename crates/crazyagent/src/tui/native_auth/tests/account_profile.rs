@@ -363,6 +363,67 @@ fn local_receipt(
 }
 
 #[tokio::test]
+async fn full_profile_history_prunes_finished_rows_and_keeps_unfinished_ones() {
+    run(|case| async move {
+        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (mut ui, connection) = local(&case, &listener).await;
+        private_panel(&mut ui, &connection);
+        let (job, submission) = configure(&mut ui, false);
+        let (owner, epoch): (String, i64) = case
+            .observer()
+            .query_row(
+                "SELECT owner_id,owner_epoch FROM owner_identities WHERE client_kind='tui'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let engine_epoch = submission.basis.identity.engine_epoch().to_string();
+        {
+            let mut db = rusqlite::Connection::open(case.root.path().join("engine.db")).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            let db = db.transaction().unwrap();
+            db.execute_batch("CREATE TABLE IF NOT EXISTS account_profile_operations (owner_id TEXT NOT NULL, request_id TEXT NOT NULL, owner_epoch INTEGER NOT NULL, engine_epoch TEXT NOT NULL, request BLOB NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('reserved','running','committed','not_applied','uncertain')), receipt BLOB, PRIMARY KEY(owner_id,request_id))").unwrap();
+            let insert = |id: String, phase: &str, owner_epoch: i64, engine: &str| {
+                db.execute(
+                    "INSERT INTO account_profile_operations(owner_id,request_id,owner_epoch,engine_epoch,request,phase) VALUES(?1,?2,?3,?4,x'7b7d',?5)",
+                    rusqlite::params![owner, id, owner_epoch, engine, phase],
+                )
+                .unwrap();
+            };
+            insert("unfinished".into(), "reserved", epoch, &engine_epoch);
+            for n in 0..1023 {
+                let (phase, owner_epoch, engine) = match n % 3 {
+                    0 => ("not_applied", epoch, engine_epoch.as_str()),
+                    1 => ("uncertain", epoch, engine_epoch.as_str()),
+                    _ => ("reserved", epoch, "previous-engine"),
+                };
+                insert(format!("finished-{n:04}"), phase, owner_epoch, engine);
+            }
+            db.commit().unwrap();
+        }
+        let completion = exchange(&mut ui, job).await;
+        let receipt = local_receipt(&completion, &submission, false);
+        assert_eq!(
+            operation(&case, &submission.request),
+            ("committed".into(), Some(receipt))
+        );
+        let rows = |sql: &str| -> i64 { case.observer().query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(rows("SELECT count(*) FROM account_profile_operations"), 1024);
+        assert_eq!(
+            rows("SELECT count(*) FROM account_profile_operations WHERE request_id='unfinished' AND phase='reserved'"),
+            1
+        );
+        assert_eq!(
+            rows("SELECT count(*) FROM account_profile_operations WHERE request_id='finished-0000'"),
+            0
+        );
+        assert_no_secret_persistence(&case);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn local_none_commits_private_profile_and_recovers_original_receipt_without_endpoint_io() {
     run(|case| async move {
         let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();

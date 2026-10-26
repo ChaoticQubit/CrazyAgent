@@ -1,8 +1,8 @@
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
-    MessageAuthor, MessageState, TaskSource, TaskStatus, TeamAccount, TeamReach, admit, agent_row,
-    append_message, bound_text, eligible_accounts, launch_harness, now_ms, parse_delegations,
-    pick_account, tool,
+    MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
+    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, now_ms,
+    parse_delegations, pick_account, tool,
 };
 use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
@@ -11,14 +11,18 @@ use crate::config::ModelAccess;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
-use crate::engine::{EngineError, NativeProfileCustody};
-use crate::harnesses::launch::{AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest};
+use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
+use crate::harnesses::launch::{
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+};
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
 use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
-use crate::research::runner::{ResearchAccount, add_worktree, ensure_repository, model_remote};
-use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::research::runner::{
+    ResearchAccount, RunError, add_worktree, ensure_repository, model_remote,
+};
+use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +49,7 @@ const HISTORY_MESSAGES_MAX: i64 = 12;
 const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
 const HISTORY_BYTES_MAX: usize = 6000;
 const TEAM_HOST: &str = "team";
+const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
@@ -196,6 +201,7 @@ enum Report {
     Finished {
         text: String,
         end: TurnEnd,
+        cause: Option<String>,
     },
     Ended {
         problem: Option<String>,
@@ -246,7 +252,7 @@ pub struct TeamRuntime {
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
-    delegation_tool: Option<PathBuf>,
+    delegation_tool: Option<RegisteredNativeAuthHost>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     swept: Option<Instant>,
@@ -498,7 +504,7 @@ impl TeamRuntime {
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
         };
-        let hosted = match self.host(&stored, id, role, launch, None) {
+        let hosted = match self.host(&stored, id, role, launch, &connection, None) {
             Ok(hosted) => hosted,
             Err(problem) => return Ok(Err(problem)),
         };
@@ -584,15 +590,16 @@ impl TeamRuntime {
     }
 
     /// Gives every team master with tools on the engine's `delegate` tool, served by `executable`.
-    /// Takes the engine executable; its canonical path is used so the project sandbox can admit its folder.
-    /// Returns the runtime, or a plain code when the executable is not a file.
+    /// Takes the engine executable; the file at its canonical path is captured, so every later
+    /// master launch serves the tool from that same file or is refused.
+    /// Returns the runtime, or a plain code when the executable is not a file or is unsafe.
     pub fn with_delegation_tool(mut self, executable: &Path) -> Result<Self, EngineError> {
         let canonical = executable
             .canonicalize()
             .ok()
             .filter(|path| path.is_file())
             .ok_or_else(|| EngineError("team_executable_invalid".into()))?;
-        self.delegation_tool = Some(canonical);
+        self.delegation_tool = Some(RegisteredNativeAuthHost::capture(&canonical)?);
         Ok(self)
     }
 
@@ -610,7 +617,83 @@ impl TeamRuntime {
         }
         self.collect()?;
         self.owner_controls();
+        self.note_conversations()?;
         self.sweep()
+    }
+
+    /// Writes the engine's note on each task a conversation master handed off that has
+    /// ended, at most `NOTES_PER_TICK_MAX` a tick, so that conversation and the master's
+    /// next turn learn how it went. Each task is noted once. Returns any SQLite failure.
+    fn note_conversations(&mut self) -> Result<(), EngineError> {
+        type Row = (
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT c.task,t.harness,t.status,t.prompt,t.result,t.error,t.agent,a.worktree
+                     FROM team_conversation_tasks c JOIN team_tasks t ON t.id=c.task
+                     LEFT JOIN team_agents a ON a.id=t.agent
+                     WHERE c.note IS NULL AND t.status IN ('done','failed','cancelled')
+                     ORDER BY c.task LIMIT ?1",
+                )
+                .map_err(error)?;
+            statement
+                .query_map([NOTES_PER_TICK_MAX], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                })
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let now = now_ms();
+        for (id, harness, status, prompt, result, problem, agent, worktree) in rows {
+            let status = TaskStatus::parse(&status)
+                .filter(|status| status.finished())
+                .expect("the sweep reads ended tasks only");
+            let note = conversation_note(&EndedTask {
+                id,
+                harness,
+                status,
+                prompt,
+                result,
+                problem,
+                agent,
+                worktree,
+            });
+            let changed = tx
+                .execute(
+                    "UPDATE team_conversation_tasks SET note=?2, noted_ms=?3 WHERE task=?1 AND note IS NULL",
+                    params![id, note, now],
+                )
+                .map_err(error)?;
+            assert!(changed <= 1);
+        }
+        tx.commit().map_err(error)
     }
 
     /// Applies the owner's stop and restart from the agent register to live agents and
@@ -853,6 +936,7 @@ impl TeamRuntime {
             return Ok(());
         }
         let paused = self.paused()?;
+        self.retire_rejected(project, access);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.feed_master(&stored, access, &paused)?;
@@ -869,7 +953,7 @@ impl TeamRuntime {
             };
             let usable = matches!(
                 eligible_accounts(access, &stored.project_id, launch),
-                Accounts::Usable(accounts) if accounts.iter().any(|a| self.ready(access, a))
+                Accounts::Usable(accounts) if accounts.iter().any(|a| self.refusal(access, a).is_none())
             );
             let (from, to) = if usable {
                 ("needs_pool", "queued")
@@ -997,11 +1081,24 @@ impl TeamRuntime {
                 "No account in this project's pool can run {harness}"
             ));
         }
+        let mut refused = Vec::new();
         let accounts: Vec<TeamAccount> = fitting
             .into_iter()
-            .filter(|account| self.ready(access, account))
+            .filter(|account| match self.refusal(access, account) {
+                None => true,
+                Some(code) => {
+                    refused.push(code);
+                    false
+                }
+            })
             .collect();
         if accounts.is_empty() {
+            assert!(!refused.is_empty());
+            if refused.iter().all(|code| code == SIGN_IN_REJECTED) {
+                return Err(format!(
+                    "Sign in again: the provider rejected the sign-in of every account in this project's pool that can run {harness}"
+                ));
+            }
             return Err(format!(
                 "Sign in to an account in this project's pool to run {harness}"
             ));
@@ -1013,17 +1110,40 @@ impl TeamRuntime {
             })
     }
 
-    /// Tells whether an account can take agent work now: endpoints always, managed
+    /// Tells why an account cannot take agent work now: endpoints always can, managed
     /// profiles only while their sign-in passes the master's check for this engine run.
-    fn ready(&self, access: &ModelAccess, account: &TeamAccount) -> bool {
+    /// Takes the live access and the account. Returns the refusal code, or none.
+    fn refusal(&self, access: &ModelAccess, account: &TeamAccount) -> Option<String> {
         match account.reach {
-            TeamReach::Endpoint { .. } => true,
-            TeamReach::Managed { .. } => self.sign_in(access, &account.connection).is_ok(),
+            TeamReach::Endpoint { .. } => None,
+            TeamReach::Managed { .. } => self.sign_in(access, &account.connection).err(),
         }
     }
 
-    /// Proves a managed pool account is signed in for this engine run with the same
-    /// check every master turn uses. Takes the live access and the pool member.
+    /// Stops the project's idle agents whose account's sign-in the provider rejected, so
+    /// the next message or task starts on another pool account instead of failing on it.
+    /// Takes the project and the live access. Busy agents finish their turn first.
+    fn retire_rejected(&mut self, project: &ProjectId, access: &ModelAccess) {
+        let rejected: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| &w.project == project && w.managed && w.busy.is_none() && !w.stopping)
+            .filter(|(_, w)| {
+                self.sign_in(access, &w.connection)
+                    .is_err_and(|code| code == SIGN_IN_REJECTED)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in rejected {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
+    /// Proves a managed pool account is signed in for this engine run, and that the
+    /// provider did not reject that sign-in, with the same check every master turn uses.
+    /// Takes the live access and the pool member.
     /// Returns the active host and the sign-in, or a plain refusal code.
     fn sign_in(
         &self,
@@ -1038,7 +1158,7 @@ impl TeamRuntime {
         let tx = self
             .connection
             .unchecked_transaction()
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "team_state_unavailable")?;
         let host = tx
             .query_row(
                 "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
@@ -1051,9 +1171,12 @@ impl TeamRuntime {
                 },
             )
             .optional()
-            .map_err(|e| e.to_string())?
+            .map_err(|_| "team_state_unavailable")?
             .ok_or("team_engine_not_ready")?;
         let fact = crate::storage::native_sign_in(&tx, &host, connection, None).map_err(|e| e.0)?;
+        if crate::model_gateway::sign_in_rejected(&tx, connection).map_err(|e| e.0)? {
+            return Err(SIGN_IN_REJECTED.into());
+        }
         drop(tx);
         assert_eq!(fact.binding.engine_epoch, host.engine_epoch);
         Ok((host, fact))
@@ -1072,12 +1195,15 @@ impl TeamRuntime {
         let (host, fact) = match self.sign_in(access, &connection) {
             Ok(signed) => signed,
             Err(code) if code == "native_profile_in_use" => return Ok(None),
-            Err(code) => return Err(sign_in_problem(&code).to_owned()),
+            Err(code) => return Err(sign_in_problem(&code)),
         };
         let generation = self.workers[&id].grants + 1;
-        let operation =
-            RequestId::new(format!("team-agent-{id}-turn-{generation}")).map_err(|e| e.0)?;
-        let custody = self.custody.as_mut().map_err(|e| e.0.clone())?;
+        let operation = RequestId::new(format!("team-agent-{id}-turn-{generation}"))
+            .map_err(|e| with_code("the turn could not be named", Some(&e.0)))?;
+        let custody = self
+            .custody
+            .as_mut()
+            .map_err(|e| with_code("the account custody is not available", Some(&e.0)))?;
         let profile = match custody.acquire_use(
             &host,
             &fact.binding,
@@ -1087,7 +1213,12 @@ impl TeamRuntime {
         ) {
             Ok(profile) => profile,
             Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
-            Err(problem) => return Err(problem.0),
+            Err(problem) => {
+                return Err(with_code(
+                    "the account could not be handed to the agent",
+                    Some(&problem.0),
+                ));
+            }
         };
         let context = self.context(project, id, self.workers[&id].role, self.workers[&id].tools)?;
         self.workers.get_mut(&id).expect("worker exists").grants = generation;
@@ -1165,8 +1296,10 @@ impl TeamRuntime {
                                 [message],
                             )
                             .map_err(error)?;
-                        return self
-                            .note(project, &format!("The master could not start: {reason}."));
+                        return self.note(
+                            project,
+                            &full_stop(format!("The master could not start: {reason}")),
+                        );
                     }
                 }
             }
@@ -1187,7 +1320,10 @@ impl TeamRuntime {
                         .map_err(error)?;
                     return self.note(
                         project,
-                        &format!("The master could not start: {}.", bound_text(&reason, 300)),
+                        &full_stop(format!(
+                            "The master could not start: {}",
+                            bound_text(&reason, 300)
+                        )),
                     );
                 }
             }
@@ -1203,7 +1339,7 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&self.framing(stored, team_tool));
+            prompt.push_str(&framing(stored, team_tool));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -1233,39 +1369,6 @@ impl TeamRuntime {
             super::direct::delivered(&self.connection, project, newest)?;
         }
         self.mark_agent(id, AgentStatus::Working, None)
-    }
-
-    fn framing(&self, stored: &StoredSetup, team_tool: bool) -> String {
-        let brief = std::fs::read_to_string(stored.state_folder().join("context/brief.md"))
-            .map(|brief| bound_text(&brief, BRIEF_BYTES_MAX))
-            .unwrap_or_default();
-        let team = stored
-            .team
-            .sub_harnesses
-            .iter()
-            .map(|slot| {
-                format!(
-                    "- {}: up to {} agents, tools {}",
-                    slot.harness,
-                    slot.agents,
-                    if slot.tools { "on" } else { "off" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let how = if team_tool {
-            format!(
-                "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
-                tool::TOOL_NAME,
-                tool::SERVER_NAME
-            )
-        } else {
-            "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
-        };
-        format!(
-            "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
-            stored.name, team, brief
-        )
     }
 
     fn mark_agent(
@@ -1529,7 +1632,10 @@ impl TeamRuntime {
                         .map_err(error)?;
                     return self.note(
                         project,
-                        &format!("Keeping sub-agents warm was turned off: a sub-agent could not start ({}).", bound_text(&problem, 300)),
+                        &full_stop(format!(
+                            "Keeping sub-agents warm was turned off because a sub-agent could not start: {}",
+                            bound_text(&problem, 300)
+                        )),
                     );
                 }
             }
@@ -1640,7 +1746,7 @@ impl TeamRuntime {
                 params![id, worktree],
             )
             .map_err(error)?;
-        let hosted = match self.host(stored, id, role, &plan.harness, again) {
+        let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
             Ok(hosted) => hosted,
             Err(problem) => {
                 self.connection
@@ -1733,16 +1839,21 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
     ) -> Result<(PathBuf, Plan, Mode), String> {
-        let plain = |e: &dyn std::fmt::Display| e.to_string();
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = self
             .executables
             .get(launch)
             .ok_or("harness is not installed")?;
+        let sandboxed = |e: SandboxError| {
+            with_code(
+                "the agent sandbox could not be set up",
+                Some(sandbox_code(&e)),
+            )
+        };
         let root = stored
             .project_folder()
             .canonicalize()
-            .map_err(|e| plain(&e))?;
+            .map_err(|e| with_code("the project folder could not be opened", Some(io_code(&e))))?;
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());
         }
@@ -1750,7 +1861,8 @@ impl TeamRuntime {
         let own_home = agent.join("home");
         let tmp = agent.join("tmp");
         for directory in [&agent, &own_home, &tmp] {
-            private_directory(directory).map_err(|e| e.0)?;
+            private_directory(directory)
+                .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
         let (home, remote, model) = match &account.reach {
             TeamReach::Endpoint { base_url, model } => {
@@ -1758,16 +1870,13 @@ impl TeamRuntime {
                     base_url: base_url.clone(),
                     model: model.clone(),
                 };
-                let remote = model_remote(&endpoint).map_err(|e| plain(&e))?;
+                let remote = model_remote(&endpoint).map_err(|e| {
+                    with_code("the endpoint address was refused", Some(run_code(&e)))
+                })?;
                 (own_home, remote, Some(model.clone()))
             }
-            TeamReach::Managed { profile_ref, model } => {
-                let custody = self.custody.as_ref().map_err(|e| e.0.clone())?;
-                (
-                    custody.profile_home(profile_ref),
-                    SandboxRemote::AnyHost(443),
-                    model.clone(),
-                )
+            TeamReach::Managed { model, .. } => {
+                (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
         let context = self.context(&stored.project_id, id, role, tools)?;
@@ -1776,37 +1885,61 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
-        let mut sandbox =
-            ProjectSandbox::new(&root, &home, &tmp, network).map_err(|e| plain(&e))?;
+        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
-            sandbox = sandbox.guard_engine(runtime).map_err(|e| plain(&e))?;
+            sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
         let install = executable
             .canonicalize()
-            .map_err(|e| plain(&e))?
+            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
-        sandbox = sandbox.allow_read(&install).map_err(|e| plain(&e))?;
+        sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
         if tools {
             for server in context.read_paths() {
                 if let Some(folder) = server.parent() {
-                    sandbox = sandbox.allow_read(folder).map_err(|e| plain(&e))?;
+                    sandbox = sandbox.allow_read(folder).map_err(sandboxed)?;
                 }
             }
         }
         let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
-        sandbox.install(&profile).map_err(|e| plain(&e))?;
-        ensure_repository(&root, &tmp).map_err(|e| plain(&e))?;
+        sandbox.install(&profile).map_err(sandboxed)?;
+        ensure_repository(&root, &tmp).map_err(|e| {
+            with_code(
+                "the project repository could not be prepared",
+                Some(run_code(&e)),
+            )
+        })?;
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
-        add_worktree(&sandbox, &profile, &worktree).map_err(|e| plain(&e))?;
-        let working_dir = worktree.canonicalize().map_err(|e| plain(&e))?;
+        add_worktree(&sandbox, &profile, &worktree)
+            .map_err(|e| with_code("the agent worktree could not be added", Some(run_code(&e))))?;
+        let working_dir = worktree
+            .canonicalize()
+            .map_err(|e| with_code("the agent worktree could not be opened", Some(io_code(&e))))?;
         if working_dir != worktree {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
+        sandbox = sandbox
+            .confine_to_worktree(&working_dir)
+            .map_err(sandboxed)?;
+        if let Some(engine) = self
+            .delegation_tool
+            .as_ref()
+            .filter(|_| role == AgentRole::Master && tools)
+        {
+            let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
+            if sandbox.writes(engine.verified_path().map_err(changed)?) {
+                return Err(with_code(
+                    "the delegate engine is in a folder the agent can write",
+                    Some("team_delegate_writable"),
+                ));
+            }
+        }
+        sandbox.install(&profile).map_err(sandboxed)?;
         let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),
@@ -1850,8 +1983,9 @@ impl TeamRuntime {
 
     /// Reads what one team agent launch receives: the project context and approved
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
-    /// tool for a master with tools on, and the team's skill and server names for a master
-    /// with tools off. Takes the project, the agent id, its role and tools switch.
+    /// tool for a master with tools on, served by the captured engine while the file at its
+    /// path is still that one, and the team's skill and server names for a master with tools
+    /// off. Takes the project, the agent id, its role and tools switch.
     fn context(
         &self,
         project: &ProjectId,
@@ -1859,29 +1993,38 @@ impl TeamRuntime {
         role: AgentRole,
         tools: bool,
     ) -> Result<AgentContext, String> {
+        let unread =
+            |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
         let context =
-            crate::launch_context::for_project(&self.connection, project).map_err(|e| e.0)?;
+            crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
         let master = role == AgentRole::Master;
         match &self.delegation_tool {
-            Some(engine) if master && tools => context
-                .with_team_tool(engine, &self.tool_record(id))
-                .map_err(|e| e.0),
+            Some(engine) if master && tools => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                context
+                    .with_team_tool(engine, &self.tool_record(id))
+                    .map_err(unread)
+            }
             _ if master && !tools => context
                 .with_team_index(&self.connection, project)
-                .map_err(|e| e.0),
+                .map_err(unread),
             _ => Ok(context),
         }
     }
 
     /// Records one team agent in the engine's agent register, continuing the register
     /// entry of an agent the owner restarted. Takes the setup, the team agent id, its role,
-    /// launch harness and the restart. Returns the register handle, none without a register.
+    /// launch harness, the account it signs in with and the restart. Returns the register
+    /// handle, none without a register.
     fn host(
         &self,
         stored: &StoredSetup,
         id: i64,
         role: AgentRole,
         harness: &str,
+        account: &CredentialRef,
         again: Option<&HostedRestart>,
     ) -> Result<Option<Hosted>, String> {
         let Some(agents) = &self.agents else {
@@ -1901,11 +2044,12 @@ impl TeamRuntime {
             harness: harness.to_owned(),
             host: TEAM_HOST,
             reference: again.map_or_else(|| id.to_string(), |restart| restart.reference.clone()),
+            account: Some(account.clone()),
         };
         agents
             .host(agent, again.map(|restart| restart.id.as_str()))
             .map(Some)
-            .map_err(|problem| format!("The agent could not be recorded ({})", problem.0))
+            .map_err(|problem| with_code("the agent could not be recorded", Some(&problem.0)))
     }
 
     fn collect(&mut self) -> Result<(), EngineError> {
@@ -1972,7 +2116,7 @@ impl TeamRuntime {
                     .map_err(error)?;
                 Ok(false)
             }
-            Report::Finished { text, end } => {
+            Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
                 if let Some(hosted) = &worker.hosted {
@@ -1993,14 +2137,23 @@ impl TeamRuntime {
                     .map_err(error)?;
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
-                    Some(Busy::Task(task)) => self.finish_task(task, &text, end)?,
+                    Some(Busy::Task(task)) => {
+                        self.finish_task(task, &text, end, cause.as_deref())?
+                    }
                     Some(Busy::Message(message)) => {
                         let proposed = if team_tool {
                             tool::take(&self.tool_record(id))
                         } else {
                             Vec::new()
                         };
-                        self.finish_message(&project, message, &text, end, proposed)?
+                        self.finish_message(
+                            &project,
+                            message,
+                            &text,
+                            end,
+                            cause.as_deref(),
+                            proposed,
+                        )?
                     }
                     None => {}
                 }
@@ -2029,12 +2182,13 @@ impl TeamRuntime {
                 }
                 match worker.busy {
                     Some(busy) if worker.held => self.release(busy)?,
-                    Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed)?,
+                    Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed, None)?,
                     Some(Busy::Message(message)) => self.finish_message(
                         &worker.project,
                         message,
                         "",
                         TurnEnd::Closed,
+                        None,
                         Vec::new(),
                     )?,
                     None => {}
@@ -2071,9 +2225,11 @@ impl TeamRuntime {
                         .map_err(error)?;
                     self.note(
                         &worker.project,
-                        &format!(
-                            "Keeping sub-agents warm was turned off: a warm sub-agent stopped before it did any work ({}).",
-                            bound_text(problem.as_deref().unwrap_or("no reason"), 300)
+                        &problem.as_deref().map_or_else(
+                            || full_stop(WARM_STOPPED.to_owned()),
+                            |problem| {
+                                full_stop(format!("{WARM_STOPPED}: {}", bound_text(problem, 300)))
+                            },
                         ),
                     )?;
                 }
@@ -2096,7 +2252,13 @@ impl TeamRuntime {
         Ok(())
     }
 
-    fn finish_task(&mut self, task: i64, text: &str, end: TurnEnd) -> Result<(), EngineError> {
+    fn finish_task(
+        &mut self,
+        task: i64,
+        text: &str,
+        end: TurnEnd,
+        cause: Option<&str>,
+    ) -> Result<(), EngineError> {
         let Some(attempts): Option<i64> = self
             .connection
             .query_row(
@@ -2110,6 +2272,7 @@ impl TeamRuntime {
             return Ok(());
         };
         let retry = attempts < self.limits.attempts_max;
+        let closed = with_code("The sub-agent stopped unexpectedly", cause);
         let (status, problem) = match end {
             TurnEnd::Success => (TaskStatus::Done, None),
             TurnEnd::Cancelled => (TaskStatus::Cancelled, Some("Cancelled by you")),
@@ -2141,7 +2304,7 @@ impl TeamRuntime {
                 } else {
                     TaskStatus::Failed
                 },
-                Some("The sub-agent stopped unexpectedly"),
+                Some(closed.as_str()),
             ),
         };
         let result =
@@ -2169,6 +2332,7 @@ impl TeamRuntime {
         message: i64,
         text: &str,
         end: TurnEnd,
+        cause: Option<&str>,
         proposed: Vec<Delegation>,
     ) -> Result<(), EngineError> {
         if end != TurnEnd::Success {
@@ -2185,11 +2349,11 @@ impl TeamRuntime {
                 .map_err(error)?;
             if state == "failed" && self.stored(project)?.is_some() {
                 let why = if end == TurnEnd::Interrupted {
-                    "You interrupted the master before it replied."
+                    "You interrupted the master before it replied.".to_owned()
                 } else {
-                    "The master stopped before it replied."
+                    with_code("The master stopped before it replied.", cause)
                 };
-                self.note(project, why)?;
+                self.note(project, &why)?;
             }
             return Ok(());
         }
@@ -2288,8 +2452,75 @@ impl TeamRuntime {
     }
 }
 
-fn refusal(code: &str) -> &'static str {
+/// Builds the master's opening frame: its sub-agents, how to hand out work
+/// and the project brief. Input: the setup and whether the team tool is on.
+/// Output: the frame text, with the brief from `master_brief`.
+fn framing(stored: &StoredSetup, team_tool: bool) -> String {
+    let brief = master_brief(stored);
+    let team = stored
+        .team
+        .sub_harnesses
+        .iter()
+        .map(|slot| {
+            format!(
+                "- {}: up to {} agents, tools {}",
+                slot.harness,
+                slot.agents,
+                if slot.tools { "on" } else { "off" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let how = if team_tool {
+        format!(
+            "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
+            tool::TOOL_NAME,
+            tool::SERVER_NAME
+        )
+    } else {
+        "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+    };
+    format!(
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
+        stored.name, team, brief
+    )
+}
+
+/// Reads the project brief for the master the way setup reads context: one
+/// chunk at most, never through a link and never blocking on a special file.
+/// Input: the setup. Output: the brief cut to `BRIEF_BYTES_MAX`, with a plain
+/// note when it is longer, or a plain reason when it is missing or not a file.
+fn master_brief(stored: &StoredSetup) -> String {
+    const BRIEF: &str = "context/brief.md";
+    match crate::project_setup::read_context(stored, BRIEF, 0) {
+        Ok(chunk) => {
+            let text = chunk.text.unwrap_or_default();
+            let shown = bound_text(&text, BRIEF_BYTES_MAX);
+            assert!(shown.len() <= BRIEF_BYTES_MAX);
+            if chunk.next_offset.is_none() && shown.len() == text.len() {
+                return shown;
+            }
+            format!(
+                "{shown}\n(The brief is {} bytes, longer than shown here. The rest is in {BRIEF}.)",
+                chunk.bytes
+            )
+        }
+        Err(_) => match std::fs::symlink_metadata(stored.state_folder().join(BRIEF)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                format!("(No brief yet: {BRIEF} is missing.)")
+            }
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                format!("(The brief is not shown: {BRIEF} is not a regular file.)")
+            }
+            _ => format!("(The brief is not shown: {BRIEF} could not be read.)"),
+        },
+    }
+}
+
+/// Words one admission refusal for the owner. Takes the refusal code. Returns the reason.
+pub(super) fn refusal(code: &str) -> &'static str {
     match code {
+        "team_plan_missing" => "this project has no team plan",
         "team_harness_not_in_plan" => "that harness is not in the team plan",
         "team_harness_cannot_run" => "that harness cannot run sub-agents yet",
         "team_queue_full" => "too many tasks are already waiting",
@@ -2299,13 +2530,14 @@ fn refusal(code: &str) -> &'static str {
     }
 }
 
-fn sign_in_problem(code: &str) -> &'static str {
+fn sign_in_problem(code: &str) -> String {
     match code {
-        "master_authentication_unknown" => "the account is not signed in",
-        "master_authentication_stale" => "the account needs a fresh sign-in",
-        "team_account_left_pool" => "the account left the pool",
-        "team_engine_not_ready" => "the engine is not ready",
-        _ => "the account's sign-in could not be checked",
+        "master_authentication_unknown" => "the account is not signed in".into(),
+        "master_authentication_stale" => "the account needs a fresh sign-in".into(),
+        SIGN_IN_REJECTED => "the provider rejected the account's sign-in".into(),
+        "team_account_left_pool" => "the account left the pool".into(),
+        "team_engine_not_ready" => "the engine is not ready".into(),
+        _ => with_code("the account's sign-in could not be checked", Some(code)),
     }
 }
 
@@ -2322,7 +2554,7 @@ fn work(
         Launch::Fresh(plan, mode) => match *mode {
             Mode::Kept { account, context } => {
                 AgentSession::start(plan.request(account), context, plan.pane.clone())
-                    .map_err(|problem| format!("The agent could not start ({})", problem.0))
+                    .map_err(|problem| with_code("The agent could not start", Some(&problem.0)))
             }
             Mode::PerTurn { home } => {
                 let problem = per_turn(
@@ -2341,9 +2573,9 @@ fn work(
             } = *adoption;
             AgentSession::adopt(host.clone(), agent.clone(), &record, limits).map_err(|problem| {
                 let _ = host.kill(&agent);
-                format!(
-                    "The agent's running terminal could not be taken over ({})",
-                    problem.0
+                with_code(
+                    "The agent's running terminal could not be taken over",
+                    Some(&problem.0),
                 )
             })
         }
@@ -2360,7 +2592,7 @@ fn work(
 enum Next {
     Turn(String, Option<Box<Grant>>),
     Stop,
-    Closed,
+    Closed(Option<String>),
 }
 
 /// Waits for the agent's next order. While it waits, an agent that keeps its process
@@ -2378,13 +2610,12 @@ fn next_turn(
             Ok(Order::Turn(prompt, grant)) => return Next::Turn(prompt, grant),
             Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
             Err(RecvTimeoutError::Timeout) => {
-                if let Some(session) = idle.as_deref_mut()
-                    && matches!(
-                        session.next_event(IDLE_EVENT_WAIT),
-                        Ok(Some(LaunchEvent::Exited { .. })) | Err(_)
-                    )
-                {
-                    return Next::Closed;
+                if let Some(session) = idle.as_deref_mut() {
+                    match session.next_event(IDLE_EVENT_WAIT) {
+                        Ok(Some(LaunchEvent::Exited { .. })) => return Next::Closed(None),
+                        Err(problem) => return Next::Closed(Some(problem.0)),
+                        Ok(_) => {}
+                    }
                 }
             }
         }
@@ -2412,21 +2643,21 @@ fn serve(
         let (prompt, grant) = match next_turn(orders, cancel, Some(&mut session)) {
             Next::Turn(prompt, grant) => (prompt, grant),
             Next::Stop => break,
-            Next::Closed => {
-                problem = Some("The agent process closed".to_owned());
+            Next::Closed(cause) => {
+                problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
                 break;
             }
         };
         assert!(grant.is_none());
-        let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
+        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
         );
         if end == TurnEnd::Closed {
-            problem = Some("The agent process closed".to_owned());
+            problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
         }
-        if reports.send(Report::Finished { text, end }).is_err() || !reusable {
+        if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             break;
         }
     }
@@ -2453,17 +2684,25 @@ fn per_turn(
             let _ = reports.send(Report::Finished {
                 text: String::new(),
                 end: TurnEnd::Closed,
+                cause: None,
             });
             return Some("The agent was given a turn without its signed-in account".into());
         };
         let Grant { profile, context } = *grant;
-        if profile.profile_path().ok().as_deref() != Some(home) {
-            let _ = reports.send(Report::Finished {
-                text: String::new(),
-                end: TurnEnd::Closed,
-            });
-            return Some("The signed-in account changed".into());
-        }
+        let credential = match profile.hand_to_agent(home, turn_time, &plan.executable) {
+            Ok(credential) => credential,
+            Err(problem) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                    cause: Some(problem.0.clone()),
+                });
+                return Some(with_code(
+                    "The signed-in account could not reach the agent",
+                    Some(&problem.0),
+                ));
+            }
+        };
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
@@ -2473,26 +2712,186 @@ fn per_turn(
                 let _ = reports.send(Report::Finished {
                     text: String::new(),
                     end: TurnEnd::Closed,
+                    cause: Some(problem.0.clone()),
                 });
-                return Some(format!("The agent could not start ({})", problem.0));
+                return Some(with_code("The agent could not start", Some(&problem.0)));
             }
         };
         let _ = reports.send(Report::Ready {
             group: session.process_group(),
             pane: None,
         });
-        let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
+        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let _ = session.stop();
+        drop(credential);
         drop(profile);
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
         );
-        if reports.send(Report::Finished { text, end }).is_err() || !reusable {
-            return (end == TurnEnd::Closed).then(|| "The agent process closed".to_owned());
+        let closed = (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()));
+        if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
+            return closed;
         }
     }
     None
+}
+
+const PROCESS_CLOSED: &str = "The agent process closed";
+const NOTE_PROMPT_BYTES_MAX: usize = 80;
+const NOTE_RESULT_BYTES_MAX: usize = 300;
+const NOTE_PROBLEM_BYTES_MAX: usize = 200;
+const NOTE_PLACE_BYTES_MAX: usize = 120;
+const NOTES_PER_TICK_MAX: i64 = 16;
+
+/// One task a conversation master handed off that has ended, as the note sweep reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EndedTask {
+    id: i64,
+    harness: String,
+    status: TaskStatus,
+    prompt: String,
+    result: Option<String>,
+    problem: Option<String>,
+    agent: Option<i64>,
+    worktree: Option<String>,
+}
+
+/// Words the engine's note on one conversation task that ended: the task and its prompt,
+/// its harness and sub-agent, how it ended and where its full result is, then a short
+/// excerpt of what it said. Takes the ended task. Returns at most `NOTE_BYTES_MAX` bytes.
+fn conversation_note(ended: &EndedTask) -> String {
+    let harness = excerpt(&ended.harness, 64);
+    let who = match ended.agent {
+        Some(agent) => format!("{harness}, sub-agent {agent}"),
+        None => harness,
+    };
+    let head = format!(
+        "Task {} \"{}\" ({who})",
+        ended.id,
+        excerpt(&ended.prompt, NOTE_PROMPT_BYTES_MAX)
+    );
+    let problem = excerpt(
+        ended.problem.as_deref().unwrap_or("no reason was recorded"),
+        NOTE_PROBLEM_BYTES_MAX,
+    );
+    let note = match ended.status {
+        TaskStatus::Done => {
+            let mut note = format!("{head} is done. Full result in the Team view");
+            if let Some(place) = &ended.worktree {
+                note.push_str(&format!(
+                    ", files in {}",
+                    excerpt(place, NOTE_PLACE_BYTES_MAX)
+                ));
+            }
+            note.push('.');
+            if let Some(result) = ended.result.as_deref().filter(|r| !r.trim().is_empty()) {
+                note.push_str(" It said: ");
+                note.push_str(&excerpt(result, NOTE_RESULT_BYTES_MAX));
+            }
+            note
+        }
+        TaskStatus::Failed => format!(
+            "{} Details in the Team view.",
+            full_stop(format!("{head} failed: {problem}"))
+        ),
+        _ => format!(
+            "{} Details in the Team view.",
+            full_stop(format!("{head} was stopped: {problem}"))
+        ),
+    };
+    assert!(note.len() <= NOTE_BYTES_MAX);
+    note
+}
+
+/// Flattens every whitespace run to one space and cuts the text to `max` bytes, ending a
+/// cut text with "...". Takes the text and the bound. Returns at most `max` bytes.
+fn excerpt(text: &str, max: usize) -> String {
+    assert!(max > 3);
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.len() <= max {
+        return flat;
+    }
+    let cut = format!("{}...", bound_text(&flat, max - 3).trim_end());
+    assert!(cut.len() <= max);
+    cut
+}
+const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
+
+/// An owner line that names the plain code behind it in the style every window uses, so a
+/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
+/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
+fn with_code(sentence: &str, cause: Option<&str>) -> String {
+    match cause {
+        Some(code) => {
+            let stop = if sentence.ends_with('.') { "" } else { "." };
+            format!("{sentence}{stop} ({})", crate::protocol::plain_code(code))
+        }
+        None => sentence.to_owned(),
+    }
+}
+
+/// Ends an owner line with one full stop, leaving a line that already ends with a sentence
+/// stop or a named code as it is. Input: the line. Output: the finished line.
+fn full_stop(line: String) -> String {
+    if line.ends_with('.') || line.ends_with(')') {
+        line
+    } else {
+        line + "."
+    }
+}
+
+/// The plain code for a failed file step, named by its kind so an owner line never quotes
+/// the system's error text or a path. Input: the I/O error. Output: the code.
+fn io_code(error: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::NotFound => "io_not_found",
+        ErrorKind::PermissionDenied => "io_permission_denied",
+        ErrorKind::AlreadyExists => "io_already_exists",
+        ErrorKind::NotADirectory => "io_not_a_directory",
+        ErrorKind::IsADirectory => "io_is_a_directory",
+        ErrorKind::ReadOnlyFilesystem => "io_read_only",
+        ErrorKind::StorageFull => "io_storage_full",
+        ErrorKind::TimedOut => "io_timed_out",
+        ErrorKind::Interrupted => "io_interrupted",
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => "io_invalid",
+        _ => "io_failed",
+    }
+}
+
+/// The plain code for a failed agent sandbox step. Input: the error. Output: the code.
+fn sandbox_code(error: &SandboxError) -> &'static str {
+    match error {
+        SandboxError::Invalid(_) => "sandbox_refused",
+        SandboxError::Unavailable(_) => "sandbox_unavailable",
+        SandboxError::Io(error) => io_code(error),
+    }
+}
+
+/// The plain code for a failed repository, worktree or endpoint step.
+/// Input: the error. Output: the code; engine codes pass through `plain_code`.
+fn run_code(error: &RunError) -> &str {
+    match error {
+        RunError::Sandbox(error) => sandbox_code(error),
+        RunError::Io(error) => io_code(error),
+        RunError::Context(error) => crate::protocol::plain_code(&error.0),
+        RunError::Account(code) => crate::protocol::plain_code(code),
+        RunError::Invalid(_) => "setup_refused",
+        RunError::Jobs(_) => "research_jobs_failed",
+        RunError::Busy => "account_busy",
+    }
+}
+
+/// How a turn ends on a launch error: the deadline and the output limits keep their own
+/// ends; any other error closes the agent and keeps its code.
+/// Input: the error. Output: the end and, for a closed agent, the launch code.
+fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
+    match problem.0.as_str() {
+        "launch_deadline" => (TurnEnd::TimedOut, None),
+        "launch_output_limit" | "launch_event_limit" => (TurnEnd::TooLong, None),
+        _ => (TurnEnd::Closed, Some(problem.0)),
+    }
 }
 
 fn turn(
@@ -2502,16 +2901,20 @@ fn turn(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     turn_time: Duration,
-) -> (String, TurnEnd) {
+) -> (String, TurnEnd, Option<String>) {
     interrupt.store(false, Ordering::SeqCst);
-    if session.send(prompt).is_err() {
-        return (String::new(), TurnEnd::Closed);
+    if let Err(problem) = session.send_or_cancel(prompt, cancel) {
+        if problem.0 == "launch_cancelled" {
+            return (String::new(), TurnEnd::Cancelled, None);
+        }
+        return (String::new(), TurnEnd::Closed, Some(problem.0));
     }
     let deadline = Instant::now() + turn_time;
     let mut text = String::new();
     let mut limited = false;
     let mut interrupted = false;
     let mut progress = Instant::now();
+    let mut cause = None;
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
@@ -2549,17 +2952,15 @@ fn turn(
             }
             Ok(Some(LaunchEvent::Exited { .. })) => break TurnEnd::Closed,
             Err(problem) => {
-                break match problem.0.as_str() {
-                    "launch_deadline" => TurnEnd::TimedOut,
-                    "launch_output_limit" | "launch_event_limit" => TurnEnd::TooLong,
-                    _ => TurnEnd::Closed,
-                };
+                let (end, code) = launch_end(problem);
+                cause = code;
+                break end;
             }
             Ok(Some(_)) => {}
         }
     };
     assert!(text.len() <= super::RESULT_BYTES_MAX * 4);
-    (text, end)
+    (text, end, cause)
 }
 
 /// Background loop that keeps every project's team moving.
@@ -2738,3 +3139,18 @@ pub fn agents(
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/managed_agent.rs"]
+pub(crate) mod managed_agent;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/dec_090_tests.rs"]
+mod dec_090_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_claude_tests.rs"]
+mod live_claude_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_codex_tests.rs"]
+mod live_codex_tests;

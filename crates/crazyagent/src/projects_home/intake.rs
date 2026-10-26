@@ -10,6 +10,7 @@ const ENTRIES_MAX: u64 = 4_000_000;
 const DEPTH_MAX: usize = 256;
 const CHUNK_BYTES: usize = 64 * 1024;
 const DEADLINE_EVERY: u64 = 1024;
+const GITDIR_FILE_BYTES_MAX: u64 = 4096;
 
 /// A checked plan to bring one folder into the projects home.
 /// Built only by `plan_add`, which refuses unsafe sources and taken names.
@@ -57,7 +58,7 @@ impl AddPlan {
                 }
                 Err(_) => Err(refused("home_move_failed")),
             },
-            AddMode::Copy => copy_into(&self.source, &self.destination, false),
+            AddMode::Copy => copy_into(&self.source, &self.destination, Copying::Standalone),
         }
     }
 }
@@ -127,7 +128,7 @@ impl MovePlan {
 /// `home_copy_unverified` with the source untouched, or `home_move_source_left`
 /// when the folder landed but part of the source could not be deleted.
 pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError> {
-    copy_into(source, destination, true)?;
+    copy_into(source, destination, Copying::Exact)?;
     make_writable(source)
         .and_then(|()| fs::remove_dir_all(source))
         .map_err(|_| refused("home_move_source_left"))
@@ -204,7 +205,16 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn copy_into(source: &Path, destination: &Path, verify: bool) -> Result<(), EngineError> {
+/// How `copy_into` copies: every entry, checked against the source afterwards, for a
+/// move; or as a standalone repository for a Copy, leaving out the git worktree links
+/// that would still tie the copy to the source (see `left_out`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Copying {
+    Exact,
+    Standalone,
+}
+
+fn copy_into(source: &Path, destination: &Path, how: Copying) -> Result<(), EngineError> {
     let parent = destination
         .parent()
         .ok_or_else(|| refused("home_copy_failed"))?;
@@ -214,20 +224,18 @@ fn copy_into(source: &Path, destination: &Path, verify: bool) -> Result<(), Engi
         ".crazyagent-adding-{}",
         token.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
-    let result = copy_tree(source, &staging)
-        .and_then(|()| {
-            if verify {
-                verify_tree(source, &staging)
-            } else {
-                Ok(())
-            }
-        })
-        .and_then(|()| {
-            if fs::symlink_metadata(destination).is_ok() {
-                return Err(refused("home_destination_exists"));
-            }
-            fs::rename(&staging, destination).map_err(|_| refused("home_copy_failed"))
-        });
+    let result = match how {
+        Copying::Exact => copy_tree(source, &staging).and_then(|()| verify_tree(source, &staging)),
+        Copying::Standalone => {
+            copy_entries(source, &staging, &|path, kind| left_out(source, path, kind))
+        }
+    }
+    .and_then(|()| {
+        if fs::symlink_metadata(destination).is_ok() {
+            return Err(refused("home_destination_exists"));
+        }
+        fs::rename(&staging, destination).map_err(|_| refused("home_copy_failed"))
+    });
     if result.is_err() && fs::symlink_metadata(&staging).is_ok() {
         let _ = make_writable(&staging);
         let _ = fs::remove_dir_all(&staging);
@@ -256,6 +264,92 @@ fn make_writable(root: &Path) -> std::io::Result<()> {
 /// `home_copy_special_file` for devices, pipes or sockets, and
 /// `home_copy_too_large` past the entry or depth bound.
 pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
+    copy_entries(source, target, &|_, _| false)
+}
+
+/// The skip rule of a standalone copy, asked for each entry below the source root.
+/// Inputs: the source root, the entry and its type. Output: true for a git folder's
+/// `worktrees` admin folder (the main `.git`, a nested repository's or a submodule's)
+/// and for a linked worktree checkout: a folder whose `.git` is a link, or a file not
+/// pointing relatively inside the source at a git folder other than a worktree admin.
+fn left_out(root: &Path, path: &Path, kind: fs::FileType) -> bool {
+    if !kind.is_dir() {
+        return false;
+    }
+    if path.file_name() == Some(std::ffi::OsStr::new("worktrees"))
+        && path.parent().is_some_and(git_folder)
+    {
+        return true;
+    }
+    let link = path.join(".git");
+    match fs::symlink_metadata(&link) {
+        Err(_) => false,
+        Ok(metadata) if metadata.file_type().is_symlink() => true,
+        Ok(metadata) if metadata.is_dir() => false,
+        Ok(_) => !gitdir_inside(root, path, &link),
+    }
+}
+
+/// True for a folder holding git's own data, as git itself tells one: a `HEAD` file
+/// and `objects` and `refs` folders, none of them links.
+fn git_folder(folder: &Path) -> bool {
+    let plain = |name: &str, folder_wanted: bool| {
+        fs::symlink_metadata(folder.join(name)).is_ok_and(|metadata| {
+            !metadata.file_type().is_symlink() && metadata.is_dir() == folder_wanted
+        })
+    };
+    plain("HEAD", false) && plain("objects", true) && plain("refs", true)
+}
+
+/// True when the `gitdir:` line of a `.git` file in `folder` is a relative path, its
+/// `..` parts leading, that stays inside `root` and does not name a worktree admin
+/// folder (`<git folder>/worktrees/<name>`), as a submodule's does. Inputs: the source
+/// root, the folder and its `.git` file. Output: false otherwise, or unreadable.
+fn gitdir_inside(root: &Path, folder: &Path, file: &Path) -> bool {
+    let Some(text) = crate::platform::read_plain_file(file, GITDIR_FILE_BYTES_MAX) else {
+        return false;
+    };
+    let Some(target) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+    else {
+        return false;
+    };
+    let mut resolved = folder.to_path_buf();
+    let mut named = false;
+    for part in Path::new(target).components() {
+        match part {
+            std::path::Component::ParentDir if !named => {
+                if !resolved.pop() {
+                    return false;
+                }
+            }
+            std::path::Component::Normal(name) => {
+                named = true;
+                resolved.push(name);
+            }
+            std::path::Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    let admin = resolved.parent().is_some_and(|parent| {
+        parent.file_name() == Some(std::ffi::OsStr::new("worktrees"))
+            && parent.parent().is_some_and(git_folder)
+    });
+    named && resolved.starts_with(root) && resolved != root && !admin
+}
+
+/// Copies a folder tree without following links, leaving out each entry `skip` names.
+/// Inputs: a real source folder, a target path that does not exist yet and the skip
+/// rule. Output: as `copy_tree`.
+fn copy_entries(
+    source: &Path,
+    target: &Path,
+    skip: &dyn Fn(&Path, fs::FileType) -> bool,
+) -> Result<(), EngineError> {
     let failed = |_| refused("home_copy_failed");
     let root = fs::symlink_metadata(source).map_err(failed)?;
     if !root.is_dir() || root.file_type().is_symlink() {
@@ -277,6 +371,9 @@ pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
             let copy = to.join(entry.file_name());
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
+            if skip(&path, kind) {
+                continue;
+            }
             if kind.is_symlink() {
                 let link = fs::read_link(&path).map_err(failed)?;
                 copy_link(&path, link, &copy).map_err(failed)?;

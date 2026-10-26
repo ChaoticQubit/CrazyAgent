@@ -12,8 +12,8 @@ use crate::terminal::{AgentId, TerminalFrame};
 /// A pool change asked for in Settings, Pools or a Project. The engine side
 /// builds the exact pool records, keeping an existing pool's projects and roles.
 /// Input: built by the pool list, the pool editor and the Project screen.
-/// Output: model access edits; `Assign` moves the project out of every other
-/// pool before adding it to the chosen one.
+/// Output: one model access edit; `Assign` gives the project exactly the chosen
+/// pool, or none, and `Remove` also takes the pool off every project using it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
@@ -31,7 +31,7 @@ pub enum PoolChange {
         id: CredentialRef,
     },
     Assign {
-        pool: CredentialRef,
+        pool: Option<CredentialRef>,
         project: ProjectId,
     },
 }
@@ -216,12 +216,13 @@ pub struct ResearchCounts {
     pub running: usize,
     pub queued: usize,
     pub needs_pool: usize,
+    pub rate_limited: usize,
     pub failed: usize,
 }
 
 impl ResearchCounts {
-    /// Counts research jobs by status.
-    /// Input: the jobs. Output: the counts; cancelled jobs are not counted.
+    /// Counts research jobs by status, a job waiting out a rate limit apart from one that
+    /// needs a pool. Input: the jobs. Output: the counts; cancelled jobs are not counted.
     pub fn of(jobs: &[ResearchJob]) -> Self {
         let mut counts = Self::default();
         for job in jobs {
@@ -229,6 +230,9 @@ impl ResearchCounts {
                 ResearchStatus::Done => counts.done += 1,
                 ResearchStatus::Running => counts.running += 1,
                 ResearchStatus::Queued => counts.queued += 1,
+                ResearchStatus::NeedsPool if job.rate_limited().is_some() => {
+                    counts.rate_limited += 1;
+                }
                 ResearchStatus::NeedsPool => counts.needs_pool += 1,
                 ResearchStatus::Failed => counts.failed += 1,
                 ResearchStatus::Cancelled => {}
@@ -239,10 +243,13 @@ impl ResearchCounts {
 
     /// The plain research summary on a project card.
     /// Input: none. Output: "Research: 2 done, 1 running", "Research: needs a
-    /// pool" or "No research".
+    /// pool", "Research: rate limited" or "No research".
     pub fn summary(&self) -> String {
         if self.needs_pool > 0 {
             return "Research: needs a pool".into();
+        }
+        if self.rate_limited > 0 {
+            return "Research: rate limited".into();
         }
         let parts: Vec<String> = [
             (self.done, "done"),

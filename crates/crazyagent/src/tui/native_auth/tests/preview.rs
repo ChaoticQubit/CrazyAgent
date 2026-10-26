@@ -186,3 +186,36 @@ async fn preview_enter_opens_actual_project_then_explicit_codex_setup_without_su
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_routine_master_read_keeps_the_owner_latest_notice() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let project_id = declared_project(&case, &mut ui).await;
+        ui.app.reduce(UiEvent::FocusPrevious).unwrap();
+        ui.app.reduce(UiEvent::FocusPrevious).unwrap();
+        ui.app.reduce(UiEvent::FocusNext).unwrap();
+        assert_eq!(ui.app.focus(), Focus::Projects);
+        ui.key(KeyCode::Enter);
+        assert_eq!(ui.app.focus(), Focus::Conversation);
+        assert_eq!(ui.app.selected_project().unwrap().project_id, project_id);
+        let notice = "No further protected history page is currently available";
+        for read in 0..2 {
+            if read == 1 {
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+            }
+            let job = ui.app.master_request().unwrap().unwrap();
+            assert!(matches!(job, crate::tui::master_session::Job::Read { .. }));
+            ui.connection.master(job).unwrap();
+            let event = ui.owner_event().await;
+            assert!(matches!(event, OwnerEvent::Master(_)));
+            ui.app.apply_owner(event).unwrap();
+            if read == 0 {
+                ui.app.reduce(UiEvent::HistoryNext).unwrap();
+                assert_eq!(ui.app.status, notice);
+            }
+        }
+        assert_eq!(ui.app.status, notice);
+    })
+    .await;
+}

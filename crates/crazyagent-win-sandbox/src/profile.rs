@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::Path;
 
 /// The first line of every boundary profile, naming its format and version.
-pub const HEADER: &str = "crazyagent-win-boundary 1";
+pub const HEADER: &str = "crazyagent-win-boundary 2";
 /// The largest profile file the helper reads.
 pub const PROFILE_BYTES_MAX: usize = 64 * 1024;
 /// The longest path a profile may name, in bytes.
@@ -66,8 +66,9 @@ pub struct Guarded {
 
 /// Everything the boundary helper needs to confine one agent: its AppContainer name, the
 /// capabilities it starts with, the folders it may read and write, the paths kept read-only
-/// or hidden inside them, and its job's process limit. Paths are plain drive paths as text,
-/// so the format reads and writes the same on every system.
+/// or hidden inside them, its job's process limit and the engine folder where it records the
+/// access entries it grants each container. Paths are plain drive paths as text, so the
+/// format reads and writes the same on every system.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryProfile {
     pub container: String,
@@ -76,6 +77,7 @@ pub struct BoundaryProfile {
     pub write_roots: Vec<String>,
     pub guarded: Vec<Guarded>,
     pub active_processes: u32,
+    pub grants: String,
 }
 
 /// Why a boundary profile was refused: the line it failed on (0 for the whole profile) and a
@@ -155,8 +157,9 @@ pub fn check_container(name: &str) -> Result<(), &'static str> {
 
 impl BoundaryProfile {
     /// Checks every bound and value: a valid container name, no repeated capability, 0 to 32
-    /// read roots, 1 to 16 writable roots, at most 64 protected paths, every path a plain
-    /// drive path, and 1 to 4096 active processes. Output: Ok, or the refusal.
+    /// read roots, 1 to 16 writable roots, at most 64 protected paths, every path and the
+    /// grants folder a plain drive path, and 1 to 4096 active processes. Output: Ok, or the
+    /// refusal.
     pub fn validate(&self) -> Result<(), ProfileError> {
         check_container(&self.container).map_err(|reason| refused(0, reason))?;
         for (at, capability) in self.capabilities.iter().enumerate() {
@@ -178,6 +181,7 @@ impl BoundaryProfile {
             .iter()
             .chain(&self.write_roots)
             .chain(self.guarded.iter().map(|item| &item.path))
+            .chain(std::iter::once(&self.grants))
         {
             check_path(path).map_err(|reason| refused(0, reason))?;
         }
@@ -192,7 +196,10 @@ impl BoundaryProfile {
     /// larger than 64 KiB.
     pub fn encode(&self) -> Result<String, ProfileError> {
         self.validate()?;
-        let mut text = format!("{HEADER}\ncontainer {}\n", self.container);
+        let mut text = format!(
+            "{HEADER}\ncontainer {}\ngrants {}\n",
+            self.container, self.grants
+        );
         for capability in &self.capabilities {
             text.push_str(&format!("capability {}\n", capability.name()));
         }
@@ -214,8 +221,8 @@ impl BoundaryProfile {
     }
 
     /// Reads a profile from text written by [`Self::encode`], treating it as untrusted: the
-    /// header first, known keywords only, exactly one container and process limit, no empty
-    /// or carriage-return lines, then [`Self::validate`]. Input: the text. Output: the
+    /// header first, known keywords only, exactly one container, grants folder and process
+    /// limit, no empty or carriage-return lines, then [`Self::validate`]. Input: the text. Output: the
     /// profile, or the refusal with its line.
     pub fn decode(text: &str) -> Result<Self, ProfileError> {
         if text.len() > PROFILE_BYTES_MAX {
@@ -233,6 +240,7 @@ impl BoundaryProfile {
             ));
         }
         let mut container = None;
+        let mut grants = None;
         let mut active_processes = None;
         let mut profile = Self {
             container: String::new(),
@@ -241,6 +249,7 @@ impl BoundaryProfile {
             write_roots: Vec::new(),
             guarded: Vec::new(),
             active_processes: 0,
+            grants: String::new(),
         };
         for (number, line) in lines {
             let (keyword, value) = line
@@ -253,6 +262,11 @@ impl BoundaryProfile {
                 "container" => {
                     if container.replace(value.to_owned()).is_some() {
                         return Err(refused(number, "the container is named twice"));
+                    }
+                }
+                "grants" => {
+                    if grants.replace(value.to_owned()).is_some() {
+                        return Err(refused(number, "the grants folder is named twice"));
                     }
                 }
                 "capability" => profile.capabilities.push(
@@ -283,13 +297,14 @@ impl BoundaryProfile {
                 _ => return Err(refused(number, "an unknown keyword")),
             }
             if let Some(path) = match keyword {
-                "read" | "write" | "readonly" | "hidden" => Some(value),
+                "grants" | "read" | "write" | "readonly" | "hidden" => Some(value),
                 _ => None,
             } {
                 check_path(path).map_err(|reason| refused(number, reason))?;
             }
         }
         profile.container = container.ok_or_else(|| refused(0, "the container is missing"))?;
+        profile.grants = grants.ok_or_else(|| refused(0, "the grants folder is missing"))?;
         profile.active_processes =
             active_processes.ok_or_else(|| refused(0, "the process limit is missing"))?;
         profile.validate()?;
@@ -338,8 +353,11 @@ mod tests {
                 },
             ],
             active_processes: 512,
+            grants: GRANTS.into(),
         }
     }
+
+    const GRANTS: &str = r"C:\Users\mira\AppData\Local\CrazyAgent\engine\boundary-grants";
 
     fn decode_error(text: &str) -> ProfileError {
         BoundaryProfile::decode(text).unwrap_err()
@@ -350,7 +368,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.profile");
         let text = sample().encode().unwrap();
-        assert!(text.starts_with("crazyagent-win-boundary 1\ncontainer crazyagent."));
+        assert!(text.starts_with("crazyagent-win-boundary 2\ncontainer crazyagent."));
+        assert!(text.contains(&format!("\ngrants {GRANTS}\n")));
         assert!(text.contains("\nwrite C:\\Users\\mira\\Projects\\shop\n"));
         assert!(text.contains("\nreadonly C:\\Users\\mira\\Projects\\shop\\context\n"));
         assert!(text.contains("\nhidden C:\\Users\\mira\\.ssh\n"));
@@ -470,7 +489,27 @@ mod tests {
             "a capability is listed twice"
         );
         let relative = good.replace(r"write C:\Users\mira\Projects\shop", r"write Projects\shop");
-        assert_eq!(decode_error(&relative).line, 5);
+        assert_eq!(decode_error(&relative).line, 6);
+        let grants_line = format!("grants {GRANTS}\n");
+        assert_eq!(
+            decode_error(&good.replace(&grants_line, "")).reason,
+            "the grants folder is missing"
+        );
+        assert_eq!(
+            decode_error(&good.replace(&grants_line, &format!("{grants_line}{grants_line}")))
+                .reason,
+            "the grants folder is named twice"
+        );
+        assert_eq!(
+            decode_error(&good.replace(&grants_line, "grants engine\\boundary-grants\n")).line,
+            3
+        );
+        assert_eq!(
+            decode_error(&good.replace("crazyagent-win-boundary 2", "crazyagent-win-boundary 1"))
+                .line,
+            1,
+            "a profile without a grants folder, from before the record, is refused"
+        );
         let unc = good.replace(r"hidden C:\Users\mira\.ssh", r"hidden \\server\share");
         assert!(decode_error(&unc).reason.contains("drive path"));
         assert_eq!(decode_error(&good.replace('\n', "\r\n")).line, 1);

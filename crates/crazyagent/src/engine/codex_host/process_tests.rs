@@ -154,7 +154,14 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
         Ok(process.pid())
     );
     let group = rustix::process::getpgid(Some(processes.descendant));
-    assert!(fixture.lease("codex-group-busy", 2).is_err());
+    assert_eq!(
+        fixture
+            .sign_in("codex-group-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use")
+    );
     let started = Instant::now();
     let closed = process.close().await;
     let elapsed = started.elapsed();
@@ -162,10 +169,10 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     assert_eq!(group, Ok(processes.leader));
     processes.assert_gone();
-    assert!(fixture.lease("codex-group-next", 3).is_ok());
+    assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lease() {
     use crate::engine::master_host_fixture::{
@@ -193,5 +200,201 @@ async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lea
         rustix::process::test_kill_process(processes.descendant),
         Ok(())
     );
-    assert!(fixture.lease("codex-group-next", 3).is_ok());
+    assert!(fixture.sign_in("codex-group-next", 3).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_codex_host_process_that_left_its_group_is_stopped_with_the_host() {
+    use crate::engine::master_host_fixture::{
+        GROUP_LEAVING_HARNESS, HarnessProcesses, MasterFixture,
+    };
+
+    let mut fixture = MasterFixture::new("codex");
+    let mut process = stand_in_host(&mut fixture, GROUP_LEAVING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    assert_eq!(
+        rustix::process::getpgid(Some(processes.descendant)),
+        Ok(processes.descendant)
+    );
+    let started = Instant::now();
+    let closed = process.close().await;
+    let elapsed = started.elapsed();
+    assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
+    assert!(fixture.sign_in("codex-group-next", 3).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closing_a_codex_host_stops_what_its_commands_detached() {
+    use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
+
+    let mut fixture = MasterFixture::new("codex");
+    let body = format!("{DETACHING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host(&mut fixture, &body).await;
+    let processes = DetachedProcesses::wait(&fixture.project);
+    let started = Instant::now();
+    let closed = process.close().await;
+    let elapsed = started.elapsed();
+    assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_codex_host_runs_in_the_home_its_command_names_and_never_in_another() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("codex");
+    let profile = fixture.lease("codex-home-turn", 1).unwrap();
+    let managed = profile.profile_path().unwrap();
+    let private = fixture.root.path().join("turn-home");
+    std::fs::create_dir(&private).unwrap();
+    let private = std::fs::canonicalize(&private).unwrap();
+    let project = std::fs::canonicalize(&fixture.project).unwrap();
+    let command = |home: &Path| {
+        let mut command = Command::new("/registered/codex");
+        command
+            .args(["-c", "cli_auth_credentials_store=\"file\"", "app-server"])
+            .current_dir(&project)
+            .env("HOME", home)
+            .env("CODEX_HOME", home);
+        command
+    };
+    let home_of = |command: &Command| -> Vec<(String, String)> {
+        command
+            .get_envs()
+            .filter(|(key, _)| *key == "HOME" || *key == "CODEX_HOME")
+            .map(|(key, value)| {
+                (
+                    key.to_str().unwrap().to_owned(),
+                    value.unwrap().to_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (selected, _, tools) =
+        super::prepare_command(command(&private), &profile, &private).unwrap();
+    assert!(
+        !tools,
+        "a command without the tools-on settings starts a read-only thread"
+    );
+    let private_text = private.to_str().unwrap().to_owned();
+    assert_eq!(
+        home_of(&selected),
+        [
+            ("CODEX_HOME".to_owned(), private_text.clone()),
+            ("HOME".to_owned(), private_text)
+        ]
+    );
+    let (selected, _, _) = super::prepare_command(command(&managed), &profile, &managed).unwrap();
+    let managed_text = managed.to_str().unwrap().to_owned();
+    assert_eq!(
+        home_of(&selected),
+        [
+            ("CODEX_HOME".to_owned(), managed_text.clone()),
+            ("HOME".to_owned(), managed_text)
+        ]
+    );
+    for (named, given) in [(&managed, &private), (&private, &managed)] {
+        assert_eq!(
+            super::prepare_command(command(named), &profile, given)
+                .map(|_| ())
+                .map_err(|error| error.0),
+            Err("codex_host_home_unsafe".to_owned())
+        );
+    }
+    let mut tools_on = command(&private);
+    tools_on.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    let (_, _, tools) = super::prepare_command(tools_on, &profile, &private).unwrap();
+    assert!(tools, "the tools-on command starts a tools thread");
+    let inside = managed.join("nested");
+    assert_eq!(
+        super::prepare_command(command(&inside), &profile, &inside)
+            .map(|_| ())
+            .map_err(|error| error.0),
+        Err("codex_host_home_unsafe".to_owned())
+    );
+}
+
+/// A stand-in Codex app-server that answers initialize, the master thread and the turn in
+/// Codex 0.164's shapes, then reports a turn on a thread the master never started.
+#[cfg(unix)]
+const FOREIGN_THREAD_APP_SERVER: &str = r#"#!/bin/sh
+read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+read -r line
+read -r line
+cwd=$(pwd)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"on-request\",\"approvalsReviewer\":\"user\",\"sandbox\":{\"type\":\"readOnly\",\"networkAccess\":false}}}"
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+printf '%s\n' '{"method":"turn/started","params":{"threadId":"stand-in-child","note":"sk-proj-NOTAREALKEY","turn":{"id":"stand-in-child-turn","items":[],"status":"inProgress"}}}'
+exec /bin/sleep 30
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_a_redacted_tail() {
+    use crate::adapters::{NativeAction, NativeHarness};
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::protocol::{CredentialRef, RequestId, SessionId};
+
+    let mut fixture = MasterFixture::new("codex");
+    let profile = fixture.lease("codex-diagnostic-turn", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("codex", FOREIGN_THREAD_APP_SERVER);
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut command = Command::new(&harness);
+    command
+        .args(["-c", "cli_auth_credentials_store=\"file\""])
+        .env("CODEX_HOME", &home)
+        .current_dir(std::fs::canonicalize(&fixture.project).unwrap());
+    let action = NativeAction::Launch {
+        session_id: SessionId::new("diagnostic-session").unwrap(),
+        harness: NativeHarness::Codex,
+        profile_ref: CredentialRef::new("group-master-profile").unwrap(),
+        worktree_lease: RequestId::new("diagnostic-lease").unwrap(),
+    };
+    let limits = ResourceBudget {
+        output_bytes: 65_536,
+        wall_time_ms: 20_000,
+        ..budget()
+    };
+    let mut host = super::CodexHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        action,
+        CredentialRef::new("group-master-account").unwrap(),
+        limits,
+        "stand-in instructions",
+    )
+    .await
+    .unwrap();
+    assert!(host.diagnostic().fault.is_none());
+    host.start_turn(RequestId::new("diagnostic-turn").unwrap(), "hello")
+        .await
+        .unwrap();
+    let failed = loop {
+        if let Err(error) = host.next_event().await {
+            break error;
+        }
+    };
+    assert_eq!(failed.0, "codex_host_protocol_stale_message");
+    let diagnostic = host.diagnostic();
+    assert_eq!(diagnostic.fault.as_deref(), Some(failed.0.as_str()));
+    assert_eq!(
+        diagnostic.message.as_deref(),
+        Some("turn/started id=- thread=stand-in-child parent=- turn=stand-in-child-turn")
+    );
+    let tail = diagnostic.tail();
+    assert!(tail.contains("\"stand-in-child-turn\""), "{tail}");
+    assert!(tail.contains("\"sk-[redacted]\""), "{tail}");
+    assert!(!tail.contains("NOTAREAL"), "{tail}");
+    let _ = host.close().await;
 }

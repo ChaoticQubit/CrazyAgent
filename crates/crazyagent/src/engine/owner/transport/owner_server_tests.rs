@@ -15,7 +15,7 @@ impl Fixture {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-own-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -166,6 +166,12 @@ async fn an_owner_client_past_the_handshake_queue_is_refused_plainly() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_owner_request_is_answered_and_the_server_keeps_serving() {
     let fixture = Fixture::start().await;
+    #[cfg(target_os = "macos")]
+    let _keychain = {
+        let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+        keychain.serve(&crate::github::namespace(fixture.root.path()));
+        keychain
+    };
     let client = fixture.client().await;
     let mut stream = admitted(&client).await;
     stream

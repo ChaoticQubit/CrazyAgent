@@ -6,8 +6,8 @@ use crate::engine::owner::{
     OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
 use crate::master_session::{
-    MasterBackend, MasterOwnerAction, MasterSelection, MasterSessionPhase, MasterSessionView,
-    MasterTurnView,
+    MasterBackend, MasterOwnerAction, MasterReason, MasterSelection, MasterSessionPhase,
+    MasterSessionView, MasterTurnPhase, MasterTurnView,
 };
 use crate::protocol::{CredentialRef, Cursor, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use crate::routing::{ResourceBudget, RouteRequest};
@@ -148,6 +148,7 @@ async fn submit(
     client: &OwnerClient,
     opened: &MasterSessionView,
     id: &str,
+    reason: MasterReason,
 ) -> (MasterSessionView, MasterTurnView) {
     apply(
         client,
@@ -161,31 +162,40 @@ async fn submit(
         },
     )
     .await;
-    let state = read(
-        client,
-        OwnerRead::ProjectMasterTurns {
-            project_id: opened.project_id.clone(),
-            session_id: opened.session_id.clone(),
-            cursor: None,
-            limit: 8,
-        },
-    )
-    .await;
-    let OwnerData::ProjectMasterTurns { mut page } = state.data else {
-        panic!("actual persisted submitted turn required");
-    };
-    assert_eq!(page.project_id, opened.project_id);
-    assert_eq!(page.session_id, opened.session_id);
-    assert!(page.next.is_none());
-    assert_eq!(page.turns.len(), 1);
-    let turn = page.turns.remove(0);
-    assert_eq!(turn.id, RequestId::new(id).unwrap());
-    assert_eq!(turn.session_id, opened.session_id);
-    assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
-    let active = session(client, &opened.project_id).await;
-    assert_eq!(active.session_id, opened.session_id);
-    assert_eq!(active.current_turn.as_ref(), Some(&turn.id));
-    (active, turn)
+    for _ in 0..200 {
+        let state = read(
+            client,
+            OwnerRead::ProjectMasterTurns {
+                project_id: opened.project_id.clone(),
+                session_id: opened.session_id.clone(),
+                cursor: None,
+                limit: 8,
+            },
+        )
+        .await;
+        let OwnerData::ProjectMasterTurns { mut page } = state.data else {
+            panic!("actual persisted submitted turn required");
+        };
+        assert_eq!(page.project_id, opened.project_id);
+        assert_eq!(page.session_id, opened.session_id);
+        assert!(page.next.is_none());
+        assert_eq!(page.turns.len(), 1);
+        let turn = page.turns.remove(0);
+        assert_eq!(turn.id, RequestId::new(id).unwrap());
+        assert_eq!(turn.session_id, opened.session_id);
+        assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
+        if turn.phase == MasterTurnPhase::Queued {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        assert_eq!(turn.phase, MasterTurnPhase::Blocked);
+        assert_eq!(turn.reason, Some(reason));
+        let active = session(client, &opened.project_id).await;
+        assert_eq!(active.session_id, opened.session_id);
+        assert_eq!(active.current_turn, None);
+        return (active, turn);
+    }
+    panic!("actual master dispatch left turn {id} queued");
 }
 
 fn database(root: &Path) -> Connection {
@@ -288,7 +298,13 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
     )
     .await;
     let opened = open(&client, &project, "open-master-brief").await;
-    let (active, first_turn) = submit(&client, &opened, "submit-master-brief").await;
+    let (active, first_turn) = submit(
+        &client,
+        &opened,
+        "submit-master-brief",
+        MasterReason::RuntimeUnavailable,
+    )
+    .await;
     let initial = assembled(root.path(), &active, &first_turn);
     apply(
         &client,
@@ -384,8 +400,13 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
         panic!("actual reopened current brief required");
     };
     assert_eq!(actual, expected);
-    let (reopened_active, reopened_turn) =
-        submit(&client, &reopened, "resubmit-master-brief").await;
+    let (reopened_active, reopened_turn) = submit(
+        &client,
+        &reopened,
+        "resubmit-master-brief",
+        MasterReason::RuntimeUnavailable,
+    )
+    .await;
     drop(client);
     tokio::time::timeout(Duration::from_secs(5), service.shutdown())
         .await

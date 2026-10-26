@@ -2,12 +2,13 @@ name: CI
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 env:
@@ -16,11 +17,13 @@ env:
   BUN_VERSION: "1.4.3"
   RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
   RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
+  TMUX_VERSION: "3.8"
+  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
+  CLAUDE_CODE_VERSION: "2.1.309"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
-    e2e_team e2e_tui research_engine smoke team_engine terminal_owner terminal_session terminal_tmux
-    onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
+    e2e_tui research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
     qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network
   DESKTOP_TESTS_EXCLUDE: conversation_native picker_windows
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
@@ -33,12 +36,12 @@ defaults:
 jobs:
   linux:
     name: Linux format, typecheck, lint and tests
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms windows_terminal agent_secret_walls setup team_project_root
-        harness_launch launch_context project_sandbox sandbox_everywhere
+        harness_launch launch_context project_sandbox sandbox_everywhere terminal_session
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -51,14 +54,86 @@ jobs:
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
+          if ! command -v rustup >/dev/null && [ -x "$HOME/.cargo/bin/rustup" ]; then
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          command -v rustup >/dev/null || { echo "::error::rustup is not installed for the runner user; install it from https://rustup.rs and restart the runner service"; exit 1; }
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
       - name: Install Linux build packages
         run: |
           set -euo pipefail
+          command -v dpkg >/dev/null || { echo "::error::this job needs a Debian or Ubuntu runner with dpkg"; exit 1; }
+          packages=(build-essential pkg-config curl libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap libevent-dev libncurses-dev)
+          missing=()
+          for package in "${packages[@]}"; do
+            [ "$(dpkg -s "$package" 2>/dev/null | sed -n 's/^Status: //p')" = "install ok installed" ] || missing+=("$package")
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "all ${#packages[@]} build packages are installed"
+            exit 0
+          fi
+          if ! sudo -n true 2>/dev/null; then
+            echo "::error::missing packages: ${missing[*]}. This runner has no passwordless sudo; provision it with: sudo apt-get install -y --no-install-recommends ${missing[*]}"
+            exit 1
+          fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+          sudo apt-get install -y --no-install-recommends "${missing[@]}"
+      - name: Install tmux
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/tmux/$TMUX_VERSION/x64"
+          if [ ! -f "$prefix.complete" ]; then
+            work="$RUNNER_TEMP/tmux"
+            rm -rf "$work" "$prefix"
+            mkdir -p "$work"
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+            echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
+            tar -xzf "$work/tmux.tar.gz" -C "$work"
+            (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
+            rm -rf "$work"
+            touch "$prefix.complete"
+          fi
+          test "$("$prefix/bin/tmux" -V)" = "tmux $TMUX_VERSION"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          found=""
+          for dir in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+            if [ -x "$dir/tmux" ]; then found="$dir/tmux"; break; fi
+          done
+          version="$([ -z "$found" ] || "$found" -V)"
+          if [[ "$version" =~ ^tmux\ ([0-9]+)\.([0-9]+) ]] && (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 4) )); then
+            echo "the engine uses $found ($version)"
+            exit 0
+          fi
+          if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+            echo "::error::the engine looks for tmux 3.4 or later only in /opt/homebrew/bin, /usr/local/bin, /usr/bin and /bin, and found ${found:-none} ${version}. Provision this runner once with: sudo ln -sf $prefix/bin/tmux /usr/local/bin/tmux"
+            exit 1
+          fi
+          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
+          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_PACKAGE: claude-code-linux-x64
+          CLAUDE_CODE_SHA256: e960c4437f6f99648437784db43e04ad5f12711aecd710864f96876f94c2fc1a
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/claude-code/$CLAUDE_CODE_VERSION/x64"
+          if [ ! -f "$prefix.complete" ]; then
+            work="$RUNNER_TEMP/claude-code"
+            rm -rf "$work" "$prefix"
+            mkdir -p "$work" "$prefix/bin"
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
+            echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | sha256sum -c -
+            tar -xzf "$work/claude.tgz" -C "$work" package/claude
+            install -m 0755 "$work/package/claude" "$prefix/bin/claude"
+            rm -rf "$work"
+            touch "$prefix.complete"
+          fi
+          test "$("$prefix/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+      - if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -66,6 +141,19 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ci-linux-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      - name: Keep the Rust build cache under 20 GiB
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target"
+          mkdir -p "$target"
+          size_kib="$(du -sk "$target" | cut -f1)"
+          if (( size_kib > 20 * 1024 * 1024 )); then
+            echo "pruning $target: ${size_kib} KiB"
+            rm -rf "$target"
+            mkdir -p "$target"
+          fi
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: Check Rust formatting
         run: make fmt-check
       - name: Install desktop dependencies
@@ -86,11 +174,19 @@ jobs:
 
   macos:
     name: macOS lint and tests
-    runs-on: macos-15
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal
     steps:
+      - name: Refuse to run under Rosetta
+        run: |
+          set -euo pipefail
+          if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+            echo "::error::this job runs as x86_64 under Rosetta; reinstall the runner with the macOS ARM64 package"
+            exit 1
+          fi
+          echo "native $(uname -m)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -112,9 +208,57 @@ jobs:
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
+          if ! command -v rustup >/dev/null && [ -x "$HOME/.cargo/bin/rustup" ]; then
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          command -v rustup >/dev/null || { echo "::error::rustup is not installed for the runner user; install it from https://rustup.rs and restart the runner service"; exit 1; }
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - name: Install tmux
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          set -euo pipefail
+          found=""
+          for dir in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+            if [ -x "$dir/tmux" ]; then found="$dir/tmux"; break; fi
+          done
+          if [ -z "$found" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::missing: tmux 3.4 or later in /opt/homebrew/bin, /usr/local/bin, /usr/bin or /bin. This runner is not provisioned for CrazyAgent CI; install tmux on it once (for example: brew install tmux)"
+              exit 1
+            fi
+            brew install tmux
+            found="$(brew --prefix)/bin/tmux"
+          fi
+          version="$("$found" -V)"
+          echo "the engine uses $found ($version)"
+          [[ "$version" =~ ^tmux\ ([0-9]+)\.([0-9]+) ]] || { echo "unexpected tmux version: $version" >&2; exit 1; }
+          (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 4) )) || { echo "tmux 3.4 or later is required: $version" >&2; exit 1; }
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_PACKAGE: claude-code-darwin-arm64
+          CLAUDE_CODE_SHA256: 0e8ce1ddb8566129661bb7698db69db89d904e23b464afc6e85d5bd8879b9a51
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/claude-code/$CLAUDE_CODE_VERSION/arm64"
+          if [ ! -f "$prefix.complete" ]; then
+            work="$RUNNER_TEMP/claude-code"
+            rm -rf "$work" "$prefix"
+            mkdir -p "$work" "$prefix/bin"
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
+            echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | shasum -a 256 -c -
+            tar -xzf "$work/claude.tgz" -C "$work" package/claude
+            install -m 0755 "$work/package/claude" "$prefix/bin/claude"
+            rm -rf "$work"
+            touch "$prefix.complete"
+          fi
+          test "$("$prefix/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+      - if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -122,6 +266,19 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ci-macos-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      - name: Keep the Rust build cache under 20 GiB
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target"
+          mkdir -p "$target"
+          size_kib="$(du -sk "$target" | cut -f1)"
+          if (( size_kib > 20 * 1024 * 1024 )); then
+            echo "pruning $target: ${size_kib} KiB"
+            rm -rf "$target"
+            mkdir -p "$target"
+          fi
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -190,9 +347,10 @@ jobs:
         run: cargo fetch --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - name: Test Windows sandbox, terminal and picker
+      - name: Test Windows sandbox, terminal, code graph switch and picker
         run: |
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --offline
           cargo test -p crazyagent --locked --offline --test windows_terminal
+          cargo test -p crazyagent --locked --offline --lib -- storage::setup::switch_tests onboarding::step_tests
           cargo test -p crazyagent-desktop --locked --offline --test picker_windows

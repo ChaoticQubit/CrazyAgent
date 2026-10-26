@@ -3,6 +3,12 @@ use super::*;
 use crate::project_setup::Platform;
 use std::os::unix::fs::symlink;
 
+const OTHER_GRAPH_MARKER: &str = "# Other project graph 6620";
+const GATHER_RACE_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+const GATHER_RACE_MAX: u64 = 2_000_000;
+const SAVE_RACE_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+const SAVE_RACE_MAX: u64 = 20_000;
+
 fn pool() -> CredentialRef {
     CredentialRef::new("main").unwrap()
 }
@@ -35,16 +41,16 @@ fn project_ids_are_the_folder_name_as_a_slug() {
 #[test]
 fn steps_round_trip_through_their_columns_and_wire_tag() {
     for step in [
-        Step::Waiting,
+        Step::WAITING,
+        Step::Waiting {
+            until_ms: Some(1_792_729_920_000),
+        },
         Step::Running,
         Step::Done,
         Step::failed("graphify not installed"),
     ] {
         let (state, reason) = step.columns();
-        assert_eq!(
-            Step::from_columns(state, reason.map(str::to_owned)).unwrap(),
-            step
-        );
+        assert_eq!(Step::from_columns(state, reason).unwrap(), step);
     }
     assert!(Step::from_columns("lost", None).is_err());
     assert_eq!(
@@ -232,4 +238,191 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
         Step::Done,
         "an overview kept from before still counts"
     );
+}
+
+#[test]
+fn a_graph_folder_swapped_for_a_link_mid_gather_is_never_followed() {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = rust_repo();
+    let repo = dir.path().canonicalize().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let other = outside.path().join("graphify-out");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("GRAPH_REPORT.md"), OTHER_GRAPH_MARKER).unwrap();
+    let graph = repo.join("graphify-out");
+    std::fs::create_dir(&graph).unwrap();
+    std::fs::write(graph.join("GRAPH_REPORT.md"), "# Own graph\n").unwrap();
+    let swap = repo.join("graphify-swap");
+    symlink(&other, &swap).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::Relaxed) {
+                renameat_with(
+                    CWD,
+                    graph.as_path(),
+                    CWD,
+                    swap.as_path(),
+                    RenameFlags::EXCHANGE,
+                )
+                .unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    let deadline = std::time::Instant::now() + GATHER_RACE_TIME;
+    let (mut gathers, mut own, mut leaks) = (0_u64, 0_u64, 0_u64);
+    while gathers < GATHER_RACE_MAX && std::time::Instant::now() < deadline && leaks == 0 {
+        match draft::gather(&repo).graph {
+            Some(text) if text.contains(OTHER_GRAPH_MARKER) => leaks += 1,
+            Some(text) if text.contains("Own graph") => own += 1,
+            _ => {}
+        }
+        gathers += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    let swaps = swapper.join().unwrap();
+    assert!(swaps > 0);
+    assert!(own > 0, "no gather read the own graph in {gathers} gathers");
+    assert_eq!(
+        leaks, 0,
+        "a gather read the linked graph after {gathers} gathers and {swaps} swaps"
+    );
+}
+
+#[test]
+fn a_setup_folder_swapped_for_a_link_mid_save_is_never_written_through() {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = rust_repo();
+    let layout = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(CRAZYAGENT_DIRECTORY);
+    let setup = layout.join("setup");
+    std::fs::create_dir_all(&setup).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let other = outside.path().canonicalize().unwrap().join("setup");
+    std::fs::create_dir(&other).unwrap();
+    let swap = layout.join("setup-swap");
+    symlink(&other, &swap).unwrap();
+    let saved = Drafted::new("Demo tool".into(), &pool());
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::Relaxed) {
+                renameat_with(
+                    CWD,
+                    setup.as_path(),
+                    CWD,
+                    swap.as_path(),
+                    RenameFlags::EXCHANGE,
+                )
+                .unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    let deadline = std::time::Instant::now() + SAVE_RACE_TIME;
+    let (mut saves, mut written, mut leaked) = (0_u64, 0_u64, Vec::new());
+    while saves < SAVE_RACE_MAX && std::time::Instant::now() < deadline && leaked.is_empty() {
+        if draft::save(&layout, &saved).is_ok() {
+            written += 1;
+        }
+        leaked = std::fs::read_dir(&other)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        saves += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    let swaps = swapper.join().unwrap();
+    assert!(swaps > 0);
+    assert!(written > 0, "no save landed in {saves} saves");
+    assert!(
+        leaked.is_empty(),
+        "a save wrote {leaked:?} into the linked folder after {saves} saves and {swaps} swaps"
+    );
+}
+
+#[test]
+fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
+    let system = service::installed_graphify()
+        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let bin = root.path().join("setup/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    symlink(&system, bin.join("graphify")).unwrap();
+    assert_eq!(
+        service::engine_graphify(root.path()),
+        Some(bin.join("graphify"))
+    );
+    std::fs::remove_file(bin.join("graphify")).unwrap();
+    let found = service::engine_graphify(root.path()).expect("the system graphify");
+    assert_eq!(found.canonicalize().unwrap(), system);
+}
+
+#[test]
+fn the_graph_leaves_out_the_engine_files_in_the_project() {
+    let graphify = service::installed_graphify()
+        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/shop.py"),
+        "def shop_total(items):\n    return sum(items)\n",
+    )
+    .unwrap();
+    let engine = repo.join(".crazyagent").join("setup");
+    std::fs::create_dir_all(&engine).unwrap();
+    std::fs::write(
+        engine.join("probe.py"),
+        "def crazyagent_probe():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join(".crazyagent/overview.md"), "# Overview\n").unwrap();
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-state-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state = scratch.path().canonicalize().unwrap();
+    for folder in ["agents", "profiles"] {
+        std::fs::create_dir(state.join(folder)).unwrap();
+    }
+
+    let ending = graph::update(
+        &graphify,
+        &repo,
+        &state,
+        "onboard-g-hide",
+        std::time::Duration::from_secs(300),
+        &|| false,
+    )
+    .unwrap();
+
+    assert_eq!(ending, graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(graph.contains("shop_total"), "{graph}");
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        assert!(
+            !text.contains(".crazyagent") && !text.contains("crazyagent_probe"),
+            "{name}: {text}"
+        );
+    }
+    assert!(engine.join("probe.py").is_file());
 }

@@ -72,11 +72,14 @@ export function FoundProjectsView({ home, found, chooser, onSetUp, onOpen, onRem
   </section>;
 }
 
+/** A folder to set up: its name and its path on disk, in the projects folder or anywhere else. */
+export type SetUpFolder = Pick<FoundProject, "name" | "path">;
+
 /** The Set up dialog body: what setting up does and the pool the mapping agent runs on.
  * Inputs: the folder, the pools read, the chosen pool id, its change handler and the last problem.
  * Output: the body. */
 export function SetUpDialogBody({ folder, pools, pool, onPool, problem }: {
-  folder: FoundProject;
+  folder: SetUpFolder;
   pools: Result<PoolChoice[]> | undefined;
   pool: string;
   onPool: (pool: string) => void;
@@ -99,7 +102,10 @@ export function SetUpDialogBody({ folder, pools, pool, onPool, problem }: {
   </div>;
 }
 
-function SetUpDialog({ folder, onClose, onStarted }: { folder: FoundProject; onClose: () => void; onStarted: () => void }) {
+/** The Set up dialog: picks the pool, starts onboarding the folder where it is and opens its setup
+ * page. Inputs: the folder, the close handler and what to do when the start was applied but the
+ * new project is not listed yet. Output: the dialog. */
+export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolder; onClose: () => void; onStarted: () => void }) {
   const [pools, setPools] = useState<Result<PoolChoice[]>>();
   const [pool, setPool] = useState("");
   const [busy, setBusy] = useState(false);
@@ -120,11 +126,11 @@ function SetUpDialog({ folder, onClose, onStarted }: { folder: FoundProject; onC
     const result = await startOnboarding(folder.path, pool, nextGeneration());
     setBusy(false);
     if (result.kind !== "ok") {
-      setProblem(result.kind === "not_ready" ? "Setting up a found folder isn't in this build." : intakeCopy(result.code));
+      setProblem(result.kind === "not_ready" ? "Setting up a folder isn't in this build." : intakeCopy(result));
       return;
     }
     const started = startedProject(result.value);
-    if (started.kind === "rejected") { setProblem(intakeCopy(started.code)); return; }
+    if (started.kind === "rejected") { setProblem(intakeCopy(started)); return; }
     if (started.kind === "started") { navigate({ name: "onboarding", id: started.id }); return; }
     if (receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm setup started. Check Home and try again."); return; }
     const found = await loadFoundProjects();
@@ -174,9 +180,9 @@ export function FoundProjects() {
     const result = await removeProject(folder.project_id, nextGeneration());
     setBusy(false);
     setRemoving(null);
-    if (result.kind !== "ok") { session.showToast(result.kind === "not_ready" ? "Removing a project isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { session.showToast(result.kind === "not_ready" ? "Removing a project isn't in this build." : intakeCopy(result)); return; }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") session.showToast(intakeCopy(state.code));
+    if (state.kind === "rejected") session.showToast(intakeCopy(state));
     else if (state.kind === "unconfirmed") session.showToast("We couldn't confirm the project was removed. Check Home.");
     else session.showToast(`${folder.name} was removed.`);
     void session.refreshProjects();

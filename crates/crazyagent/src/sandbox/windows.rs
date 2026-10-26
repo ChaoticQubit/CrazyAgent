@@ -28,6 +28,10 @@ pub const SEATBELT_MISSING: &str =
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
 
+/// The folder in the engine's data root where the boundary helper records the access entries
+/// it grants each agent's container, so a later, narrower profile can take them back.
+pub const GRANTS_FOLDER: &str = "boundary-grants";
+
 const CONTAINER_PREFIX: &str = "crazyagent.";
 const CONTAINER_HASH_BYTES: usize = 16;
 const PROFILE_NAME_MAX: usize = 128;
@@ -63,15 +67,20 @@ impl WindowsSandbox {
     /// Writes the boundary profile for `sandbox` at `profile`, replacing any earlier one
     /// atomically, and binds it to `helper`. The profile must end in `.sb` like every
     /// platform's profile and lie outside every writable root, so no agent can rewrite the
-    /// profile its next launch uses. Inputs: the policy, the helper and the profile path.
-    /// Output: the sandbox, `Unavailable` for a missing helper or an endpoint limit, or
-    /// `Invalid` for an unsafe path or policy.
+    /// profile its next launch uses; the existing `grants` folder, where the helper records
+    /// what it grants each container, must lie outside them too. Inputs: the policy, the
+    /// helper, the profile path and the grants folder. Output: the sandbox, `Unavailable` for
+    /// a missing helper or an endpoint limit, or `Invalid` for an unsafe path or policy.
     pub fn install(
         sandbox: ProjectSandbox,
         helper: &Path,
         profile: &Path,
+        grants: &Path,
     ) -> Result<Self, SandboxError> {
-        let boundary = boundary_profile(&sandbox)?;
+        let grants = Some(grants)
+            .filter(|grants| clean_absolute(grants) && grants.is_dir())
+            .ok_or_else(|| invalid("grants folder must exist"))?;
+        let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
         let helper = existing_helper(helper)?;
         let parent = profile
             .parent()
@@ -256,10 +265,14 @@ pub fn container_name(sandbox: &ProjectSandbox) -> String {
 }
 
 /// The boundary profile for a policy: its container, network capabilities, read roots and
-/// writable roots, the protected paths kept read-only and every secret path that is a plain
-/// drive path hidden. The helper's own plan check runs here too, so a policy it would refuse
-/// is refused at install. Input: the policy. Output: the profile, or the refusal.
-pub fn boundary_profile(sandbox: &ProjectSandbox) -> Result<BoundaryProfile, SandboxError> {
+/// writable roots, the protected paths kept read-only, every secret path that is a plain
+/// drive path hidden, and the grants folder. The helper's own plan check runs here too, so a
+/// policy it would refuse, such as a grants folder inside a writable root, is refused at
+/// install. Inputs: the policy and the grants folder. Output: the profile, or the refusal.
+pub fn boundary_profile(
+    sandbox: &ProjectSandbox,
+    grants: &Path,
+) -> Result<BoundaryProfile, SandboxError> {
     let capabilities = capabilities(sandbox.network())?;
     let read_roots = sandbox
         .read_roots()
@@ -293,6 +306,7 @@ pub fn boundary_profile(sandbox: &ProjectSandbox) -> Result<BoundaryProfile, San
         write_roots,
         guarded,
         active_processes: ACTIVE_PROCESSES,
+        grants: drive_path(grants)?,
     };
     profile
         .validate()
@@ -308,7 +322,20 @@ fn drive_path(path: &Path) -> Result<String, SandboxError> {
         .ok_or_else(|| invalid("a sandbox path is not a plain drive path"))
 }
 
-fn existing_helper(helper: &Path) -> Result<PathBuf, SandboxError> {
+/// The engine's grants folder, [`GRANTS_FOLDER`] in its data root, made when missing. Output:
+/// the folder, `Unavailable` when the data root is unknown, or the I/O error.
+pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
+    let layout =
+        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
+    let grants = layout.root().join(GRANTS_FOLDER);
+    fs::create_dir_all(&grants)?;
+    assert!(grants.is_dir());
+    Ok(grants)
+}
+
+/// The boundary helper at `helper`, when it is an existing absolute plain file. Output: the
+/// path, `Unavailable` with [`APPCONTAINER_MISSING`] when it is missing, or `Invalid`.
+pub(super) fn existing_helper(helper: &Path) -> Result<PathBuf, SandboxError> {
     if !helper.is_file() {
         return Err(SandboxError::Unavailable(APPCONTAINER_MISSING.into()));
     }
@@ -360,6 +387,7 @@ mod tests {
         home: PathBuf,
         tmp: PathBuf,
         profiles: PathBuf,
+        grants: PathBuf,
     }
 
     fn folders() -> Folders {
@@ -369,7 +397,15 @@ mod tests {
         let home = root.join("agent").join("home");
         let tmp = root.join("agent").join("tmp");
         let profiles = root.join("profiles");
-        for folder in [&project, &project.join("context"), &home, &tmp, &profiles] {
+        let grants = root.join("grants");
+        for folder in [
+            &project,
+            &project.join("context"),
+            &home,
+            &tmp,
+            &profiles,
+            &grants,
+        ] {
             fs::create_dir_all(folder).unwrap();
         }
         fs::write(project.join("context").join("brief.md"), "brief\r\n").unwrap();
@@ -379,6 +415,7 @@ mod tests {
             home,
             tmp,
             profiles,
+            grants,
         }
     }
 
@@ -415,8 +452,9 @@ mod tests {
     fn the_profile_keeps_the_policy_and_each_agent_gets_its_own_container() {
         let folders = folders();
         let sandbox = policy(&folders, SandboxNetwork::Open);
-        let profile = boundary_profile(&sandbox).unwrap();
+        let profile = boundary_profile(&sandbox, &folders.grants).unwrap();
         assert_eq!(profile.capabilities, vec![Capability::InternetClient]);
+        assert_eq!(profile.grants, folders.grants.to_str().unwrap());
         assert_eq!(
             profile.write_roots,
             [&folders.project, &folders.home, &folders.tmp]
@@ -456,25 +494,57 @@ mod tests {
         let helper = std::env::current_exe().unwrap();
         let inside = folders.project.join("agent.sb");
         assert!(matches!(
-            WindowsSandbox::install(sandbox.clone(), &helper, &inside),
+            WindowsSandbox::install(sandbox.clone(), &helper, &inside, &folders.grants),
             Err(SandboxError::Invalid(_))
         ));
         assert!(!inside.exists());
+        let writable = folders.project.join("grants");
+        fs::create_dir_all(&writable).unwrap();
+        let beside = folders.profiles.join("c.sb");
+        match WindowsSandbox::install(sandbox.clone(), &helper, &beside, &writable) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert!(
+                    reason.contains("the grants folder sits in a writable root"),
+                    "{reason}"
+                )
+            }
+            other => panic!("expected the grants folder refusal, got {other:?}"),
+        }
+        assert!(!beside.exists());
+        let absent = folders.profiles.join("absent");
+        assert!(matches!(
+            WindowsSandbox::install(sandbox.clone(), &helper, &beside, &absent),
+            Err(SandboxError::Invalid(_))
+        ));
         let missing = folders.profiles.join("missing-helper.exe");
-        match WindowsSandbox::install(sandbox.clone(), &missing, &folders.profiles.join("a.sb")) {
+        match WindowsSandbox::install(
+            sandbox.clone(),
+            &missing,
+            &folders.profiles.join("a.sb"),
+            &folders.grants,
+        ) {
             Err(SandboxError::Unavailable(reason)) => assert_eq!(reason, APPCONTAINER_MISSING),
             other => panic!("expected the missing helper refusal, got {other:?}"),
         }
         let path = folders.profiles.join("agent.sb");
-        let installed = WindowsSandbox::install(sandbox.clone(), &helper, &path).unwrap();
+        let installed =
+            WindowsSandbox::install(sandbox.clone(), &helper, &path, &folders.grants).unwrap();
         let written = BoundaryProfile::load(&path).unwrap();
-        assert_eq!(written, boundary_profile(&sandbox).unwrap());
+        assert_eq!(
+            written,
+            boundary_profile(&sandbox, &folders.grants).unwrap()
+        );
         assert_eq!(installed.launcher(), helper.as_path());
         let limited = policy(
             &folders,
             SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
         );
-        match WindowsSandbox::install(limited, &helper, &folders.profiles.join("b.sb")) {
+        match WindowsSandbox::install(
+            limited,
+            &helper,
+            &folders.profiles.join("b.sb"),
+            &folders.grants,
+        ) {
             Err(SandboxError::Unavailable(reason)) => assert_eq!(reason, FIREWALL_RULE_MISSING),
             other => panic!("expected the firewall refusal, got {other:?}"),
         }
@@ -485,8 +555,13 @@ mod tests {
         let folders = folders();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let helper = std::env::current_exe().unwrap();
-        let installed =
-            WindowsSandbox::install(sandbox, &helper, &folders.profiles.join("agent.sb")).unwrap();
+        let installed = WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &folders.profiles.join("agent.sb"),
+            &folders.grants,
+        )
+        .unwrap();
         let mut harness = Command::new(cmd());
         harness
             .arg("/C")
@@ -562,8 +637,13 @@ mod tests {
             helper.display()
         );
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
-        let installed =
-            WindowsSandbox::install(sandbox, &helper, &folders.profiles.join("agent.sb")).unwrap();
+        let installed = WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &folders.profiles.join("agent.sb"),
+            &folders.grants,
+        )
+        .unwrap();
         let brief = folders.project.join("context").join("brief.md");
         let mut overwrite = Command::new(cmd());
         overwrite
@@ -611,5 +691,60 @@ mod tests {
         running.wait().unwrap();
         assert_eq!(received.recv_timeout(Duration::from_secs(30)), Ok("closed"));
         drop(stdin);
+    }
+
+    #[test]
+    fn a_wrapped_agent_cannot_vacate_or_create_a_protected_path_but_still_edits_the_project() {
+        let folders = folders();
+        let tests = std::env::current_exe().unwrap();
+        let helper = tests.parent().unwrap().with_file_name(HELPER_NAME);
+        assert!(
+            helper.is_file(),
+            "build crazyagent-win-boundary first: {}",
+            helper.display()
+        );
+        let project = &folders.project;
+        let git = project.join(".git");
+        fs::create_dir_all(git.join("hooks")).unwrap();
+        fs::write(git.join("config"), "[core]\r\n").unwrap();
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("README.md"), "readme\r\n").unwrap();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let installed = WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &folders.profiles.join("agent.sb"),
+            &folders.grants,
+        )
+        .unwrap();
+        let run = |line: &str| {
+            let mut shell = Command::new(cmd());
+            shell.arg("/C").arg(line).current_dir(project);
+            crate::spawn_gate::status(
+                Sandbox::wrap(&installed, &shell)
+                    .unwrap()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap()
+            .success()
+        };
+        assert!(!run("ren .git .git-moved"));
+        assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
+        assert!(!run(r"mkdir .crazyagent\context"));
+        assert!(!project.join(".crazyagent").exists());
+        assert!(!run(r"echo planted>.git\config.lock"));
+        assert!(!git.join("config.lock").exists());
+        assert!(!run(r"mkdir .git\hooks\planted"));
+        assert!(!git.join("hooks").join("planted").exists());
+        assert!(!run("ren context context-moved"));
+        assert!(project.join("context").join("brief.md").is_file());
+        assert!(run(r"echo changed>src\work.txt"));
+        assert!(run("echo changed>README.md"));
+        assert_eq!(
+            fs::read_to_string(project.join("README.md")).unwrap(),
+            "changed\r\n"
+        );
     }
 }

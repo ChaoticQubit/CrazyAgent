@@ -2,9 +2,11 @@ use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::adapters::codex::{AuthAccount, AuthControl};
 use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
+use crate::agents::{Hold, Holder};
 use crate::config::ModelAuthentication;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::claude_host::ClaudeHost;
+use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::engine::codex_host::CodexHost;
 use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
@@ -28,14 +30,23 @@ const REPLY_BYTES_MAX: usize = 8192;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
+/// SQLite's refusal when another engine connection held the database write lock past the
+/// storage wait; the write was rolled back, so the turn is driven again (LB-28).
+const STORAGE_BUSY: &str = "database is locked";
+const BUSY_ATTEMPTS: u32 = 5;
+const BUSY_PAUSE: Duration = Duration::from_millis(250);
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
+    pub(super) home: std::path::PathBuf,
+    pub(super) credential: Option<crate::engine::bootstrap::AgentCredential>,
     pub(super) artifact_sha256: String,
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
     pub(super) capture: File,
+    pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
+    pub(super) tool_record: Option<std::path::PathBuf>,
 }
 
 pub(super) struct Capture {
@@ -84,6 +95,22 @@ impl MasterHost {
         match self {
             Self::Codex(host) => host.close().await,
             Self::Claude(host) => host.close().await,
+        }
+    }
+
+    fn process_group(&self) -> Option<u32> {
+        match self {
+            Self::Codex(host) => Some(host.process_group()),
+            Self::Claude(host) => host.process_group(),
+        }
+    }
+
+    /// What the host kept about its harness stream for the engine log. Input: the host.
+    /// Output: the diagnostic, or none before a Claude Code host retired its stream.
+    fn diagnostic(&self) -> Option<StreamDiagnostic> {
+        match self {
+            Self::Codex(host) => Some(host.diagnostic()),
+            Self::Claude(host) => host.diagnostic(),
         }
     }
 }
@@ -175,8 +202,53 @@ impl Capture {
 #[cfg(all(test, unix))]
 mod routing_tests;
 
+/// Runs one master turn step again while another engine connection holds the database
+/// write lock past the storage wait, which rolls the step's write back (LB-28). Input: the
+/// step. Output: its result, or `storage_busy` when the lock never freed.
+async fn when_storage_frees<T, F, Fut>(mut step: F) -> Result<T, EngineError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, EngineError>>,
+{
+    let mut attempt = 1;
+    loop {
+        assert!(attempt <= BUSY_ATTEMPTS);
+        match step().await {
+            Err(error) if error.0 == STORAGE_BUSY && attempt < BUSY_ATTEMPTS => {
+                tokio::time::sleep(BUSY_PAUSE * attempt).await;
+                attempt += 1;
+            }
+            Err(error) if error.0 == STORAGE_BUSY => return Err(failure("storage_busy")),
+            result => return result,
+        }
+    }
+}
+
 impl OwnerRuntimeHandle {
+    /// Runs one master runtime command in storage. A first preparation that reserves the
+    /// conversation worktree checks it out on a blocking thread without the owner barrier,
+    /// so owner reads and the database keep serving, then stores it and prepares again
+    /// (LB-28). Input: the command. Output: the storage result, never a checkout.
     async fn master_runtime_command(
+        &self,
+        command: MasterRuntimeCommand,
+    ) -> Result<MasterRuntimeResult, EngineError> {
+        let checkout = match self.master_runtime_job(command).await? {
+            MasterRuntimeResult::Checkout(checkout) => checkout,
+            result => return Ok(result),
+        };
+        let checked = tokio::task::spawn_blocking(move || checkout.materialize())
+            .await
+            .map_err(|_| failure("master_worktree_checkout_interrupted"))?;
+        match self.master_runtime_job(checked).await? {
+            MasterRuntimeResult::Checkout(_) => Err(failure("master_worktree_checkout_repeated")),
+            result => Ok(result),
+        }
+    }
+
+    /// Sends one master runtime command to storage under the owner barrier. Input: the
+    /// command. Output: the storage result.
+    async fn master_runtime_job(
         &self,
         command: MasterRuntimeCommand,
     ) -> Result<MasterRuntimeResult, EngineError> {
@@ -243,12 +315,16 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Takes the profile of a prepared master turn and names its conversation in the agent
+    /// register as a holder of the turn's account until the returned hold is dropped, which
+    /// the caller keeps until the turn's host has closed. Takes the prepared turn and its
+    /// id. Returns the profile and its hold, none without a register, or the refusal.
     pub(super) async fn acquire_master_profile(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-    ) -> Result<NativeProfileUse, EngineError> {
-        match self
+    ) -> Result<(NativeProfileUse, Option<Hold>), EngineError> {
+        let profile = match self
             .master_runtime_command(MasterRuntimeCommand::AcquireProfile {
                 host: self.identity(),
                 project_id: prepared.session.project_id.clone(),
@@ -258,8 +334,48 @@ impl OwnerRuntimeHandle {
             })
             .await?
         {
-            MasterRuntimeResult::Profile(profile) => Ok(*profile),
-            MasterRuntimeResult::Turn(_) => Err(failure("master_runtime_profile_not_acquired")),
+            MasterRuntimeResult::Profile(profile) => *profile,
+            MasterRuntimeResult::Turn(_) => {
+                return Err(failure("master_runtime_profile_not_acquired"));
+            }
+            _ => return Err(failure("master_runtime_result")),
+        };
+        let hold = self.agents().ok().map(|agents| {
+            agents.hold(
+                prepared.profile.binding().connection.id.clone(),
+                Holder::Master {
+                    project: prepared.session.project_id.clone(),
+                    session: prepared.session.session_id.clone(),
+                },
+            )
+        });
+        Ok((profile, hold))
+    }
+
+    /// Records the process group a master turn's harness started in, so a later engine run
+    /// can tell whether it may still write in the conversation worktree (LB-23). Takes the
+    /// prepared turn, its id and the group. Returns success, or the refusal ending the turn.
+    pub(super) async fn record_master_child(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        group: Option<u32>,
+    ) -> Result<(), EngineError> {
+        let group = group
+            .and_then(|group| i32::try_from(group).ok())
+            .filter(|group| *group > 1)
+            .ok_or_else(|| failure("master_runtime_group_unknown"))?;
+        match self
+            .master_runtime_command(MasterRuntimeCommand::RecordChild {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+                group,
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(_) => Ok(()),
             _ => Err(failure("master_runtime_result")),
         }
     }
@@ -286,7 +402,60 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Settles a master turn whose dispatch failed before it ran, so it never stays queued.
+    /// Inputs: the turn's project, session and id, and the dispatch error, which names the
+    /// reason the owner sees. Output: the turn as stored: blocked (never admitted) or failed
+    /// (admitted) with the reason when it was the session's queued or prepared current
+    /// turn, else unchanged.
+    async fn fail_master_turn(
+        &self,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        turn_id: &RequestId,
+        cause: &EngineError,
+    ) -> Result<MasterTurnView, EngineError> {
+        match self
+            .master_runtime_command(MasterRuntimeCommand::Fail {
+                host: self.identity(),
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                reason: reason_for_error(cause),
+                cause: cause.0.clone(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(turn) => Ok(*turn),
+            _ => Err(failure("master_runtime_result")),
+        }
+    }
+
+    /// Drives one committed master turn, again after a write another engine connection kept
+    /// locked, and when the dispatch fails with a known outcome settles the turn failed with
+    /// the reason so the owner sees it and can retry. Inputs: the turn's project, session and
+    /// id. Output: the turn view, or the dispatch error after the turn was settled; an
+    /// unknown outcome is returned for the caller to drive the same turn again.
     pub async fn drive_master_turn(
+        &self,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        turn_id: &RequestId,
+    ) -> Result<MasterTurnView, EngineError> {
+        let result = when_storage_frees(|| self.drive_turn(project_id, session_id, turn_id)).await;
+        if let Err(cause) = &result
+            && cause.0 != super::master_dispatch::UNKNOWN_OUTCOME
+        {
+            let settled = when_storage_frees(|| {
+                self.fail_master_turn(project_id, session_id, turn_id, cause)
+            })
+            .await?;
+            assert_eq!(&settled.id, turn_id);
+            assert_eq!(&settled.session_id, session_id);
+        }
+        result
+    }
+
+    async fn drive_turn(
         &self,
         project_id: &ProjectId,
         session_id: &SessionId,
@@ -301,13 +470,18 @@ impl OwnerRuntimeHandle {
         ) {
             return Ok(routed);
         }
+        if routed.phase == MasterTurnPhase::Queued {
+            self.reprove_sign_ins(Some(session_id.clone())).await;
+        }
         let prepared = match self
             .prepare_master_turn(project_id, session_id, turn_id)
             .await?
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) => return Err(failure("master_runtime_result")),
+            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::Checkout(_) => {
+                return Err(failure("master_runtime_result"));
+            }
             #[cfg(all(test, unix))]
             MasterRuntimeResult::ConfiguredProfile(_) => {
                 return Err(failure("master_runtime_result"));
@@ -328,12 +502,7 @@ impl OwnerRuntimeHandle {
         let result = self.launch_master_turn(&prepared, turn_id).await;
         match result {
             Ok(turn) => Ok(turn),
-            Err(error)
-                if matches!(
-                    error.0.as_str(),
-                    "native_profile_in_use" | "master_runtime_profile_not_acquired"
-                ) =>
-            {
+            Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
                 self.inspect_master_turn(project_id, session_id, turn_id)
                     .await
             }
@@ -343,6 +512,7 @@ impl OwnerRuntimeHandle {
                 } else {
                     MasterRuntimeObservation::Failed {
                         reason: reason_for_error(&error),
+                        cause: error.0.clone(),
                     }
                 };
                 self.observe_master_turn(&prepared, turn_id, observation)
@@ -366,8 +536,11 @@ impl OwnerRuntimeHandle {
             ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
             _ => return Err(failure("gateway_invalid_authentication")),
         };
-        let profile = self.acquire_master_profile(prepared, turn_id).await?;
+        let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let launch = self.prepare_master_host(prepared, &profile)?;
+        let _folder = launch.folder;
+        let _credential = launch.credential;
+        let tool_record = launch.tool_record;
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -396,6 +569,7 @@ impl OwnerRuntimeHandle {
                     launch.command,
                     launch.sandbox,
                     profile,
+                    launch.home,
                     action,
                     account_ref,
                     resources,
@@ -408,6 +582,7 @@ impl OwnerRuntimeHandle {
                     launch.command,
                     launch.sandbox,
                     profile,
+                    launch.home,
                     action,
                     account_ref,
                     resources,
@@ -435,9 +610,34 @@ impl OwnerRuntimeHandle {
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
         }
-        active.host.close().await.map_err(|error| {
+        let closed = active.host.close().await;
+        if let Some(diagnostic) = active.host.diagnostic()
+            && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
+            && self.authority.root.verify().is_ok()
+            && let Some(root) = self.authority.root.path.parent()
+        {
+            let error = closed.as_ref().err().or(observed.as_ref().err());
+            let _ = keep_stream_diagnostic(
+                root,
+                &prepared.session.session_id,
+                turn_id,
+                &active.runtime,
+                &diagnostic,
+                error.map(|error| error.0.as_str()),
+            );
+        }
+        closed.map_err(|error| {
             EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0))
         })?;
+        let observed = match (observed, tool_record) {
+            (Ok(MasterRuntimeObservation::Response { reply, .. }), Some(record)) => {
+                Ok(MasterRuntimeObservation::Response {
+                    reply,
+                    delegations: crate::team::tool::take(&record),
+                })
+            }
+            (observed, _) => observed,
+        };
         match observed {
             Ok(observation) => {
                 self.observe_master_turn(prepared, turn_id, observation)
@@ -453,6 +653,8 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
         active: &mut ActiveMaster,
     ) -> Result<MasterRuntimeObservation, EngineError> {
+        self.record_master_child(prepared, turn_id, active.host.process_group())
+            .await?;
         self.observe_master_turn(
             prepared,
             turn_id,
@@ -474,13 +676,7 @@ impl OwnerRuntimeHandle {
             return Ok(MasterRuntimeObservation::Cancelled);
         }
         if let MasterHost::Codex(host) = &mut active.host {
-            match host.observe_account().await? {
-                AuthControl::AccountRead {
-                    account: Some(AuthAccount::Chatgpt { .. }),
-                    ..
-                } => {}
-                _ => return Err(failure("gateway_invalid_authentication")),
-            }
+            account_failure(&host.observe_account().await?)?;
         }
         if self
             .inspect_master_turn(
@@ -498,7 +694,7 @@ impl OwnerRuntimeHandle {
             .host
             .start_turn(turn_id.clone(), &prepared.text)
             .await?;
-        let mut text = String::new();
+        let mut reply = ReplyText::default();
         let mut inspect = tokio::time::interval(INSPECT_INTERVAL);
         inspect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -548,30 +744,39 @@ impl OwnerRuntimeHandle {
                 }
             }
             match event.kind {
-                EventKind::AssistantDelta { text: delta, .. }
-                | EventKind::AssistantText { text: delta, .. } => {
-                    if text
-                        .len()
-                        .checked_add(delta.len())
-                        .is_none_or(|length| length > REPLY_BYTES_MAX)
-                    {
-                        return Err(failure("codex_host_output_limit"));
+                EventKind::AssistantText {
+                    parent_tool_use_id: Some(_),
+                    ..
+                } if prepared.tools => {}
+                EventKind::ToolUse {
+                    parent_tool_use_id, ..
+                } if prepared.tools => {
+                    if parent_tool_use_id.is_none() {
+                        reply.tool_step();
                     }
-                    text.push_str(&delta);
-                    assert!(text.len() <= REPLY_BYTES_MAX);
+                }
+                EventKind::AssistantDelta {
+                    item_id,
+                    text: delta,
+                } => {
+                    reply.push(Some(&item_id), &delta, prepared.tools)?;
+                    assert!(active.capture.sequence > 0);
+                }
+                EventKind::AssistantText { text: delta, .. } => {
+                    reply.push(None, &delta, prepared.tools)?;
                     assert!(active.capture.sequence > 0);
                 }
                 EventKind::TurnFinished {
                     outcome: TurnOutcome::Success,
                     ..
                 } => {
-                    if text.trim().is_empty() || active.runtime.native_session_id.is_none() {
+                    if reply.text.trim().is_empty() || active.runtime.native_session_id.is_none() {
                         return Err(failure("master_capture_incomplete"));
                     }
                     active.capture.finish()?;
                     return Ok(MasterRuntimeObservation::Response {
                         reply: MasterReply {
-                            text,
+                            text: reply.text,
                             provenance: MasterReplyProvenance {
                                 attempt_id: prepared.attempt.request.id.clone(),
                                 runtime_ref: active.runtime.runtime_ref.clone(),
@@ -579,6 +784,7 @@ impl OwnerRuntimeHandle {
                                 capture_sequence: active.capture.sequence,
                             },
                         },
+                        delegations: Vec::new(),
                     });
                 }
                 EventKind::TurnFinished { .. }
@@ -590,12 +796,7 @@ impl OwnerRuntimeHandle {
                 | EventKind::UnsupportedRequest { .. }
                 | EventKind::Unsupported { .. } => {}
                 EventKind::AssistantError { code } => {
-                    return Err(failure(match code.as_str() {
-                        "authentication_failed" => "gateway_invalid_authentication",
-                        "rate_limit" => "gateway_rate_limited",
-                        "billing_error" => "gateway_quota_exhausted",
-                        _ => "codex_host_turn_failed",
-                    }));
+                    return Err(failure(assistant_failure(&code)));
                 }
                 EventKind::RequestFailed { .. }
                 | EventKind::TurnError {
@@ -605,6 +806,87 @@ impl OwnerRuntimeHandle {
                 _ => {}
             }
         }
+    }
+}
+
+/// Appends a master turn's stream diagnostic to the engine log
+/// `logs/master-stream.log` (0600, rotated, credentials redacted) so a failed turn or one
+/// whose harness kept talking after its result can be explained later. Input: the engine
+/// root, the conversation, turn, runtime, diagnostic and the turn's error code when it
+/// failed. Output: an error code when the log could not be written safely.
+fn keep_stream_diagnostic(
+    root: &std::path::Path,
+    session_id: &SessionId,
+    turn_id: &RequestId,
+    runtime: &MasterRuntimeView,
+    diagnostic: &StreamDiagnostic,
+    error: Option<&str>,
+) -> Result<(), EngineError> {
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let entry = serde_json::json!({
+        "at_ms": at_ms,
+        "session_id": session_id.as_str(),
+        "turn_id": turn_id.as_str(),
+        "native_session_id": runtime.native_session_id,
+        "artifact_sha256": runtime.artifact_sha256,
+        "error": error,
+        "fault": diagnostic.fault,
+        "message": diagnostic.message,
+        "late_lines": diagnostic.late_lines,
+        "late": diagnostic.late,
+        "tail": diagnostic.tail(),
+    });
+    crate::engine::claude_host::diagnostic::append(
+        &crate::paths::Layout::new(root.to_path_buf())
+            .map_err(|_| failure("master_stream_log_unavailable"))?
+            .logs(),
+        &entry,
+    )
+}
+
+/// The reply a master turn is building: its text so far and, for a tools-on master, the
+/// agent message that text belongs to. A tools-on master's reply is what it says after its
+/// last tool step, so a new message or a top-level tool step starts the text over.
+#[derive(Default)]
+pub(super) struct ReplyText {
+    pub(super) text: String,
+    message: Option<String>,
+}
+
+impl ReplyText {
+    /// Starts the reply over after a top-level tool step of a tools-on master.
+    pub(super) fn tool_step(&mut self) {
+        self.text.clear();
+        self.message = None;
+    }
+
+    /// Adds streamed reply text. With tools on, text of a new agent message replaces what an
+    /// earlier message said; with tools off every message adds to the reply, as before.
+    /// Inputs: the agent message the text belongs to when the harness names one, the text and
+    /// the tools switch. Output: Ok, or `codex_host_output_limit` past `REPLY_BYTES_MAX`.
+    pub(super) fn push(
+        &mut self,
+        message: Option<&str>,
+        part: &str,
+        tools: bool,
+    ) -> Result<(), EngineError> {
+        if tools && message.is_some() && message != self.message.as_deref() {
+            self.text.clear();
+            self.message = message.map(str::to_owned);
+        }
+        if self
+            .text
+            .len()
+            .checked_add(part.len())
+            .is_none_or(|length| length > REPLY_BYTES_MAX)
+        {
+            return Err(failure("codex_host_output_limit"));
+        }
+        self.text.push_str(part);
+        assert!(self.text.len() <= REPLY_BYTES_MAX);
+        Ok(())
     }
 }
 
@@ -630,6 +912,33 @@ fn validate_event(
     Ok(())
 }
 
+/// Names the failure a harness error ends a master turn with: a provider's rejected sign-in,
+/// or a sign-in the harness found missing itself, which is no word from the provider.
+/// Input: the error code the harness reported. Output: the code the turn's reason reads.
+fn assistant_failure(code: &str) -> &'static str {
+    match code {
+        "authentication_failed" => "gateway_invalid_authentication",
+        "not_signed_in" => "master_sign_in_missing",
+        "rate_limit" => "gateway_rate_limited",
+        "billing_error" => "gateway_quota_exhausted",
+        _ => "codex_host_turn_failed",
+    }
+}
+
+/// Checks the account Codex reads locally before a master turn is a ChatGPT sign-in; no
+/// account at all is a missing sign-in, not a provider rejection.
+/// Input: Codex's account read. Output: success, or the failure the turn ends with.
+pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
+    match read {
+        AuthControl::AccountRead {
+            account: Some(AuthAccount::Chatgpt { .. }),
+            ..
+        } => Ok(()),
+        AuthControl::AccountRead { account: None, .. } => Err(failure("master_sign_in_missing")),
+        _ => Err(failure("gateway_invalid_authentication")),
+    }
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
@@ -637,8 +946,12 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
 fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
-        "gateway_health_unknown" => MasterReason::ReadinessUnknown,
-        "gateway_invalid_authentication" => MasterReason::InvalidAuthentication,
+        "gateway_health_unknown"
+        | "master_sign_in_missing"
+        | "native_profile_credential_unavailable" => MasterReason::ReadinessUnknown,
+        "gateway_invalid_authentication"
+        | "native_profile_credential_expiring"
+        | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,
         "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
@@ -654,9 +967,13 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "codex_host_approval_required" => MasterReason::ApprovalRequired,
         "codex_host_cancelled" => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
-        "native_profile_lock_unavailable" | "master_runtime_host_unavailable" => {
-            MasterReason::RuntimeUnavailable
+        "master_repository_missing" => MasterReason::RepositoryMissing,
+        code if code.starts_with("repository_config_refused:") => {
+            MasterReason::RepositoryConfigRefused
         }
+        "native_profile_lock_unavailable"
+        | "master_runtime_host_unavailable"
+        | "rcli_profile_configuration_required" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }
@@ -671,6 +988,39 @@ mod tests {
     use crate::master_session::MasterReason;
     use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {
+        let mut reply = ReplyText::default();
+        reply
+            .push(Some("message-1"), "I will write ", true)
+            .unwrap();
+        reply.push(Some("message-1"), "the note.", true).unwrap();
+        reply.push(Some("message-2"), "DO", true).unwrap();
+        reply.push(Some("message-2"), "NE", true).unwrap();
+        assert_eq!(reply.text, "DONE");
+        reply.push(None, " more", true).unwrap();
+        assert_eq!(reply.text, "DONE more");
+        reply.tool_step();
+        assert_eq!(reply.text, "");
+        reply.push(None, "After the step.", true).unwrap();
+        assert_eq!(reply.text, "After the step.");
+
+        let mut reply = ReplyText::default();
+        reply.push(Some("message-1"), "First. ", false).unwrap();
+        reply.push(Some("message-2"), "Second.", false).unwrap();
+        assert_eq!(reply.text, "First. Second.");
+
+        let mut reply = ReplyText::default();
+        let long = "x".repeat(REPLY_BYTES_MAX);
+        reply.push(Some("message-1"), &long, true).unwrap();
+        assert_eq!(
+            reply.push(Some("message-1"), "y", true),
+            Err(failure("codex_host_output_limit"))
+        );
+        reply.push(Some("message-2"), "z", true).unwrap();
+        assert_eq!(reply.text, "z");
+    }
 
     fn protocol_input() -> ObservedEvent {
         ObservedEvent {
@@ -772,6 +1122,57 @@ mod tests {
             validate_event(&expected, &turn, &event).unwrap_err().0,
             "master_capture_identity"
         );
+    }
+
+    #[test]
+    fn a_master_stream_diagnostic_names_the_turn_and_its_late_lines_in_the_engine_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::Builder::new()
+            .prefix("crazyagent-stream-log")
+            .tempdir()
+            .unwrap();
+        let mut diagnostic = StreamDiagnostic::default();
+        diagnostic.keep(b"{\"type\":\"result\",\"subtype\":\"success\"}\n");
+        diagnostic.late(b"{\"type\":\"system\",\"subtype\":\"task_notification\"}\n");
+        diagnostic.fault = Some("claude_host_protocol_invalid_state".to_owned());
+        let runtime = MasterRuntimeView {
+            runtime_ref: RequestId::new("runtime-1").unwrap(),
+            artifact_sha256: "a".repeat(64),
+            native_session_id: Some("native-1".to_owned()),
+        };
+        keep_stream_diagnostic(
+            root.path(),
+            &SessionId::new("session-1").unwrap(),
+            &RequestId::new("turn-1").unwrap(),
+            &runtime,
+            &diagnostic,
+            Some("claude_host_protocol_invalid_state"),
+        )
+        .unwrap();
+        let log = root.path().join("logs").join("master-stream.log");
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        let entry: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&log).unwrap().trim_end()).unwrap();
+        assert_eq!(entry["session_id"], "session-1");
+        assert_eq!(entry["turn_id"], "turn-1");
+        assert_eq!(entry["native_session_id"], "native-1");
+        assert_eq!(entry["artifact_sha256"], "a".repeat(64));
+        assert_eq!(entry["error"], "claude_host_protocol_invalid_state");
+        assert_eq!(entry["fault"], "claude_host_protocol_invalid_state");
+        assert_eq!(entry["late_lines"], 1);
+        assert_eq!(
+            entry["late"],
+            serde_json::json!(["system/task_notification"])
+        );
+        assert_eq!(
+            entry["tail"],
+            "{\"type\":\"result\",\"subtype\":\"success\"}\n"
+        );
+        assert!(entry["at_ms"].as_u64().is_some_and(|at| at > 0));
     }
 
     struct RuntimeFixture {
@@ -913,6 +1314,10 @@ mod tests {
                 MasterReason::ConnectionChanged,
             ),
             ("gateway_health_unknown", MasterReason::ReadinessUnknown),
+            (
+                "repository_config_refused:core_hookspath",
+                MasterReason::RepositoryConfigRefused,
+            ),
             ("gateway_quota_unknown", MasterReason::QuotaUnknown),
             ("gateway_quota_exhausted", MasterReason::QuotaExhausted),
             ("gateway_rate_limited", MasterReason::RateLimited),
@@ -932,6 +1337,57 @@ mod tests {
             assert_eq!(
                 reason_for_error(&EngineError(code.into())),
                 expected,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_harness_with_no_sign_in_fails_the_turn_without_a_provider_rejection() {
+        let read = |account| AuthControl::AccountRead {
+            id: 1,
+            account,
+            requires_openai_auth: true,
+        };
+        let chatgpt = AuthAccount::Chatgpt {
+            email: None,
+            plan_type: "plus".into(),
+        };
+        assert!(account_failure(&read(Some(chatgpt))).is_ok());
+        assert_eq!(assistant_failure("not_signed_in"), "master_sign_in_missing");
+        for (gap, reason) in [
+            (
+                assistant_failure("not_signed_in").to_owned(),
+                MasterReason::ReadinessUnknown,
+            ),
+            (
+                account_failure(&read(None)).unwrap_err().0,
+                MasterReason::ReadinessUnknown,
+            ),
+            (
+                assistant_failure("authentication_failed").to_owned(),
+                MasterReason::InvalidAuthentication,
+            ),
+            (
+                account_failure(&read(Some(AuthAccount::ApiKey)))
+                    .unwrap_err()
+                    .0,
+                MasterReason::InvalidAuthentication,
+            ),
+        ] {
+            assert_eq!(reason_for_error(&EngineError(gap.clone())), reason, "{gap}");
+        }
+    }
+
+    #[test]
+    fn a_revoked_or_expiring_profile_sign_in_asks_the_owner_to_sign_in_again() {
+        for code in [
+            "native_profile_sign_in_revoked",
+            "native_profile_credential_expiring",
+        ] {
+            assert_eq!(
+                reason_for_error(&EngineError(code.into())),
+                MasterReason::InvalidAuthentication,
                 "{code}"
             );
         }

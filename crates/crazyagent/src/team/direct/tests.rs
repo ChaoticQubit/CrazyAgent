@@ -27,69 +27,7 @@ fn project(name: &str) -> ProjectId {
 }
 
 #[test]
-fn typed_keys_become_lines_on_enter() {
-    let mut lines = InputLines::default();
-    assert_eq!(lines.feed(b"use the "), Vec::<String>::new());
-    assert_eq!(
-        lines.feed(b"staging db\r"),
-        vec!["use the staging db".to_owned()]
-    );
-    assert_eq!(lines.feed(b"\r  \r"), Vec::<String>::new());
-    assert_eq!(
-        lines.feed(b"two\rlines\n"),
-        vec!["two".to_owned(), "lines".to_owned()]
-    );
-}
-
-#[test]
-fn editing_keys_change_the_line_and_other_keys_are_dropped() {
-    let mut lines = InputLines::default();
-    assert_eq!(lines.feed(b"fixx\x7f it\r"), vec!["fix it".to_owned()]);
-    assert_eq!(
-        lines.feed("caf\u{e9}\x7fe\r".as_bytes()),
-        vec!["cafe".to_owned()]
-    );
-    assert_eq!(lines.feed(b"wrong\x15right\r"), vec!["right".to_owned()]);
-    assert_eq!(lines.feed(b"gone\x03kept\r"), vec!["kept".to_owned()]);
-    assert_eq!(
-        lines.feed(b"up\x1b[A\x1b[1;5Cand\x1bOB\x1bx done\x01\r"),
-        vec!["upand done".to_owned()]
-    );
-    assert_eq!(
-        lines.feed(b"\x1b]0;title\x07\x1b]8;;link\x1b\\shown\r"),
-        vec!["shown".to_owned()]
-    );
-}
-
-#[test]
-fn a_paste_keeps_its_newlines_until_enter() {
-    let mut lines = InputLines::default();
-    assert_eq!(
-        lines.feed(b"\x1b[200~first\r\nsecond\x1b[201~"),
-        Vec::<String>::new()
-    );
-    assert_eq!(lines.feed(b"\r"), vec!["first\n\nsecond".to_owned()]);
-}
-
-#[test]
-fn a_sequence_split_across_inputs_is_still_dropped() {
-    let mut lines = InputLines::default();
-    assert_eq!(lines.feed(b"a\x1b"), Vec::<String>::new());
-    assert_eq!(lines.feed(b"["), Vec::<String>::new());
-    assert_eq!(lines.feed(b"Db\r"), vec!["ab".to_owned()]);
-}
-
-#[test]
-fn a_line_is_bounded() {
-    let mut lines = InputLines::default();
-    let long = vec![b'x'; DIRECT_INPUT_BYTES_MAX * 2];
-    assert_eq!(lines.feed(&long), Vec::<String>::new());
-    let line = lines.feed(b"\r");
-    assert_eq!(line, vec!["x".repeat(DIRECT_INPUT_BYTES_MAX)]);
-}
-
-#[test]
-fn input_to_a_sub_agent_is_recorded_on_its_task_and_noted_once() {
+fn a_prompt_to_a_sub_agent_is_recorded_on_its_task_and_noted_once() {
     let connection = database();
     let sub = agent(&connection, "alpha", "sub", "codex", Some(12));
     let master = agent(&connection, "alpha", "master", "claude-code", None);
@@ -110,7 +48,7 @@ fn input_to_a_sub_agent_is_recorded_on_its_task_and_noted_once() {
     );
     let task: Option<i64> = connection
         .query_row(
-            "SELECT task FROM team_direct_inputs WHERE agent=?1",
+            "SELECT task FROM team_owner_prompts WHERE agent=?1",
             [sub],
             |row| row.get(0),
         )
@@ -134,7 +72,7 @@ fn input_to_a_sub_agent_is_recorded_on_its_task_and_noted_once() {
     assert_eq!(
         note,
         format!(
-            "The owner typed straight into sub-agents since your last turn:\n- Owner told codex-{sub} on task 12: use the staging db\n- Owner told claude-code-{idle}: stop there\n\n"
+            "The owner sent these prompts straight to sub-agents since your last turn:\n- Owner told codex-{sub} on task 12: use the staging db\n- Owner told claude-code-{idle}: stop there\n\n"
         )
     );
     delivered(&connection, &project("alpha"), newest.unwrap()).unwrap();
@@ -142,6 +80,14 @@ fn input_to_a_sub_agent_is_recorded_on_its_task_and_noted_once() {
         notes(&connection, &project("alpha")).unwrap(),
         (String::new(), None)
     );
+    let kept: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_owner_prompts WHERE project='alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 0, "a prompt the master heard leaves no row behind");
     let (beta, _) = notes(&connection, &project("beta")).unwrap();
     assert!(beta.contains("elsewhere"));
 }
@@ -182,4 +128,48 @@ fn a_long_input_is_cut_in_the_note() {
     let (note, _) = notes(&connection, &project("alpha")).unwrap();
     assert!(note.contains(&format!(": {}\n", "y".repeat(NOTE_TEXT_BYTES_MAX))));
     assert!(!note.contains(&"y".repeat(NOTE_TEXT_BYTES_MAX + 1)));
+}
+
+#[test]
+fn typed_terminal_input_kept_by_older_engines_is_erased_when_the_database_opens() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("engine.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+            CREATE TABLE team_direct_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                task INTEGER,
+                harness TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_ms INTEGER NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO team_direct_inputs(project,agent,harness,text,created_ms,delivered)
+                VALUES ('alpha',1,'codex','export TOKEN=hunter2-typed',1,1);",
+        )
+        .unwrap();
+    super::super::initialize(&connection).unwrap();
+    let left: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'team_direct_inputs%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
+    super::super::initialize(&connection).unwrap();
+    let mut stored = Vec::new();
+    for entry in std::fs::read_dir(folder.path()).unwrap() {
+        stored.extend(std::fs::read(entry.unwrap().path()).unwrap());
+    }
+    assert!(
+        !stored
+            .windows(b"hunter2-typed".len())
+            .any(|window| window == b"hunter2-typed"),
+        "the erased text is gone from the database files"
+    );
 }

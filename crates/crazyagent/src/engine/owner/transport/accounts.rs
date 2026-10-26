@@ -350,21 +350,26 @@ async fn handle(
             if let (Some(credential), Some(key)) = (&credential, key) {
                 store_key(root, credential, key)?;
             }
-            let added = actor(
-                engine,
-                admission,
-                Command::Add(Box::new(connection), details),
-            )
-            .await;
-            let added = match added {
-                Ok(ResultValue::Account(listed)) => listed,
-                Ok(_) => return Err(unknown()),
-                Err(error) => {
-                    if let Some(credential) = &credential {
-                        let _ = remove_key(root, credential);
-                    }
-                    return Err(error);
-                }
+            let keys = authority.clone();
+            let added = engine
+                .settled_job(
+                    |reply| {
+                        Job::Accounts(
+                            admission.clone(),
+                            Command::Add(Box::new(connection), details),
+                            reply,
+                        )
+                    },
+                    move |result| {
+                        if let (Err(_), Some(credential)) = (result, &credential) {
+                            let _ = remove_key(&keys.root, credential);
+                        }
+                        Ok(())
+                    },
+                )
+                .await?;
+            let ResultValue::Account(added) = added else {
+                return Err(unknown());
             };
             Reply::Account {
                 account: views(root, vec![*added]).await?.remove(0),
@@ -742,7 +747,9 @@ fn base_status(root: &Root, listed: &Listed) -> Result<AccountStatus, EngineErro
     Ok(match &listed.connection.auth {
         ModelAuthentication::NativeManaged { .. } | ModelAuthentication::Oauth { .. } => {
             match listed.sign_in {
-                Some(NativeAuthPhase::AuthenticatedObserved) => AccountStatus::SignedIn,
+                Some(NativeAuthPhase::AuthenticatedObserved) if listed.launchable => {
+                    AccountStatus::SignedIn
+                }
                 Some(
                     NativeAuthPhase::Starting
                     | NativeAuthPhase::AwaitingOwner
@@ -792,7 +799,12 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         },
         model: (!native).then(|| listed.connection.model.id.clone()),
         status,
-        status_label: status.label().into(),
+        status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
+            "Sign-in rejected"
+        } else {
+            status.label()
+        }
+        .into(),
     }
 }
 
@@ -852,6 +864,7 @@ async fn check(root: &Root, listed: Listed) -> Result<(AccountView, Vec<String>)
     let Some(url) = http_url(&listed.connection) else {
         return Ok((view(&listed, base), Vec::new()));
     };
+    crate::accounts::account_url(url.as_str())?;
     let key = match &listed.connection.auth {
         ModelAuthentication::ApiKey { credential_ref } => read_key(root, credential_ref)?,
         _ => None,

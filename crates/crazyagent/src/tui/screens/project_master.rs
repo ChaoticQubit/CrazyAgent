@@ -16,7 +16,8 @@ pub(in crate::tui) struct MasterRead<'a> {
 
 /// Builds the Conversation transcript from the engine's master turns.
 /// Takes the read, the master harness name, the account label, whether tools are on and the UTC offset.
-/// Returns the transcript: the owner's messages, the master's real replies and a plain notice for a stopped turn.
+/// Returns the transcript: the owner's messages, the master's real replies, a notice per task a reply
+/// handed to the team and a plain notice for a stopped turn.
 pub(in crate::tui) fn transcript_from(
     read: &MasterRead<'_>,
     harness: &str,
@@ -55,6 +56,14 @@ pub(in crate::tui) fn transcript_from(
                 error: false,
             });
         }
+        for task in &turn.tasks {
+            messages.push(Message {
+                speaker: Speaker::Notice,
+                time: None,
+                text: task.line(),
+                error: false,
+            });
+        }
         if let Some(text) = notice(turn, harness, latest) {
             messages.push(Message {
                 speaker: Speaker::Notice,
@@ -64,7 +73,7 @@ pub(in crate::tui) fn transcript_from(
             });
         }
     }
-    assert!(messages.len() <= turns.len() * 3);
+    assert!(messages.len() <= turns.len() * 3 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
     let status = match (read.session, turns.last()) {
         (None, _) => MasterStatus::NotReady,
         (Some(MasterSessionPhase::Closing | MasterSessionPhase::Closed), _) => {
@@ -88,6 +97,7 @@ pub(in crate::tui) fn transcript_from(
         harness: harness.to_owned(),
         account,
         tools,
+        open: read.session == Some(MasterSessionPhase::Configured),
         status,
         messages,
     }
@@ -138,15 +148,24 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
     if waiting {
         return None;
     }
+    let code = stop_code(turn);
     if asks_approval(turn) {
-        return latest.then(|| format!("{harness} is waiting for your approval."));
+        let code = turn
+            .reason
+            .map_or_else(String::new, |_| format!(" ({code})"));
+        return latest.then(|| format!("{harness} is waiting for your approval.{code}"));
     }
     if turn.phase == MasterTurnPhase::Uncertain {
         return Some(format!(
-            "It is not known whether {harness} finished this turn. Press r to try again."
+            "It is not known whether {harness} finished this turn. ({code}) Press r to try again."
         ));
     }
     let retry = if latest { " Press r to try again." } else { "" };
+    if turn.reason == Some(MasterReason::RepositoryConfigRefused)
+        && let Some(detail) = &turn.detail
+    {
+        return Some(format!("{harness} stopped: {detail} ({code}){retry}"));
+    }
     let why = match turn.reason {
         Some(MasterReason::ReadinessUnknown | MasterReason::ReadinessStale) => {
             "the account is not signed in. Sign in again in Settings, Accounts."
@@ -159,14 +178,13 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             | MasterReason::QuotaUnknown
             | MasterReason::BudgetExhausted,
         ) => {
-            "the account hit its usage limit. Add an account to the pool, or wait for one to be free."
+            "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset."
         }
         Some(MasterReason::RateLimited | MasterReason::CooldownActive) => {
             "the account is resting after too many requests."
         }
-        Some(MasterReason::CapacityUnavailable | MasterReason::ProfileBusy) => {
-            "no account in the pool is free right now."
-        }
+        Some(MasterReason::CapacityUnavailable) => "another turn is still running.",
+        Some(MasterReason::ProfileBusy) => "its account is busy signing in or out.",
         Some(MasterReason::ConnectionChanged) => "its settings changed while it was open.",
         Some(MasterReason::ScopeRevoked) => "it no longer has access to this project.",
         Some(MasterReason::RuntimeUnavailable) => {
@@ -175,6 +193,10 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::CaptureIncomplete) => "its reply was cut off.",
         Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
+        Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
+        Some(MasterReason::RepositoryConfigRefused) => {
+            "a Git setting in this project's repository runs commands or redirects Git."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -184,7 +206,49 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             }
         }
     };
-    Some(format!("{harness} stopped: {why}{retry}"))
+    Some(format!("{harness} stopped: {why} ({code}){retry}"))
+}
+
+/// Names the engine code a stopped turn shows: the cause the engine stored, else its
+/// reason, else its phase when the engine gave no specific reason, so the owner never
+/// sees a bare "unknown". Takes the turn. Returns the code as the engine spells it.
+fn stop_code(turn: &MasterTurnView) -> String {
+    if let Some(cause) = &turn.cause {
+        return cause.clone();
+    }
+    let value = match turn
+        .reason
+        .filter(|reason| *reason != MasterReason::Unknown)
+    {
+        Some(reason) => serde_json::to_value(reason),
+        None => serde_json::to_value(turn.phase),
+    }
+    .expect("master reasons and phases serialize");
+    let code = value
+        .as_str()
+        .expect("master reasons and phases serialize as names")
+        .to_owned();
+    assert!(!code.is_empty() && code != "unknown");
+    code
+}
+
+/// Turns the engine's refusal of a master request into a plain line that keeps its code.
+/// Takes the rejection code.
+/// Returns what happened, ending with the code in brackets.
+pub(in crate::tui) fn master_problem(code: &str) -> String {
+    let plain = match code {
+        "master_source_conflict" => "Settings changed since this conversation started.",
+        "master_session_active" => "A master conversation is already open.",
+        "master_session_missing" | "master_session_not_active" => {
+            "This conversation has ended. Send again to start a new one."
+        }
+        "master_turn_outstanding" => "The master is still working on the last message.",
+        "master_turn_capacity" => "This conversation is full. Press e to end it, then send again.",
+        "master_turn_not_current" => "That turn already ended.",
+        "stale_revision" => "Something changed meanwhile. Try again.",
+        _ => "The engine refused it.",
+    };
+    format!("{plain} ({code})")
 }
 
 #[cfg(test)]
@@ -210,6 +274,10 @@ mod tests {
             attempt: None,
             runtime: None,
             reply: None,
+            accounts: Vec::new(),
+            tasks: Vec::new(),
+            detail: None,
+            cause: None,
         }
     }
 
@@ -255,6 +323,61 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_could_not_start_names_the_missing_repository_and_offers_a_retry() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let turns = [turn(
+            1,
+            3,
+            MasterTurnPhase::Blocked,
+            Some(MasterReason::RepositoryMissing),
+        )];
+        let transcript = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Plan the dashboard.", false),
+                (
+                    Speaker::Notice,
+                    "Codex stopped: this project has no repository yet. (repository_missing) Press r to try again.",
+                    true
+                ),
+            ]
+        );
+        assert_ne!(transcript.status, MasterStatus::Thinking { since_ms: None });
+    }
+
+    #[test]
+    fn a_shared_account_never_tells_the_owner_to_wait_for_a_free_account() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let cases = [
+            (
+                MasterReason::ProfileBusy,
+                "Codex stopped: its account is busy signing in or out. (profile_busy) Press r to try again.",
+            ),
+            (
+                MasterReason::CapacityUnavailable,
+                "Codex stopped: another turn is still running. (capacity_unavailable) Press r to try again.",
+            ),
+            (
+                MasterReason::QuotaExhausted,
+                "Codex stopped: the account hit its usage limit. Add an account to the pool, or wait for its limit to reset. (quota_exhausted) Press r to try again.",
+            ),
+        ];
+        for (reason, notice) in cases {
+            let turns = [turn(1, 3, MasterTurnPhase::Failed, Some(reason))];
+            let transcript = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
+            assert_eq!(
+                said(&transcript),
+                [
+                    (Speaker::You, "Plan the dashboard.", false),
+                    (Speaker::Notice, notice, true),
+                ]
+            );
+            assert!(!notice.contains("free"));
+        }
+    }
+
+    #[test]
     fn no_session_is_not_ready_and_an_open_master_without_turns_is_ready() {
         let empty = build(None, &[], &[]);
         assert_eq!(empty.status, MasterStatus::NotReady);
@@ -289,7 +412,7 @@ mod tests {
                 (Speaker::You, "Plan the dashboard.", false),
                 (
                     Speaker::Notice,
-                    "Codex stopped: the account hit its usage limit. Add an account to the pool, or wait for one to be free.",
+                    "Codex stopped: the account hit its usage limit. Add an account to the pool, or wait for its limit to reset. (quota_exhausted)",
                     true
                 ),
                 (Speaker::You, "Add a dark theme.", false),
@@ -356,7 +479,15 @@ mod tests {
                     );
                 }
                 MasterStatus::NeedsYou => {
-                    assert_eq!(last.text, "Codex is waiting for your approval.");
+                    let code = if reason.is_some() {
+                        " (approval_required)"
+                    } else {
+                        ""
+                    };
+                    assert_eq!(
+                        last.text,
+                        format!("Codex is waiting for your approval.{code}")
+                    );
                     assert!(!last.error);
                 }
                 _ => assert_eq!(last.speaker, Speaker::You),
@@ -369,8 +500,123 @@ mod tests {
         );
         assert_eq!(
             cancelled.messages.last().unwrap().text,
-            "Codex stopped: you stopped this turn. Press r to try again."
+            "Codex stopped: you stopped this turn. (cancelled) Press r to try again."
         );
+    }
+
+    #[test]
+    fn every_stopped_turn_names_its_engine_code_and_never_a_bare_unknown() {
+        let configured = Some(MasterSessionPhase::Configured);
+        let inputs = [entry(3, "Go.")];
+        let named = [
+            (MasterReason::ReadinessUnknown, "readiness_unknown"),
+            (MasterReason::ReadinessStale, "readiness_stale"),
+            (
+                MasterReason::InvalidAuthentication,
+                "invalid_authentication",
+            ),
+            (MasterReason::QuotaUnknown, "quota_unknown"),
+            (MasterReason::QuotaExhausted, "quota_exhausted"),
+            (MasterReason::RateLimited, "rate_limited"),
+            (MasterReason::CooldownActive, "cooldown_active"),
+            (MasterReason::ConnectionChanged, "connection_changed"),
+            (MasterReason::ScopeRevoked, "scope_revoked"),
+            (MasterReason::CapacityUnavailable, "capacity_unavailable"),
+            (MasterReason::BudgetExhausted, "budget_exhausted"),
+            (MasterReason::ProfileBusy, "profile_busy"),
+            (MasterReason::RuntimeUnavailable, "runtime_unavailable"),
+            (MasterReason::CaptureIncomplete, "capture_incomplete"),
+            (MasterReason::OutputLimit, "output_limit"),
+            (
+                MasterReason::UnsupportedCapability,
+                "unsupported_capability",
+            ),
+            (MasterReason::RepositoryMissing, "repository_missing"),
+            (MasterReason::Cancelled, "cancelled"),
+        ];
+        for (reason, code) in named {
+            for phase in [MasterTurnPhase::Blocked, MasterTurnPhase::Failed] {
+                let transcript = build(configured, &[turn(1, 3, phase, Some(reason))], &inputs);
+                let last = &transcript.messages.last().unwrap().text;
+                assert!(last.contains(&format!(" ({code}) Press r")), "{last}");
+            }
+        }
+        let unnamed = [
+            (
+                MasterTurnPhase::Blocked,
+                Some(MasterReason::Unknown),
+                "blocked",
+            ),
+            (
+                MasterTurnPhase::Failed,
+                Some(MasterReason::Unknown),
+                "failed",
+            ),
+            (MasterTurnPhase::Failed, None, "failed"),
+            (MasterTurnPhase::Cancelled, None, "cancelled"),
+            (MasterTurnPhase::Uncertain, None, "uncertain"),
+            (
+                MasterTurnPhase::Uncertain,
+                Some(MasterReason::Unknown),
+                "uncertain",
+            ),
+        ];
+        for (phase, reason, code) in unnamed {
+            let transcript = build(configured, &[turn(1, 3, phase, reason)], &inputs);
+            let last = &transcript.messages.last().unwrap().text;
+            assert!(last.contains(&format!(" ({code}) Press r")), "{last}");
+            assert!(!last.contains("unknown"), "{last}");
+        }
+    }
+
+    #[test]
+    fn a_refused_master_request_reads_plainly_and_keeps_its_code() {
+        assert_eq!(
+            master_problem("master_source_conflict"),
+            "Settings changed since this conversation started. (master_source_conflict)"
+        );
+        assert_eq!(
+            master_problem("master_turn_capacity"),
+            "This conversation is full. Press e to end it, then send again. (master_turn_capacity)"
+        );
+        assert_eq!(
+            master_problem("master_dispatch_capacity"),
+            "The engine refused it. (master_dispatch_capacity)"
+        );
+    }
+
+    #[test]
+    fn a_stopped_turn_names_the_cause_the_engine_stored() {
+        let configured = Some(MasterSessionPhase::Configured);
+        let inputs = [entry(3, "Go.")];
+        let refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+        let cases = [
+            (
+                MasterReason::RuntimeUnavailable,
+                None,
+                "rcli_profile_configuration_required",
+                "Codex stopped: it could not start. Check it in Settings, Harnesses. (rcli_profile_configuration_required) Press r to try again.".to_owned(),
+            ),
+            (
+                MasterReason::Unknown,
+                None,
+                "master_runtime_binding",
+                "Codex stopped: something went wrong. (master_runtime_binding) Press r to try again.".to_owned(),
+            ),
+            (
+                MasterReason::RepositoryConfigRefused,
+                Some(refused),
+                "repository_config_refused:core_hookspath",
+                format!("Codex stopped: {refused} (repository_config_refused:core_hookspath) Press r to try again."),
+            ),
+        ];
+        for (reason, detail, cause, line) in cases {
+            let mut stopped = turn(1, 3, MasterTurnPhase::Blocked, Some(reason));
+            stopped.detail = detail.map(str::to_owned);
+            stopped.cause = Some(cause.to_owned());
+            let transcript = build(configured, &[stopped], &inputs);
+            assert_eq!(transcript.messages.last().unwrap().text, line);
+        }
     }
 
     #[test]
@@ -402,6 +648,43 @@ mod tests {
                 .messages
                 .iter()
                 .all(|m| m.speaker == Speaker::You)
+        );
+    }
+
+    #[test]
+    fn the_tasks_a_reply_handed_off_show_under_it_with_their_outcome_or_as_still_running() {
+        use crate::master_session::{MasterReply, MasterReplyProvenance, MasterTask};
+        let inputs = [entry(3, "Plan the page.")];
+        let mut replied = turn(1, 3, MasterTurnPhase::Succeeded, None);
+        replied.reply = Some(MasterReply {
+            text: "I handed it to a sub-agent.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-1").unwrap(),
+                runtime_ref: RequestId::new("runtime-1").unwrap(),
+                capture_ref: RequestId::new("capture-1").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        let done = "Task 7 \"Write the README\" (codex, sub-agent 3) is done. Full result in the Team view.";
+        replied.tasks = vec![
+            MasterTask {
+                task: 7,
+                note: Some(done.into()),
+            },
+            MasterTask {
+                task: 8,
+                note: None,
+            },
+        ];
+        let transcript = build(Some(MasterSessionPhase::Configured), &[replied], &inputs);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Plan the page.", false),
+                (Speaker::Master, "I handed it to a sub-agent.", false),
+                (Speaker::Notice, done, false),
+                (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+            ]
         );
     }
 }

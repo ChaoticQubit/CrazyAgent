@@ -8,6 +8,7 @@ import type { IconName, Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
+import { localClock } from "../project/research";
 
 export const COPY_WARN_BYTES = 1024 ** 3;
 export const FOUND_POLL_MS = 3000;
@@ -95,17 +96,30 @@ export function joinPath(root: string, name: string): string {
   return `${trimSlash(root)}${separator}${name}`;
 }
 
-/** Says what Move or Copy does; Copy shows the size first and warns above 1 GB.
- * Inputs: the mode, the folder size or null while it is read, and the projects folder.
+/** How the owner adds an existing folder: set it up where it is (the default, nothing on disk
+ * moves), or explicitly move or copy it into the projects folder. */
+export type AddWay = "here" | AddFolderMode;
+
+/** Says what using the folder where it is, Move or Copy does; Copy shows the size first and warns
+ * above 1 GB. Inputs: the way, the folder size or null while it is read, and the projects folder.
  * Output: the sentence and whether it is a warning. */
-export function sizeLine(mode: AddFolderMode, bytes: number | null, home: string): { text: string; warn: boolean } {
+export function sizeLine(mode: AddWay, bytes: number | null, home: string): { text: string; warn: boolean } {
   const where = folderLabel(home);
+  if (mode === "here") return { text: "Sets it up where it is. Nothing is moved or copied.", warn: false };
   if (mode === "move") return { text: `Moves the folder into ${where}. It won't stay at its old place.`, warn: false };
   if (bytes === null) return { text: "Checking the folder size...", warn: false };
   if (bytes > COPY_WARN_BYTES) {
-    return { text: `This copies ${formatBytes(bytes)} into ${where}. That takes a while and uses as much disk again. Move is instant on the same disk.`, warn: true };
+    return { text: `This copies ${formatBytes(bytes)} into ${where}. That takes a while and uses as much disk again. Using it where it is needs no copy.`, warn: true };
   }
   return { text: `Copies ${formatBytes(bytes)} into ${where}. The original stays where it is.`, warn: false };
+}
+
+/** Says that a Copy leaves the folder's linked git worktrees with the original, since a copy
+ * that kept them would share them with it. Input: how many linked worktrees the folder has.
+ * Output: one sentence. */
+export function worktreesLine(count: number): string {
+  const many = count !== 1;
+  return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
 }
 
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it
@@ -149,15 +163,36 @@ export function repoMeta(repo: GitHubRepo): string {
   return `${repo.private ? "Private" : "Public"}, ${formatBytes(repo.size_kb * 1024)}, branch ${displayText(repo.default_branch)}`;
 }
 
-/** Badge word, tone and failure line for one onboarding step.
- * Input: the step. Output: the fixed status word, its tone and the reason when it failed. */
-export function stepView(step: OnboardingStep): { word: string; tone: Tone; line: string | null } {
+/** Badge word, tone and failure line for one onboarding step; a step waiting out a paused pool
+ * names when the pause ends in local time. Inputs: the step and whether the setup is already saved,
+ * when a step that never started was skipped. Output: the status word, its tone and the reason when
+ * it failed. */
+export function stepView(step: OnboardingStep, finished = false): { word: string; tone: Tone; line: string | null } {
   switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
+    case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." };
+    case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
-    default: return { word: "Waiting", tone: "neutral", line: null };
+    default:
+      if (finished) return { word: "Skipped", tone: "neutral", line: null };
+      if (step.until_ms !== undefined) return { word: `Rate limited until ${localClock(step.until_ms)}`, tone: "warn", line: null };
+      return { word: "Waiting", tone: "neutral", line: null };
   }
+}
+
+/** Whether the review offers Retry mapping: the mapping agent failed and the setup isn't saved yet.
+ * Input: the onboarding view. Output: true when Retry and Skip show. */
+export function mappingRetry(view: OnboardingView): boolean {
+  return view.mapping.kind === "failed" && !view.finished;
+}
+
+/** The project's own folder from its saved setup: the recorded folder, or the folder holding it when
+ * it is the project's `.crazyagent` folder. Input: the saved setup. Output: the folder path. */
+export function projectFolder(stored: StoredSetup): string {
+  const clean = trimSlash(stored.folder);
+  const name = folderName(clean);
+  return name === ".crazyagent" ? clean.slice(0, clean.length - name.length - 1) : clean;
 }
 
 const MISSING_LABELS: Record<string, string> = {
@@ -184,20 +219,21 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
   };
 }
 
-/** Tells whether the graph and mapping steps have stopped changing.
+/** Tells whether the graph and mapping steps have stopped changing or the setup is already saved.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
   const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
-  return done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
+  return view.finished || done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
 }
 
 /** Says whether the owner can confirm yet and what to do.
  * Input: the onboarding view. Output: ready and one sentence. */
 export function confirmReady(view: OnboardingView): { ready: boolean; line: string } {
+  if (view.finished) return { ready: true, line: "This project is set up. Change anything below, then save." };
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
   if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
-  if (view.graph.kind !== "done") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
+  if (!["done", "off", "not_installed"].includes(view.graph.kind)) return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
 }
 
@@ -251,9 +287,13 @@ export function installed(entry: PackEntry): boolean {
   return entry.state.state === "on" || entry.state.state === "off";
 }
 
-/** The name a pack entry shows. Input: the entry. Output: its id as plain text. */
+const ENTRY_NAMES: Record<string, string> = { graphify: "Graphify skill for agents" };
+
+/** The name a pack entry shows, kept apart from the tool of the same name: the graphify entry
+ * reads "Graphify skill for agents" beside the "Graphify command" tool. Input: the entry.
+ * Output: the name as plain text. */
 export function entryName(entry: PackEntry): string {
-  return displayText(entry.id);
+  return displayText(Object.hasOwn(ENTRY_NAMES, entry.id) ? ENTRY_NAMES[entry.id] : entry.id);
 }
 
 /** The icon a pack entry shows. Input: the entry. Output: server for an MCP server, blocks for a skill. */
@@ -262,7 +302,7 @@ export function entryIcon(entry: PackEntry): IconName {
 }
 
 export const PACK_GROUPS: { group: PackGroup; title: string; about: string }[] = [
-  { group: "always", title: "Always on", about: "Every project needs these." },
+  { group: "graph", title: "Code graph", about: "Builds each project's code graph with the Graphify command and gives agents the Graphify skill. Untick it to set projects up without a graph." },
   { group: "workflow", title: "Workflow skills", about: "How agents plan, build, test and review." },
   { group: "design", title: "Design skills", about: "Taste and explainers for front ends and docs." },
   { group: "reply_style", title: "Reply style", about: "Change how every agent writes its replies." },
@@ -280,10 +320,11 @@ export function packGroups(pack: PackEntry[]): { group: PackGroup; title: string
   return groups.filter((item) => item.entries.length > 0);
 }
 
-/** The pack entries ticked before the owner changes anything: the ones on by default.
+/** The pack entries ticked before the owner changes anything: the ones on by default that are not
+ * installed or installing yet, so Setup never offers to install an entry again.
  * Input: the pack. Output: their ids in pack order. */
 export function packTicks(pack: PackEntry[]): string[] {
-  return pack.filter((entry) => entry.on_by_default).map((entry) => entry.id);
+  return pack.filter((entry) => entry.on_by_default && (entry.state.state === "available" || entry.state.state === "failed")).map((entry) => entry.id);
 }
 
 /** Names the ticked MCP servers that continuing approves.
@@ -310,7 +351,7 @@ export function setupBusy(status: SetupStatus): boolean {
  * Inputs: the status and the ticked ids. Output: how many are settled, of how many, and how many failed. */
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
-    ...status.pack.filter((item) => ticked.includes(item.id) || item.group === "always").map((item) => item.state.state)];
+    ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
   const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }

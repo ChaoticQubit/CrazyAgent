@@ -250,7 +250,7 @@ fn a_removal_that_did_not_commit_is_put_back_by_the_sweep() {
 }
 
 #[test]
-fn required_unknown_and_uninstalled_entries_are_refused_without_changes() {
+fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_forced() {
     let (dir, mut connection) = database();
     let root = dir.path();
     let cases = [
@@ -258,14 +258,14 @@ fn required_unknown_and_uninstalled_entries_are_refused_without_changes() {
             SetupAction::Remove {
                 id: "graphify".into(),
             },
-            "pack_required",
+            "pack_not_installed",
         ),
         (
             SetupAction::Set {
                 id: "graphify".into(),
                 on: false,
             },
-            "pack_required",
+            "pack_not_installed",
         ),
         (
             SetupAction::Set {
@@ -352,6 +352,96 @@ fn an_entry_whose_skill_name_is_taken_installs_nothing() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(store, vec!["beta"]);
+}
+
+fn graph_on(connection: &mut Connection) -> bool {
+    let tx = connection.transaction().unwrap();
+    entry_switch(&tx, GRAPH_ENTRY).unwrap() == Some(true)
+}
+
+#[test]
+fn a_graphify_skill_already_in_the_store_reads_installed_and_is_adopted_not_installed_again() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let mine = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    assert!(!graph_on(&mut connection));
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AddSkill {
+            scope: Scope::Global,
+            source: skill(mine.path(), "graphify").display().to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pack_state(&status_of(&mut connection, root), "graphify"),
+        PackState::On
+    );
+    assert!(graph_on(&mut connection));
+
+    install(
+        &mut connection,
+        root,
+        "graphify",
+        "https://example.invalid/graphify@1",
+        vec![skill(work.path(), "graphify")],
+        None,
+    )
+    .unwrap();
+    let listed = skills(&mut connection, root);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "graphify");
+    assert_eq!(
+        pack_state(&status_of(&mut connection, root), "graphify"),
+        PackState::On
+    );
+
+    let off = SetupAction::Set {
+        id: "graphify".into(),
+        on: false,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    assert_eq!(
+        pack_state(&status_of(&mut connection, root), "graphify"),
+        PackState::Off
+    );
+    assert!(!skills(&mut connection, root)[0].enabled);
+    assert!(!graph_on(&mut connection));
+}
+
+#[test]
+fn a_setup_run_installs_the_graphify_command_only_while_graphify_is_ticked_or_on() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let mine = tempfile::tempdir().unwrap();
+    let run = |pack: Vec<&str>| SetupAction::Run {
+        pack: pack.into_iter().map(Into::into).collect(),
+    };
+    assert_eq!(
+        owner(&mut connection, root, run(vec!["caveman"])),
+        Outcome::Applied
+    );
+    assert!(!progress::snapshot(root).graph_tool);
+    assert_eq!(
+        owner(&mut connection, root, run(vec!["graphify"])),
+        Outcome::Applied
+    );
+    assert!(progress::snapshot(root).graph_tool);
+    assert_eq!(owner(&mut connection, root, run(vec![])), Outcome::Applied);
+    assert!(!progress::snapshot(root).graph_tool);
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AddSkill {
+            scope: Scope::Global,
+            source: skill(mine.path(), "graphify").display().to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(owner(&mut connection, root, run(vec![])), Outcome::Applied);
+    assert!(progress::snapshot(root).graph_tool);
 }
 
 #[test]

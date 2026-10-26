@@ -51,18 +51,30 @@ const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
-const CODEX_TOOLS_ON: [&str; 6] = [
+const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
     "features.apps=false",
     "features.plugins=false",
     "features.goals=false",
+    "features.multi_agent=false",
+    "features.multi_agent_v2=false",
     "mcp_servers={}",
 ];
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
 pub(super) const CLAUDE_NO_MCP: [&str; 2] = ["--mcp-config", "{\"mcpServers\":{}}"];
+pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
+/// Claude Code's own sub-agent tools, denied to every tools-on Claude agent the engine starts,
+/// master and team alike, so sub-agents start only through the engine. Claude Code 2.1.309
+/// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
+/// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
+pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+/// Turns off Claude Code's background Bash commands and background agents for a tools-on
+/// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
+/// the turn's result, which the engine would read as the next task's reply.
+const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -207,11 +219,13 @@ pub enum LaunchEvent {
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
+    LateOutput { lines: u64 },
 }
 
 /// Tells whether a provider error message says the account hit a rate or usage limit.
 /// Takes the provider's error text, which is never stored or shown.
-/// Returns true for rate limit, usage limit, quota and HTTP 429 wording.
+/// Returns true for rate limit, usage limit, quota and HTTP 429 wording, and for the
+/// limit lines Claude Code writes itself.
 pub fn rate_limited(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [
@@ -225,6 +239,43 @@ pub fn rate_limited(message: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+        || claude_limit_line(message.trim_start())
+}
+
+/// Tells whether a line is one of Claude Code's own limit lines, by the check Claude
+/// Code 2.1.309 ships (`Bii`): one of its limit prefixes, or a model family, an optional
+/// name of 1 to 40 characters without a middle dot or line break, then
+/// ` requires usage credits.`. Takes the line. Returns true for a limit line.
+fn claude_limit_line(line: &str) -> bool {
+    const PREFIXES: [&str; 12] = [
+        "You've hit your",
+        "You've reached your",
+        "You're out of usage credits",
+        "Your org is out of usage \u{b7} add funds to continue",
+        "Your org is out of usage \u{b7} contact your admin",
+        "Your seat type doesn't include usage credits",
+        "Your seat type doesn't include usage",
+        "Your usage allocation has been disabled by your admin",
+        "Your group's usage limit is set to $0",
+        "Fable 5 requires usage credits",
+        "You're out of extra usage",
+        "Your seat type doesn't include extra usage",
+    ];
+    const FAMILIES: [&str; 5] = ["Fable", "Haiku", "Mythos", "Opus", "Sonnet"];
+    const CREDITS: &str = " requires usage credits.";
+    PREFIXES.iter().any(|prefix| line.starts_with(prefix))
+        || FAMILIES.iter().any(|family| {
+            line.strip_prefix(family).is_some_and(|rest| {
+                rest.starts_with(CREDITS)
+                    || rest
+                        .strip_prefix(' ')
+                        .and_then(|tail| tail.find(CREDITS).map(|end| &tail[..end]))
+                        .is_some_and(|name| {
+                            (1..=40).contains(&name.chars().count())
+                                && !name.contains(['\u{b7}', '\n'])
+                        })
+            })
+        })
 }
 
 /// A plain failure code from a launch adapter. It never carries secrets or raw output.
@@ -434,15 +485,18 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
+                CLAUDE_DENY_FLAG,
             ]
             .map(OsString::from),
         );
+        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(OsString::from));
     } else {
         arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
     }
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR", home.clone()),
-        ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home),
+        ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.clone()),
+        ("CLAUDE_CODE_TMPDIR", home),
         ("TERM", OsString::from("dumb")),
         ("DISABLE_TELEMETRY", OsString::from("1")),
         (
@@ -452,6 +506,10 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
     ];
     if request.tools {
         environment.push(("SHELL", OsString::from("/bin/zsh")));
+        environment.push((
+            CLAUDE_BACKGROUND_TASKS_OFF.0,
+            OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
+        ));
     }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
         arguments.push(OsString::from("--bare"));
@@ -580,6 +638,7 @@ enum Driver {
         protocol: ClaudeProtocol,
         turns: u64,
         interrupt: Option<String>,
+        late: u64,
     },
 }
 
@@ -621,6 +680,7 @@ impl Driver {
                         protocol,
                         turns: 0,
                         interrupt: None,
+                        late: 0,
                     },
                     Vec::new(),
                 ))
@@ -695,6 +755,7 @@ impl Driver {
                 protocol,
                 turns,
                 interrupt,
+                ..
             } => {
                 if protocol.state() != ClaudeState::Active || interrupt.is_some() {
                     return Err(failure("launch_not_running"));
@@ -734,7 +795,11 @@ impl Driver {
                 let decoded = protocol
                     .receive(&framed)
                     .map_err(|_| failure("launch_protocol_failed"))?;
-                if started {
+                if started
+                    && !decoded
+                        .iter()
+                        .any(|event| matches!(event, CodexEvent::NativeSubAgentStarted { .. }))
+                {
                     *server_turn = true;
                 }
                 for event in decoded {
@@ -777,6 +842,13 @@ impl Driver {
                                 success: status == TurnStatus::Completed,
                             });
                         }
+                        CodexEvent::NativeSubAgentStarted { thread_id, turn_id } => {
+                            writes.push(
+                                protocol
+                                    .interrupt_child(&thread_id, &turn_id)
+                                    .map_err(|_| failure("launch_protocol_failed"))?,
+                            );
+                        }
                         CodexEvent::ApprovalRequired { id, .. }
                         | CodexEvent::UnsupportedRequest { id, .. } => {
                             writes.push(
@@ -813,6 +885,7 @@ impl Driver {
             Self::Claude {
                 protocol,
                 interrupt,
+                late,
                 ..
             } => {
                 let value: serde_json::Value =
@@ -827,6 +900,10 @@ impl Driver {
                         }
                     }
                     Some("control_request" | "keep_alive") => {}
+                    _ if protocol.state() == ClaudeState::Idle => {
+                        *late = late.saturating_add(1);
+                        events.push(LaunchEvent::LateOutput { lines: *late });
+                    }
                     _ => {
                         let decoded = protocol
                             .receive(&framed)
@@ -869,9 +946,11 @@ impl Driver {
 }
 
 /// A running harness process driven through its headless interface.
-/// The process leads its own process group so stop reaches every descendant.
+/// The process leads its own process group, and a harness on pipes has a warden in its
+/// sandbox, so stop reaches every descendant, those in their own sessions included.
 pub struct Session {
     child: Child,
+    warden: Option<crate::sandbox::warden::Warden>,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -943,6 +1022,7 @@ impl Session {
         let output_bytes = request.limits.output_bytes;
         let (sender, lines) = channel();
         let mut child;
+        let mut warden = None;
         let stdin;
         match durable {
             Some(io) => {
@@ -961,7 +1041,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
-                child = crate::spawn_gate::spawn(&mut command)
+                (child, warden) = crate::sandbox::warden::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
@@ -988,6 +1068,7 @@ impl Session {
         }
         let mut session = Self {
             child,
+            warden,
             stdin,
             lines,
             driver,
@@ -1084,7 +1165,8 @@ impl Session {
         }
     }
 
-    /// Stops the whole process group: TERM, a bounded grace wait, then KILL.
+    /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
+    /// run's warden, when it has one, stop every process left in its sandbox.
     /// Output: the leader's exit code when it exited normally.
     pub fn stop(mut self) -> Option<i32> {
         self.stop_group()
@@ -1129,10 +1211,13 @@ impl Session {
         }
         self.stopped = true;
         self.stdin = None;
+        if let Some(warden) = self.warden.take() {
+            match warden {}
+        }
         let code = self.reap(self.limits.stop_grace);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
-        assert!(self.stdin.is_none());
+        assert!(self.stdin.is_none() && self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))
     }
 
@@ -1149,7 +1234,13 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
+        if let Some(warden) = self.warden.take()
+            && let Err(code) = warden.fire(crate::sandbox::warden::FIRE_TIME)
+        {
+            eprintln!("harness_warden_unconfirmed cause={code}");
+        }
         assert!(self.stdin.is_none());
+        assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))
     }
 }

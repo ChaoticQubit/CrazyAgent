@@ -143,7 +143,7 @@ impl OwnerController {
 
     fn github(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 }

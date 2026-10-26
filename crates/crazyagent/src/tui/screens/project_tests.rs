@@ -1,10 +1,10 @@
 use super::new_project_view::{Look, Row};
 use super::project::{
-    JobLog, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, memory_source, plain_problem,
-    research_kind,
+    JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, Transcript,
+    memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
-use super::project_view::{activity, project_screen};
+use super::project_view::{activity, job_status, project_screen};
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
@@ -288,14 +288,14 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Assign(picked.clone())
+        ProjectReply::Assign(Some(picked.clone()))
     );
     screen.open(Tab::Settings);
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Assign(picked)
+        ProjectReply::Assign(Some(picked))
     );
     screen.pool.as_mut().unwrap().assigned = true;
     let drawn = project_screen(&mut screen, 80, 24, &look);
@@ -452,6 +452,39 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     );
     assert!(shown.contains("From Competitor research"), "{shown}");
     assert!(drawn.help.contains(&("y", "Save to memory")));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Handled,
+        "y must show the whole memory before it saves"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("# Competitors"), "{shown}");
+    assert!(!drawn.help.contains(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(text(&drawn.rows).contains("word word"));
+    assert!(drawn.help.contains(&("y", "Save to memory")));
+    let kept = screen.key(key(KeyCode::Char('y')));
+    assert!(
+        matches!(
+            kept,
+            ProjectReply::Review {
+                decision: ReviewDecision::Keep,
+                ..
+            }
+        ),
+        "{kept:?}"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
 
     screen.width = 80;
     screen.read(&research);
@@ -462,6 +495,12 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert!(shown.contains("Suggested memory"), "{shown}");
     assert!(shown.contains("y Save to memory   n Dismiss   e Edit first"));
     assert_eq!(drawn.help.first(), Some(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("# Competitors"));
+    assert!(drawn.rows.iter().all(|row| row.width() == 80));
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.reading);
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
     screen.edit = None;
@@ -630,7 +669,15 @@ fn report_paths_map_back_to_their_research() {
     );
     assert_eq!(
         plain_problem("anything_else"),
-        "That didn't work. Try again."
+        "That didn't work. Try again. (code: anything_else)"
+    );
+    assert_eq!(
+        plain_problem("disk I/O error at /Users/owner/notes"),
+        "That didn't work. Try again. (code: engine_error_unplain)"
+    );
+    assert_eq!(
+        plain_problem("project_folder_unwritable"),
+        "CrazyAgent can't write in the project folder. Check its permissions."
     );
 }
 
@@ -933,6 +980,139 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
         ["jobs"],
         "a refused change reads the jobs again"
     );
+}
+
+#[test]
+fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
+    const REASON: &str =
+        "Every account in this project's pool that can run this research hit its rate limit";
+    let look = Look::plain();
+    let limited = ResearchJob {
+        id: 9,
+        project_id: ProjectId::new("notes-cli").unwrap(),
+        kind: ResearchKind::CompetitorResearch,
+        kind_label: "Competitor research".into(),
+        status: ResearchStatus::NeedsPool,
+        status_label: "Rate limited".into(),
+        report_path: "context/research/competitor_research.md".into(),
+        harness: "claude".into(),
+        tools: false,
+        attempts: 0,
+        claimer: None,
+        error: Some(format!("rate_limited until 2026-10-23 04:32 UTC: {REASON}")),
+        cancel_requested: false,
+        output_bytes: 0,
+        created_ms: 1_000,
+        started_ms: None,
+        heartbeat_ms: None,
+        finished_ms: None,
+    };
+    assert_eq!(
+        text(&[job_status(&limited, 0, 3_600, &look)]),
+        "! Rate limited until 05:32"
+    );
+    assert_eq!(
+        activity(&limited, &look)
+            .into_iter()
+            .map(|(at, text, _)| (at, text))
+            .collect::<Vec<_>>(),
+        [
+            (Some(1_000), "Queued".to_owned()),
+            (None, REASON.to_owned())
+        ]
+    );
+    assert_eq!(
+        crate::tui::seam::ResearchCounts::of(std::slice::from_ref(&limited)).summary(),
+        "Research: rate limited"
+    );
+    let mut waiting = limited.clone();
+    waiting.error = None;
+    assert_eq!(
+        text(&[job_status(&waiting, 0, 3_600, &look)]),
+        "! Needs a pool"
+    );
+    waiting.error = Some(format!("rate_limited until soon: {REASON}"));
+    assert_eq!(
+        text(&[job_status(&waiting, 0, 3_600, &look)]),
+        "! Needs a pool"
+    );
+    assert_eq!(
+        crate::tui::seam::ResearchCounts::of(&[waiting]).summary(),
+        "Research: needs a pool"
+    );
+}
+
+#[test]
+fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
+    let mut screen = ProjectScreen::new(
+        ProjectId::new("notes-cli").unwrap(),
+        "Notes CLI".into(),
+        None,
+    );
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.transcript = Some(Transcript {
+        harness: "RCLI".into(),
+        account: None,
+        tools: true,
+        open: true,
+        status: MasterStatus::Stopped,
+        messages: Vec::new(),
+    });
+    screen.open(Tab::Conversation);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(screen.typing, "the Conversation tab opens on its input");
+    assert!(
+        drawn.help.contains(&("Esc", "Leave input")),
+        "{:?}",
+        drawn.help
+    );
+    assert!(
+        !drawn.help.contains(&("r", "Try again")),
+        "{:?}",
+        drawn.help
+    );
+    assert!(
+        !drawn.help.contains(&("e", "End conversation")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('r'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.input.value(),
+        "r",
+        "r types while the input has the keys"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(drawn.help.contains(&("r", "Try again")), "{:?}", drawn.help);
+    assert!(
+        drawn.help.contains(&("e", "End conversation")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('e'))),
+        ProjectReply::EndConversation
+    );
+    screen
+        .transcript
+        .as_mut()
+        .expect("the transcript is set above")
+        .open = false;
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(
+        !drawn.help.contains(&("e", "End conversation")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Ignored);
 }
 
 #[test]
@@ -1296,6 +1476,11 @@ fn remove_asks_first_and_marks_the_project_removed_once_the_engine_forgets_it() 
     assert!(!screen.confirm_remove);
 
     screen.key(key(KeyCode::Char('x')));
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(
+        shown.contains("Its master conversation ends,"),
+        "the confirm says removing ends the master conversation: {shown}"
+    );
     let remove = SetupAction::Remove {
         project_id: project.clone(),
     };
@@ -1311,13 +1496,13 @@ fn remove_asks_first_and_marks_the_project_removed_once_the_engine_forgets_it() 
     screen.apply(
         &change,
         Ok(SetupView::Changed(OwnerResult::Rejected {
-            code: "project_master_open".into(),
+            code: "invalid_project".into(),
         })),
     );
     assert!(!screen.removed);
     assert_eq!(
         screen.problem.as_deref(),
-        Some("End this project's master conversation first, then remove the project.")
+        Some("This project no longer exists.")
     );
     screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
     assert!(screen.removed);

@@ -2,15 +2,17 @@ use super::new_project::{HarnessChoice, HarnessState};
 use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
-use super::project_page::open_path;
+use super::project::OpenRequest;
+use super::project_page::{Opening, opening};
 use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse};
+use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
+use crate::master_session::{MasterSessionPhase, MasterSessionView, MasterTurnView};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
-use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
@@ -140,7 +142,8 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 other => panic!("project pages never send {other:?}"),
             }
         }
-        quiet = if moved || connection.busy() {
+        quiet = if moved || connection.busy() || crate::tui::test_home::connecting(&shell.ctx.link)
+        {
             0
         } else {
             quiet + 1
@@ -356,14 +359,80 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
 }
 
 #[test]
-fn opening_a_path_refuses_relative_and_missing_paths() {
+fn a_project_folder_is_revealed_and_only_documents_inside_it_open() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-open-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let bundle = home.join("notes.app");
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    std::fs::write(bundle.join("Contents/Info.plist"), "<plist/>").unwrap();
+    let crazy = bundle.join(".crazyagent");
+    std::fs::create_dir_all(crazy.join("context/research/viewer.md")).unwrap();
+    std::fs::create_dir_all(crazy.join("context/documents")).unwrap();
+    std::fs::write(crazy.join("context/research/market.md"), "# Market").unwrap();
+    std::fs::write(crazy.join("context/documents/brief.PDF"), "%PDF").unwrap();
+    std::fs::write(
+        crazy.join("context/research/report.command"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::write(home.join("outside.md"), "kept outside").unwrap();
+    std::os::unix::fs::symlink(
+        home.join("outside.md"),
+        crazy.join("context/documents/escape.md"),
+    )
+    .unwrap();
+    let folder = |path: &std::path::Path| OpenRequest::Folder(path.display().to_string());
+    let context = |path: &str| OpenRequest::Context {
+        folder: crazy.display().to_string(),
+        path: path.into(),
+    };
+
+    let refused = Err("CrazyAgent opens only documents inside the project folder.".to_owned());
+    let let_through: Vec<(&str, Result<Opening, String>)> = [
+        "context/research/report.command",
+        "context/documents/escape.md",
+        "context/research/viewer.md",
+        "../outside.md",
+        "context/../../../outside.md",
+        "/etc/hosts",
+        "context/research",
+        "context/research/missing.md",
+        "",
+    ]
+    .into_iter()
+    .map(|path| (path, opening(&context(path))))
+    .filter(|(_, got)| *got != refused)
+    .collect();
+    assert_eq!(let_through, Vec::new(), "every one is refused");
     assert_eq!(
-        open_path("context/brief.md"),
-        Err("That file or folder is not there any more.".into())
+        opening(&folder(&bundle)),
+        Ok(Opening::Reveal(bundle.clone())),
+        "a project folder is shown in the file manager, so a folder named notes.app is never launched"
     );
     assert_eq!(
-        open_path("/private/tmp/ca-no-such-folder-4f1c"),
-        Err("That file or folder is not there any more.".into())
+        opening(&context("context/research/market.md")),
+        Ok(Opening::Open(crazy.join("context/research/market.md")))
+    );
+    assert_eq!(
+        opening(&context("context/documents/brief.PDF")),
+        Ok(Opening::Open(crazy.join("context/documents/brief.PDF")))
+    );
+    let missing = Err("That file or folder is not there any more.".to_owned());
+    assert_eq!(opening(&folder(std::path::Path::new("notes.app"))), missing);
+    assert_eq!(opening(&folder(&home.join("gone"))), missing);
+    assert_eq!(
+        opening(&folder(&crazy.join("context/research/market.md"))),
+        missing
+    );
+    assert_eq!(
+        opening(&OpenRequest::Context {
+            folder: "notes.app/.crazyagent".into(),
+            path: "context/research/market.md".into(),
+        }),
+        missing
     );
 }
 
@@ -501,6 +570,19 @@ async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Main is assigned."), "{shown}");
     assert!(shown.contains("Main   Enter Change"), "{shown}");
+
+    shell.key(Key::Enter);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("(*) Main"), "{shown}");
+    assert!(shown.contains("( ) No pool"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"edit pool"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("This project has no pool now."), "{shown}");
+    assert!(shown.contains("No pool yet"), "{shown}");
 }
 
 #[test]
@@ -707,9 +789,374 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Plan the first slice"), "{shown}");
     assert!(shown.contains("RCLI"), "{shown}");
-    assert!(!shown.contains("could not start"), "{shown}");
+    assert!(!shown.contains("The master could not start"), "{shown}");
     assert!(!shown.contains("did not take"), "{shown}");
     assert!(!shown.contains("No messages yet."), "{shown}");
+    assert!(
+        shown.contains("(rcli_profile_configuration_required)"),
+        "{shown}"
+    );
+}
+
+async fn latest_master(
+    engine: &mut Engine,
+    project: &ProjectId,
+) -> (Option<MasterSessionView>, ConfigId) {
+    let reply = engine
+        .controller
+        .read(OwnerRead::ProjectMaster {
+            project_id: project.clone(),
+        })
+        .await
+        .unwrap();
+    let OwnerData::ProjectMaster { session } = reply.data else {
+        panic!("a master read answers with the master session");
+    };
+    (session.map(|session| *session), reply.config_id)
+}
+
+async fn session_turns(
+    engine: &mut Engine,
+    project: &ProjectId,
+    session: &SessionId,
+) -> Vec<MasterTurnView> {
+    let reply = engine
+        .controller
+        .read(OwnerRead::ProjectMasterTurns {
+            project_id: project.clone(),
+            session_id: session.clone(),
+            cursor: None,
+            limit: 32,
+        })
+        .await
+        .unwrap();
+    let OwnerData::ProjectMasterTurns { page } = reply.data else {
+        panic!("a turn read answers with a turn page");
+    };
+    assert!(page.next.is_none());
+    page.turns
+}
+
+async fn turn_text(engine: &mut Engine, project: &ProjectId, turn: &MasterTurnView) -> String {
+    let reply = engine
+        .controller
+        .read(OwnerRead::ConversationHistory {
+            project_id: project.clone(),
+            cursor: None,
+            limit: 32,
+        })
+        .await
+        .unwrap();
+    let OwnerData::ConversationHistory { page } = reply.data else {
+        panic!("a conversation read answers with a history page");
+    };
+    page.entries
+        .into_iter()
+        .find(|entry| entry.event_cursor == turn.input_cursor)
+        .expect("every master turn keeps its owner message")
+        .text
+}
+
+async fn until(
+    shell: &mut Shell,
+    connection: &mut Connection,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        shell.refresh();
+        pump(shell, connection).await;
+        let shown = render(shell, 100, 40);
+        if done(&shown) {
+            return shown;
+        }
+        assert!(Instant::now() < deadline, "never shown:\n{shown}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn settled_master(
+    engine: &mut Engine,
+    project: &ProjectId,
+    shell: &mut Shell,
+    connection: &mut Connection,
+    turns: usize,
+) -> MasterSessionView {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        shell.refresh();
+        pump(shell, connection).await;
+        if let (Some(session), _) = latest_master(engine, project).await
+            && session.current_turn.is_none()
+            && session_turns(engine, project, &session.session_id)
+                .await
+                .len()
+                == turns
+        {
+            return session;
+        }
+        assert!(Instant::now() < deadline, "the master turn never settled");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn say(shell: &mut Shell, connection: &mut Connection, text: &str) {
+    shell.key(Key::Enter);
+    for character in text.chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    pump(shell, connection).await;
+}
+
+async fn conversation_with_a_settled_turn(
+    engine: &mut Engine,
+) -> (ProjectId, Shell, Connection, MasterSessionView) {
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(100, 40);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    say(&mut shell, &mut connection, "Plan the first slice").await;
+    let first = settled_master(engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_eq!(first.phase, MasterSessionPhase::Configured);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Plan the first slice") && !shown.contains("Thinking")
+    })
+    .await;
+    (notes, shell, connection, first)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+
+    shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Spare is assigned.")
+    })
+    .await;
+    let (open, changed) = latest_master(&mut engine, &notes).await;
+    assert_eq!(open.as_ref(), Some(&first));
+    assert_ne!(first.config_id, changed);
+
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    say(&mut shell, &mut connection, "Add a dark theme").await;
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Settings changed, so a new conversation started.")
+    })
+    .await;
+    assert!(!shown.contains("did not take"), "{shown}");
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(second.phase, MasterSessionPhase::Configured);
+    assert_eq!(second.config_id, latest_master(&mut engine, &notes).await.1);
+    assert_eq!(second.selection.pool_ref.as_str(), "pool-b");
+    let turns = session_turns(&mut engine, &notes, &second.session_id).await;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turn_text(&mut engine, &notes, &turns[0]).await,
+        "Add a dark theme"
+    );
+    let stale = session_turns(&mut engine, &notes, &first.session_id).await;
+    assert_eq!(stale.len(), 1);
+    assert_eq!(
+        turn_text(&mut engine, &notes, &stale[0]).await,
+        "Plan the first slice"
+    );
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Add a dark theme") && !shown.contains("Thinking")
+    })
+    .await;
+    assert!(!shown.contains("Plan the first slice"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Stopped"), "{shown}");
+    assert!(
+        shown.contains("(rcli_profile_configuration_required)"),
+        "{shown}"
+    );
+    assert!(!shown.contains("something went wrong"), "{shown}");
+    assert!(!shown.contains("e End conversation"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("e End conversation"), "{shown}");
+    shell.key(Key::Char('e'));
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("The master conversation is closed.")
+    })
+    .await;
+    assert!(!shown.contains("e End conversation"), "{shown}");
+    let (closed, _) = latest_master(&mut engine, &notes).await;
+    let closed = closed.unwrap();
+    assert_eq!(closed.session_id, first.session_id);
+    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert_eq!(closed.current_turn, None);
+
+    say(&mut shell, &mut connection, "Add a dark theme").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(second.phase, MasterSessionPhase::Configured);
+    let turns = session_turns(&mut engine, &notes, &second.session_id).await;
+    assert_eq!(
+        turn_text(&mut engine, &notes, &turns[0]).await,
+        "Add a dark theme"
+    );
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Add a dark theme") && !shown.contains("Thinking")
+    })
+    .await;
+    assert!(!shown.contains("is closed"), "{shown}");
+    assert!(!shown.contains("Settings changed"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_on_home() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.projects = Load::Ready(vec![ProjectCard {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        about: String::new(),
+        platforms: vec![Platform::Cli],
+        pool: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    }]);
+    let home = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, home);
+    while shell.ctx.next_request().is_some() {}
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    for _ in 0..3 {
+        shell.key(Key::ShiftLeft);
+    }
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    for character in "Plan the first slice".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Plan the first slice"), "{shown}");
+    assert!(shown.contains("e End conversation"), "{shown}");
+    let (open, _) = latest_master(&mut engine, &notes).await;
+    let open = open.expect("the first message opened a master conversation");
+    assert_eq!(open.phase, MasterSessionPhase::Configured);
+
+    for _ in 0..3 {
+        shell.key(Key::ShiftRight);
+    }
+    shell.key(Key::Char('x'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Its master conversation ends"), "{shown}");
+    shell.key(Key::Char('y'));
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert_eq!(shell.place(), Some(Place::Home), "{shown}");
+    assert!(shown.contains("Notes CLI was removed."), "{shown}");
+
+    let (closed, _) = latest_master(&mut engine, &notes).await;
+    let closed = closed.expect("the ended conversation stays on record");
+    assert_eq!(closed.session_id, open.session_id);
+    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert!(closed.current_turn.is_none());
+
+    while shell.ctx.next_request().is_some() {}
+    let read = SetupQuery::Setup {
+        project: notes.clone(),
+    };
+    connection.project_setup(read.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let after = loop {
+        if let Some(OwnerEvent::Setup(event)) = connection.poll_owner().unwrap()
+            && event.query == read
+        {
+            break event.result;
+        }
+        assert!(Instant::now() < deadline, "the setup read never arrived");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        !matches!(after, Ok(SetupView::Setup(Some(_)))),
+        "the engine forgot the project: {after:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wizard_waits_for_an_engine_slow_to_accept_its_connection() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let engine = runtime.spawn(Engine::start()).await.unwrap();
+    let (blocking, blocked) = std::sync::mpsc::channel();
+    let busy = runtime.spawn(async move {
+        blocking.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    blocked.recv().unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, &mut connection).await;
+    busy.await.unwrap();
+    drop(connection);
+    std::thread::spawn(move || {
+        drop(engine);
+        runtime.shutdown_timeout(Duration::from_secs(10));
+    })
+    .join()
+    .unwrap();
+    assert_eq!(sent, ["pools", "harnesses", "catalog", "catalog"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -990,4 +1437,88 @@ fn shell_draws_the_wizard_like_the_design() {
     assert_eq!(kept_draft(), None);
     drawn.push(("wiz-about-80".to_owned(), framed(&mut shell, 80, 24)));
     check_frames(&drawn);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_the_engine_cannot_write_into_the_project_says_why() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let setup = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let documents = setup.state_folder().join("context/documents");
+    std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let scope = sources.path().join("scope.csv");
+    std::fs::write(&scope, "item,size\nlogin,small\n").unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(100, 24);
+    ctx.store.projects = Load::Ready(vec![ProjectCard {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        about: String::new(),
+        platforms: vec![Platform::Cli],
+        pool: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    }]);
+    let home = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, home);
+    while shell.ctx.next_request().is_some() {}
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('a'));
+    let shown = render(&mut shell, 100, 24);
+    assert!(shown.contains("Add file"), "{shown}");
+    shell.key(Key::Paste(scope.display().to_string()));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    let shown = render(&mut shell, 100, 24);
+    assert!(
+        shown.contains("CrazyAgent can't write in the project folder."),
+        "{shown}"
+    );
+    assert!(shown.contains("permissions."), "{shown}");
+    assert!(!shown.contains("That didn't work"), "{shown}");
+    assert!(!documents.join("scope.csv").exists(), "nothing was copied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Tidepool"), "{shown}");
+    std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(sent.first(), Some(&"create"), "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(
+        shown.contains("The project folder could not be created. Nothing was kept."),
+        "{shown}"
+    );
+    assert!(!engine.home.path().join("tidepool").exists(), "{shown}");
 }
