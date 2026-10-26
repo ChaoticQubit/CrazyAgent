@@ -773,6 +773,22 @@ impl Fixture {
         }
     }
 
+    /// Holds the engine database write lock from another connection, as an agent register
+    /// commit does under load, longer than storage waits for it. Input: how long. Output:
+    /// the thread that commits and releases the lock.
+    fn hold_write_lock(&self, held: Duration) -> std::thread::JoinHandle<()> {
+        let db = Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(held);
+            db.execute_batch("COMMIT").unwrap();
+        })
+    }
+
     async fn submit(&self, text: &str) -> RequestId {
         let revision = Self::read_owner(&self.owner, OwnerRead::Capabilities)
             .await
@@ -1218,6 +1234,27 @@ async fn a_turn_that_cannot_start_ends_blocked_with_its_reason_in_the_read() {
     let before = case.snapshot();
     assert_eq!(case.drive().await.unwrap(), failed);
     assert_eq!(case.snapshot(), before);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_turn_whose_write_waits_on_another_engine_connection_still_ends_with_its_own_reason() {
+    let case = Fixture::new(MasterBackend::Rcli, false).await;
+    case.register().await;
+    let holder = case.hold_write_lock(Duration::from_millis(600));
+    let returned = case.drive().await;
+    holder.join().unwrap();
+    assert_eq!(
+        returned
+            .expect_err("a project without a repository cannot start a turn")
+            .0,
+        "master_repository_missing"
+    );
+    unallocated(
+        &case.persisted_turn().await,
+        MasterTurnPhase::Blocked,
+        Some(MasterReason::RepositoryMissing),
+    );
     case.finish().await;
 }
 
