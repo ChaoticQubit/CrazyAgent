@@ -6,7 +6,7 @@ use super::launch::{
 use crate::launch_context::Installed;
 use std::ffi::OsStr;
 #[cfg(unix)]
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -579,20 +579,10 @@ pub fn prepare_claude_home(home: &Path, project: &Path) -> Result<(), LaunchErro
     super::launch::validate_home(home)?;
     let project = text(project)?;
     let path = home.join(".claude.json");
-    let mut config = match std::fs::symlink_metadata(&path) {
-        Ok(metadata)
-            if metadata.is_file()
-                && !metadata.file_type().is_symlink()
-                && metadata.len() <= CLAUDE_CONFIG_BYTES_MAX =>
-        {
-            let bytes =
-                std::fs::read(&path).map_err(|_| failure("launch_claude_config_unavailable"))?;
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-                .map_err(|_| failure("launch_claude_config_invalid"))?
-        }
-        Ok(_) => return Err(failure("launch_claude_config_unsafe")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(_) => return Err(failure("launch_claude_config_unavailable")),
+    let mut config = match read_claude_config(&path)? {
+        Some(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| failure("launch_claude_config_invalid"))?,
+        None => serde_json::json!({}),
     };
     let object = config
         .as_object_mut()
@@ -640,6 +630,45 @@ pub fn prepare_claude_home(home: &Path, project: &Path) -> Result<(), LaunchErro
         .and_then(|()| file.sync_all())
         .map_err(|_| failure("launch_claude_config_unavailable"))?;
     std::fs::rename(&staged, &path).map_err(|_| failure("launch_claude_config_unavailable"))
+}
+
+/// Reads Claude Code's config file through one open that never follows a link or waits on
+/// a FIFO, then checks the opened file itself, so an entry swapped in after any earlier
+/// look is never read. Takes the path. Returns its bytes, `None` when there is none, or a
+/// plain code when it is not a regular file of at most 1 MiB or cannot be read.
+#[cfg(unix)]
+fn read_claude_config(path: &Path) -> Result<Option<Vec<u8>>, LaunchError> {
+    use rustix::io::Errno;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(path);
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if [Errno::LOOP, Errno::NXIO, Errno::OPNOTSUPP]
+                .iter()
+                .any(|errno| error.raw_os_error() == Some(errno.raw_os_error())) =>
+        {
+            return Err(failure("launch_claude_config_unsafe"));
+        }
+        Err(_) => return Err(failure("launch_claude_config_unavailable")),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|_| failure("launch_claude_config_unavailable"))?;
+    if !metadata.is_file() || metadata.len() > CLAUDE_CONFIG_BYTES_MAX {
+        return Err(failure("launch_claude_config_unsafe"));
+    }
+    let mut bytes = Vec::new();
+    file.take(CLAUDE_CONFIG_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| failure("launch_claude_config_unavailable"))?;
+    if bytes.len() as u64 > CLAUDE_CONFIG_BYTES_MAX {
+        return Err(failure("launch_claude_config_unsafe"));
+    }
+    Ok(Some(bytes))
 }
 
 #[cfg(all(test, unix))]
