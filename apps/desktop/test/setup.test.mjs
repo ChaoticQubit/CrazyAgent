@@ -68,8 +68,11 @@ test("every setup command the client calls is a desktop command the bridge maps 
     assert.ok(source.includes(`"${kind}"`), kind);
   }
   assert.ok(!bridge.includes(`"pack_required"`), "no pack entry is forced, so the bridge has no pack_required code");
+  const setupCodes = setup.match(/const SETUP_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
+  assert.ok(setupCodes, "the bridge lists its setup codes");
+  assert.ok(bridge.includes(".or_else(|| intake::setup_code(code))"), "owner receipts keep setup codes");
   for (const code of ["setup_busy", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
-    assert.ok(bridge.includes(`"${code}"`), code);
+    assert.ok(setupCodes[1].includes(`"${code}"`), code);
     assert.notEqual(client.errorMessage({ code }), client.errorMessage({ code: "unknown" }), code);
   }
 });
