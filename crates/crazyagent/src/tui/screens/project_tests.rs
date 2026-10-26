@@ -669,7 +669,15 @@ fn report_paths_map_back_to_their_research() {
     );
     assert_eq!(
         plain_problem("anything_else"),
-        "That didn't work. Try again."
+        "That didn't work. Try again. (code: anything_else)"
+    );
+    assert_eq!(
+        plain_problem("disk I/O error at /Users/owner/notes"),
+        "That didn't work. Try again. (code: engine_error_unplain)"
+    );
+    assert_eq!(
+        plain_problem("project_folder_unwritable"),
+        "CrazyAgent can't write in the project folder. Check its permissions."
     );
 }
 

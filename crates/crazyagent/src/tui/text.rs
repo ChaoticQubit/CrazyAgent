@@ -284,6 +284,36 @@ pub fn thumb(visible: usize, offset: usize, total: usize) -> (usize, usize) {
     (top.min(visible - size), size)
 }
 
+/// The code a screen shows in place of a problem that is not a plain engine code.
+pub const UNPLAIN_CODE: &str = "engine_error_unplain";
+
+/// The longest problem code a screen shows as it is.
+const CODE_BYTES_MAX: usize = 96;
+
+/// Says whether a problem is a plain engine code a screen may show.
+/// Input: the problem. Output: true for 1 to 96 lowercase ASCII letters,
+/// digits or underscores; anything else may be raw error text.
+pub fn plain_code(problem: &str) -> bool {
+    !problem.is_empty()
+        && problem.len() <= CODE_BYTES_MAX
+        && problem
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// The screen's sentence for a problem it has no copy for, naming the code.
+/// Inputs: the sentence and the problem. Output: "<sentence> (code: <code>)",
+/// with `UNPLAIN_CODE` in place of a problem that is not a plain code, so raw
+/// error text never reaches the screen.
+pub fn coded(sentence: &str, problem: &str) -> String {
+    let code = if plain_code(problem) {
+        problem
+    } else {
+        UNPLAIN_CODE
+    };
+    format!("{sentence} (code: {code})")
+}
+
 /// Plain text of a line, for tests and copy.
 /// Input: the line. Output: its characters without styles.
 #[cfg(test)]
@@ -436,5 +466,35 @@ mod tests {
             .map(plain)
             .collect();
         assert_eq!(ascii, ["one    #", "two    |", "three  |", "four   |"]);
+    }
+
+    #[test]
+    fn a_problem_without_copy_names_its_code_and_never_its_raw_text() {
+        assert_eq!(
+            coded("That didn't work. Try again.", "pool_summary_bounds"),
+            "That didn't work. Try again. (code: pool_summary_bounds)"
+        );
+        let longest = "a".repeat(96);
+        assert_eq!(coded("No.", &longest), format!("No. (code: {longest})"));
+        assert!(plain_code(UNPLAIN_CODE));
+        let too_long = "a".repeat(97);
+        for raw in [
+            "",
+            "Permission denied (os error 13)",
+            "database is locked",
+            "/Users/owner/Projects/secret",
+            "Pool_Missing",
+            "pool-missing",
+            "pool missing",
+            "pöol",
+            &too_long,
+        ] {
+            assert!(!plain_code(raw), "{raw:?}");
+            assert_eq!(
+                coded("Something went wrong. Try again.", raw),
+                "Something went wrong. Try again. (code: engine_error_unplain)",
+                "{raw:?}"
+            );
+        }
     }
 }
