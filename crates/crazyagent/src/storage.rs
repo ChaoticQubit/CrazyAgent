@@ -35,6 +35,8 @@ pub(crate) mod setup;
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
+mod model_access_page_tests;
+#[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
 mod settings;
@@ -272,6 +274,7 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
+                let mut model_access_snapshot = None;
                 let mut home_watch = if readonly {
                     None
                 } else {
@@ -670,6 +673,7 @@ impl Storage {
                                     &mut connection,
                                     &config,
                                     sources.as_ref(),
+                                    &mut model_access_snapshot,
                                     &admission,
                                     &query,
                                 ));
