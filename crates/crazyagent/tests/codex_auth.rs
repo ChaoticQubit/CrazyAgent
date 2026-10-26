@@ -14,8 +14,8 @@ const COMPLETED: &str = "account/login/completed";
 const READ: &str = "account/read";
 const CANCEL: &str = "account/login/cancel";
 const LOGOUT: &str = "account/logout";
-const AUTH_URL: &str = "https://auth.example.test/authorize?state=private-browser-challenge";
-const DEVICE_URL: &str = "https://auth.example.test/device/private-device-challenge";
+const AUTH_URL: &str = "https://auth.openai.com/authorize?state=private-browser-challenge";
+const DEVICE_URL: &str = "https://auth.openai.com/device/private-device-challenge";
 const USER_CODE: &str = "PRIVATE-DEVICE-CODE";
 const AUTH_ERROR: &str = "private-auth-error-material";
 const EMAIL: &str = "private-account@example.test";
@@ -143,6 +143,48 @@ fn begin_browser(protocol: &mut CodexProtocol, login_id: &str) -> AuthControl {
         json!({"id":id,"method":LOGIN,"params":{"type":"chatgpt"}})
     );
     auth(reply(protocol, id, browser_result(login_id)))
+}
+
+/// Runs a real child that writes one Codex reply line the way the app-server
+/// does, and returns what it wrote. Inputs: the folder for the script and the
+/// reply. Output: the child's standard output.
+#[cfg(unix)]
+fn child_output(folder: &Path, reply: &Value) -> Vec<u8> {
+    use std::os::unix::fs::PermissionsExt;
+    let script = folder.join("codex-reply.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = crazyagent::spawn_gate::output(
+        std::process::Command::new(&script)
+            .arg(reply.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, wire(reply.clone()));
+    output.stdout
+}
+
+/// Starts a browser or device-code sign-in and feeds the protocol the reply a
+/// real child printed for it. Inputs: the script folder, whether the flow uses a
+/// device code and the sign-in address. Output: what the protocol made of it.
+#[cfg(unix)]
+fn child_sign_in(folder: &Path, device_code: bool, url: &str) -> Result<Vec<Event>, ProtocolError> {
+    let mut protocol = ready();
+    let outgoing = if device_code {
+        request(&protocol.start_device_code_login().unwrap())
+    } else {
+        request(&protocol.start_chatgpt_login().unwrap())
+    };
+    let id = outgoing["id"].as_i64().unwrap();
+    let result = if device_code {
+        json!({"type":"chatgptDeviceCode","loginId":"pinned-login","userCode":USER_CODE,"verificationUrl":url})
+    } else {
+        json!({"type":"chatgpt","loginId":"pinned-login","authUrl":url})
+    };
+    protocol.receive(&child_output(folder, &json!({"id":id,"result":result})))
 }
 
 fn bridge() -> CodexEventBridge {
@@ -612,7 +654,7 @@ fn unsolicited_duplicate_and_duplicate_key_rpc_responses_fail_closed() {
     let mut protocol = ready();
     protocol.start_chatgpt_login().unwrap();
     assert_eq!(
-        protocol.receive(b"{\"id\":2,\"id\":2,\"result\":{\"type\":\"chatgpt\",\"loginId\":\"native-once\",\"authUrl\":\"https://auth.example.test/login\"}}\n"),
+        protocol.receive(b"{\"id\":2,\"id\":2,\"result\":{\"type\":\"chatgpt\",\"loginId\":\"native-once\",\"authUrl\":\"https://auth.openai.com/login\"}}\n"),
         Err(ProtocolError::InvalidMessage)
     );
     assert_eq!(protocol.state(), State::Failed);
@@ -657,7 +699,7 @@ fn missing_challenge_fields_wrong_login_variants_and_malformed_urls_fail_explici
         json!({"type":"chatgpt","loginId":"native-valid","authUrl":null}),
         json!({"type":"chatgpt","loginId":"native-valid","authUrl":"file:///private/auth"}),
         json!({"type":"chatgpt","loginId":"native-valid","authUrl":"https://"}),
-        json!({"type":"chatgpt","loginId":"native-valid","authUrl":"https://auth.example.test/\ncode"}),
+        json!({"type":"chatgpt","loginId":"native-valid","authUrl":"https://auth.openai.com/\ncode"}),
         json!({"type":"chatgptAuthTokens","accessToken":"synthetic-denied-token","chatgptAccountId":"synthetic-denied-account"}),
         json!({"type":"apiKey"}),
         device_result("native-wrong-method"),
@@ -1098,7 +1140,7 @@ fn auth_string_bounds_accept_exact_limits_and_reject_one_byte_over() {
             let mut result = browser_result("native-bounded");
             let size = maximum + usize::from(overflow);
             result[field] = if field == "authUrl" {
-                let prefix = "https://auth.example.test/";
+                let prefix = "https://auth.openai.com/";
                 json!(format!("{prefix}{}", "x".repeat(size - prefix.len())))
             } else {
                 json!("x".repeat(size))
@@ -1162,7 +1204,7 @@ fn email_error_and_device_url_bounds_apply_to_every_sensitive_ingress() {
     let mut protocol = ready();
     protocol.start_device_code_login().unwrap();
     let mut result = device_result("native-device-url");
-    result["verificationUrl"] = json!(format!("https://auth.example.test/{}", "x".repeat(2049)));
+    result["verificationUrl"] = json!(format!("https://auth.openai.com/{}", "x".repeat(2049)));
     assert_eq!(
         protocol.receive(&wire(json!({"id":2,"result":result}))),
         Err(ProtocolError::InvalidMessage)
@@ -1387,4 +1429,48 @@ fn worker_bridge_also_rejects_legacy_auth_errors_and_unsupported_auth_method_eve
             .native_thread_id,
         None
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sign_in_page_from_the_child_is_shown_only_on_the_openai_auth_origin() {
+    let folder = tempfile::tempdir().unwrap();
+    for (device_code, url) in [
+        (
+            false,
+            "https://auth.openai.com/oauth/authorize?state=pinned-browser-state",
+        ),
+        (true, "https://auth.openai.com/codex/device"),
+    ] {
+        let events = child_sign_in(folder.path(), device_code, url).unwrap();
+        let challenge = match auth(events) {
+            AuthControl::LoginStarted { challenge, .. } => challenge,
+            other => panic!("expected a started sign-in, received {other:?}"),
+        };
+        let shown = match &challenge {
+            LoginChallenge::Browser { auth_url, .. } => auth_url,
+            LoginChallenge::DeviceCode {
+                verification_url, ..
+            } => verification_url,
+        };
+        assert_eq!(shown.expose(), url);
+    }
+    for url in [
+        "https://auth.openai.com.attacker.invalid/oauth/authorize?state=s",
+        "https://attacker.invalid/auth.openai.com/oauth/authorize?state=s",
+        "https://auth.openai.com@attacker.invalid/oauth/authorize?state=s",
+        "https://auth.openai.com\\@attacker.invalid/oauth/authorize?state=s",
+        "https://auth.openai.com:8443/oauth/authorize?state=s",
+        "http://auth.openai.com/oauth/authorize?state=s",
+        "https://chatgpt.com/auth/login?state=s",
+        "https://AUTH.openai.com.attacker.invalid/codex/device",
+    ] {
+        for device_code in [false, true] {
+            assert_eq!(
+                child_sign_in(folder.path(), device_code, url),
+                Err(ProtocolError::InvalidMessage),
+                "{url} (device code {device_code})"
+            );
+        }
+    }
 }

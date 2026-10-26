@@ -2095,8 +2095,8 @@ mod auth_observation_tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command as ProcessCommand, Stdio};
 
-    const URL: &str = "https://auth.example.test/authorize?state=observation-private-state";
-    const DEVICE_URL: &str = "https://auth.example.test/device/observation-private-state";
+    const URL: &str = "https://auth.openai.com/authorize?state=observation-private-state";
+    const DEVICE_URL: &str = "https://auth.openai.com/device/observation-private-state";
     const USER_CODE: &str = "OBSERVATION-PRIVATE-CODE";
     const EMAIL: &str = "observation-private@example.test";
     const ERROR: &str = "observation-private-native-error";
