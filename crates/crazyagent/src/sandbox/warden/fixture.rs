@@ -18,7 +18,7 @@ exec /bin/sleep 30
 /// A private project, home and temp folder under `/private/tmp` with the agent profile every
 /// project agent gets installed for them, for tests that start a detaching run in it.
 pub(crate) struct DetachingRun {
-    _root: tempfile::TempDir,
+    _root: Option<tempfile::TempDir>,
     pub(crate) project: PathBuf,
     pub(crate) profile: PathBuf,
     home: PathBuf,
@@ -50,11 +50,26 @@ impl DetachingRun {
         .install(&profile)
         .unwrap();
         Self {
-            _root: root,
+            _root: Some(root),
             project,
             profile,
             home,
             tmp,
+        }
+    }
+
+    /// A second run under this run's profile, home and temp folder, working in a new folder
+    /// `name` inside this run's project, as two agents launched from one profile file are.
+    /// Takes the folder name. Returns the run, whose folders are removed with this run's.
+    pub(crate) fn beside(&self, name: &str) -> Self {
+        let project = self.project.join(name);
+        std::fs::create_dir(&project).unwrap();
+        Self {
+            _root: None,
+            project,
+            profile: self.profile.clone(),
+            home: self.home.clone(),
+            tmp: self.tmp.clone(),
         }
     }
 
