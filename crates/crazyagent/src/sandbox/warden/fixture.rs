@@ -15,7 +15,7 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
-/// A private project, home and temp folder under `/private/tmp` with the agent profile every
+/// A private project, home and temp folder under the canonical `/tmp` with the agent profile every
 /// project agent gets installed for them, for tests that start a detaching run in it.
 pub(crate) struct DetachingRun {
     _root: Option<tempfile::TempDir>,
@@ -30,7 +30,7 @@ impl DetachingRun {
     pub(crate) fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("crazyagent-warden-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let folder = |name: &str| {
             let folder = root.path().join(name);

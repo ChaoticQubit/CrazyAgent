@@ -16,7 +16,7 @@ impl Live {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-loss-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);

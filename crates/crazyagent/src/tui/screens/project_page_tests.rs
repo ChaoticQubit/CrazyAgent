@@ -362,7 +362,7 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
 fn a_project_folder_is_revealed_and_only_documents_inside_it_open() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-open-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let home = root.path().canonicalize().unwrap();
     let bundle = home.join("notes.app");

@@ -4347,7 +4347,7 @@ fallback_allowed = false
             let repos = onboarded.then(|| {
                 tempfile::Builder::new()
                     .prefix("ca-mrc-repos-")
-                    .tempdir_in("/private/tmp")
+                    .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                     .unwrap()
             });
             let repository = match &repos {

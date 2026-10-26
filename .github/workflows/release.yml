@@ -133,20 +133,23 @@ jobs:
           set -euo pipefail
           arch -x86_64 /usr/bin/true || { echo "::error::Rosetta 2 is required to build the x86_64 rcli host; install it with: softwareupdate --install-rosetta --agree-to-license"; exit 1; }
           prefix="$RUNNER_TOOL_CACHE/bun/$BUN_VERSION/x64"
-          if [ ! -f "$prefix.complete" ]; then
-            work="$RUNNER_TEMP/bun-x64"
-            rm -rf "$work" "$prefix"
-            mkdir -p "$work" "$prefix/bin"
+          work="$RUNNER_TEMP/bun-x64"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/bun.zip" ]; then
+            cp "$prefix/bun.zip" "$work/bun.zip"
+          fi
+          if ! echo "$BUN_DARWIN_X64_SHA256  $work/bun.zip" | shasum -a 256 -s -c - 2>/dev/null; then
             curl -fsSL --proto '=https' --tlsv1.2 -o "$work/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-darwin-x64.zip"
             echo "$BUN_DARWIN_X64_SHA256  $work/bun.zip" | shasum -a 256 -c -
-            unzip -q "$work/bun.zip" -d "$work"
-            install -m 0755 "$work/bun-darwin-x64/bun" "$prefix/bin/bun"
-            rm -rf "$work"
-            touch "$prefix.complete"
+            cp "$work/bun.zip" "$prefix/bun.zip.$$"
+            mv "$prefix/bun.zip.$$" "$prefix/bun.zip"
           fi
-          test "$("$prefix/bin/bun" --version)" = "$BUN_VERSION"
-          test "$("$prefix/bin/bun" -e 'console.log(process.arch)')" = x64
-          echo "bun-path=$prefix/bin/bun" >> "$GITHUB_OUTPUT"
+          unzip -q "$work/bun.zip" -d "$work"
+          install -m 0755 "$work/bun-darwin-x64/bun" "$work/bin/bun"
+          test "$("$work/bin/bun" --version)" = "$BUN_VERSION"
+          test "$("$work/bin/bun" -e 'console.log(process.arch)')" = x64
+          echo "bun-path=$work/bin/bun" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -181,19 +184,14 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: release-${{ matrix.target }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-      - name: Keep the Rust build cache under 20 GiB
+      - name: Use a clean Rust build folder
         if: runner.environment != 'github-hosted'
         run: |
           set -euo pipefail
-          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target"
-          mkdir -p "$target"
-          size_kib="$(du -sk "$target" | cut -f1)"
-          if (( size_kib > 20 * 1024 * 1024 )); then
-            echo "pruning $target: ${size_kib} KiB"
-            rm -rf "$target"
-            mkdir -p "$target"
-          fi
-          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+          rm -rf "$RUNNER_TEMP/crazyagent-release"
+          mkdir -p "$RUNNER_TEMP/crazyagent-release/target" "$RUNNER_TEMP/crazyagent-release/cargo-home"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crazyagent-release/target" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$RUNNER_TEMP/crazyagent-release/cargo-home" >> "$GITHUB_ENV"
       - name: Set release version
         run: node scripts/release/version.mjs set "$VERSION"
       - name: Install desktop dependencies

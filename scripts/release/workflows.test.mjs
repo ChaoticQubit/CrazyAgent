@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
@@ -101,15 +101,18 @@ test("every badal job refuses to run under Rosetta before anything else", async 
   }
 });
 
-test("on a self-hosted runner CI and release install nothing globally and keep their build cache bounded", async () => {
+test("on a self-hosted runner CI and release install nothing globally, and CI keeps its build cache bounded", async () => {
   const ci = await workflow("ci.yml");
   const release = await workflow("release.yml");
+  for (const job of ["linux", "macos"]) {
+    const text = steps(ci, job).join("\n");
+    assert.match(text, /"\$RUNNER_TOOL_CACHE\/crazyagent-ci\/target"/, job);
+    assert.match(text, /\(\( size_kib > 20 \* 1024 \* 1024 \)\)/, job);
+  }
   for (const [name, job] of [["ci.yml", "linux"], ["ci.yml", "macos"], ["release.yml", "build"]]) {
     const all = steps(name === "ci.yml" ? ci : release, job);
     const text = all.join("\n");
     assert.match(text, /- if: runner\.environment == 'github-hosted'\n\s+uses: actions\/cache@/, job);
-    assert.match(text, /"\$RUNNER_TOOL_CACHE\/crazyagent-ci\/target"/, job);
-    assert.match(text, /\(\( size_kib > 20 \* 1024 \* 1024 \)\)/, job);
     assert.match(text, /command -v rustup/, job);
     for (const step of all) {
       for (const install of step.matchAll(/^(?!\s*echo ).*(\bsudo (?!-n true|apt-get)\S+|\bbrew install\b).*$/gm)) {
@@ -129,6 +132,62 @@ test("on a self-hosted runner CI and release install nothing globally and keep t
   assert.match(linux, /sudo -n true/);
   assert.match(linux, /"\$RUNNER_TOOL_CACHE\/tmux\/\$TMUX_VERSION\/x64"/);
   assert.doesNotMatch(release, /"target\/\$TARGET/, "release paths follow CARGO_TARGET_DIR");
+});
+
+test("a self-hosted release builds in a clean Rust folder and Cargo home, never in what CI left on the runner", async () => {
+  const release = await workflow("release.yml");
+  const all = steps(release, "build");
+  const index = all.findIndex((step) => step.includes("name: Use a clean Rust build folder"));
+  assert(index >= 0, "the release build has a clean-folder step");
+  const clean = all[index];
+  assert.match(clean, /^ {6}- name: Use a clean Rust build folder\n {8}if: runner\.environment != 'github-hosted'\n/);
+  assert.match(clean, /\n\s+rm -rf "\$RUNNER_TEMP\/crazyagent-release"\n/);
+  assert.match(clean, /echo "CARGO_TARGET_DIR=\$RUNNER_TEMP\/crazyagent-release\/target"/);
+  assert.match(clean, /echo "CARGO_HOME=\$RUNNER_TEMP\/crazyagent-release\/cargo-home"/);
+  assert(all.findIndex((step) => /\bcargo (build|metadata|update)\b|tauri\.js build|version\.mjs set/.test(step)) > index, "no cargo run comes before the clean folder");
+  assert.doesNotMatch(release, /crazyagent-ci/, "release never reads the CI build cache");
+});
+
+test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
+  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"]]) {
+    const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
+    assert(step, `${job}: ${title}`);
+    assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
+    assert.match(step, /\n\s+if ! echo "\$[A-Z0-9_]+_SHA256  \$work\/[a-z.]+" \| (sha256sum -c --status -|shasum -a 256 -s -c -) 2>\/dev\/null; then\n/, `${job}: ${title} checks the cached archive every time`);
+    assert.match(step, /\n\s+cp "\$work\/([a-z.]+)" "\$prefix\/\1\.\$\$"\n\s+mv "\$prefix\/\1\.\$\$" "\$prefix\/\1"\n/, `${job}: ${title} replaces the cached archive in one rename`);
+    assert.match(step, /"\$work\/bin" >> "\$GITHUB_PATH"|bun-path=\$work\/bin\/bun/, `${job}: ${title} runs the copy it just checked`);
+  }
+});
+
+test("make test and test-rust-selected give every cargo test the native-auth host, desktop tests included", async () => {
+  const lines = (await readFile(new URL("../../Makefile", import.meta.url), "utf8")).split("\n");
+  const exported = new Set(lines.flatMap((line) => {
+    const match = /^([a-z -]+): export CRAZYAGENT_TEST_NATIVE_AUTH_HOST = \S/.exec(line);
+    return match ? match[1].trim().split(/\s+/) : [];
+  }));
+  for (const target of ["test", "test-rust-selected"]) {
+    const start = lines.findIndex((line) => line.startsWith(`${target}:`) && !line.includes(" export "));
+    assert(start >= 0, target);
+    const end = lines.findIndex((line, index) => index > start && !line.startsWith("\t"));
+    const tests = lines.slice(start + 1, end).filter((line) => /\bcargo test\b/.test(line));
+    assert(tests.length > 0, target);
+    for (const line of tests) assert(exported.has(target) || line.includes("CRAZYAGENT_TEST_NATIVE_AUTH_HOST="), `${target}: ${line.trim()}`);
+  }
+});
+
+test("Rust tests make their temp folders under the canonical /tmp, which also exists on Linux CI, never under /private/tmp", async () => {
+  const root = new URL("../../", import.meta.url);
+  const found = [];
+  for (const base of ["crates", "apps/desktop/src-tauri/src", "apps/desktop/src-tauri/tests"]) {
+    for (const name of await readdir(new URL(base, root), { recursive: true })) {
+      if (!name.endsWith(".rs")) continue;
+      const text = await readFile(new URL(`${base}/${name}`, root), "utf8");
+      text.split("\n").forEach((line, index) => {
+        if (/tempdir_in\(\s*"\/private\/tmp"/.test(line)) found.push(`${base}/${name}:${index + 1}`);
+      });
+    }
+  }
+  assert.deepEqual(found, []);
 });
 
 test("macOS release signing keeps the certificate in a job keychain under RUNNER_TEMP and always removes it", async () => {

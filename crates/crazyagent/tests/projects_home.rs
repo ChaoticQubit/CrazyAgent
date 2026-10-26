@@ -683,7 +683,7 @@ struct Volume {
 impl Volume {
     fn attach() -> Self {
         use std::os::unix::fs::MetadataExt;
-        let image = tempfile::tempdir_in("/private/tmp").unwrap();
+        let image = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         let disk = image.path().join("second.dmg");
         let mount = image.path().join("mount");
         fs::create_dir(&mount).unwrap();

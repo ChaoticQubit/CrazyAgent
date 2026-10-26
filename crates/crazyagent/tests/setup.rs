@@ -153,7 +153,7 @@ async fn graphify_already_in_the_plugin_store_reads_installed_and_switches_like_
     let mut owner = case.controller().await;
     let owned = tempfile::Builder::new()
         .prefix("ca-setup-owned-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let folder = owned.path().canonicalize().unwrap().join("graphify");
     fs::create_dir(&folder).unwrap();

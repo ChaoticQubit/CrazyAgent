@@ -38,7 +38,7 @@ pub(in crate::engine) const DETACHING_HARNESS: &str = r#"#!/bin/sh
 echo $$ > leader.pid
 "#;
 
-/// A real native profile custody in a private engine folder under `/private/tmp`, with a
+/// A real native profile custody in a private engine folder under the canonical `/tmp`, with a
 /// project folder, for master host tests that need an actual profile lease and sandbox.
 pub(in crate::engine) struct MasterFixture {
     pub(in crate::engine) root: tempfile::TempDir,
@@ -56,7 +56,7 @@ impl MasterFixture {
         let reference = |value: &str| CredentialRef::new(value).unwrap();
         let root = tempfile::Builder::new()
             .prefix("ca-master-group-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let database = root.path().join("engine.db");

@@ -1614,7 +1614,7 @@ fn the_add_file_box_general_form_and_remove_question_draw_with_their_keys() {
 async fn failed_and_empty_reads_settle_back_off_and_say_why() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-quiet-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let sources = tempfile::tempdir().unwrap();

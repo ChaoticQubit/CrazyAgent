@@ -244,7 +244,7 @@ async fn desktop_configures_a_pooled_key_account_from_the_saved_key() -> TestRes
 async fn desktop_account_actions_cancel_and_delete_on_the_real_engine() -> TestResult<()> {
     let root = tempfile::Builder::new()
         .prefix("ca-dact-")
-        .tempdir_in("/private/tmp")?;
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
     let global = root.path().join("global.toml");
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n")?;
