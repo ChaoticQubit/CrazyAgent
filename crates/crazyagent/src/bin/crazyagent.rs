@@ -663,6 +663,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     };
                 }
             };
+            let terminal = service
+                .owner_runtime()
+                .and_then(|runtime| runtime.terminal().ok());
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if research.is_some() || onboarding.is_some() {
                 let _ = tokio::task::spawn_blocking(move || stop_background(research, onboarding))
@@ -670,6 +673,15 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             }
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;
+            }
+            if let Some(terminal) = terminal {
+                let quit = tokio::task::spawn_blocking(move || {
+                    crazyagent::terminal::quit(terminal.as_ref())
+                })
+                .await;
+                if let Ok(Err(problem)) = quit {
+                    eprintln!("agent terminals left running ({problem})");
+                }
             }
             result
         }

@@ -226,6 +226,23 @@ pub fn end_except(host: &(impl Host + ?Sized), keep: &[AgentId]) -> Result<(), H
     Ok(())
 }
 
+/// Leaves the host as the engine stops: team agent terminals keep running for the next
+/// engine to take over, every other terminal ends, and with no team agent left the host
+/// leaves nothing behind. Takes the host; one that cannot run has nothing to end.
+/// Returns the host's first failure.
+pub fn quit(host: &(impl Host + ?Sized)) -> Result<(), HostError> {
+    let alive = match host.alive() {
+        Ok(alive) => alive,
+        Err(problem) if problem.0 == "terminal_unavailable" => return Ok(()),
+        Err(problem) => return Err(problem),
+    };
+    let keep: Vec<AgentId> = alive
+        .into_iter()
+        .filter(|agent| agent.team_agent().is_some())
+        .collect();
+    host.close(&keep)
+}
+
 /// Turns a terminal code into the sentence clients show, such as for a refused attach.
 /// Takes the code from `HostError`, `TerminalFrame::Rejected` or `TerminalFrame::Closed`.
 /// Returns plain words without internal terms.

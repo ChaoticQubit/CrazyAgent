@@ -5,6 +5,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
@@ -20,6 +21,17 @@ const BODY_BYTES_MAX = 4 * 1024 * 1024;
 const REPO = "plant-shop";
 const ABOUT = "A small shop that sells house plants online.";
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
+
+/** Reads the phase of every master conversation the engine recorded, oldest first.
+ * Input: the engine database path. Output: the phases, read without writing. */
+function masterPhases(database) {
+  const db = new DatabaseSync(database, { readOnly: true });
+  try {
+    return db.prepare("SELECT phase FROM master_sessions ORDER BY created").all().map((row) => row.phase);
+  } finally {
+    db.close();
+  }
+}
 
 /** Reads an absolute path from the environment or stops the run with what to set.
  * Input: the variable name and what it names. Output: the existing path. */
@@ -443,22 +455,27 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Remove project", "button.danger");
         const confirm = await me.waitFor("the remove confirmation", (text) => /Remove plant-shop from CrazyAgent\?/.test(text));
         assert.match(confirm, /folder stays on disk/, "the confirmation says the folder stays on disk");
+        assert.match(confirm, /master conversation ends/, "the confirmation says removing ends the open master conversation");
         await me.click("Remove project", "dialog button");
       };
-      await remove();
-      await me.waitFor("why the project stays while its master is open", (text) => text.includes("End this project's master conversation first, then remove the project."));
-      assert.equal(log.answers.get("desktop_remove_project")?.value?.rejection, "project_master_open", "the engine refused the removal while the master conversation is open");
-      await me.capture("remove-refused");
-
-      await me.follow("#tab-conversation");
+      const database = join(runtime, "engine.db");
       await me.click("Conversation actions");
       await me.click("End conversation", "[role=menuitem]");
       await me.waitFor("the master conversation ended", (text) => /\bStopped\b/.test(text));
       await me.capture("master-ended");
+      await me.type("#pj-composer", "Hello again, master.");
+      await me.click("Send");
+      await me.waitFor("a new master conversation", (text) => text.includes("Hello again, master.") && line.test(text), STEP_MS);
+      assert.deepEqual(masterPhases(database), ["closed", "configured"], "End conversation closed the first conversation and the next message opened a new one");
+      const closes = () => log.trail.filter((entry) => entry.cmd === "desktop_close_master").length;
+      const ended = closes();
 
       await remove();
       await me.waitFor("Home with no projects again", (text) => /No projects yet/.test(text));
       await me.capture("home-empty-again");
+      assert.equal(log.answers.get("desktop_remove_project")?.value?.outcome, "applied", `one Remove project removes the project with its conversation open: ${JSON.stringify(log.answers.get("desktop_remove_project") ?? null)}`);
+      assert.equal(closes(), ended, "Remove project made no separate End conversation call");
+      assert.deepEqual(masterPhases(database), ["closed", "closed"], "the engine ended the open conversation in the same owner action");
       assert.ok(existsSync(join(repo, ".git")) && existsSync(join(repo, "README.md")), "the folder is still on disk");
       assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "no page errors");
     }

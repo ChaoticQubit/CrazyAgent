@@ -1845,9 +1845,6 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "stale_revision" | "project_setup_revision" => {
             "This project changed since you opened the form. Open it again."
         }
-        "project_master_open" => {
-            "End this project's master conversation first, then remove the project."
-        }
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
         _ => return coded("That didn't work. Try again.", code),

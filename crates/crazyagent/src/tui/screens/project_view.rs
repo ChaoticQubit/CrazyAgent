@@ -230,7 +230,7 @@ pub(in crate::tui) fn project_screen(
         )];
         body.extend(
             wrap_words(
-                "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
+                "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
                 50,
             )
             .into_iter()

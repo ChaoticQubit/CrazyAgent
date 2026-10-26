@@ -465,11 +465,11 @@ test("Project Settings offers No pool, and a project without a pool tells the ow
   assert.equal(settings.poolSaved("Main"), "Main is assigned.");
 });
 
-test("removing a project says its folder stays on disk", async () => {
+test("removing a project says it ends the master conversation and its folder stays on disk", async () => {
   const settings = await import("../src/screens/project/settings.tsx");
   assert.equal(settings.removeLine("/Users/me/CrazyAgent/harbor-notes"),
-    "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
-  assert.equal(settings.removeLine(null), "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
+    "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
+  assert.equal(settings.removeLine(null), "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
 });
 
 test("a project set up in an existing folder shows that folder, not the .crazyagent folder inside it", async () => {

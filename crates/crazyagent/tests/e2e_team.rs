@@ -224,3 +224,113 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
     owner.controller.detach();
     engine.stop();
 }
+
+fn server_pid(tmux: &std::path::Path, socket: &std::path::Path) -> u32 {
+    let output = crazyagent::spawn_gate::output(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .args(["display-message", "-p", "#{pid}"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "the engine's tmux server answers");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn ended(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while e2e_support::alive(pid) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() {
+    let mut engine = Engine::new("ca-e2e-quit-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let folder = engine.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let team = AgentId::team(1).unwrap();
+    let research = AgentId::new("research-7-1").unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into()],
+        cwd: engine.path().to_path_buf(),
+        env: vec![("PS1".into(), "quit$ ".into())],
+        transcript: Transcript::Unavailable,
+    };
+    let launcher = {
+        let agents = [team.clone(), research.clone()];
+        let folder = folder.clone();
+        let tmux = tmux.clone();
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            for agent in &agents {
+                launcher.spawn(agent, &command).unwrap();
+            }
+            launcher
+        })
+        .await
+        .unwrap()
+    };
+    engine.launch();
+    engine.stop();
+    let (launcher, alive) = tokio::task::spawn_blocking(move || {
+        let alive = launcher.alive().unwrap();
+        (launcher, alive)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        alive,
+        vec![team.clone()],
+        "the stopped engine keeps its team agent for the next engine and ends every other terminal"
+    );
+
+    engine.launch();
+    let mut owner = Owner::attach(&engine).await;
+    let TerminalSession {
+        agent: attached,
+        mut output,
+        control,
+        ..
+    } = owner
+        .controller
+        .terminal_attach(team.clone())
+        .await
+        .unwrap();
+    assert_eq!(attached, team);
+    let mut seen = Vec::new();
+    assert!(
+        read_until(&mut output, &mut seen, b"quit$ ").await,
+        "the restarted engine reaches the team agent that lived on: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    control.detach().await.unwrap();
+    owner.controller.detach();
+    let server = server_pid(&tmux, &socket);
+    tokio::task::spawn_blocking(move || launcher.kill(&team))
+        .await
+        .unwrap()
+        .unwrap();
+    engine.stop();
+    assert!(
+        !socket.exists(),
+        "with no team agent left the engine stop ends its tmux server and removes its socket"
+    );
+    assert!(ended(server), "the tmux server process is gone");
+}

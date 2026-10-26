@@ -137,7 +137,6 @@ const copy: Record<string, string> = {
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   invalid_project: "This project no longer exists.",
-  project_master_open: "End this project's master conversation first, then remove the project.",
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
