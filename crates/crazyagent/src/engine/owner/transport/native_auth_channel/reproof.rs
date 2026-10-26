@@ -68,6 +68,10 @@ impl OwnerRuntimeHandle {
             }
     }
 
+    /// Re-proves one earlier sign-in, waiting for the account-check host to be free first
+    /// and again until the finished check has released the profile, and checking again when
+    /// the host was busy or could not run the check, all within one bound (LB-26). Inputs:
+    /// the owner's standing admission and the check. Output: the settled phase, or the code.
     async fn reprove(
         &self,
         admission: &Admission,
@@ -77,15 +81,46 @@ impl OwnerRuntimeHandle {
             start.method,
             NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting
         ));
+        let deadline = Instant::now() + REPROOF_WAIT;
+        let mut attempt = start;
+        loop {
+            self.native_auth_idle_by(deadline).await?;
+            let settled = self.check_once(admission, &attempt, deadline).await;
+            if !unrun(&settled) {
+                if settled.is_ok() {
+                    self.native_auth_idle_by(deadline).await?;
+                }
+                return settled;
+            }
+            if Instant::now() >= deadline || !self.reprovable(attempt.method) {
+                return settled;
+            }
+            tokio::time::sleep(REPROOF_POLL).await;
+            attempt = NativeAuthStart {
+                request_id: RequestId::new(random_id()?)
+                    .map_err(|_| failure("owner_identity_encoding"))?,
+                ..attempt
+            };
+        }
+    }
+
+    /// Starts one account check and follows it until it settles or the bound passes.
+    /// Inputs: the admission, the check and the bound. Output: the settled phase, with
+    /// `native_auth_host_unavailable` mapped to an error, or the refusal code.
+    async fn check_once(
+        &self,
+        admission: &Admission,
+        start: &NativeAuthStart,
+        deadline: Instant,
+    ) -> Result<NativeAuthPhase, EngineError> {
         let query = NativeAuthQuery {
             request_id: RequestId::new(random_id()?)
                 .map_err(|_| failure("owner_identity_encoding"))?,
             scope: start.scope.clone(),
             operation_id: start.request_id.clone(),
         };
-        let deadline = Instant::now() + REPROOF_WAIT;
         let mut reply = self
-            .native_auth_command(admission.clone(), Command::Start(start))
+            .native_auth_command(admission.clone(), Command::Start(start.clone()))
             .await?;
         while reply.fact.phase.unfinished() {
             if Instant::now() >= deadline {
@@ -97,11 +132,47 @@ impl OwnerRuntimeHandle {
                 .await?;
         }
         assert_eq!(reply.fact.operation_id, query.operation_id);
+        if reply.fact.phase == NativeAuthPhase::Unavailable
+            && reply.fact.code.as_deref() == Some("native_auth_host_unavailable")
+        {
+            return Err(failure("native_auth_host_unavailable"));
+        }
         Ok(reply.fact.phase)
+    }
+
+    /// Waits until the account-check host holds no operation but the finished one it keeps
+    /// to show. Input: the bound. Output: success, or `native_auth_reproof_deadline`.
+    async fn native_auth_idle_by(&self, deadline: Instant) -> Result<(), EngineError> {
+        while !self.authority.native_auth_idle() {
+            if Instant::now() >= deadline {
+                return Err(failure("native_auth_reproof_deadline"));
+            }
+            tokio::time::sleep(REPROOF_POLL).await;
+        }
+        Ok(())
     }
 }
 
+/// Tells whether a check failed only because the host was busy or could not run it, which
+/// says nothing about the account. Input: the check's result. Output: true to check again.
+fn unrun(settled: &Result<NativeAuthPhase, EngineError>) -> bool {
+    settled.as_ref().is_err_and(|error| {
+        matches!(
+            error.0.as_str(),
+            "native_auth_host_busy" | "native_auth_host_unavailable"
+        )
+    })
+}
+
 impl Authority {
+    /// Tells whether the account-check host can take a new operation: it holds none, or
+    /// only the finished one it keeps to show. Input: none. Output: true when idle.
+    fn native_auth_idle(&self) -> bool {
+        self.native_auth
+            .lock()
+            .is_ok_and(|current| current.as_ref().is_none_or(NativeAuthSlot::cached))
+    }
+
     /// The admission of the first owner registration this engine run holds active: the
     /// owner's standing grant an engine-started account check runs under. Input: none.
     /// Output: that admission, or none when no owner is registered.

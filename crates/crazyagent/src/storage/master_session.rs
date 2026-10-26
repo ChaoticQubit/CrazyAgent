@@ -1771,18 +1771,28 @@ fn block_on_gaps(
     persist_runtime(tx, config, session, turn)
 }
 
-/// Names the native connection whose sign-in a master session's turns launch on.
-/// Inputs: the transaction and the session. Output: that connection, or none for a
-/// missing session or a backend that launches without a native sign-in.
-pub(super) fn native_target(
+/// Names the native connections whose sign-ins a master session's turns may launch on:
+/// every member of its pool that may serve its backend, since a turn moves past a member
+/// that cannot run (LB-17). Inputs: the transaction, settings and session. Output: those
+/// connections, or none for a missing session or a backend without a native sign-in.
+pub(super) fn native_members(
     tx: &Transaction<'_>,
+    config: &EffectiveConfig,
     session: &SessionId,
-) -> Result<Option<crate::protocol::CredentialRef>, EngineError> {
+) -> Result<Option<Vec<crate::protocol::CredentialRef>>, EngineError> {
     let Some(session) = load_session(tx, session, owner_revision(tx)?)? else {
         return Ok(None);
     };
-    Ok((session.selection.backend != MasterBackend::Rcli)
-        .then(|| session.selection.target_profile_ref.clone()))
+    if session.selection.backend == MasterBackend::Rcli {
+        return Ok(None);
+    }
+    let members: Vec<_> = master_members(config, &session)
+        .into_iter()
+        .filter(|(_, gap, _)| gap.is_none())
+        .map(|(connection, _, _)| connection.id.clone())
+        .collect();
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
+    Ok(Some(members))
 }
 
 /// Proves the latest sign-in of a native managed connection can authorize a launch on
@@ -1796,14 +1806,41 @@ pub(crate) fn native_sign_in(
     connection: &ModelConnection,
     account_ref: Option<&crate::protocol::CredentialRef>,
 ) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
+    proved_sign_in(tx, host, connection, account_ref, None)
+}
+
+/// Proves one sign-in operation of a native managed connection, named by its generation,
+/// passes the launch check under the run that proved it, so a later run may re-prove it.
+/// Inputs: the transaction, that run's host, the connection and the generation. Output:
+/// the authenticated sign-in fact, or the unknown, stale or in-use code.
+pub(super) fn sign_in_at(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &ModelConnection,
+    generation: u64,
+) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
+    proved_sign_in(tx, host, connection, None, Some(generation))
+}
+
+/// Proves a connection's latest sign-in, or the one with the given generation, can
+/// authorize a launch under the host's run. Inputs: the transaction, host, connection,
+/// the account a master route names and the generation, if any. Output: the fact or code.
+fn proved_sign_in(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &ModelConnection,
+    account_ref: Option<&crate::protocol::CredentialRef>,
+    generation: Option<u64>,
+) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
     let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
         return Err(error("native_profile_not_managed"));
     };
     let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let wanted = generation.map(signed).transpose()?;
     type OperationRow = (String, i64, String, Vec<u8>, Vec<u8>);
     let row: Option<OperationRow> = tx.query_row(
-        "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-        [&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 AND (?2 IS NULL OR generation=?2) ORDER BY generation DESC LIMIT 1",
+        params![&key, wanted], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(error)?;
     let (id, generation, phase, request, bytes) =
         row.ok_or_else(|| error("master_authentication_unknown"))?;
