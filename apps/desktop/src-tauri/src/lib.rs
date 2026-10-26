@@ -1587,6 +1587,27 @@ async fn desktop_stop_agent(
 }
 
 #[tauri::command]
+async fn desktop_agents_using(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    account_id: String,
+) -> Result<Vec<AgentView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)?.agents_using(account_id).await
+}
+
+#[tauri::command]
+async fn desktop_stop_agents_using(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    account_id: String,
+) -> Result<Vec<AgentView>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)?.stop_agents_using(account_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_interrupt_agent(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1964,6 +1985,8 @@ pub fn run() {
             desktop_project_plugins,
             desktop_agents,
             desktop_stop_agent,
+            desktop_agents_using,
+            desktop_stop_agents_using,
             desktop_interrupt_agent,
             desktop_restart_agent,
             desktop_pick_folder,

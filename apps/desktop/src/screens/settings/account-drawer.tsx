@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { checkAccount, renameAccount, type AccountView, type PoolSummary } from "../../api";
-import { useAppSession } from "../../state";
+import { agentsUsing, checkAccount, plainError, renameAccount, stopAgentsUsing, type AccountView, type AgentView, type PoolSummary } from "../../api";
+import { useAppSession, type ProjectRow } from "../../state";
 import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
+import { displayText } from "../conversation";
 import { nameError } from "./add-account";
-import { cancelSignIn, SignInPanel, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { cancelSignIn, signOut, SignInPanel, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 /** Joins names for a sentence: "A", "A and B", "A, B and C". Input: the names. Output: the text. */
 export function andList(names: readonly string[]): string {
@@ -30,6 +31,39 @@ export function supportDetails(account: AccountView): string {
     `Status: ${account.status_label}`, ...account.model ? [`Model: ${account.model}`] : []].join("\n");
 }
 
+/** Whether an account can be signed out here: a subscription sign-in that is signed in.
+ * Input: the account. Output: true when Sign out applies. */
+export function canSignOut(account: AccountView): boolean {
+  return account.method === "subscription" && (account.provider === "chatgpt" || account.provider === "claude")
+    && account.status === "signed_in";
+}
+
+/** Names the agents that keep an account from signing out, grouped by project: "Team
+ * sub-agent 3 in Alpha is using this account." Inputs: the agents and the known projects.
+ * Output: the sentence. */
+export function inUseLine(agents: readonly AgentView[], projects: readonly ProjectRow[] | undefined): string {
+  const groups = new Map<string, string[]>();
+  for (const agent of agents) groups.set(agent.project, [...groups.get(agent.project) ?? [], displayText(agent.label)]);
+  const parts = [...groups].map(([project, labels]) =>
+    `${andList(labels)} in ${displayText(projects?.find((row) => row.id === project)?.name ?? "another project")}`);
+  return `${andList(parts)} ${agents.length === 1 ? "is" : "are"} using this account.`;
+}
+
+/** Says why an account could not be signed out. When the engine named the agents using it,
+ * offers one action that stops them and signs out. Inputs: those agents, the known
+ * projects, whether that action runs, and its handler. */
+export function InUseNotice({ agents, projects, pending, onStop }: {
+  agents: readonly AgentView[];
+  projects: readonly ProjectRow[] | undefined;
+  pending: boolean;
+  onStop: () => void;
+}) {
+  if (agents.length === 0) return <Notice tone="warn" alert>{plainError("native_profile_in_use")}</Notice>;
+  return <Notice tone="warn" alert><span className="stack-small"><span>{inUseLine(agents, projects)}</span>
+    <span><Button variant="danger-text" icon="log-out" pending={pending} pendingLabel="Stopping agents..." onClick={onStop}>Stop agents and sign out</Button></span>
+  </span></Notice>;
+}
+
 function SignInAgain({ account, onSignedIn }: { account: AccountView; onSignedIn: () => void }) {
   const provider = account.provider as SubscriptionProvider;
   const signIn = useSignIn(account.id);
@@ -47,7 +81,7 @@ function SignInAgain({ account, onSignedIn }: { account: AccountView; onSignedIn
 }
 
 /** The account details drawer: rename, status with its action (Sign in again, Cancel sign-in,
- * Check again), model, pools, support copy and Delete account. Inputs: the account (or
+ * Sign out, Check again), model, pools, support copy and Delete account. Inputs: the account (or
  * undefined when closed), pools, whether sign-in opens at once, and handlers for close, for any
  * change that needs the list reloaded and for Delete, which the page confirms. */
 export function AccountDrawer({ account, pools, signIn = false, onClose, onChanged, onDelete }: {
@@ -66,6 +100,8 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
   const [checking, setChecking] = useState(false);
   const [checkLine, setCheckLine] = useState<string>();
   const [cancelling, setCancelling] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [inUse, setInUse] = useState<AgentView[]>();
   const [error, setError] = useState<string>();
   const accountId = account?.id;
   useEffect(() => {
@@ -73,6 +109,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
     setNameMessage(undefined);
     setSigningIn(signIn);
     setCheckLine(undefined);
+    setInUse(undefined);
     setError(undefined);
   }, [accountId, signIn]);
 
@@ -110,6 +147,36 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
     else setError(result.kind === "not_ready" ? "Cancelling sign-in isn't ready yet in this build." : result.message);
   };
 
+  const signOutAccount = async (stopFirst: boolean) => {
+    setSigningOut(true);
+    setError(undefined);
+    if (stopFirst) {
+      const stopped = session.noteResult(await stopAgentsUsing(account.id));
+      if (stopped.kind !== "ok") {
+        setSigningOut(false);
+        return setError(stopped.kind === "not_ready" ? "Stopping agents isn't ready yet in this build." : stopped.message);
+      }
+      if (stopped.value.length > 0) {
+        setSigningOut(false);
+        return setInUse(stopped.value);
+      }
+    }
+    const result = session.noteResult(await signOut(account.id));
+    if (result.kind === "ok") {
+      setSigningOut(false);
+      setInUse(undefined);
+      session.showToast("Signed out.");
+      return onChanged();
+    }
+    if (result.kind === "error" && result.code === "native_profile_in_use") {
+      const using = await agentsUsing(account.id);
+      setSigningOut(false);
+      return setInUse(using.kind === "ok" ? using.value : []);
+    }
+    setSigningOut(false);
+    setError(result.kind === "not_ready" ? "Signing out isn't ready yet in this build." : result.message);
+  };
+
   return <>
     <Drawer open title={account.name} onClose={onClose}
       footer={<span className="row"><Button variant="danger-text" icon="trash" onClick={() => onDelete(account)}>Delete account</Button>
@@ -132,6 +199,10 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
         <span><Button icon="x" pending={cancelling} pendingLabel="Cancelling..." onClick={() => void cancel()}>Cancel sign-in</Button></span>}
       {subscription && account.status !== "signed_in" && account.status !== "signing_in" && !signingIn &&
         <span><Button variant="primary" icon="log-in" onClick={() => setSigningIn(true)}>Sign in again</Button></span>}
+      {canSignOut(account) && !signingIn && inUse === undefined &&
+        <span><Button icon="log-out" pending={signingOut} pendingLabel="Signing out..." onClick={() => void signOutAccount(false)}>Sign out</Button></span>}
+      {inUse !== undefined && <InUseNotice agents={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
+        pending={signingOut} onStop={() => void signOutAccount(true)} />}
       {subscription && signingIn && <SignInAgain account={account} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
       {account.method === "url" && <div className="stack-small">
         <span><Button icon="refresh-cw" pending={checking} pendingLabel="Checking..." onClick={() => void check()}>Check again</Button></span>

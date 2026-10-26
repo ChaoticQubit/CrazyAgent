@@ -1,6 +1,7 @@
 use super::app::UiEvent;
 use super::model_access::Basis;
 use crate::adapters::{claude, codex};
+use crate::agents::AgentView;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
@@ -14,6 +15,7 @@ pub(super) mod claude_code;
 
 const DISPLAY_BYTES_MAX: usize = 65536;
 const FIELD_BYTES_MAX: usize = 4096;
+const USING_SHOWN_MAX: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
@@ -29,6 +31,8 @@ pub(super) enum Command {
     Read(NativeAuthQuery),
     Cancel(NativeAuthCancel),
     Logout(NativeAuthLogout),
+    Using,
+    StopUsing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +44,7 @@ pub(super) struct Job {
 pub(super) enum Output {
     Inspected(Box<OwnerReadReply>),
     Auth(Box<NativeAuthReply>),
+    Using(Vec<AgentView>),
 }
 
 pub(super) struct Event {
@@ -66,6 +71,8 @@ pub(super) struct State {
     inspected: bool,
     selected: usize,
     confirmation: Option<bool>,
+    prior: Option<Retained>,
+    using: Option<(Vec<AgentView>, bool)>,
     scroll: u16,
     notice: &'static str,
     polled: Option<std::time::Instant>,
@@ -86,6 +93,8 @@ impl Default for State {
             inspected: false,
             selected: 0,
             confirmation: None,
+            prior: None,
+            using: None,
             scroll: 0,
             notice: "Select a managed native connection",
             polled: None,
@@ -96,7 +105,7 @@ impl Default for State {
 impl Command {
     fn request_id(&self) -> Option<&RequestId> {
         match self {
-            Self::Inspect => None,
+            Self::Inspect | Self::Using | Self::StopUsing => None,
             Self::Start(request) => Some(&request.request_id),
             Self::Read(request) => Some(&request.request_id),
             Self::Cancel(request) => Some(&request.request_id),
@@ -106,7 +115,7 @@ impl Command {
 
     fn operation_id(&self) -> Option<&RequestId> {
         match self {
-            Self::Inspect => None,
+            Self::Inspect | Self::Using | Self::StopUsing => None,
             Self::Start(request) => Some(&request.request_id),
             Self::Read(request) => Some(&request.operation_id),
             Self::Cancel(request) => Some(&request.operation_id),
@@ -116,7 +125,7 @@ impl Command {
 
     fn scope(&self) -> Option<&NativeAuthScope> {
         match self {
-            Self::Inspect => None,
+            Self::Inspect | Self::Using | Self::StopUsing => None,
             Self::Start(request) => Some(&request.scope),
             Self::Read(request) => Some(&request.scope),
             Self::Cancel(request) => Some(&request.scope),
@@ -130,7 +139,7 @@ impl Command {
                 method: request.method,
             }),
             Self::Logout(_) => Some(NativeAuthAction::Logout),
-            Self::Inspect | Self::Read(_) | Self::Cancel(_) => None,
+            Self::Inspect | Self::Read(_) | Self::Cancel(_) | Self::Using | Self::StopUsing => None,
         }
     }
 }
@@ -211,6 +220,7 @@ impl State {
         self.claude_code.clear();
         self.presentation = None;
         self.confirmation = None;
+        self.using = None;
         self.generation = self
             .generation
             .checked_add(1)
@@ -254,6 +264,7 @@ impl State {
             || !self.inspected
             || self.loading()
             || self.confirmation.is_some()
+            || self.using.is_some()
             || self.claude_code.accepts_code()
         {
             return false;
@@ -310,6 +321,7 @@ impl State {
         }
         if self.selected == 0
             && self.confirmation.is_none()
+            && self.using.is_none()
             && matches!(
                 event,
                 UiEvent::Character(_) | UiEvent::Backspace | UiEvent::Submit
@@ -338,6 +350,8 @@ impl State {
             UiEvent::SelectionNext | UiEvent::SelectionPrevious => {
                 if let Some(confirm) = &mut self.confirmation {
                     *confirm = !*confirm;
+                } else if let Some((_, stop)) = &mut self.using {
+                    *stop = !*stop;
                 } else {
                     let count = self.choices().len();
                     let step = if matches!(event, UiEvent::SelectionNext) {
@@ -399,6 +413,16 @@ impl State {
         if let Some(confirm) = self.confirmation.take() {
             return if confirm { self.begin(None) } else { Ok(()) };
         }
+        if let Some((_, stop)) = self.using.take() {
+            if !stop {
+                return Ok(());
+            }
+            let context = self.context.clone().ok_or("Select a native connection")?;
+            return self.queue(Job {
+                context,
+                command: Command::StopUsing,
+            });
+        }
         let claude = self
             .context
             .as_ref()
@@ -435,6 +459,7 @@ impl State {
         };
         let job = Job { context, command };
         self.queue(job.clone())?;
+        self.prior = self.retained.take();
         self.retained = Some(Retained {
             original: job,
             fact: None,
@@ -503,6 +528,7 @@ impl State {
         if self.flight.as_ref() != Some(&event.job) {
             return Ok(());
         }
+        let (mut list_using, mut sign_out) = (false, false);
         match event.result {
             Ok(Output::Auth(reply)) if !matches!(event.job.command, Command::Inspect) => {
                 if !self.matches_reply(&event.job, &reply) {
@@ -518,11 +544,31 @@ impl State {
                     "Selected connection or source changed; close and inspect again"
                 };
             }
+            Ok(Output::Using(agents))
+                if matches!(event.job.command, Command::Using | Command::StopUsing)
+                    && self.open
+                    && self.context.as_ref() == Some(&event.job.context) =>
+            {
+                sign_out = matches!(event.job.command, Command::StopUsing) && agents.is_empty();
+                self.notice = if sign_out {
+                    "Agents stopped; signing out"
+                } else if agents.is_empty() {
+                    "native_profile_in_use"
+                } else {
+                    "The agents below use this account; stop them to sign out"
+                };
+                self.using = (!agents.is_empty()).then_some((agents, false));
+            }
             Err(problem) => {
                 self.presentation = None;
                 self.claude_code.clear();
                 self.notice = public_problem(&problem);
-                if problem != "native_auth_not_active"
+                list_using = problem == "native_profile_in_use"
+                    && matches!(event.job.command, Command::Logout(_));
+                if list_using {
+                    self.retained = self.prior.take();
+                } else if problem != "native_auth_not_active"
+                    && !matches!(event.job.command, Command::Using | Command::StopUsing)
                     && let Some(retained) = &mut self.retained
                 {
                     retained.uncertain = true;
@@ -540,6 +586,14 @@ impl State {
         }
         self.flight = None;
         self.job = None;
+        if list_using {
+            self.queue(Job {
+                context: event.job.context,
+                command: Command::Using,
+            })?;
+        } else if sign_out {
+            self.begin(None)?;
+        }
         self.assert_consistent();
         Ok(())
     }
@@ -733,7 +787,30 @@ impl State {
     }
 
     fn action_lines(&self) -> Vec<String> {
-        if let Some(confirm) = self.confirmation {
+        if let Some((agents, stop)) = &self.using {
+            let mut names: Vec<String> = agents
+                .iter()
+                .take(USING_SHOWN_MAX)
+                .map(|agent| {
+                    format!(
+                        "{} (project {})",
+                        display_text(&agent.label, 256),
+                        display_text(agent.project.as_str(), 256)
+                    )
+                })
+                .collect();
+            if agents.len() > USING_SHOWN_MAX {
+                names.push(format!("and {} more", agents.len() - USING_SHOWN_MAX));
+            }
+            vec![
+                format!("In use by: {}", names.join(", ")),
+                format!(
+                    "{} Back | {} Stop agents and sign out",
+                    if *stop { " " } else { ">" },
+                    if *stop { ">" } else { " " }
+                ),
+            ]
+        } else if let Some(confirm) = self.confirmation {
             vec![
                 "Request logout for this connection?".into(),
                 format!(
@@ -765,6 +842,11 @@ impl State {
         assert!(!self.open || self.context.is_some());
         assert!(!self.open || self.selected < self.choices().len());
         assert!(self.presentation.is_none() || (self.open && self.connected));
+        assert!(
+            self.using
+                .as_ref()
+                .is_none_or(|(agents, _)| !agents.is_empty())
+        );
         if let Some(retained) = &self.retained {
             assert!(retained.original.command.action().is_some());
             assert!(retained.fact.as_ref().is_none_or(|fact| {

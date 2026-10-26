@@ -3,7 +3,7 @@ use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
 };
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -305,7 +305,8 @@ struct HostedSpec {
 
 /// What the register shows for one agent that another engine part starts and drives,
 /// such as a team agent: its project, role, owner-facing label and harness, the host's
-/// name and the host's own reference for it, handed back with every owner restart.
+/// name, the host's own reference for it, handed back with every owner restart, and the
+/// account it signs in with, so a refused sign-out can name and stop it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedAgent {
     pub project: ProjectId,
@@ -314,6 +315,7 @@ pub struct HostedAgent {
     pub harness: String,
     pub host: &'static str,
     pub reference: String,
+    pub account: Option<CredentialRef>,
 }
 
 /// What the owner asked of a hosted agent. A restart also stops it; once it ends, the
@@ -338,6 +340,7 @@ struct Control {
     restart: AtomicBool,
     busy: AtomicBool,
     interrupt: Arc<AtomicBool>,
+    account: Option<CredentialRef>,
 }
 
 /// A hosted agent's place in the register, kept by the engine part that drives it.
@@ -949,12 +952,60 @@ impl Agents {
     pub fn stop(&self, id: &str) -> Result<AgentView, LaunchError> {
         if let Some(control) = self.hosted(id)? {
             control.stop.store(true, Ordering::Release);
-            self.await_host(id, &control);
+            self.await_host(id, &control, Instant::now() + HOST_WAIT);
             return self.view(id);
         }
         let live = self.take(id)?.ok_or_else(|| failure("agent_not_running"))?;
         end(live, AgentState::Stopped, self.recorder(id)?);
         self.view(id)
+    }
+
+    /// Lists the running hosted agents that sign in with one account, newest first, so a
+    /// refused sign-out can name them. Input: the account. Output: the agents.
+    pub fn using(&self, account: &CredentialRef) -> Result<Vec<AgentView>, LaunchError> {
+        let mut views = self
+            .hosted_using(account)?
+            .iter()
+            .map(|(id, _)| self.view(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        views.sort_by(|a, b| {
+            b.started_ms
+                .cmp(&a.started_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        views.truncate(LIST_MAX);
+        Ok(views)
+    }
+
+    /// Stops every running hosted agent that signs in with one account and waits, at most
+    /// `HOST_WAIT` in all, for their hosts to end them. Input: the account. Output: those
+    /// agents as they are after the wait.
+    pub fn stop_using(&self, account: &CredentialRef) -> Result<Vec<AgentView>, LaunchError> {
+        let hosted = self.hosted_using(account)?;
+        for (_, control) in &hosted {
+            control.stop.store(true, Ordering::Release);
+        }
+        let deadline = Instant::now() + HOST_WAIT;
+        for (id, control) in &hosted {
+            self.await_host(id, control, deadline);
+        }
+        hosted.iter().map(|(id, _)| self.view(id)).collect()
+    }
+
+    fn hosted_using(
+        &self,
+        account: &CredentialRef,
+    ) -> Result<Vec<(String, Arc<Control>)>, LaunchError> {
+        Ok(self
+            .live()?
+            .iter()
+            .filter_map(|(id, live)| match live {
+                Live::Hosted { control } if control.account.as_ref() == Some(account) => {
+                    Some((id.clone(), control.clone()))
+                }
+                _ => None,
+            })
+            .collect())
     }
 
     /// Restarts one agent from its spec with the same id: a live agent is stopped first,
@@ -1079,7 +1130,10 @@ impl Agents {
             }
         };
         drop(db);
-        let control = Arc::new(Control::default());
+        let control = Arc::new(Control {
+            account: agent.account.clone(),
+            ..Control::default()
+        });
         self.live()?.insert(
             id.clone(),
             Live::Hosted {
@@ -1156,7 +1210,7 @@ impl Agents {
         if let Some(control) = self.hosted(id)? {
             control.restart.store(true, Ordering::Release);
             control.stop.store(true, Ordering::Release);
-            self.await_host(id, &control);
+            self.await_host(id, &control, Instant::now() + HOST_WAIT);
             return self.view(id);
         }
         let served = self
@@ -1181,8 +1235,7 @@ impl Agents {
         })
     }
 
-    fn await_host(&self, id: &str, control: &Arc<Control>) {
-        let deadline = Instant::now() + HOST_WAIT;
+    fn await_host(&self, id: &str, control: &Arc<Control>, deadline: Instant) {
         while Instant::now() < deadline {
             let held = match self.live() {
                 Ok(live) => {
@@ -1580,6 +1633,12 @@ impl Stored {
             Some(Live::Hosted { control }) => control.busy.load(Ordering::Acquire),
             _ => false,
         };
+        let asked = match live {
+            Some(Live::Hosted { control }) if control.stop.load(Ordering::Acquire) => {
+                Some(control.restart.load(Ordering::Acquire))
+            }
+            _ => None,
+        };
         let can_restart = if self.hosted {
             live.is_some() || (!running && served)
         } else {
@@ -1589,6 +1648,8 @@ impl Stored {
             AgentState::Running if self.reattached => {
                 "Running, reconnected after CrazyAgent restarted".to_owned()
             }
+            AgentState::Running if asked == Some(true) => "Restarting".to_owned(),
+            AgentState::Running if asked == Some(false) => "Stopping".to_owned(),
             AgentState::Running if busy => "Working".to_owned(),
             AgentState::Running => "Running".to_owned(),
             AgentState::Stopped => "Stopped".to_owned(),
@@ -1610,7 +1671,7 @@ impl Stored {
             reattached: self.reattached,
             busy,
             attempt: self.attempt,
-            can_stop: running && live.is_some(),
+            can_stop: running && live.is_some() && asked.is_none(),
             can_interrupt: running && driven && busy,
             can_restart,
             exit_code: self.exit_code,

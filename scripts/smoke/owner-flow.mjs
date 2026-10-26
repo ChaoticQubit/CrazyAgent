@@ -573,6 +573,7 @@ async function main() {
     await step("6d", "stop the agent: it ends and its worktree is no longer held", async () => {
       const id = needs(team.agents[0], "6b");
       const stopped = await value("desktop_stop_agent", { id: needs(team.view, "6c") });
+      if (stopped.state !== "stopped" || stopped.can_stop) throw new Refused(`stop_answered_${stopped.state}`, `${stopped.status}, can_stop ${stopped.can_stop}`);
       let member;
       for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 2)) {
         member = (await teamStatus()).agents.find((item) => item.id === id);
@@ -589,15 +590,33 @@ async function main() {
     await step("6e", "one pool account rate-limited: the next agent launch uses the other member (DEC-091)", async () => {
       throw new Blocked("needs_a_real_rate_limit: only a provider reply pauses an account, and the smoke may not fabricate one");
     });
-    await step("6e2", "one pool account signed out: the next agent launch uses the other member", async () => {
-      const [first, second] = [needs(team.accounts[0], "6"), needs(team.accounts[1], "6")];
-      await value("desktop_logout_native_auth", { ticket: (await connection(first.id)).ticket });
-      await settleAuth(first.id, "logout", "unauthenticated_observed");
+    await step("6e2", "sign out an account an agent is using: the refusal names the agent and its project, Stop agents and sign out ends it, the next launch uses the other member", async () => {
+      const project = needs(state.project, "1");
+      needs(team.accounts[1], "6");
       const { task, agent } = await delegate("Read the README of this repository.");
       if (!agent) throw new Refused(`team_task_${task.status}`, task.problem ?? "no agent");
       team.agents.push(agent.id);
-      if (agent.account !== second.id) throw new Refused("team_agent_on_signed_out_account", agent.account ?? "no account");
-      return `agent on the other member; launch ${launched(agent, task)}`;
+      const used = team.accounts.find((account) => account.id === agent.account);
+      const other = team.accounts.find((account) => account.id !== agent.account);
+      if (!used || !other) throw new Refused("team_agent_account_unknown", agent.account ?? "no account");
+      for (const deadline = Date.now() + TEAM_MS; ; await pause(POLL_MS * 2)) {
+        const member = (await teamStatus()).agents.find((item) => item.id === agent.id);
+        if (member?.status === "working") break;
+        if (Date.now() > deadline) throw new Refused(`team_agent_not_working_${member?.status ?? "missing"}`, member?.problem ?? "-");
+      }
+      const refused = await call("desktop_logout_native_auth", { ticket: (await connection(used.id)).ticket });
+      if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
+      const using = await value("desktop_agents_using", { accountId: used.id });
+      if (!using.some((view) => view.label === `Team sub-agent ${agent.id}` && view.project === project)) throw new Refused("in_use_without_the_agent", using.map((view) => `${view.label}@${view.project}`).join(",") || "none");
+      const left = await value("desktop_stop_agents_using", { accountId: used.id });
+      if (left.length) throw new Refused("agents_using_still_running", left.map((view) => `${view.label} ${view.status}`).join(","));
+      await value("desktop_logout_native_auth", { ticket: (await connection(used.id)).ticket });
+      await settleAuth(used.id, "logout", "unauthenticated_observed");
+      const next = await delegate("Summarize the README of this repository.");
+      if (!next.agent) throw new Refused(`team_task_${next.task.status}`, next.task.problem ?? "no agent");
+      team.agents.push(next.agent.id);
+      if (next.agent.account !== other.id) throw new Refused("team_agent_on_signed_out_account", next.agent.account ?? "no account");
+      return `refusal named ${using.map((view) => view.label).join(", ")}; stopped and signed out; next agent on the other member, ${launched(next.agent, next.task)}`;
     });
     await step("6f", "End conversation and Remove project clean up the team's agents", async () => {
       const project = needs(state.project, "1");
