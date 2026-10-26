@@ -242,6 +242,15 @@ impl DispatchFixture {
     }
 
     async fn open_named(&self, project: &str) -> (OwnerRequest, OwnerReply, MasterSessionView) {
+        self.open_as(&format!("dispatch-open-{project}"), project)
+            .await
+    }
+
+    async fn open_as(
+        &self,
+        id: &str,
+        project: &str,
+    ) -> (OwnerRequest, OwnerReply, MasterSessionView) {
         let basis = self
             .read(OwnerRead::ModelAccessPage {
                 collection: ModelAccessCollection::Pools,
@@ -254,7 +263,7 @@ impl DispatchFixture {
         };
         let (request, reply) = self
             .action(
-                &format!("dispatch-open-{project}"),
+                id,
                 MasterOwnerAction::Open {
                     project_id: ProjectId::new(project).unwrap(),
                     expected_config_id: basis.config_id,
@@ -730,12 +739,36 @@ async fn master_dispatch_blocks_a_claude_turn_without_a_current_sign_in() {
 }
 
 #[tokio::test]
-async fn master_dispatch_blocks_a_turn_on_a_master_opened_before_an_engine_restart() {
+async fn a_send_to_a_master_opened_before_an_engine_restart_is_refused_so_a_new_conversation_takes_it()
+ {
     let mut fixture = DispatchFixture::start().await;
     fixture.create().await;
-    let (_, _, session) = fixture.open().await;
+    let (_, _, stale) = fixture.open().await;
     fixture.restart().await;
-    let (submit, submitted) = fixture.submit(&session, "after-restart").await;
+    let (_, refused) = fixture.submit(&stale, "after-restart").await;
+    let OwnerResponse::Applied { operation: refusal } = &refused.response else {
+        panic!("actual refusal missing: {refused:?}");
+    };
+    assert_eq!(
+        refusal.result,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        }
+    );
+    assert_eq!(fixture.counts(), (0, 0));
+    let (_, closed) = fixture
+        .action(
+            "close-after-restart",
+            MasterOwnerAction::Close {
+                project_id: stale.project_id.clone(),
+                session_id: stale.session_id.clone(),
+            },
+        )
+        .await;
+    operation(&closed);
+    let (_, _, fresh) = fixture.open_as("reopen-after-restart", "p").await;
+    assert_ne!(fresh.session_id, stale.session_id);
+    let (submit, submitted) = fixture.submit(&fresh, "after-restart-new").await;
     operation(&submitted);
     let mut dispatcher = MasterDispatch::new();
     assert!(
@@ -743,11 +776,11 @@ async fn master_dispatch_blocks_a_turn_on_a_master_opened_before_an_engine_resta
             .committed(fixture.runtime(), &submit, &submitted)
             .unwrap()
     );
-    let turn = fixture.await_blocked(&session).await;
+    let turn = fixture.await_blocked(&fresh).await;
     assert_eq!(turn.id, submit.request_id);
     assert_eq!(
         turn.reason,
-        Some(crate::master_session::MasterReason::ConnectionChanged)
+        Some(crate::master_session::MasterReason::ReadinessUnknown)
     );
     dispatcher.shutdown().await.unwrap();
     fixture.finish().await;

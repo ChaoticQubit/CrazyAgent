@@ -2935,7 +2935,10 @@ fn execute(
     }
     match action {
         MasterOwnerAction::Submit { text, .. } => {
-            if session.config_id != config.id || session.source_hash != source_hash {
+            if session.config_id != config.id
+                || session.source_hash != source_hash
+                || session.owner.engine_epoch != provenance.engine_epoch
+            {
                 return Ok(reject("master_source_conflict"));
             }
             if let Err(reason) = validate_selection(config, project, &session.selection) {
