@@ -215,6 +215,57 @@ fn team_launch(harness: &str) -> TeamLaunch {
 }
 
 #[test]
+fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub_agent() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    let launch = team_launch("claude-code");
+    let mut command = super::command(&launch.request).unwrap();
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n")
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (send, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let tools: Vec<String> = loop {
+        let line = lines
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("Claude Code names its tools when its session starts");
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if event["type"] == "system" && event["subtype"] == "init" {
+            break serde_json::from_value(event["tools"].clone()).unwrap();
+        }
+    };
+    let _ = child.kill();
+    child.wait().unwrap();
+    for kept in ["Bash", "Edit", "Read", "Write"] {
+        assert!(tools.iter().any(|tool| tool == kept), "{kept}: {tools:?}");
+    }
+    for built_in in ["Agent", "Task", "Workflow", "TeamCreate"] {
+        assert!(
+            !tools.iter().any(|tool| tool == built_in),
+            "{built_in}: {tools:?}"
+        );
+    }
+}
+
+#[test]
 fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
     let launch = team_launch("codex");
     let mut features = std::process::Command::new(&launch.request.executable);

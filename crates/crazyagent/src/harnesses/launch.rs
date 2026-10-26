@@ -65,6 +65,12 @@ const CODEX_TOOLS_ON: [&str; 8] = [
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
 pub(super) const CLAUDE_NO_MCP: [&str; 2] = ["--mcp-config", "{\"mcpServers\":{}}"];
+pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
+/// Claude Code's own sub-agent tools, denied to every tools-on Claude agent the engine starts,
+/// master and team alike, so sub-agents start only through the engine. Claude Code 2.1.309
+/// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
+/// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
+pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -474,9 +480,11 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
+                CLAUDE_DENY_FLAG,
             ]
             .map(OsString::from),
         );
+        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(OsString::from));
     } else {
         arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
     }
