@@ -991,10 +991,10 @@ fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
         harness: "RCLI".into(),
         account: None,
         tools: true,
+        open: true,
         status: MasterStatus::Stopped,
         messages: Vec::new(),
     });
-    screen.master_open = true;
     screen.open(Tab::Conversation);
     let look = Look::plain();
     let drawn = project_screen(&mut screen, 80, 24, &look);
@@ -1033,7 +1033,11 @@ fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
         screen.key(key(KeyCode::Char('e'))),
         ProjectReply::EndConversation
     );
-    screen.master_open = false;
+    screen
+        .transcript
+        .as_mut()
+        .expect("the transcript is set above")
+        .open = false;
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(
         !drawn.help.contains(&("e", "End conversation")),

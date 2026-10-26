@@ -171,13 +171,15 @@ impl MasterStatus {
 }
 
 /// The master conversation the Conversation tab draws.
-/// Holds the master harness name, its account, whether tools are on, the status and the messages.
+/// Holds the master harness name, its account, whether tools are on, whether its conversation
+/// is open, the status and the messages.
 /// The host fills it from the engine's master session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct Transcript {
     pub harness: String,
     pub account: Option<String>,
     pub tools: bool,
+    pub open: bool,
     pub status: MasterStatus,
     pub messages: Vec<Message>,
 }
@@ -485,7 +487,6 @@ pub(in crate::tui) struct ProjectScreen {
     pub pool_choices: Vec<PoolChoice>,
     pub pool_picker: Option<usize>,
     pub transcript: Option<Transcript>,
-    pub master_open: bool,
     pub input: TextInput,
     pub typing: bool,
     pub transcript_scroll: usize,
@@ -537,7 +538,6 @@ impl ProjectScreen {
             pool_choices: Vec::new(),
             pool_picker: None,
             transcript: None,
-            master_open: false,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
             transcript_scroll: 0,
@@ -1168,7 +1168,9 @@ impl ProjectScreen {
                 ProjectReply::Retry
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
-            KeyCode::Char('e') if !control && self.master_open => ProjectReply::EndConversation,
+            KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
+                ProjectReply::EndConversation
+            }
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             KeyCode::Enter => {
