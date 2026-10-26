@@ -919,24 +919,35 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
     assert_eq!(f.session(&owner, "p").await.unwrap().current_turn, None);
     f.restart().await;
     let reader = f.owner(OwnerClientKind::Desktop).await;
+    assert_eq!(f.page(&reader, &session).await.turns, vec![ended.clone()]);
+    rejected_with(
+        reader
+            .request(mutation(
+                "stale-turn",
+                f.revision(&reader).await,
+                MasterOwnerAction::Submit {
+                    project_id: project("p"),
+                    session_id: session.session_id.clone(),
+                    text: "Use the revised requirement.".into(),
+                },
+            ))
+            .await
+            .unwrap(),
+        "master_source_conflict",
+    );
     assert_eq!(f.page(&reader, &session).await.turns, vec![ended]);
-    f.submit(
-        &reader,
-        "next-turn",
-        &session,
-        "Use the revised requirement.",
-    )
-    .await;
-    let next = f.settled(&reader, &session, "next-turn").await;
-    assert_eq!(next.session_id, session.session_id);
-    assert_eq!(next.phase, MasterTurnPhase::Blocked);
-    assert_eq!(next.reason, Some(MasterReason::ConnectionChanged));
-    assert_eq!(next.attempt, None);
-    assert_eq!(next.runtime, None);
-    assert_eq!(next.reply, None);
-    assert_eq!(next.ordinal, 2);
-    assert_eq!(f.page(&reader, &session).await.turns.len(), 2);
     assert_eq!(f.session(&reader, "p").await.unwrap().current_turn, None);
+    assert_eq!(f.history(&reader, "p").await.entries.len(), 1);
+    f.close(&reader, "close-stale", &session).await;
+    let (_, fresh) = f
+        .open(&reader, "reopen", "p", selection(MasterBackend::Rcli))
+        .await;
+    assert_ne!(fresh.session_id, session.session_id);
+    f.submit(&reader, "next-turn", &fresh, "Use the revised requirement.")
+        .await;
+    let next = f.settled(&reader, &fresh, "next-turn").await;
+    blocked(&next, &fresh, "next-turn", MasterReason::Unknown);
+    assert_eq!(next.ordinal, 1);
     assert_eq!(f.history(&reader, "p").await.entries.len(), 2);
     f.stop().await;
 }
