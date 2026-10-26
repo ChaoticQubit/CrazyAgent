@@ -147,6 +147,87 @@ struct Viewer {
 struct Views {
     next: u64,
     viewers: HashMap<AgentId, Viewer>,
+    opening: HashMap<AgentId, u64>,
+}
+
+impl Views {
+    fn held(&self) -> usize {
+        let opening = self
+            .opening
+            .keys()
+            .filter(|agent| !self.viewers.contains_key(*agent))
+            .count();
+        self.viewers.len() + opening
+    }
+
+    fn admits(&self, agent: &AgentId) -> bool {
+        self.viewers.contains_key(agent)
+            || self.opening.contains_key(agent)
+            || self.held() < VIEWERS_MAX
+    }
+}
+
+/// One view's place among the window's views, taken before its engine connection opens
+/// so views still opening count toward `VIEWERS_MAX`. Attaching turns it into the view;
+/// dropping it first gives the place back.
+pub struct Reservation {
+    terminals: Arc<Terminals>,
+    agent: AgentId,
+    serial: u64,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Ok(mut views) = self.terminals.0.lock()
+            && views.opening.get(&self.agent) == Some(&self.serial)
+        {
+            views.opening.remove(&self.agent);
+        }
+    }
+}
+
+impl Reservation {
+    /// Streams one opened terminal session to the window's channel in order: the attach
+    /// frame with the size first, then the screen and live output.
+    /// Takes the session of this place's agent and the channel.
+    /// Returns once the reader and writer run; a place lost to a full set of views is refused.
+    pub fn attach(
+        self,
+        session: TerminalSession,
+        output: Channel<InvokeResponseBody>,
+    ) -> Result<(), BridgeError> {
+        let terminals = Arc::clone(&self.terminals);
+        let (agent, serial) = (self.agent.clone(), self.serial);
+        assert_eq!(session.agent, agent);
+        let (requests, queue) = mpsc::channel(REQUESTS_MAX);
+        {
+            let mut views = terminals.views()?;
+            if !views.admits(&agent) {
+                return Err(failure("terminal_viewers_full"));
+            }
+            if views.opening.get(&agent) == Some(&serial) {
+                views.opening.remove(&agent);
+            }
+            views
+                .viewers
+                .insert(agent.clone(), Viewer { serial, requests });
+            assert!(views.held() <= VIEWERS_MAX);
+        }
+        let attached = TerminalFrame::Attached {
+            agent_id: agent.clone(),
+            cols: session.cols,
+            rows: session.rows,
+        };
+        let (message, last) = channel_message(&agent, attached);
+        assert!(!last);
+        if output.send(message).is_err() {
+            terminals.forget(&agent, serial);
+            return Err(failure("terminal_window_closed"));
+        }
+        tauri::async_runtime::spawn(write(session.control, queue));
+        tauri::async_runtime::spawn(read(terminals, agent, serial, session.output, output));
+        Ok(())
+    }
 }
 
 /// The window's live terminal views, at most one per agent and `VIEWERS_MAX` in all.
@@ -160,62 +241,23 @@ impl Terminals {
         self.0.lock().map_err(|_| failure("terminal_state_failed"))
     }
 
-    /// Checks there is room for one more view before a connection opens.
-    /// Takes the terminal name; a second view of the same agent replaces the first.
-    /// Returns nothing, or `terminal_viewers_full`.
-    pub fn room(&self, agent: &AgentId) -> Result<(), BridgeError> {
-        let views = self.views()?;
-        if views.viewers.len() >= VIEWERS_MAX && !views.viewers.contains_key(agent) {
+    /// Checks for room and takes a place for one more view in the same step, before its
+    /// connection opens. Takes the terminal name; a second view of the same agent replaces
+    /// the first. Returns the held place, or `terminal_viewers_full`.
+    pub fn room(self: &Arc<Self>, agent: &AgentId) -> Result<Reservation, BridgeError> {
+        let mut views = self.views()?;
+        if !views.admits(agent) {
             return Err(failure("terminal_viewers_full"));
         }
-        Ok(())
-    }
-
-    /// Streams one opened terminal session to the window's channel in order: the attach
-    /// frame with the size first, then the screen and live output.
-    /// Takes the terminal name, the session and the channel.
-    /// Returns once the reader and writer run; a full set of views is refused.
-    pub fn attach(
-        self: &Arc<Self>,
-        agent: AgentId,
-        session: TerminalSession,
-        output: Channel<InvokeResponseBody>,
-    ) -> Result<(), BridgeError> {
-        assert_eq!(session.agent, agent);
-        let (requests, queue) = mpsc::channel(REQUESTS_MAX);
-        let serial = {
-            let mut views = self.views()?;
-            if views.viewers.len() >= VIEWERS_MAX && !views.viewers.contains_key(&agent) {
-                return Err(failure("terminal_viewers_full"));
-            }
-            views.next += 1;
-            let serial = views.next;
-            views
-                .viewers
-                .insert(agent.clone(), Viewer { serial, requests });
-            assert!(views.viewers.len() <= VIEWERS_MAX);
-            serial
-        };
-        let attached = TerminalFrame::Attached {
-            agent_id: agent.clone(),
-            cols: session.cols,
-            rows: session.rows,
-        };
-        let (message, last) = channel_message(&agent, attached);
-        assert!(!last);
-        if output.send(message).is_err() {
-            self.forget(&agent, serial);
-            return Err(failure("terminal_window_closed"));
-        }
-        tauri::async_runtime::spawn(write(session.control, queue));
-        tauri::async_runtime::spawn(read(
-            Arc::clone(self),
-            agent,
+        views.next += 1;
+        let serial = views.next;
+        views.opening.insert(agent.clone(), serial);
+        assert!(views.held() <= VIEWERS_MAX);
+        Ok(Reservation {
+            terminals: Arc::clone(self),
+            agent: agent.clone(),
             serial,
-            session.output,
-            output,
-        ));
-        Ok(())
+        })
     }
 
     /// Queues one input, prompt or resize request for an attached agent terminal.
