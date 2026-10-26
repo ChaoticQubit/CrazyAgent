@@ -956,8 +956,8 @@ fn fail_before_running(
     Ok(())
 }
 
-/// Lifts the holds on an account that just signed in afresh: its pause and the provider's
-/// rejection of its earlier sign-in, so its next turn may run at once.
+/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause
+/// and the provider's rejection of its earlier credential, so its next turn may run at once.
 /// Inputs: the transaction and the account's connection. Output: both holds are gone.
 pub(super) fn lift_account_holds(
     tx: &Transaction<'_>,

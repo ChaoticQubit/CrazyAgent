@@ -633,6 +633,90 @@ async fn a_saved_key_never_goes_out_over_plain_http_to_another_host() {
     fixture.stop().await;
 }
 
+/// Records the provider's rejection of a routed account's sign-in the way a failed master
+/// turn does, through the gateway's own observation write. Inputs: the fixture and the
+/// account. Output: the rejection is the account's newest observation.
+fn reject_sign_in(fixture: &Fixture, id: &CredentialRef) {
+    let config = crazyagent::config::resolve_config(
+        &fixture.global,
+        &fixture.root.path().join("project.toml"),
+    )
+    .unwrap();
+    let connection = config
+        .settings
+        .model_access
+        .as_ref()
+        .unwrap()
+        .connections
+        .iter()
+        .find(|connection| connection.id == *id)
+        .unwrap()
+        .clone();
+    let observed_at_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let mut db = rusqlite::Connection::open(fixture.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tx = db.transaction().unwrap();
+    crazyagent::model_gateway::observe(
+        &tx,
+        &config,
+        &crazyagent::model_gateway::Observation {
+            id: RequestId::new(format!("rejected-{}", id.as_str())).unwrap(),
+            connection,
+            sequence: 1,
+            observed_at_ms,
+            valid_until_ms: observed_at_ms + 60_000,
+            kind: crazyagent::model_gateway::ObservationKind::InvalidAuthentication,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejected_key_shows_in_the_list_until_the_owner_replaces_it() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let old = format!("sk-ant-old-{}-expired", std::process::id());
+    let new = format!("sk-ant-new-{}-fresh", std::process::id());
+    let account = client
+        .add_account(
+            draft(
+                Provider::Claude,
+                SignInMethod::ApiKey,
+                "Team key",
+                None,
+                Some("claude-team-model"),
+            ),
+            key(&old),
+        )
+        .await
+        .unwrap();
+    create_pool(&client, "key-pool", vec![account.id.clone()], "demo").await;
+    assert_eq!(all_accounts(&client).await[0].status_label, "Key saved");
+
+    reject_sign_in(&fixture, &account.id);
+    let listed = all_accounts(&client).await;
+    assert_eq!(listed[0].status, AccountStatus::NotSignedIn, "{listed:?}");
+    assert_eq!(listed[0].status_label, "Sign-in rejected");
+
+    let replaced = client
+        .replace_account_key(account.id.clone(), key(&new).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replaced.status, AccountStatus::KeySaved, "{replaced:?}");
+    assert_eq!(replaced.status_label, "Key saved");
+    let listed = all_accounts(&client).await;
+    assert_eq!(listed[0].status_label, "Key saved", "{listed:?}");
+    client.remove_account(account.id.clone()).await.unwrap();
+    fixture.stop().await;
+}
+
 /// Wiring test: a local stand-in server answers the check with an invented model list,
 /// so this checks the key replacement and what the engine sends, not a provider.
 /// Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.

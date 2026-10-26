@@ -17,6 +17,7 @@ pub(crate) enum Command {
     Remove(CredentialRef),
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
+    KeyReplaced(CredentialRef),
 }
 
 pub(crate) struct Listed {
@@ -133,6 +134,22 @@ pub(super) fn execute(
             Ok(ResultValue::Account(Box::new(listed(
                 &tx, admission, connection, details,
             )?)))
+        }
+        Command::KeyReplaced(id) => {
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(error)?;
+            check_owner_admission(&tx, admission)?;
+            let (connection, details) =
+                find(&tx, config, &id)?.ok_or_else(|| error("account_not_found"))?;
+            if !matches!(connection.auth, ModelAuthentication::ApiKey { .. }) {
+                return Err(error("account_key_not_allowed"));
+            }
+            super::master_session::lift_account_holds(&tx, &connection)?;
+            let account = listed(&tx, admission, connection, details)?;
+            assert!(!account.rejected);
+            tx.commit().map_err(error)?;
+            Ok(ResultValue::Account(Box::new(account)))
         }
         Command::Add(connection, details) => {
             {
@@ -379,13 +396,11 @@ fn listed(
     connection: ModelConnection,
     details: AccountDetails,
 ) -> Result<Listed, EngineError> {
-    let (sign_in, rejected) = match &connection.auth {
-        ModelAuthentication::NativeManaged { profile_ref } => (
-            latest_sign_in(tx, profile_ref)?,
-            crate::model_gateway::sign_in_rejected(tx, &connection)?,
-        ),
-        _ => (None, false),
+    let sign_in = match &connection.auth {
+        ModelAuthentication::NativeManaged { profile_ref } => latest_sign_in(tx, profile_ref)?,
+        _ => None,
     };
+    let rejected = crate::model_gateway::sign_in_rejected(tx, &connection)?;
     let host = HostStamp {
         db_instance: admission.db_instance.clone(),
         engine_epoch: admission.engine_epoch.clone(),
