@@ -254,6 +254,7 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     let home_text = home.path().to_str().unwrap();
     assert_eq!(variables["CLAUDE_CONFIG_DIR"], home_text);
     assert_eq!(variables["CLAUDE_SECURESTORAGE_CONFIG_DIR"], home_text);
+    assert_eq!(variables["CLAUDE_CODE_TMPDIR"], home_text);
     assert!(!variables.contains_key("ANTHROPIC_API_KEY"));
     let args = arguments(&off);
     assert!(
