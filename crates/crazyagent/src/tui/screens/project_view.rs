@@ -924,14 +924,7 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
             transcript_lines(transcript, content, screen.now_ms, look)
         };
         let empty = transcript.messages.is_empty();
-        let mut help = if transcript.status.retryable() {
-            vec![
-                ("r", "Try again"),
-                ("Tab", "To input"),
-                TABS,
-                ("Esc", "Home"),
-            ]
-        } else if screen.typing {
+        let mut help = if screen.typing {
             vec![
                 ("Enter", "Send"),
                 ("Ctrl-J", "New line"),
@@ -939,6 +932,13 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 ("PgUp", "Scroll"),
                 TABS,
                 ("Esc", "Leave input"),
+            ]
+        } else if transcript.status.retryable() {
+            vec![
+                ("r", "Try again"),
+                ("Tab", "To input"),
+                TABS,
+                ("Esc", "Home"),
             ]
         } else {
             vec![
