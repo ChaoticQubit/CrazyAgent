@@ -4,7 +4,8 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { App, AppView } = await import("../src/app.tsx");
+const { App, AppView, EngineOutdatedView } = await import("../src/app.tsx");
+const state = await import("../src/state.ts");
 const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
 
 const profile = { name: "Mira Okafor", role: "", bio: "", preferred_stack: [], working_style: { detail: "terse", initiative: "ask_first" } };
@@ -34,6 +35,31 @@ test("an unreachable engine shows one full-window state with Try again and no sh
   assert.match(markup, /Start it, then try again\./);
   assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Try again<\/button>/);
   assert.doesNotMatch(markup, /class="sidebar"/);
+});
+
+test("an engine of another version asks for a restart with both versions, not the engine-down state", () => {
+  const { engineState } = state;
+  const ok = { kind: "ok", value: { connected: true, pending: false } };
+  assert.equal(engineState(ok), "running");
+  assert.equal(engineState({ kind: "error", code: "engine_version_mismatch", message: "x" }), "outdated");
+  assert.equal(engineState({ kind: "error", code: "engine_unreachable", message: "x" }), "down");
+  assert.equal(engineState({ kind: "error", code: "engine_start_failed", message: "x" }), "down");
+
+  const screen = render({ engine: "outdated" });
+  assert.match(screen, /<h1>CrazyAgent&#x27;s engine needs a restart<\/h1>/);
+  assert.doesNotMatch(screen, /class="sidebar"|isn&#x27;t running/);
+
+  const forbidden = () => { throw new Error("static rendering must not call the engine"); };
+  const versions = { kind: "ok", value: { engine: "0.1.0", app: "0.2.0", message: "Engine is version 0.1.0, this app is 0.2.0; restart the engine" } };
+  const view = (patch) => renderToStaticMarkup(createElement(EngineOutdatedView, { versions, restart: { kind: "idle" }, onRestart: forbidden, onRetry: forbidden, ...patch }));
+  const markup = view();
+  assert.match(markup, /Engine is version 0\.1\.0, this app is 0\.2\.0; restart the engine/);
+  assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Restart engine<\/button>/);
+  assert.match(markup, /Try again<\/button>/);
+  assert.match(view({ restart: { kind: "busy" } }), /Restarting\.\.\./);
+  assert.match(view({ restart: { kind: "failed", message: "CrazyAgent's engine didn't start. Try again." } }), /role="alert"[^>]*>CrazyAgent&#x27;s engine didn&#x27;t start/);
+  const hostile = view({ versions: { kind: "ok", value: { engine: "9\u202e1", app: "0.2.0", message: "Engine is version 9\u202e1, this app is 0.2.0; restart the engine" } } });
+  assert.doesNotMatch(hostile, /\u202e/);
 });
 
 test("an empty engine profile opens Welcome; a saved profile opens Home in the shell", () => {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { SessionContext, useSession, type Session } from "./state";
-import { unconfirmedLine } from "./api";
+import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
+import { engineVersions, plainError, unconfirmedLine, type EngineVersions } from "./api";
+import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
@@ -9,7 +10,7 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { useUpdateWatch } from "./screens/settings/updates";
+import { RestartEngine, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
@@ -46,6 +47,34 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
   </main>;
 }
 
+/** The full-window state for an engine of another version than this app: the engine's own
+ * message naming both versions, Restart engine on this app's version, and Try again.
+ * Inputs: the version read, the restart state and the handlers. */
+export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
+  versions: Loaded<EngineVersions>;
+  restart: EngineRestart;
+  onRestart: () => void;
+  onRetry: () => void;
+}) {
+  const message = versions.kind === "ok" && versions.value.message ? displayText(versions.value.message) : plainError("engine_version_mismatch");
+  return <main id="main" className="full-state">
+    <div className="box">
+      <BrandMark />
+      <Icon name="refresh-cw" size={28} />
+      <h1>CrazyAgent's engine needs a restart</h1>
+      <p className="secondary">{message}</p>
+      <RestartEngine restart={restart} onRestart={onRestart} primary />
+      <span><Button icon="refresh-cw" onClick={onRetry}>Try again</Button></span>
+    </div>
+  </main>;
+}
+
+function EngineOutdated({ onRetry }: { onRetry: () => void }) {
+  const [versions] = useLoad(engineVersions);
+  const [restart, restartNow] = useEngineRestart(onRetry);
+  return <EngineOutdatedView versions={versions} restart={restart} onRestart={restartNow} onRetry={onRetry} />;
+}
+
 function Launching() {
   return <div className="shell" aria-busy="true">
     <aside className="sidebar"><BrandMark /><Skeleton shape="line" count={6} /></aside>
@@ -69,11 +98,12 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
   }
 }
 
-/** The whole app for one session and route: the engine-down state, the launch skeleton, the
- * first-run Welcome page while the profile is empty, or the shell with the routed screen.
- * Inputs: the session and the current route. */
+/** The whole app for one session and route: the engine-down or engine-outdated state, the
+ * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
+ * routed screen. Inputs: the session and the current route. */
 export function AppView({ session, route }: { session: Session; route: Route }) {
   if (session.engine === "down") return <EngineDown onRetry={session.retry} />;
+  if (session.engine === "outdated") return <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
   if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
