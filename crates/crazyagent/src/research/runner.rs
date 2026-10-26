@@ -259,6 +259,18 @@ pub struct ResearchRunner {
     agents: Option<Arc<Agents>>,
 }
 
+/// Where one launch of a claimed research job runs: the canonical project folder, its
+/// id and launch context, the run's name, worktree and agent folder.
+struct JobPlace {
+    root: PathBuf,
+    project: ProjectId,
+    context: AgentContext,
+    name: String,
+    worktree: PathBuf,
+    agent: PathBuf,
+}
+
+#[derive(Debug)]
 enum Ending {
     Exited(bool),
     TimedOut,
@@ -570,6 +582,33 @@ impl ResearchRunner {
         project: &ResearchProject<'_>,
         account: &ResearchAccount,
     ) -> Result<(Ending, u32, PathBuf), RunError> {
+        let place = self.job_place(jobs, job, project)?;
+        let lease = match account {
+            ResearchAccount::ManagedCodex { connection, .. }
+            | ResearchAccount::ManagedClaude { connection, .. } => {
+                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
+                    if code == PROFILE_BUSY {
+                        RunError::Busy
+                    } else {
+                        RunError::Account(code)
+                    }
+                })?;
+                Some(self.held_lease(&host, &fact.binding, &place.name, &place.project, job)?)
+            }
+            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
+        };
+        self.launch_leased(jobs, job, account, place, lease)
+    }
+
+    /// Checks that a claimed job can launch and names its run: the canonical project
+    /// folder, the project's launch context and a free run name and worktree.
+    /// Inputs: the job store, the claimed job and its project. Output: where it runs.
+    fn job_place(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        project: &ResearchProject<'_>,
+    ) -> Result<JobPlace, RunError> {
         if !valid_kind(&job.kind) {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
@@ -582,20 +621,36 @@ impl ResearchRunner {
         let context = jobs.project_context(&id).map_err(RunError::Context)?;
         let (name, worktree) = self.free_run(&root, job)?;
         let agent = self.state.join("agents").join(&name);
-        let lease = match account {
-            ResearchAccount::ManagedCodex { connection, .. }
-            | ResearchAccount::ManagedClaude { connection, .. } => {
-                let (host, fact) = jobs.managed_sign_in(connection).map_err(|code| {
-                    if code == PROFILE_BUSY {
-                        RunError::Busy
-                    } else {
-                        RunError::Account(code)
-                    }
-                })?;
-                Some(self.held_lease(&host, &fact.binding, &name, &id, job)?)
-            }
-            ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
-        };
+        Ok(JobPlace {
+            root,
+            project: id,
+            context,
+            name,
+            worktree,
+            agent,
+        })
+    }
+
+    /// Runs a claimed job's agent once its account is taken: the managed credential copy
+    /// in the agent's home, the project context, the sandboxed worktree and the harness.
+    /// Inputs: the job store, the job, its account, where it runs and the held lease, none
+    /// for an endpoint account. Output: how the agent ended, its process group and output.
+    fn launch_leased(
+        &self,
+        jobs: &ResearchJobs,
+        job: &ResearchJob,
+        account: &ResearchAccount,
+        place: JobPlace,
+        lease: Option<(NativeProfileUse, Option<Hold>)>,
+    ) -> Result<(Ending, u32, PathBuf), RunError> {
+        let JobPlace {
+            root,
+            context,
+            name,
+            worktree,
+            agent,
+            ..
+        } = place;
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
@@ -2988,3 +3043,7 @@ mod tests {
         ensure_repository(&created, &home).unwrap();
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runner/live_claude_tests.rs"]
+mod live_claude_tests;

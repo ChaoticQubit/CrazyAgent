@@ -1,19 +1,123 @@
-use super::{Mode, TeamLimits, TeamRuntime};
+use super::{Grant, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd, per_turn};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
-use crate::engine::owner::HostStamp;
+use crate::engine::NativeProfileCustody;
+use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::team::{AgentRole, TeamAccount, TeamReach};
 use rusqlite::{Connection, params};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::channel;
+use std::time::Duration;
 
 const PROJECT: &str = "dec-090";
 const AGENT: i64 = 1;
+const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
+
+/// The owner's signed-in managed Claude profile of a real engine, named by its slot folder
+/// in `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`, held through that engine's own custody, which
+/// only reads its database and takes a shared lock on the slot. Output of `open`: the
+/// profile's connection and custody, or a panic with the plain BLOCKED message.
+pub(crate) struct SignedInClaude {
+    pub(crate) connection: ModelConnection,
+    custody: NativeProfileCustody,
+    host: HostStamp,
+    binding: NativeProfileBinding,
+}
+
+impl SignedInClaude {
+    pub(crate) fn open() -> Self {
+        let slot = std::env::var_os(SIGNED_IN_CLAUDE).unwrap_or_else(|| {
+            panic!(
+                "BLOCKED: no signed-in managed Claude profile. Sign in to a Claude account in CrazyAgent, then run with {SIGNED_IN_CLAUDE}=<engine folder>/native-profiles/<profile key>"
+            )
+        });
+        let slot = PathBuf::from(slot)
+            .canonicalize()
+            .unwrap_or_else(|_| panic!("BLOCKED: {SIGNED_IN_CLAUDE} does not name a profile slot"));
+        let manifest = std::fs::read(slot.join("identity.json"))
+            .unwrap_or_else(|_| panic!("BLOCKED: {SIGNED_IN_CLAUDE} has no identity manifest"));
+        let identity: Value = serde_json::from_slice(&manifest).unwrap();
+        let database = slot
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("engine.db");
+        let instance = identity["root"]["database_instance"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let bound = |key: &str| reference(identity["binding"][key].as_str().unwrap());
+        let connection = ModelConnection {
+            id: reference("claude-live-connection"),
+            provider: bound("provider"),
+            harness: bound("harness"),
+            protocol: bound("protocol"),
+            account_ref: bound("account_ref"),
+            endpoint: ModelEndpoint::Native {},
+            model: ModelReference {
+                id: "native-default".into(),
+                author: bound("provider"),
+            },
+            auth: ModelAuthentication::NativeManaged {
+                profile_ref: bound("profile_ref"),
+            },
+        };
+        let custody =
+            NativeProfileCustody::capture(&database, &std::fs::metadata(&database).unwrap())
+                .unwrap();
+        let host = HostStamp {
+            db_instance: instance.clone(),
+            engine_epoch: "b".repeat(64),
+        };
+        let binding = NativeProfileBinding {
+            database_instance: instance,
+            engine_epoch: host.engine_epoch.clone(),
+            config_id: ConfigId::new("c".repeat(64)).unwrap(),
+            source_hash: "d".repeat(64),
+            at_revision: Cursor::new(1),
+            connection: connection.clone(),
+            custody_id: format!("{:x}", Sha256::digest(&manifest)),
+        };
+        Self {
+            connection,
+            custody,
+            host,
+            binding,
+        }
+    }
+
+    /// The profile reference the owner's sign-in is kept under. Output: the reference.
+    pub(crate) fn profile_ref(&self) -> CredentialRef {
+        match &self.connection.auth {
+            ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
+            other => panic!("the signed-in profile is not managed: {other:?}"),
+        }
+    }
+
+    /// Takes the profile for one launch, as every launch on a managed account does.
+    /// Input: the launch's name. Output: the profile held for execution.
+    pub(crate) fn acquire(&mut self, launch: &str) -> NativeProfileUse {
+        self.custody
+            .acquire_use(
+                &self.host,
+                &self.binding,
+                &RequestId::new(launch).unwrap(),
+                1,
+                NativeProfileUsePurpose::Execution,
+            )
+            .unwrap()
+    }
+}
 
 /// A tools-on team sub-agent that the real team runtime prepared on a native managed
 /// account: a real engine database, the profile slot the engine's custody made, the
@@ -21,14 +125,15 @@ const AGENT: i64 = 1;
 /// Input: the launch harness and its real executable. Output: the paths the agent and
 /// the engine's own processes use, and commands that run as the agent does.
 pub(crate) struct ManagedAgent {
-    _runtime: TeamRuntime,
+    runtime: TeamRuntime,
+    plan: Plan,
     pub(crate) base: PathBuf,
     pub(crate) profile_home: PathBuf,
     pub(crate) home: PathBuf,
     pub(crate) tmp: PathBuf,
     pub(crate) project: PathBuf,
     pub(crate) working_dir: PathBuf,
-    sandbox_profile: PathBuf,
+    pub(crate) sandbox_profile: PathBuf,
     _root: tempfile::TempDir,
 }
 
@@ -182,17 +287,58 @@ impl ManagedAgent {
             Mode::Kept { .. } => panic!("a managed agent keeps no process across turns"),
         };
         let tmp = runtime.agent_folder(AGENT).join("tmp");
+        let sandbox_profile = plan.sandbox_profile.clone();
+        let working_dir = plan.working_dir.clone();
         Self {
-            _runtime: runtime,
+            runtime,
+            plan,
             base,
             profile_home,
             home,
             tmp,
             project: project.canonicalize().unwrap(),
-            working_dir: plan.working_dir,
-            sandbox_profile: plan.sandbox_profile,
+            working_dir,
+            sandbox_profile,
             _root: root,
         }
+    }
+
+    /// Runs one turn of the agent the way the runtime runs every turn on a managed
+    /// account: the runtime's per-turn launch hands `profile`'s credential copy to the
+    /// agent's home, starts the harness in the agent's Seatbelt profile and reads the turn.
+    /// Inputs: the signed-in profile held for this turn, the prompt and the turn's time.
+    /// Output: the reply text, how the turn ended and its cause.
+    pub(super) fn run_turn(
+        &self,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+    ) -> (String, TurnEnd, Option<String>) {
+        let project = ProjectId::new(PROJECT).unwrap();
+        let context = self
+            .runtime
+            .context(&project, AGENT, AgentRole::Sub, true)
+            .unwrap();
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders
+            .send(Order::Turn(
+                prompt.to_owned(),
+                Some(Box::new(Grant { profile, context })),
+            ))
+            .unwrap();
+        drop(orders);
+        let cancel = AtomicBool::new(false);
+        let interrupt = AtomicBool::new(false);
+        let problem = per_turn(
+            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt, turn_time,
+        );
+        drop(reports);
+        let finished = reported.iter().find_map(|report| match report {
+            Report::Finished { text, end, cause } => Some((text, end, cause)),
+            _ => None,
+        });
+        finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
     }
 
     /// Builds a command that runs `program` the way the agent's harness runs its tools:
