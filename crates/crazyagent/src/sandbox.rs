@@ -832,6 +832,20 @@ impl ProjectSandbox {
         command
     }
 
+    /// Runs `script` with `/bin/sh -c` under the installed profile, the way a tools-on
+    /// agent's shell tool runs a command. Test support. Input: the installed profile and
+    /// the script. Output: the finished process with its captured output.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn run_agent_shell(&self, profile: &Path, script: &str) -> std::process::Output {
+        let mut command = self.command(profile, Path::new("/bin/sh"));
+        command
+            .args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        crate::spawn_gate::output(&mut command).expect("the sandboxed shell starts")
+    }
+
     fn base_env(&self) -> [(&str, &OsStr); 5] {
         [
             ("HOME", self.agent_home.as_os_str()),

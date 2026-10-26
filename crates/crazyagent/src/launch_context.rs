@@ -82,6 +82,7 @@ pub struct AgentContext {
 pub struct Installed {
     arguments: Vec<OsString>,
     removals: Vec<PathBuf>,
+    copies: Option<PathBuf>,
     _lock: File,
 }
 
@@ -261,6 +262,7 @@ impl AgentContext {
         let mut installed = Installed {
             arguments: Vec::new(),
             removals: vec![state.clone()],
+            copies: None,
             _lock: lock,
         };
         remove(&state);
@@ -270,8 +272,9 @@ impl AgentContext {
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
-            installed.removals.extend([config.clone(), copies.clone()]);
-            remove(&copies);
+            installed.removals.push(config.clone());
+            installed.copies = Some(home.to_path_buf());
+            remove_copies(home);
             if skills {
                 directory(&home.join("skills"), false)?;
                 self.copy_skills(&copies)?;
@@ -349,6 +352,9 @@ impl Drop for Installed {
     fn drop(&mut self) {
         for path in &self.removals {
             remove(path);
+        }
+        if let Some(home) = &self.copies {
+            remove_copies(home);
         }
         #[cfg(unix)]
         let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
@@ -602,6 +608,36 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
         .map_err(|_| failure("launch_home_busy"))?;
     Ok(file)
 }
+
+/// Removes the Codex skill copies at `<home>/skills/crazyagent` without resolving `skills`
+/// by path, because the agent may have replaced that folder with a link: the copies are
+/// moved up into the verified home through descriptors and removed there. A `skills` that
+/// is not a real folder of this user is left alone. Input: the validated agent home.
+#[cfg(unix)]
+fn remove_copies(home: &Path) {
+    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(parent) = rustix::fs::open(home, folder, Mode::empty()) else {
+        return;
+    };
+    let Ok(skills) = rustix::fs::openat(&parent, "skills", folder, Mode::empty()) else {
+        return;
+    };
+    if !rustix::fs::fstat(&skills)
+        .is_ok_and(|stat| stat.st_uid == rustix::process::geteuid().as_raw())
+    {
+        return;
+    }
+    let parked = format!(".{STATE}-skills-{}", std::process::id());
+    remove(&home.join(&parked));
+    if rustix::fs::renameat(&skills, STATE, &parent, parked.as_str()).is_ok() {
+        remove(&home.join(&parked));
+    }
+}
+
+/// Leaves skill copies in place where descriptor-relative removal does not exist; no
+/// launch reaches this, because the home lock is refused first. Input: unused.
+#[cfg(not(unix))]
+fn remove_copies(_home: &Path) {}
 
 fn remove(path: &Path) {
     match fs::symlink_metadata(path) {

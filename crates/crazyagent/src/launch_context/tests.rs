@@ -352,3 +352,102 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
     assert!(!home.join("skills").join("crazyagent").exists());
     drop(installed);
 }
+
+#[cfg(target_os = "macos")]
+struct Agents {
+    _temp: tempfile::TempDir,
+    home: PathBuf,
+    peer: PathBuf,
+    sandbox: crate::sandbox::ProjectSandbox,
+    profile: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl Agents {
+    fn new() -> Self {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = root.join("project");
+        let profiles = root.join("profiles");
+        let home = root.join("agents").join("agent-1").join("home");
+        let tmp = root.join("agents").join("agent-1").join("tmp");
+        let peer = root.join("agents").join("agent-2").join("home");
+        for folder in [&project, &profiles, &home, &tmp, &peer] {
+            fs::create_dir_all(folder).unwrap();
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let sandbox = crate::sandbox::ProjectSandbox::new(
+            &project,
+            &home,
+            &tmp,
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
+        let profile = profiles.join("agent-1.sb");
+        sandbox.install(&profile).unwrap();
+        Self {
+            _temp: temp,
+            home,
+            peer,
+            sandbox,
+            profile,
+        }
+    }
+
+    fn agent(&self, script: &str) {
+        let output = self.sandbox.run_agent_shell(&self.profile, script);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {
+    let agents = Agents::new();
+    let marker = agents.peer.join(STATE).join("marker");
+    fs::create_dir(agents.peer.join(STATE)).unwrap();
+    fs::write(&marker, "peer").unwrap();
+    let skills = agents.home.join("skills");
+    let plant = format!(
+        "rm -rf '{}' && ln -s '{}' '{}'",
+        skills.display(),
+        agents.peer.display(),
+        skills.display()
+    );
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: String::new(),
+    };
+
+    agents.agent(&plant);
+    assert!(
+        fs::symlink_metadata(&skills)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let installed = context.install("codex", &agents.home, false).unwrap();
+    assert!(marker.exists(), "launch removed a folder through the link");
+    drop(installed);
+    assert!(marker.exists(), "cleanup removed a folder through the link");
+
+    agents.agent(&format!("rm -f '{}'", skills.display()));
+    let installed = context.install("codex", &agents.home, false).unwrap();
+    agents.agent(&plant);
+    drop(installed);
+    assert!(marker.exists(), "cleanup followed a link planted mid-run");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "peer");
+
+    fs::remove_file(&skills).unwrap();
+    fs::create_dir_all(skills.join(STATE).join("old")).unwrap();
+    let installed = context.install("codex", &agents.home, false).unwrap();
+    assert!(!skills.join(STATE).exists(), "real copies were left behind");
+    fs::create_dir(skills.join(STATE)).unwrap();
+    drop(installed);
+    assert!(!skills.join(STATE).exists(), "real copies were left behind");
+    assert!(skills.is_dir() && marker.exists());
+}
