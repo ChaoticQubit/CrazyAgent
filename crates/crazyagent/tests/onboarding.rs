@@ -13,7 +13,7 @@ use crazyagent::plugins::Scope;
 use crazyagent::project_setup::{Platform, ProjectSetup};
 use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
-use crazyagent::research::accounts::SettingsResolver;
+use crazyagent::research::accounts::{AccountPick, SettingsResolver};
 use crazyagent::research::runner::{
     ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
 };
@@ -597,6 +597,15 @@ impl Bench {
     }
 }
 
+/// The pick a test's account closure answers with: `account` on a stand-in pool
+/// connection id. Takes the account. Returns the pick.
+fn picked(account: &ResearchAccount) -> AccountPick {
+    AccountPick::Account {
+        connection: CredentialRef::new("test-connection").unwrap(),
+        account: Box::new(account.clone()),
+    }
+}
+
 async fn stop_service(service: OnboardingService) {
     tokio::task::spawn_blocking(move || service.stop())
         .await
@@ -719,7 +728,7 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -862,7 +871,7 @@ async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_insta
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         installed_graphify,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -924,7 +933,7 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| Some(account.clone()),
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
@@ -953,7 +962,7 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| Some(account.clone()),
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1000,7 +1009,7 @@ async fn an_existing_crazyagent_folder_is_reused_not_overwritten() {
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1129,7 +1138,7 @@ async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
             runner,
             move |_: &CredentialRef, _: &[ResearchHarness]| {
                 *asked.lock().unwrap() += 1;
-                Some(account.clone())
+                picked(&account)
             },
             move || Some(graphify.clone()),
             OnboardingLimits::default(),
@@ -1160,7 +1169,7 @@ async fn with_only_claude_code_installed_mapping_asks_for_a_claude_code_account(
             runner,
             move |_: &CredentialRef, harnesses: &[ResearchHarness]| {
                 seen.lock().unwrap().push(harnesses.to_vec());
-                Some(ResearchAccount::Endpoint {
+                picked(&ResearchAccount::Endpoint {
                     base_url: "http://127.0.0.1:9/v1".into(),
                     model: "codex-only-model".into(),
                 })
@@ -1196,28 +1205,32 @@ async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
         base_url: "http://127.0.0.1:11434/v1".into(),
         model: MODEL.into(),
     };
+    let local = AccountPick::Account {
+        connection: CredentialRef::new("local-connection").unwrap(),
+        account: Box::new(local),
+    };
     assert_eq!(
         resolver.pool_pick(&pool, &[ResearchHarness::Codex]),
-        Some(local.clone())
+        local.clone()
     );
     assert_eq!(
         resolver.pool_pick(
             &pool,
             &[ResearchHarness::ClaudeCode, ResearchHarness::Codex]
         ),
-        Some(local)
+        local
     );
     assert_eq!(
         resolver.pool_pick(&pool, &[ResearchHarness::ClaudeCode]),
-        None
+        AccountPick::NoUsableAccount
     );
-    assert_eq!(resolver.pool_pick(&pool, &[]), None);
+    assert_eq!(resolver.pool_pick(&pool, &[]), AccountPick::NoUsableAccount);
     assert_eq!(
         resolver.pool_pick(
             &CredentialRef::new("absent-pool").unwrap(),
             &[ResearchHarness::Codex]
         ),
-        None
+        AccountPick::NeedsPool
     );
     bench.stop().await;
 }
@@ -1259,7 +1272,7 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_until_both_steps_ar
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1354,7 +1367,7 @@ async fn saving_the_setup_after_mapping_fails_finishes_onboarding_and_reopening_
     let (runner, _) = bench.runner_without_codex(false);
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1405,7 +1418,7 @@ async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_runnin
     let (runner, _) = bench.runner_without_codex(false);
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1440,7 +1453,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| Some(account.clone()),
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
@@ -1515,5 +1528,45 @@ async fn an_added_folder_is_its_project_repository_and_older_projects_are_repair
         })
         .await;
     assert_eq!(bench.repositories(&project), [repo]);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_pick_changes() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let pick = Arc::new(Mutex::new(AccountPick::Paused { until_ms: i64::MAX }));
+    let asked = Arc::new(Mutex::new(0_usize));
+    let (runner, agents) = bench.runner();
+    let service = {
+        let pick = pick.clone();
+        let asked = asked.clone();
+        OnboardingService::start(
+            runner,
+            move |_: &CredentialRef, _: &[ResearchHarness]| {
+                *asked.lock().unwrap() += 1;
+                pick.lock().unwrap().clone()
+            },
+            || None,
+            OnboardingLimits::default(),
+            Duration::from_millis(50),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while *asked.lock().unwrap() < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "mapping never asked for an account"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let view = bench.view(&project).await;
+    assert!(!settled(&view.mapping), "{view:?}");
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    *pick.lock().unwrap() = AccountPick::NoUsableAccount;
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     bench.stop().await;
 }
