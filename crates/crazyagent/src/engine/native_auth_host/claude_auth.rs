@@ -98,6 +98,9 @@ mod executable_fixture_tests;
 #[cfg(test)]
 mod protocol_tests;
 
+#[cfg(all(test, target_os = "macos"))]
+mod dec_090_tests;
+
 fn verified_status(
     stdout: &[u8],
     home: &Path,
