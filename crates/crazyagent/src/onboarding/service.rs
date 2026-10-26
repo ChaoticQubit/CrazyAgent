@@ -244,7 +244,7 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         .query_row(
             "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed')
+                OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
                     AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
                         AND json_extract(s.body,'$.revision')>?1)))
              ORDER BY created_ms,project LIMIT 1",

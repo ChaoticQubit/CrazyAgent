@@ -9,6 +9,7 @@ use crazyagent::onboarding::service::{
     CODEX_MISSING, OnboardingLimits, OnboardingService, installed_graphify,
 };
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
+use crazyagent::plugins::Scope;
 use crazyagent::project_setup::{Platform, ProjectSetup};
 use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
@@ -16,6 +17,7 @@ use crazyagent::research::accounts::SettingsResolver;
 use crazyagent::research::runner::{
     ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
 };
+use crazyagent::setup::PackState;
 use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -116,7 +118,7 @@ fn rust_repo(repo: &Path) {
 }
 
 fn settled(step: &Step) -> bool {
-    matches!(step, Step::Done | Step::Failed { .. })
+    matches!(step, Step::Done | Step::Off | Step::Failed { .. })
 }
 
 fn failed(reason: &str) -> Step {
@@ -223,6 +225,7 @@ enum Engine {
 struct Bench {
     _runtime: tempfile::TempDir,
     _repos: tempfile::TempDir,
+    skills: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
     global: PathBuf,
@@ -232,11 +235,13 @@ struct Bench {
     generation: u64,
 }
 
-/// The private runtime folder with the settings, and the committed repo
-/// beside it. `prepare` may add files to the repo.
+/// The private runtime folder with the settings, the committed repo beside
+/// it, and a folder outside both for skills the owner already has. `prepare`
+/// may add files to the repo.
 struct Folders {
     runtime: tempfile::TempDir,
     repos: tempfile::TempDir,
+    skills: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
     global: PathBuf,
@@ -264,9 +269,14 @@ impl Folders {
         let repo = repos.path().canonicalize().unwrap().join(PROJECT);
         rust_repo(&repo);
         prepare(&repo);
+        let skills = tempfile::Builder::new()
+            .prefix("ca-onboard-skills-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
         Self {
             runtime,
             repos,
+            skills,
             root,
             repo,
             global,
@@ -280,6 +290,7 @@ impl Bench {
         Self {
             _runtime: folders.runtime,
             _repos: folders.repos,
+            skills: folders.skills,
             root: folders.root,
             repo: folders.repo,
             global: folders.global,
@@ -290,8 +301,34 @@ impl Bench {
         }
     }
 
-    /// Starts an in-process engine; `prepare` may add files to the repo.
+    /// Starts an in-process engine with the Graphify skill already in its
+    /// plugin store, so the graph step runs; `prepare` may add files to the repo.
     async fn start(prepare: impl FnOnce(&Path)) -> Self {
+        let bench = Self::start_without_graphify(prepare).await;
+        bench.graphify_skill().await;
+        bench
+    }
+
+    /// Adds a global Graphify skill from a folder outside the projects folder,
+    /// the way an owner who has the skill already would. The pack then reads it
+    /// installed.
+    async fn graphify_skill(&self) {
+        let folder = self.skills.path().canonicalize().unwrap().join("graphify");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("SKILL.md"),
+            "---\nname: graphify\ndescription: Reads the project's code graph.\n---\n",
+        )
+        .unwrap();
+        self.owner
+            .add_skill(Scope::Global, folder.to_str().unwrap().into())
+            .await
+            .unwrap();
+    }
+
+    /// Starts an in-process engine with nothing of the Graphify pack entry
+    /// installed; `prepare` may add files to the repo.
+    async fn start_without_graphify(prepare: impl FnOnce(&Path)) -> Self {
         let folders = Folders::new(prepare);
         let (stop, stopped) = watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -332,7 +369,9 @@ impl Bench {
                 }
             }
         };
-        Self::with(folders, Engine::Binary(process), owner)
+        let bench = Self::with(folders, Engine::Binary(process), owner);
+        bench.graphify_skill().await;
+        bench
     }
 
     /// Asks the engine to onboard `path` on the local pool through the owner
@@ -451,6 +490,7 @@ impl Bench {
         let Self {
             _runtime,
             _repos,
+            skills,
             root,
             repo,
             global,
@@ -481,6 +521,7 @@ impl Bench {
         Self {
             _runtime,
             _repos,
+            skills,
             root,
             repo,
             global,
@@ -761,6 +802,79 @@ async fn adding_a_repo_in_place_onboards_it_where_it_is_and_keeps_its_worktree_l
     assert_eq!(fs::read_to_string(side.join(".git")).unwrap(), link);
     assert_eq!(git(&side, &["rev-parse", "--abbrev-ref", "HEAD"]), "side\n");
     assert!(git(&bench.repo, &["worktree", "list"]).contains("demo-side"));
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unticking_graphify_in_setup_installs_nothing_for_it_and_onboarding_reports_the_graph_off()
+{
+    let mut bench = Bench::start_without_graphify(|_| {}).await;
+    bench.generation += 1;
+    let ran = bench
+        .owner
+        .run_setup(Vec::new(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&ran), None, "{ran:?}");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        let status = bench.owner.setup_status().await.unwrap();
+        if !status.running {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "setup still running: {status:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let graphify = status
+        .pack
+        .iter()
+        .find(|entry| entry.id == "graphify")
+        .unwrap();
+    assert_eq!(graphify.state, PackState::Available, "{status:?}");
+    let command = status
+        .dependencies
+        .iter()
+        .find(|tool| tool.name == crazyagent::setup::Dependency::Graphify)
+        .unwrap();
+    assert!(
+        !matches!(
+            command.state,
+            crazyagent::setup::DependencyState::Installing
+                | crazyagent::setup::DependencyState::Installed { .. }
+        ),
+        "{command:?}"
+    );
+    assert!(
+        bench
+            .owner
+            .plugin_skills(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|skill| skill.name != "graphify")
+    );
+
+    let project = bench.start_onboarding().await;
+    assert_eq!(bench.view(&project).await.graph, Step::Off);
+    let (runner, _) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        installed_graphify,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(view.graph, Step::Off, "{view:?}");
+    assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert!(!bench.repo.join("graphify-out").exists());
+    let again = bench.start_onboarding().await;
+    assert_eq!(again, project);
+    let retried = bench.view(&project).await;
+    assert_eq!(retried.graph, Step::Off);
+    assert_eq!(retried.mapping, Step::Waiting);
     bench.stop().await;
 }
 

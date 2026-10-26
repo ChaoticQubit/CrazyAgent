@@ -161,6 +161,7 @@ export function stepView(step: OnboardingStep, finished = false): { word: string
   switch (step.kind) {
     case "running": return { word: "Working", tone: "info", line: null };
     case "done": return { word: "Done", tone: "ok", line: null };
+    case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Setup, so no code graph is built." };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(step.reason) };
     default: return { word: finished ? "Skipped" : "Waiting", tone: "neutral", line: null };
   }
@@ -218,7 +219,7 @@ export function confirmReady(view: OnboardingView): { ready: boolean; line: stri
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
   if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
-  if (view.graph.kind !== "done") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
+  if (view.graph.kind !== "done" && view.graph.kind !== "off") return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
 }
 
@@ -272,9 +273,13 @@ export function installed(entry: PackEntry): boolean {
   return entry.state.state === "on" || entry.state.state === "off";
 }
 
-/** The name a pack entry shows. Input: the entry. Output: its id as plain text. */
+const ENTRY_NAMES: Record<string, string> = { graphify: "Graphify skill for agents" };
+
+/** The name a pack entry shows, kept apart from the tool of the same name: the graphify entry
+ * reads "Graphify skill for agents" beside the "Graphify command" tool. Input: the entry.
+ * Output: the name as plain text. */
 export function entryName(entry: PackEntry): string {
-  return displayText(entry.id);
+  return displayText(Object.hasOwn(ENTRY_NAMES, entry.id) ? ENTRY_NAMES[entry.id] : entry.id);
 }
 
 /** The icon a pack entry shows. Input: the entry. Output: server for an MCP server, blocks for a skill. */
@@ -283,7 +288,7 @@ export function entryIcon(entry: PackEntry): IconName {
 }
 
 export const PACK_GROUPS: { group: PackGroup; title: string; about: string }[] = [
-  { group: "always", title: "Always on", about: "Every project needs these." },
+  { group: "graph", title: "Code graph", about: "Builds each project's code graph with the Graphify command and gives agents the Graphify skill. Untick it to set projects up without a graph." },
   { group: "workflow", title: "Workflow skills", about: "How agents plan, build, test and review." },
   { group: "design", title: "Design skills", about: "Taste and explainers for front ends and docs." },
   { group: "reply_style", title: "Reply style", about: "Change how every agent writes its replies." },
@@ -301,10 +306,11 @@ export function packGroups(pack: PackEntry[]): { group: PackGroup; title: string
   return groups.filter((item) => item.entries.length > 0);
 }
 
-/** The pack entries ticked before the owner changes anything: the ones on by default.
+/** The pack entries ticked before the owner changes anything: the ones on by default that are not
+ * installed or installing yet, so Setup never offers to install an entry again.
  * Input: the pack. Output: their ids in pack order. */
 export function packTicks(pack: PackEntry[]): string[] {
-  return pack.filter((entry) => entry.on_by_default).map((entry) => entry.id);
+  return pack.filter((entry) => entry.on_by_default && (entry.state.state === "available" || entry.state.state === "failed")).map((entry) => entry.id);
 }
 
 /** Names the ticked MCP servers that continuing approves.
@@ -331,7 +337,7 @@ export function setupBusy(status: SetupStatus): boolean {
  * Inputs: the status and the ticked ids. Output: how many are settled, of how many, and how many failed. */
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
-    ...status.pack.filter((item) => ticked.includes(item.id) || item.group === "always").map((item) => item.state.state)];
+    ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
   const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }

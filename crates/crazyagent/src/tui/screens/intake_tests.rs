@@ -695,6 +695,26 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
 }
 
 #[test]
+fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Off;
+        view.mapping = Step::Running;
+    });
+    let rows = render(&mut shell, 80, 40);
+    let off = format!("{} Turned off", shell.ctx.glyphs.status(Status::Off));
+    assert!(shows(&rows, "Build the code graph"), "{rows:#?}");
+    assert!(shows(&rows, &off), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Graphify is off in Setup, so no code graph is built."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Running"), "{rows:#?}");
+}
+
+#[test]
 fn the_review_marks_what_is_missing_and_clears_it_as_the_owner_fills_it() {
     let (mut shell, project) = waiting_review();
     let Some(Request::Setup(SetupQuery::Setup { project: read })) = shell.ctx.next_request() else {

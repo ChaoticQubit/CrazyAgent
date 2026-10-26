@@ -255,7 +255,6 @@ export function errorMessage(error: unknown): string {
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
     setup_outcome_unknown: "The setup request did not finish. Refresh before continuing.",
     pack_unknown: "This entry is not in the default pack.",
-    pack_required: "This entry is always on and can't be removed.",
     pack_not_installed: "This entry is not installed yet. Run setup first.",
     pack_name_taken: "A skill or server with this name already exists.",
     agent_not_found: "This agent was not found. Refresh the list.",
@@ -801,7 +800,7 @@ export interface FolderSize {
 
 export type AddFolderMode = "move" | "copy";
 
-export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "failed"; reason: string };
+export type OnboardingStep = { kind: "waiting" } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "failed"; reason: string };
 
 export interface MappingFacts {
   languages: string[];
@@ -905,7 +904,7 @@ export interface Dependency {
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
-export type PackGroup = "always" | "workflow" | "design" | "reply_style" | "context" | "optional";
+export type PackGroup = "graph" | "workflow" | "design" | "reply_style" | "context" | "optional";
 
 export type PackState = { state: "available" } | { state: "installing" } | { state: "on" } | { state: "off" } | { state: "failed"; reason: string };
 

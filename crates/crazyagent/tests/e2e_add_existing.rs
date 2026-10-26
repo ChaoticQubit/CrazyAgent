@@ -5,6 +5,7 @@ mod e2e_support;
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::onboarding::Step;
 use crazyagent::onboarding::service::CODEX_MISSING;
+use crazyagent::plugins::Scope;
 use crazyagent::projects_home::{AddMode, FoundState};
 use crazyagent::protocol::CredentialRef;
 use e2e_support::{Engine, Owner, git, named, rejected, repository, result, scratch};
@@ -108,6 +109,18 @@ async fn existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its
         assert_eq!(entry.path, home.join(name).to_str().unwrap());
     }
 
+    let skill = disk.path().join("skills").join("graphify");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: graphify\ndescription: Reads the project's code graph.\n---\n",
+    )
+    .unwrap();
+    owner
+        .controller
+        .add_skill(Scope::Global, skill.to_str().unwrap().into())
+        .await
+        .unwrap();
     let pool = CredentialRef::new(POOL).unwrap();
     let generation = owner.next();
     let started = result(

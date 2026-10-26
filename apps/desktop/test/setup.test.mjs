@@ -36,7 +36,6 @@ const client = await import("../src/engine-client.ts");
 test("setup and default-pack refusals read as plain sentences", () => {
   const fallback = client.errorMessage({ code: "unknown" });
   assert.equal(client.errorMessage({ code: "setup_busy" }), "Setup is already running.");
-  assert.equal(client.errorMessage({ code: "pack_required" }), "This entry is always on and can't be removed.");
   for (const code of ["setup_store_unavailable", "setup_outcome_unknown", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
     assert.notEqual(client.errorMessage({ code }), fallback, code);
   }
@@ -68,7 +67,8 @@ test("every setup command the client calls is a desktop command the bridge maps 
     assert.ok(bridge.includes(`=> ("${kind}", None, None)`), kind);
     assert.ok(source.includes(`"${kind}"`), kind);
   }
-  for (const code of ["setup_busy", "pack_unknown", "pack_required", "pack_not_installed", "pack_name_taken"]) {
+  assert.ok(!bridge.includes(`"pack_required"`), "no pack entry is forced, so the bridge has no pack_required code");
+  for (const code of ["setup_busy", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
     assert.ok(bridge.includes(`"${code}"`), code);
     assert.notEqual(client.errorMessage({ code }), client.errorMessage({ code: "unknown" }), code);
   }
