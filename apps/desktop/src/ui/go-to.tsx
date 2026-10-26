@@ -7,7 +7,7 @@ export const GO_TO_ROWS_MAX = 8;
 export const GO_TO_QUERY_MAX = 100;
 
 const PROJECT_TAB_LABELS = [
-  ["overview", "Overview"], ["conversation", "Conversation"], ["agents", "Agents"], ["context", "Context"], ["settings", "Settings"],
+  ["overview", "Overview"], ["conversation", "Conversation"], ["agents", "Agents"], ["changes", "Changes"], ["context", "Context"], ["settings", "Settings"],
 ] as const;
 const SETTINGS_LABELS = [
   ["accounts", "Accounts"], ["pools", "Pools"], ["harnesses", "Harnesses"], ["plugins", "Plugins and skills"], ["memory", "Memory"], ["profile", "Profile"],
@@ -23,7 +23,7 @@ export const SHORTCUTS: readonly (readonly [string, string])[] = [
   ["Cmd+N", "New project"],
   ["Cmd+,", "Settings"],
   ["Cmd+[  Cmd+]", "Back, forward"],
-  ["Cmd+1 to Cmd+5", "Project tabs"],
+  ["Cmd+1 to Cmd+6", "Project tabs"],
   ["Cmd+Enter", "Send a message or prompt"],
   ["Esc", "Close a dialog or panel"],
   ["Arrow keys", "Move a focused box in the team graph"],
