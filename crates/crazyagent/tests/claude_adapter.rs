@@ -398,6 +398,27 @@ fn aborted_success_and_assistant_errors_keep_the_observed_failure_information() 
 }
 
 #[test]
+fn a_harness_with_no_sign_in_is_told_apart_from_a_provider_rejecting_the_sign_in() {
+    let mut p = active();
+    let mut value = assistant(
+        "not-signed-in",
+        json!([{"type":"text","text":"Not logged in \u{b7} Please run /login"}]),
+    );
+    value["error"] = json!("authentication_failed");
+    let events = p.receive(&wire(value)).unwrap();
+    assert!(matches!(&events[0].kind, EventKind::AssistantError { code }
+        if code == "not_signed_in"));
+    let mut value = assistant(
+        "rejected",
+        json!([{"type":"text","text":"Invalid API key \u{b7} Please run /login"}]),
+    );
+    value["error"] = json!("authentication_failed");
+    let events = p.receive(&wire(value)).unwrap();
+    assert!(matches!(&events[0].kind, EventKind::AssistantError { code }
+        if code == "authentication_failed"));
+}
+
+#[test]
 fn malformed_and_repeated_initialization_cannot_rebind_native_identity() {
     let mut p = ready();
     let mut value = init();

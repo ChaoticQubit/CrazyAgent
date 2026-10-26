@@ -1136,7 +1136,7 @@ impl AccountDetails {
             && self.account.method == SignInMethod::Subscription
         {
             lines.push(Line::raw(
-                "The sign-in expired or never finished. Sign in again to keep using this account.",
+                "The sign-in expired, was rejected or never finished. Sign in again to keep using this account.",
             ));
             lines.push(Line::default());
         }

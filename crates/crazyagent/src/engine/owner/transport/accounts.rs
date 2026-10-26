@@ -799,7 +799,12 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         },
         model: (!native).then(|| listed.connection.model.id.clone()),
         status,
-        status_label: status.label().into(),
+        status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
+            "Sign-in rejected"
+        } else {
+            status.label()
+        }
+        .into(),
     }
 }
 

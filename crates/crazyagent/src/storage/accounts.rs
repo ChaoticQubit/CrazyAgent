@@ -24,6 +24,7 @@ pub(crate) struct Listed {
     pub(crate) details: AccountDetails,
     pub(crate) sign_in: Option<NativeAuthPhase>,
     pub(crate) launchable: bool,
+    pub(crate) rejected: bool,
 }
 
 pub(crate) enum ResultValue {
@@ -367,25 +368,30 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
-/// Lists one account with its latest sign-in and whether that sign-in passes the launch
-/// check every master, team and research turn uses on this engine run, so status never
-/// shows an account as signed in when a launch would refuse it. Inputs: the transaction,
-/// the admitted owner, the connection and its details. Output: the listed account.
+/// Lists one account with its latest sign-in, whether the provider rejected it, and whether
+/// it passes the launch check every master, team and research turn uses on this engine run,
+/// so status never shows an account as signed in when a launch or the master would refuse
+/// it. Inputs: the transaction, the admitted owner, the connection and its details.
+/// Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
     admission: &Admission,
     connection: ModelConnection,
     details: AccountDetails,
 ) -> Result<Listed, EngineError> {
-    let sign_in = match &connection.auth {
-        ModelAuthentication::NativeManaged { profile_ref } => latest_sign_in(tx, profile_ref)?,
-        _ => None,
+    let (sign_in, rejected) = match &connection.auth {
+        ModelAuthentication::NativeManaged { profile_ref } => (
+            latest_sign_in(tx, profile_ref)?,
+            crate::model_gateway::sign_in_rejected(tx, &connection)?,
+        ),
+        _ => (None, false),
     };
     let host = HostStamp {
         db_instance: admission.db_instance.clone(),
         engine_epoch: admission.engine_epoch.clone(),
     };
     let launchable = sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
+        && !rejected
         && crate::storage::native_sign_in(tx, &host, &connection, None).is_ok();
     assert!(!launchable || sign_in == Some(NativeAuthPhase::AuthenticatedObserved));
     Ok(Listed {
@@ -393,6 +399,7 @@ fn listed(
         details,
         sign_in,
         launchable,
+        rejected,
     })
 }
 

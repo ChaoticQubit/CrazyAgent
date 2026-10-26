@@ -8,7 +8,7 @@ const STATUSES: [RegExp, IconName, Tone][] = [
   [/^Key saved$/, "key-round", "ok"],
   [/^(Not signed in|Needs a pool|Needs approval|Needs you|Rate limited until .+)$/, "circle-alert", "warn"],
   [/^Limited control/, "triangle-alert", "warn"],
-  [/^(Can't reach this URL|Failed|Can't start.*|Folder missing)$/, "circle-x", "danger"],
+  [/^(Can't reach this URL|Failed|Can't start.*|Folder missing|Sign-in rejected)$/, "circle-x", "danger"],
   [/^(Running|Signing in\.\.\.|Starting|Thinking\.\.\.|Writing|Working|Installing)$/, "loader-circle", "info"],
   [/^Found$/, "search", "info"],
   [/^Setting up$/, "list-checks", "warn"],
