@@ -27,14 +27,27 @@ const SILENT_MARK = "owner-flow-silent";
 const SILENT_TURN_S = 300;
 const STAND_IN = `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.owner-flow-signed-in"
+keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
+service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
   case " $* " in *" --session-id "*|*" --print "*) [ -f "\${0%/*}/${SILENT_MARK}" ] && exec /bin/sleep ${SILENT_TURN_S} ;; esac
   echo "owner-flow stand-in: this claude only answers auth commands, it cannot run a turn" >&2
   exit 64
 fi
 case "$2" in
-  login) : > "$marker"; exit 0 ;;
-  logout) rm -f "$marker"; exit 0 ;;
+  login)
+    expires=$(( ( $(/bin/date +%s) + 28800 ) * 1000 ))
+    record=$(printf '{"claudeAiOauth":{"accessToken":"owner-flow-stand-in","refreshToken":"owner-flow-stand-in","expiresAt":%s,"scopes":["user:inference"]}}' "$expires")
+    if [ -x /usr/bin/security ]; then
+      hex=$(printf %s "$record" | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \\n')
+      printf 'add-generic-password -U -a owner-flow -s "%s" -X %s "%s"\\n' "$service" "$hex" "$keychain" | /usr/bin/security -i >/dev/null || exit 1
+    else
+      (umask 077; printf %s "$record" > "$CLAUDE_CONFIG_DIR/.credentials.json") || exit 1
+    fi
+    : > "$marker"; exit 0 ;;
+  logout)
+    if [ -x /usr/bin/security ]; then /usr/bin/security delete-generic-password -s "$service" "$keychain" >/dev/null 2>&1; fi
+    rm -f "$marker" "$CLAUDE_CONFIG_DIR/.credentials.json"; exit 0 ;;
   status)
     if [ -f "$marker" ]; then
       printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","configDirectory":"%s","email":null,"orgId":null,"orgName":null,"subscriptionType":null}\\n' "$CLAUDE_CONFIG_DIR"
@@ -655,7 +668,10 @@ async function main() {
         if (Date.now() > deadline) throw new Refused(`team_agent_not_working_${member?.status ?? "missing"}`, member?.problem ?? "-");
       }
       const refused = await call("desktop_logout_native_auth", { ticket: (await connection(used.id)).ticket });
-      if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
+      if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") {
+        if ("value" in refused) await settleAuth(used.id, "logout", "unauthenticated_observed").catch(() => null);
+        throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
+      }
       const using = await value("desktop_agents_using", { accountId: used.id });
       if (!using.some((view) => view.label === `Team sub-agent ${agent.id}` && view.project === project)) throw new Refused("in_use_without_the_agent", using.map((view) => `${view.label}@${view.project}`).join(",") || "none");
       const left = await value("desktop_stop_agents_using", { accountId: used.id });
