@@ -187,7 +187,30 @@ impl Capture {
 mod routing_tests;
 
 impl OwnerRuntimeHandle {
+    /// Runs one master runtime command in storage. A first preparation that reserves the
+    /// conversation worktree checks it out on a blocking thread without the owner barrier,
+    /// so owner reads and the database keep serving, then stores it and prepares again
+    /// (LB-28). Input: the command. Output: the storage result, never a checkout.
     async fn master_runtime_command(
+        &self,
+        command: MasterRuntimeCommand,
+    ) -> Result<MasterRuntimeResult, EngineError> {
+        let checkout = match self.master_runtime_job(command).await? {
+            MasterRuntimeResult::Checkout(checkout) => checkout,
+            result => return Ok(result),
+        };
+        let checked = tokio::task::spawn_blocking(move || checkout.materialize())
+            .await
+            .map_err(|_| failure("master_worktree_checkout_interrupted"))?;
+        match self.master_runtime_job(checked).await? {
+            MasterRuntimeResult::Checkout(_) => Err(failure("master_worktree_checkout_repeated")),
+            result => Ok(result),
+        }
+    }
+
+    /// Sends one master runtime command to storage under the owner barrier. Input: the
+    /// command. Output: the storage result.
+    async fn master_runtime_job(
         &self,
         command: MasterRuntimeCommand,
     ) -> Result<MasterRuntimeResult, EngineError> {
@@ -417,7 +440,9 @@ impl OwnerRuntimeHandle {
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) => return Err(failure("master_runtime_result")),
+            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::Checkout(_) => {
+                return Err(failure("master_runtime_result"));
+            }
             #[cfg(all(test, unix))]
             MasterRuntimeResult::ConfiguredProfile(_) => {
                 return Err(failure("master_runtime_result"));

@@ -728,6 +728,51 @@ impl Fixture {
         stale
     }
 
+    /// Commits many files and one large file to the repository, the size of an owner's
+    /// project, so a conversation worktree takes a while to check out. Input: the file
+    /// count and the large file's bytes. Output: none; the repository head has them.
+    fn grow(&self, files: usize, large: usize) {
+        private_directory(&self.repository.join("bulk"));
+        for index in 0..files {
+            private_file(
+                &self.repository.join(format!("bulk/{index:05}.txt")),
+                format!("Actual fixture file {index}.\n").as_bytes(),
+            );
+        }
+        private_file(&self.repository.join("large.bin"), &vec![7; large]);
+        git(&self.repository, self.root.path(), &["add", "-A"]);
+        git(
+            &self.repository,
+            self.root.path(),
+            &["commit", "-qm", "Grow master routing fixture"],
+        );
+    }
+
+    /// Waits until the conversation's worktree lease is reserved and not yet checked out.
+    /// Input: the fixture. Output: none; panics when the checkout is never seen running.
+    async fn checkout_started(&self) {
+        let db = self.db();
+        let deadline = Instant::now() + TEST_BOUND;
+        loop {
+            let state: Option<String> = db
+                .query_row(
+                    "SELECT json_extract(body,'$.lease.state') FROM worktree_leases WHERE task=?1",
+                    [self.session.bootstrap_task_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            if state.as_deref() == Some("Reserved") {
+                return;
+            }
+            assert!(
+                state.is_none() && Instant::now() < deadline,
+                "actual checkout was not seen running: {state:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
     async fn submit(&self, text: &str) -> RequestId {
         let revision = Self::read_owner(&self.owner, OwnerRead::Capabilities)
             .await
@@ -1487,6 +1532,51 @@ async fn a_repository_vs_code_and_the_codex_app_wrote_to_gets_a_master_worktree_
     assert_eq!(
         fs::read(prepared.cwd.join("README")).unwrap(),
         b"Actual master routing fixture.\n"
+    );
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn the_owner_reads_while_the_first_send_checks_out_the_conversation_worktree() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    case.grow(2000, 16 << 20);
+    case.register().await;
+    let prepare = async {
+        let result = case
+            .command(MasterRuntimeCommand::Prepare {
+                host: case.runtime().identity(),
+                project_id: case.session.project_id.clone(),
+                session_id: case.session.session_id.clone(),
+                turn_id: case.turn.id.clone(),
+            })
+            .await;
+        (result, Instant::now())
+    };
+    let read = async {
+        case.checkout_started().await;
+        Fixture::read_owner(
+            &case.owner,
+            OwnerRead::ProjectMaster {
+                project_id: case.session.project_id.clone(),
+            },
+        )
+        .await;
+        Instant::now()
+    };
+    let ((result, prepared_at), read_at) = tokio::join!(prepare, read);
+    let prepared = match result {
+        Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+        Ok(_) => panic!("the master turn was not prepared"),
+        Err(error) => panic!("the master refused the repository: {}", error.0),
+    };
+    assert_eq!(
+        fs::read(prepared.cwd.join("bulk/01999.txt")).unwrap(),
+        b"Actual fixture file 1999.\n"
+    );
+    assert!(
+        read_at < prepared_at,
+        "the owner read was answered {:?} after the worktree checkout",
+        read_at - prepared_at
     );
     case.finish().await;
 }
