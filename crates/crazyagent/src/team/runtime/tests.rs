@@ -916,7 +916,12 @@ fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
     let stopped = stopper.join().unwrap().unwrap();
     assert_eq!(stopped.state, RunState::Stopped);
     assert!(!stopped.can_stop);
-    assert!(!host.alive().unwrap().contains(&AgentId::team(member.id).unwrap()));
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(member.id).unwrap())
+    );
     assert!(!crate::agents::tests::alive(group));
     assert!(team.shutdown().unwrap().is_empty());
 }

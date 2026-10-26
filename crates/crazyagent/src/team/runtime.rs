@@ -498,7 +498,7 @@ impl TeamRuntime {
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
         };
-        let hosted = match self.host(&stored, id, role, launch, None) {
+        let hosted = match self.host(&stored, id, role, launch, &connection, None) {
             Ok(hosted) => hosted,
             Err(problem) => return Ok(Err(problem)),
         };
@@ -1607,7 +1607,7 @@ impl TeamRuntime {
                 params![id, worktree],
             )
             .map_err(error)?;
-        let hosted = match self.host(stored, id, role, &plan.harness, again) {
+        let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
             Ok(hosted) => hosted,
             Err(problem) => {
                 self.connection
@@ -1846,13 +1846,15 @@ impl TeamRuntime {
 
     /// Records one team agent in the engine's agent register, continuing the register
     /// entry of an agent the owner restarted. Takes the setup, the team agent id, its role,
-    /// launch harness and the restart. Returns the register handle, none without a register.
+    /// launch harness, the account it signs in with and the restart. Returns the register
+    /// handle, none without a register.
     fn host(
         &self,
         stored: &StoredSetup,
         id: i64,
         role: AgentRole,
         harness: &str,
+        account: &CredentialRef,
         again: Option<&HostedRestart>,
     ) -> Result<Option<Hosted>, String> {
         let Some(agents) = &self.agents else {
@@ -1872,6 +1874,7 @@ impl TeamRuntime {
             harness: harness.to_owned(),
             host: TEAM_HOST,
             reference: again.map_or_else(|| id.to_string(), |restart| restart.reference.clone()),
+            account: Some(account.clone()),
         };
         agents
             .host(agent, again.map(|restart| restart.id.as_str()))
@@ -2540,8 +2543,13 @@ fn turn(
     turn_time: Duration,
 ) -> (String, TurnEnd) {
     interrupt.store(false, Ordering::SeqCst);
-    if session.send(prompt).is_err() {
-        return (String::new(), TurnEnd::Closed);
+    if let Err(problem) = session.send_or_cancel(prompt, cancel) {
+        let end = if problem.0 == "launch_cancelled" {
+            TurnEnd::Cancelled
+        } else {
+            TurnEnd::Closed
+        };
+        return (String::new(), end);
     }
     let deadline = Instant::now() + turn_time;
     let mut text = String::new();
