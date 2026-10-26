@@ -359,3 +359,119 @@ fn link_cli_links_into_the_bin_folder_and_refuses_a_real_file() {
     assert_eq!(std::fs::read_to_string(&link).unwrap(), "user file");
     assert!(link_cli(&temp.path().join("missing"), &bin).is_err());
 }
+
+fn standard(platform: Platform) -> &'static str {
+    match platform {
+        Platform::MacOs => LAUNCHD_LABEL,
+        Platform::Linux => SYSTEMD_UNIT,
+        Platform::Windows => WINDOWS_TASK,
+    }
+}
+
+fn short_hash(name: &str, platform: Platform) -> String {
+    let hash = match platform {
+        Platform::MacOs => name.strip_prefix("dev.crazyagent.engine."),
+        Platform::Linux => name
+            .strip_prefix("crazyagent-engine-")
+            .and_then(|rest| rest.strip_suffix(".service")),
+        Platform::Windows => name.strip_prefix("CrazyAgent Engine "),
+    }
+    .unwrap_or_else(|| panic!("{name} is not a per-root {platform:?} service name"));
+    assert_eq!(hash.len(), 12, "{name}");
+    assert!(
+        hash.bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "{name}"
+    );
+    hash.to_owned()
+}
+
+#[test]
+fn each_data_root_names_its_own_service_and_the_default_root_keeps_the_standard_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let default = temp.path().join("default").join("engine");
+    let first = temp.path().join("first").join("engine");
+    let second = temp.path().join("second").join("engine");
+    for platform in [Platform::MacOs, Platform::Linux, Platform::Windows] {
+        assert_eq!(
+            service_name(platform, &default, Some(&default)),
+            standard(platform)
+        );
+        let one = service_name(platform, &first, Some(&default));
+        let two = service_name(platform, &second, Some(&default));
+        assert_ne!(short_hash(&one, platform), short_hash(&two, platform));
+        assert_eq!(service_name(platform, &first, Some(&default)), one);
+        assert_eq!(service_name(platform, &first, None), one);
+        assert_ne!(service_name(platform, &default, None), standard(platform));
+    }
+    assert_eq!(
+        short_hash(
+            &service_name(Platform::MacOs, &first, None),
+            Platform::MacOs
+        ),
+        short_hash(
+            &service_name(Platform::Linux, &first, None),
+            Platform::Linux
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_names_the_same_service_through_links_and_before_and_after_it_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let default = real.join("default");
+    std::fs::create_dir(&default).unwrap();
+    assert_eq!(
+        service_name(Platform::MacOs, &link.join("default"), Some(&default)),
+        LAUNCHD_LABEL
+    );
+    let before = service_name(Platform::MacOs, &link.join("engine"), Some(&default));
+    std::fs::create_dir(real.join("engine")).unwrap();
+    let after = service_name(Platform::MacOs, &link.join("engine"), Some(&default));
+    assert_eq!(before, after);
+    assert_eq!(
+        service_name(Platform::MacOs, &real.join("engine"), Some(&default)),
+        after
+    );
+    short_hash(&after, Platform::MacOs);
+}
+
+#[test]
+fn the_current_user_service_follows_the_data_root() {
+    let platform = Platform::CURRENT;
+    let environment = crate::paths::RootEnvironment {
+        home_override: None,
+        ..crate::paths::RootEnvironment::current()
+    };
+    let executable = PathBuf::from("/opt/crazyagent/crazyagent");
+    let default = Layout::new(crate::paths::data_root(platform, &environment).unwrap()).unwrap();
+    let service = Service::current_user(platform, executable.clone(), &default).unwrap();
+    assert_eq!(service.name, standard(platform));
+    let temp = tempfile::tempdir().unwrap();
+    let other = Service::current_user(
+        platform,
+        executable,
+        &Layout::new(temp.path().join("engine")).unwrap(),
+    )
+    .unwrap();
+    short_hash(&other.name, platform);
+    if platform == Platform::MacOs {
+        assert_eq!(
+            other.definition.file_name().unwrap(),
+            OsStr::new(&format!("{}.plist", other.name))
+        );
+        assert_eq!(
+            texts(vec![other.status_command(501)]),
+            vec![words(&[
+                "/bin/launchctl",
+                "print",
+                &format!("gui/501/{}", other.name)
+            ])]
+        );
+    }
+}
