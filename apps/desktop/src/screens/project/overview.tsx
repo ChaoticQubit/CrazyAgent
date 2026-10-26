@@ -78,7 +78,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
       <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
         {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
-        {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research.code)}</p>}
+        {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research)}</p>}
         {data.research?.kind === "ok" && jobs.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
         {rows.length > 0 && <ul className="pj-rows" aria-label="Research">{rows.map(({ job, row }) => <li className="pj-research-row" key={job.id}>
           <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>

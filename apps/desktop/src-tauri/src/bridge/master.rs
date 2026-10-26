@@ -1,4 +1,4 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, failure};
+use super::{BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, caused, failure};
 use crazyagent::engine::owner::{OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::master_session::{
     MasterCursor, MasterOwnerAction, MasterSessionView, MasterTurnPage,
@@ -43,7 +43,7 @@ impl NativeBridge {
                 project_id: project_id.clone(),
             })
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let OwnerData::ProjectMaster { session } = state.data else {
             return Err(failure("unexpected_reply"));
         };
@@ -94,7 +94,7 @@ impl NativeBridge {
                 limit: PAGE_SIZE,
             })
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         let page = match state.data {
             OwnerData::ProjectMasterTurns { page } => page,
             OwnerData::ResyncRequired => return Err(failure("resync_required")),
@@ -146,10 +146,10 @@ impl NativeBridge {
                 project_id: selected,
             })
             .await
-            .map_err(|_| failure("owner_read_failed"))?;
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::ProjectMaster { action }, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
     }
@@ -542,7 +542,7 @@ fallback_allowed = false
             .await
             .map_err(|error| error.code)?;
         assert_eq!(late.outcome, ActionOutcome::Rejected);
-        assert_eq!(late.rejection, Some("master_turn_not_current"));
+        assert_eq!(late.rejection.as_deref(), Some("master_turn_not_current"));
         assert_eq!(late.intent.kind, "master");
         assert!(!late.pending);
         let after_cancel = bridge
@@ -1025,7 +1025,7 @@ fallback_allowed = false
             .map_err(|error| error.code)?;
         assert_eq!(refused.outcome, ActionOutcome::Rejected);
         assert_eq!(
-            refused.rejection,
+            refused.rejection.as_deref(),
             Some("master_source_conflict"),
             "the window learns the session predates the settings, not a bare refusal"
         );

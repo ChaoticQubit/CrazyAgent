@@ -295,7 +295,7 @@ test("a stopped or failed master turn offers its own message to send again", () 
 });
 
 test("a failed send says Couldn't send and keeps specific engine copy", () => {
-  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again.");
+  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again. (made_up_code)");
   assert.equal(research.sendFailureLine("engine_unreachable"), `Couldn't send. ${api.failureCopy("engine_unreachable")}`);
 });
 
@@ -465,11 +465,11 @@ test("Project Settings offers No pool, and a project without a pool tells the ow
   assert.equal(settings.poolSaved("Main"), "Main is assigned.");
 });
 
-test("removing a project says its folder stays on disk", async () => {
+test("removing a project says it ends the master conversation and its folder stays on disk", async () => {
   const settings = await import("../src/screens/project/settings.tsx");
   assert.equal(settings.removeLine("/Users/me/CrazyAgent/harbor-notes"),
-    "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
-  assert.equal(settings.removeLine(null), "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
+    "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
+  assert.equal(settings.removeLine(null), "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
 });
 
 test("a project set up in an existing folder shows that folder, not the .crazyagent folder inside it", async () => {
@@ -674,7 +674,7 @@ test("files named like object built-ins get the plain file icon instead of crash
 test("an engine code named like an object built-in gets the plain fallback sentence", () => {
   for (const code of ["constructor", "__proto__", "toString"]) {
     assert.equal(typeof api.failureCopy(code), "string", code);
-    assert.equal(api.failureCopy(code), api.failureCopy("some_unknown_code"), code);
+    assert.equal(api.failureCopy(code), `Something went wrong. Try again. (${/^[a-z0-9_]+$/.test(code) ? code : "unknown"})`, code);
   }
 });
 

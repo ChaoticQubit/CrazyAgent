@@ -222,7 +222,10 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     let protected = bridge
         .delete_project_context(&id, "context/brief.md".into(), 7)
         .await?;
-    assert_eq!(protected.rejection, Some("context_item_protected"));
+    assert_eq!(
+        protected.rejection.as_deref(),
+        Some("context_item_protected")
+    );
     assert_eq!(
         bridge
             .project_context(&id)
@@ -241,7 +244,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     std::os::unix::fs::symlink(sources.join("brief.txt"), sources.join("link.txt"))?;
     let taken = bridge.setup_project(spec, setup(vec![]), 8).await?;
     assert!(matches!(taken.outcome, ActionOutcome::Rejected));
-    assert_eq!(taken.rejection, Some("home_destination_exists"));
+    assert_eq!(taken.rejection.as_deref(), Some("home_destination_exists"));
     let rejected = bridge
         .setup_project(
             ProjectSpec {
@@ -253,7 +256,10 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         )
         .await?;
     assert!(matches!(rejected.outcome, ActionOutcome::Rejected));
-    assert_eq!(rejected.rejection, Some("document_not_a_regular_file"));
+    assert_eq!(
+        rejected.rejection.as_deref(),
+        Some("document_not_a_regular_file")
+    );
 
     let job = jobs.jobs[0].id;
     assert!(bridge.research_log(&id, job).await?.lines.is_empty());
@@ -264,7 +270,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(cancelled.intent.kind, "research_cancel");
     let finished = bridge.cancel_research(&id, job, 10).await?;
-    assert_eq!(finished.rejection, Some("research_job_finished"));
+    assert_eq!(finished.rejection.as_deref(), Some("research_job_finished"));
     let retried = bridge.retry_research(&id, job, 11).await?;
     assert!(
         matches!(retried.outcome, ActionOutcome::Applied),
@@ -310,7 +316,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     let stale = bridge
         .update_project_setup(&id, edited, None, Some(1), 13)
         .await?;
-    assert_eq!(stale.rejection, Some("stale_revision"));
+    assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 
     let removed = bridge.remove_project(&id, 14).await?;
     assert!(

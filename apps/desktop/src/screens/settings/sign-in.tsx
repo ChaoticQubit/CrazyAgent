@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
-import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode } from "../../engine-client";
+import { knownError, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
@@ -23,6 +23,7 @@ export type SignInStage =
 
 const ACTIVE_PHASES = ["starting", "awaiting_owner", "checking_account", "cancelling"];
 const EXPIRED = ["native_auth_sign_in_expired", "native_auth_claude_deadline", "native_auth_bootstrap_timeout"];
+const UNFINISHED = ["native_auth_interrupted", "native_auth_login_failed", "native_auth_native_request_failed", "native_auth_not_active"];
 const CHECK = ["native_auth_outcome_unknown_read_same_operation", "native_auth_claude_input_outcome_unknown"];
 export const POLL_MS = 2000;
 
@@ -37,8 +38,8 @@ export function signInFailure(code: string, provider: SubscriptionProvider): { t
   if (CHECK.includes(code)) return { text: plainError(code), hint: "check" };
   if (code === "native_auth_cancelled") return { text: "Sign-in cancelled.", hint: "retry" };
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
-  const known = plainError(code);
-  return { text: known === plainError("") ? "Sign-in didn't finish. Try again." : known, hint: "retry" };
+  if (UNFINISHED.includes(code)) return { text: "Sign-in didn't finish. Try again.", hint: "retry" };
+  return { text: knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
 }
 
 const STUCK = new Set(["native_auth_operation_missing", "native_profile_source_conflict", "native_auth_operation_scope_conflict", "native_auth_recovery_required"]);

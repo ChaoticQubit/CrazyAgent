@@ -4,7 +4,7 @@ use super::{Flow, Place, Screen, open};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
 use crate::setup::pack::entry_title;
-use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, plain_reason};
+use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, known_reason};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
@@ -12,7 +12,8 @@ use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, NOT_READY};
 use crate::tui::text::{
-    cells, indent, join, list_row, pad, row, status, styled, thumb, with_bar, wrap,
+    cells, coded, indent, join, list_row, pad, plain_code, row, status, styled, thumb, with_bar,
+    wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, checkbox};
@@ -38,8 +39,9 @@ const SETTINGS_TEXT: &str = "The tools CrazyAgent needs on this computer, the sk
 
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
-/// request, otherwise the setup sentence for the code.
-pub fn setup_plain(code: &str) -> &'static str {
+/// request, otherwise the setup, projects home or GitHub sentence for the code,
+/// or a general setup sentence naming a code none of them knows.
+pub fn setup_plain(code: &str) -> String {
     match code {
         NOT_READY => "Not ready yet.",
         "trusted_connection_unavailable" | "controller_disconnected" => {
@@ -49,7 +51,26 @@ pub fn setup_plain(code: &str) -> &'static str {
         "owner_outcome_unknown_reconcile_same_identity" => {
             "CrazyAgent did not answer in time. Try again."
         }
-        _ => plain_reason(code),
+        _ => {
+            return known_reason(code)
+                .or_else(|| super::intake::known(code))
+                .map_or_else(
+                    || coded("Something went wrong during setup.", code),
+                    str::to_owned,
+                );
+        }
+    }
+    .to_owned()
+}
+
+/// The sentence for why a tool or default skill did not install.
+/// Input: the reason the engine sent, which is the setup sentence it already chose.
+/// Output: that sentence; a plain code instead gets the setup sentence for the code.
+fn setup_reason(reason: &str) -> String {
+    if plain_code(reason) {
+        setup_plain(reason)
+    } else {
+        reason.to_owned()
     }
 }
 
@@ -288,7 +309,7 @@ impl AppSetup {
             _ => return Flow::Handled,
         };
         if running || self.started || self.sent.is_some() {
-            ctx.say(Message::warning(setup_plain("setup_busy"), ""));
+            ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
         let pack: Vec<String> = self
@@ -387,7 +408,7 @@ impl AppSetup {
                 self.started = true;
                 self.read(0, AppSetupJob::Status, ctx);
             }
-            Err(code) => ctx.say(Message::error(setup_plain(code), "")),
+            Err(code) => ctx.say(Message::error(&setup_plain(code), "")),
         }
     }
 
@@ -404,7 +425,7 @@ impl AppSetup {
                 ctx.say(Message::success(&done, ""));
                 self.reload(ctx);
             }
-            Err(code) => ctx.say(Message::error(setup_plain(code), "")),
+            Err(code) => ctx.say(Message::error(&setup_plain(code), "")),
         }
     }
 
@@ -457,7 +478,7 @@ impl AppSetup {
     fn submit_home(&mut self, typed: &str, field: TextField, ctx: &mut Ctx) {
         let path = expand(typed, ctx);
         if path_text(&path, "home_path_invalid").is_err() {
-            ctx.say(Message::error(setup_plain("home_path_invalid"), ""));
+            ctx.say(Message::error(&setup_plain("home_path_invalid"), ""));
             self.ask = Some(Ask::HomePath(field));
             return;
         }
@@ -581,7 +602,7 @@ impl AppSetup {
             if let DependencyState::Failed { reason } = &tool.state {
                 let gap = " ".repeat(2 + TOOL_WIDTH + 2);
                 lines.extend(
-                    wrap(plain_reason(reason), rest).into_iter().map(|part| {
+                    wrap(&setup_reason(reason), rest).into_iter().map(|part| {
                         join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])
                     }),
                 );
@@ -674,7 +695,7 @@ impl AppSetup {
         {
             lines.extend(
                 wrap(
-                    &format!("{}: {}", entry_title(id), plain_reason(reason)),
+                    &format!("{}: {}", entry_title(id), setup_reason(reason)),
                     limit,
                 )
                 .into_iter()

@@ -1,4 +1,6 @@
-use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, failure};
+use super::{
+    ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
+};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
@@ -17,7 +19,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 50] = [
+pub const INTAKE_CODES: [&str; 57] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -37,12 +39,19 @@ pub const INTAKE_CODES: [&str; 50] = [
     "home_copy_too_large",
     "home_copy_failed",
     "home_copy_unverified",
+    "home_copy_linked_checkout",
     "home_move_failed",
     "home_move_source_left",
     "home_move_same",
     "home_move_nested",
     "home_move_partial",
     "home_move_interrupted",
+    "home_move_worktrees",
+    "home_move_project",
+    "home_move_too_many",
+    "home_move_in_progress",
+    "home_folder_name_invalid",
+    "home_new_project_failed",
     "home_add_unverified",
     "home_add_interrupted",
     "home_record_invalid",
@@ -144,12 +153,14 @@ const SETUP_CODES: [&str; 33] = [
     "owner_unavailable",
 ];
 
-/// A folder's size before it is copied in, and the GitHub owner/name of its `origin`
-/// remote when that remote is on github.com, so the window can suggest a clone instead.
+/// A folder's size before it is copied in, the GitHub owner/name of its `origin`
+/// remote when that remote is on github.com, so the window can suggest a clone instead,
+/// and how many linked git worktrees it has, which a copy leaves with the original.
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: u64,
     pub github: Option<String>,
+    pub worktrees: usize,
 }
 
 fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
@@ -158,11 +169,12 @@ fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeErr
     } else {
         code
     };
-    failure(
+    caused(
         list.iter()
             .copied()
             .find(|item| *item == code)
             .unwrap_or(fallback),
+        code,
     )
 }
 
@@ -172,19 +184,18 @@ pub fn intake_code(code: &str) -> Option<&'static str> {
     INTAKE_CODES.iter().copied().find(|item| *item == code)
 }
 
-/// Names a setup or pack refusal the window has a sentence for, so an owner receipt
-/// keeps the engine's reason instead of a general one.
-/// Input: an engine code. Output: the same code as a static name, or None.
-pub fn setup_code(code: &str) -> Option<&'static str> {
-    SETUP_CODES.iter().copied().find(|item| *item == code)
-}
-
 fn intake_failure(error: EngineError) -> BridgeError {
     known(&error.0, &INTAKE_CODES, "owner_read_failed")
 }
 
+/// Names a GitHub failure from its allowlist only, never with the engine code behind it:
+/// this path carries tokens, and a token can look like a plain code.
+/// Input: the engine error. Output: the listed code, or `github_failed` with no cause.
 fn github_failure(error: EngineError) -> BridgeError {
-    known(&error.0, &GITHUB_CODES, "github_failed")
+    BridgeError {
+        cause: None,
+        ..known(&error.0, &GITHUB_CODES, "github_failed")
+    }
 }
 
 fn setup_failure(error: EngineError) -> BridgeError {
@@ -308,7 +319,7 @@ impl NativeBridge {
         self.owner_read(OwnerRead::ProjectsHome).await?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
 
@@ -346,14 +357,20 @@ impl NativeBridge {
         }
     }
 
-    /// Measures a folder before Copy and names its GitHub repository when it has one.
-    /// Input: an absolute folder path. Output: its size and the GitHub owner/name, if any.
+    /// Measures a folder before Copy, names its GitHub repository when it has one and
+    /// counts its linked git worktrees. Input: an absolute folder path. Output: its size,
+    /// the GitHub owner/name, if any, and the linked worktree count.
     pub async fn folder_size(&mut self, path: String) -> Result<FolderSize, BridgeError> {
         crazyagent::projects_home::path_text(&path, "folder_size_path_invalid")
             .map_err(intake_failure)?;
         let github = origin_on_github(Path::new(&path));
+        let worktrees = crazyagent::projects_home::linked_worktrees(Path::new(&path));
         match self.owner_read(OwnerRead::FolderSize { path }).await? {
-            OwnerData::FolderSize { bytes } => bounded(FolderSize { bytes, github }),
+            OwnerData::FolderSize { bytes } => bounded(FolderSize {
+                bytes,
+                github,
+                worktrees,
+            }),
             _ => Err(failure("owner_read_failed")),
         }
     }
@@ -500,12 +517,12 @@ impl NativeBridge {
             .map_err(setup_failure)?;
         self.controller()?
             .begin_mutation(mutation, generation)
-            .map_err(|_| failure("owner_not_ready"))?;
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
         let receipt = self.deliver_intent(false).await?;
         match receipt.outcome {
             ActionOutcome::Applied => self.setup_status().await,
             ActionOutcome::Rejected => Err(known(
-                receipt.rejection.unwrap_or("setup_failed"),
+                receipt.rejection.as_deref().unwrap_or("setup_failed"),
                 &SETUP_CODES,
                 "setup_failed",
             )),
@@ -758,20 +775,51 @@ mod tests {
             github_failure(EngineError("github_sign_in_expired".into())).code,
             "github_sign_in_expired"
         );
+        let leaked = github_failure(EngineError("ghp_leaked".into()));
+        assert_eq!(leaked.code, "github_failed");
+        assert_eq!(leaked.cause, None);
+        let home = intake_failure(EngineError("home_destination_exists".into()));
+        assert_eq!(home.code, "home_destination_exists");
+        assert_eq!(home.cause, None);
+        let weird = intake_failure(EngineError("weird".into()));
+        assert_eq!(weird.code, "owner_read_failed");
+        assert_eq!(weird.cause.as_deref(), Some("weird"));
+        let raw = setup_failure(EngineError("open /Users/mira/setup: denied".into()));
+        assert_eq!(raw.code, "setup_failed");
         assert_eq!(
-            github_failure(EngineError("ghp_leaked".into())).code,
-            "github_failed"
+            raw.cause.as_deref(),
+            Some(crazyagent::protocol::TEXT_WITHHELD)
         );
         assert_eq!(
-            intake_failure(EngineError("home_destination_exists".into())).code,
-            "home_destination_exists"
+            serde_json::to_value(&weird).unwrap(),
+            serde_json::json!({ "code": "owner_read_failed", "cause": "weird" })
         );
         assert_eq!(
-            intake_failure(EngineError("weird".into())).code,
-            "owner_read_failed"
+            serde_json::to_value(&home).unwrap(),
+            serde_json::json!({ "code": "home_destination_exists" })
         );
         assert_eq!(intake_code("home_move_partial"), Some("home_move_partial"));
         assert_eq!(intake_code("folder_name_taken"), None);
+        let engine = [
+            include_str!("../../../../../crates/crazyagent/src/projects_home.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
+        ];
+        let mut refusals: Vec<&str> = engine
+            .iter()
+            .flat_map(|source| source.split("refused(\"").skip(1))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|code| !code.starts_with("home_trash_"))
+            .collect();
+        refusals.sort_unstable();
+        refusals.dedup();
+        assert!(refusals.contains(&"home_copy_failed"), "{refusals:?}");
+        for code in refusals
+            .into_iter()
+            .chain(["home_move_in_progress", "home_new_project_failed"])
+        {
+            assert_eq!(intake_code(code), Some(code), "{code}");
+        }
         assert_eq!(
             github_failure(EngineError("clone_destination_exists".into())).code,
             "clone_destination_exists"
@@ -782,7 +830,7 @@ mod tests {
     fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
         let refused = |code: &str| {
             known(
-                super::super::rejection_code(code),
+                &super::super::rejection_code(code),
                 &SETUP_CODES,
                 "setup_failed",
             )

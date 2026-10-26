@@ -42,7 +42,7 @@ impl BridgeQueue {
         let _turn = Turn::take(&self.waiting)?;
         tokio::time::timeout(BRIDGE_WAIT, lock)
             .await
-            .map_err(|_| BridgeError { code: "busy" })
+            .map_err(|_| super::failure("busy"))
     }
 }
 
@@ -57,7 +57,7 @@ impl<'a> Turn<'a> {
                 (count < BRIDGE_WAITERS_MAX).then_some(count + 1)
             })
             .map(|_| Self(waiting))
-            .map_err(|_| BridgeError { code: "busy" })
+            .map_err(|_| super::failure("busy"))
     }
 }
 

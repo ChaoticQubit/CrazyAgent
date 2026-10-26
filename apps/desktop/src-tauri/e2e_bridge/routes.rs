@@ -1363,14 +1363,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async {
-                let stop = lock(state).await?.stop_account_agents(account_id.clone())?;
-                let holders = stop.await?;
-                lock(state).await?.end_holders(holders, generation).await?;
-                let wait = lock(state).await?.await_account_free(account_id)?;
-                wait.await
-            }
-            .await;
+            let result: Result<_, BridgeError> = async { let stop = lock(state) .await? .stop_account_agents(account_id.clone())?; let holders = stop.await?; lock(state).await?.end_holders(holders, generation).await?; let wait = lock(state).await?.await_account_free(account_id)?; wait.await }.await;
             routed(result)
         }
         "desktop_interrupt_agent" => {

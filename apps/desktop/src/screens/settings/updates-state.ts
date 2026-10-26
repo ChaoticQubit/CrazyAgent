@@ -1,4 +1,5 @@
 import type { AvailableUpdate, UpdateProgress } from "../../api-updates";
+import { withCode } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
 export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -42,9 +43,9 @@ const COPY: Record<string, string> = {
 };
 
 /** Turns an update error code into one plain sentence for the owner.
- * Input: the code. Output: the copy, or the generic update fallback. */
+ * Input: the code. Output: the copy, or the generic update fallback naming the code. */
 export function updateMessage(code: string): string {
-  return COPY[code] ?? "Something went wrong with the update. Try again.";
+  return COPY[code] ?? withCode("Something went wrong with the update. Try again.", code);
 }
 
 const blocking = (state: UpdatePhase) => state.kind === "installing" || state.kind === "installed";

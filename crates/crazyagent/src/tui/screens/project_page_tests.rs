@@ -1041,6 +1041,83 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_master_conversation_ends_from_its_tab_so_the_project_can_be_removed() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.projects = Load::Ready(vec![ProjectCard {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        about: String::new(),
+        platforms: vec![Platform::Cli],
+        pool: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    }]);
+    let home = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, home);
+    while shell.ctx.next_request().is_some() {}
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    for _ in 0..3 {
+        shell.key(Key::ShiftLeft);
+    }
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    for character in "Plan the first slice".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Plan the first slice"), "{shown}");
+    assert!(shown.contains("e End conversation"), "{shown}");
+
+    let remove = |shell: &mut Shell| {
+        for _ in 0..3 {
+            shell.key(Key::ShiftRight);
+        }
+        shell.key(Key::Char('x'));
+        shell.key(Key::Char('y'));
+    };
+    remove(&mut shell);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("End this project's master conversation first"),
+        "{shown}"
+    );
+    assert_ne!(shell.place(), Some(Place::Home));
+
+    for _ in 0..3 {
+        shell.key(Key::ShiftLeft);
+    }
+    shell.key(Key::Esc);
+    shell.key(Key::Char('e'));
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("The master conversation is closed."),
+        "{shown}"
+    );
+    assert!(!shown.contains("e End conversation"), "{shown}");
+
+    remove(&mut shell);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert_eq!(shell.place(), Some(Place::Home), "{shown}");
+    assert!(shown.contains("Notes CLI was removed."), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     let engine = Engine::start().await;
     let mut connection = engine.connect();
@@ -1318,4 +1395,88 @@ fn shell_draws_the_wizard_like_the_design() {
     assert_eq!(kept_draft(), None);
     drawn.push(("wiz-about-80".to_owned(), framed(&mut shell, 80, 24)));
     check_frames(&drawn);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_the_engine_cannot_write_into_the_project_says_why() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let setup = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let documents = setup.state_folder().join("context/documents");
+    std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let scope = sources.path().join("scope.csv");
+    std::fs::write(&scope, "item,size\nlogin,small\n").unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(100, 24);
+    ctx.store.projects = Load::Ready(vec![ProjectCard {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        about: String::new(),
+        platforms: vec![Platform::Cli],
+        pool: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    }]);
+    let home = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, home);
+    while shell.ctx.next_request().is_some() {}
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('a'));
+    let shown = render(&mut shell, 100, 24);
+    assert!(shown.contains("Add file"), "{shown}");
+    shell.key(Key::Paste(scope.display().to_string()));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    std::fs::set_permissions(&documents, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    let shown = render(&mut shell, 100, 24);
+    assert!(
+        shown.contains("CrazyAgent can't write in the project folder."),
+        "{shown}"
+    );
+    assert!(shown.contains("permissions."), "{shown}");
+    assert!(!shown.contains("That didn't work"), "{shown}");
+    assert!(!documents.join("scope.csv").exists(), "nothing was copied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Tidepool"), "{shown}");
+    std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    std::fs::set_permissions(engine.home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(sent.first(), Some(&"create"), "{sent:?}");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(
+        shown.contains("The project folder could not be created. Nothing was kept."),
+        "{shown}"
+    );
+    assert!(!engine.home.path().join("tidepool").exists(), "{shown}");
 }

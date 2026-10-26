@@ -230,7 +230,7 @@ pub(in crate::tui) fn project_screen(
         )];
         body.extend(
             wrap_words(
-                "Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
+                "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
                 50,
             )
             .into_iter()
@@ -940,14 +940,7 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
             transcript_lines(transcript, content, screen.now_ms, look)
         };
         let empty = transcript.messages.is_empty();
-        let mut help = if transcript.status.retryable() {
-            vec![
-                ("r", "Try again"),
-                ("Tab", "To input"),
-                TABS,
-                ("Esc", "Home"),
-            ]
-        } else if screen.typing {
+        let mut help = if screen.typing {
             vec![
                 ("Enter", "Send"),
                 ("Ctrl-J", "New line"),
@@ -955,6 +948,13 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 ("PgUp", "Scroll"),
                 TABS,
                 ("Esc", "Leave input"),
+            ]
+        } else if transcript.status.retryable() {
+            vec![
+                ("r", "Try again"),
+                ("Tab", "To input"),
+                TABS,
+                ("Esc", "Home"),
             ]
         } else {
             vec![

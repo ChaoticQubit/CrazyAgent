@@ -40,6 +40,6 @@ test("pool and owner profile refusals read as plain sentences", () => {
   assert.equal(errorMessage({ code: "pool_needs_account" }), "A pool needs at least one account. Add another account first, or delete the pool.");
   assert.equal(errorMessage({ code: "pool_name_bounds" }), "Use a pool name of 1 to 64 characters, without control characters.");
   for (const code of ["owner_profile_name", "owner_profile_role", "owner_profile_bio", "owner_profile_stack", "owner_profile_bounds"]) {
-    assert.notEqual(errorMessage({ code }), errorMessage({ code: "unknown" }), code);
+    assert.doesNotMatch(errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });

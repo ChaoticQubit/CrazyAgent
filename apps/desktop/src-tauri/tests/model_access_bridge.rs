@@ -210,7 +210,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
             .await?;
         if rejected.outcome != ActionOutcome::Rejected
             || rejected.pending
-            || rejected.rejection != Some("invalid_model_access")
+            || rejected.rejection.as_deref() != Some("invalid_model_access")
         {
             return Err(format!("real dependency rejection required: {rejected:?}").into());
         }
@@ -358,7 +358,8 @@ async fn desktop_project_pool_moves_to_none_and_back_and_a_used_pool_deletes() {
                 6,
             )
             .await?;
-        if missing.outcome != ActionOutcome::Rejected || missing.rejection != Some("pool_not_found")
+        if missing.outcome != ActionOutcome::Rejected
+            || missing.rejection.as_deref() != Some("pool_not_found")
         {
             return Err(format!("a missing pool must be named: {missing:?}").into());
         }
@@ -506,7 +507,7 @@ async fn desktop_reports_actual_source_conflict_without_losing_the_engine_reason
             .await?;
         if receipt.outcome != ActionOutcome::Rejected
             || receipt.pending
-            || receipt.rejection != Some("settings_source_conflict")
+            || receipt.rejection.as_deref() != Some("settings_source_conflict")
         {
             return Err(format!("actual source-conflict reason required: {receipt:?}").into());
         }

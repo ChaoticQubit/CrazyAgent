@@ -3,6 +3,7 @@ use crate::engine::owner::{
     AccountAuthCapabilitiesReply, AccountProfileOutcome, AccountProfileReceipt,
     AccountProfileReply, AccountSecret, NativeAuthScope, ProducerCapability,
 };
+use crate::tui::text::plain_code;
 use std::fmt;
 
 const SECRET_BYTES_MAX: usize = 8192;
@@ -280,12 +281,12 @@ impl State {
                 if let ProducerCapability::Unavailable { code } = &reply.configured
                     && self.profile.pending.is_none()
                 {
-                    self.notice = public_problem(code).into();
+                    self.notice = public_problem(code);
                 }
                 panel.capability = Some(reply.configured);
             }
             Ok(_) => self.notice = "account_profile_capability_identity_mismatch".into(),
-            Err(problem) => self.notice = public_problem(&problem).into(),
+            Err(problem) => self.notice = public_problem(&problem),
         }
     }
 
@@ -328,7 +329,7 @@ impl State {
                 }
             }
             Err(problem) => {
-                self.notice = public_problem(&problem).into();
+                self.notice = public_problem(&problem);
                 if retained {
                     self.ready = false;
                 } else {
@@ -372,7 +373,7 @@ impl State {
         if let Some(capability) = &panel.capability {
             lines.push(match capability {
                 ProducerCapability::Available => "Owner supports private configuration".into(),
-                ProducerCapability::Unavailable { code } => public_problem(code).into(),
+                ProducerCapability::Unavailable { code } => public_problem(code),
             });
         }
         if let Some(receipt) = &panel.receipt {
@@ -482,26 +483,14 @@ fn visible(value: &str) -> String {
         .collect()
 }
 
-pub(in crate::tui) fn public_problem(problem: &str) -> &'static str {
-    match problem {
-        "rcli_private_key_writer_unavailable" => "rcli_private_key_writer_unavailable",
-        "account_profile_outcome_unknown" => "account_profile_outcome_unknown",
-        "account_profile_request_conflict" => "account_profile_request_conflict",
-        "account_profile_secret_required_or_unexpected" => {
-            "account_profile_secret_required_or_unexpected"
-        }
-        "account_profile_auth_unsupported" => "account_profile_auth_unsupported",
-        "account_profile_harness_unsupported" => "account_profile_harness_unsupported",
-        "account_profile_owner_changed" => "account_profile_owner_changed",
-        "account_profile_stale_connection" => "account_profile_stale_connection",
-        "account_profile_pending_intent" => "account_profile_pending_intent",
-        "account_profile_local_none_requires_http_loopback" => {
-            "account_profile_local_none_requires_http_loopback"
-        }
-        "account_profile_endpoint_invalid" => "account_profile_endpoint_invalid",
-        "account_profile_capability_identity_mismatch" => {
-            "account_profile_capability_identity_mismatch"
-        }
-        _ => "account_profile_unavailable_read_original_request",
+/// Keeps an account profile problem for the owner without raw error text.
+/// Input: the engine's problem. Output: a plain code as it is, so a code with no
+/// sentence still names itself, or a fixed code that says to read the original
+/// request again when the problem is not a plain code.
+pub(in crate::tui) fn public_problem(problem: &str) -> String {
+    if plain_code(problem) {
+        problem.to_owned()
+    } else {
+        "account_profile_unavailable_read_original_request".to_owned()
     }
 }

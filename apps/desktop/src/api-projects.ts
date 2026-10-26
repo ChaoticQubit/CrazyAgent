@@ -1,4 +1,4 @@
-import { call, classifyFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, editModelAccess, masterState, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
@@ -128,8 +128,6 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
 
 const copy: Record<string, string> = {
   pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
-  owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
-  owner_read_failed: "Couldn't read this from the engine. Try again.",
   not_connected: "CrazyAgent's engine isn't running.",
   not_configured: "CrazyAgent's engine isn't running.",
   owner_unavailable: "CrazyAgent's engine isn't running.",
@@ -137,7 +135,6 @@ const copy: Record<string, string> = {
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   invalid_project: "This project no longer exists.",
-  project_master_open: "End this project's master conversation first, then remove the project.",
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
@@ -222,10 +219,18 @@ const copy: Record<string, string> = {
   rejected: "The engine refused this change.",
 };
 
-/** Plain sentence for one engine failure code.
- * Input: the code. Output: what happened and what to do, or the generic fallback. */
-export function failureCopy(code: string): string {
-  return Object.hasOwn(copy, code) ? copy[code] : plainError(code);
+/** Plain sentence for one engine failure, never opaque.
+ * Input: the code, or a failure with the engine cause behind it. Output: what happened and
+ * what to do, or the generic fallback naming the code. */
+export function failureCopy(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  return namedFailure(failureSentence(code), code, cause);
+}
+
+/** The sentence the project screens have for a code. Input: the code. Output: the sentence,
+ * or undefined when there is none. */
+export function failureSentence(code: string): string | undefined {
+  return Object.hasOwn(copy, code) ? copy[code] : knownError(code);
 }
 
 /** Says whether the saved pools give a project exactly the chosen pool, or none.

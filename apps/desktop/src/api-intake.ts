@@ -1,4 +1,4 @@
-import { classifyFailure, nextGeneration, plainError, type Result } from "./api";
+import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
@@ -35,6 +35,7 @@ const COPY: Record<string, string> = {
   home_copy_too_large: "The folder has too many files or levels to copy. Use it where it is instead.",
   home_copy_failed: "Couldn't copy the folder. The original is untouched. Try again.",
   home_copy_unverified: "The copy didn't match the original, so the original was kept.",
+  home_copy_linked_checkout: "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.",
   home_move_failed: "Couldn't move the folder. Nothing was removed. Try again.",
   home_move_source_left: "The folder was added, but part of the original couldn't be removed. Check its old place.",
   home_move_same: "This is already your projects folder.",
@@ -43,6 +44,10 @@ const COPY: Record<string, string> = {
   home_move_worktrees: "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it.",
   home_move_project: "This folder holds or sits inside a project you already added. Use it where it is or copy it.",
   home_move_interrupted: "Moving your projects stopped part way. Check both folders before trying again.",
+  home_move_too_many: "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved.",
+  home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  home_folder_name_invalid: "Give the project a name with letters or digits, and no folder by that name.",
+  home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
@@ -132,10 +137,12 @@ const COPY: Record<string, string> = {
   owner_outcome_unknown_reconcile_same_identity: "CrazyAgent didn't answer in time. Try again.",
 };
 
-/** Plain sentence for one intake, GitHub or setup failure code.
- * Input: the code. Output: the intake copy, then the project and app copy, then the fallback. */
-export function intakeCopy(code: string): string {
-  return Object.hasOwn(COPY, code) ? COPY[code] : failureCopy(code);
+/** Plain sentence for one intake, GitHub or setup failure.
+ * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
+ * the project and app copy, then the fallback naming the code; a different cause is named after. */
+export function intakeCopy(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  return Object.hasOwn(COPY, code) ? namedFailure(COPY[code], code, cause) : failureCopy({ code, cause });
 }
 
 function failure<T>(code: string): Result<T> {
@@ -151,7 +158,7 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
     return { kind: "ok", value: await action() };
   } catch (error) {
     const sorted = classifyFailure(error);
-    return sorted.kind === "error" ? { ...sorted, message: intakeCopy(sorted.code) } : sorted;
+    return sorted.kind === "error" ? { ...sorted, message: intakeCopy(sorted) } : sorted;
   }
 }
 

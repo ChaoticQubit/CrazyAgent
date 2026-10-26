@@ -27,14 +27,27 @@ const SILENT_MARK = "owner-flow-silent";
 const SILENT_TURN_S = 300;
 const STAND_IN = `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.owner-flow-signed-in"
+keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
+service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
   case " $* " in *" --session-id "*|*" --print "*) [ -f "\${0%/*}/${SILENT_MARK}" ] && exec /bin/sleep ${SILENT_TURN_S} ;; esac
   echo "owner-flow stand-in: this claude only answers auth commands, it cannot run a turn" >&2
   exit 64
 fi
 case "$2" in
-  login) : > "$marker"; exit 0 ;;
-  logout) rm -f "$marker"; exit 0 ;;
+  login)
+    expires=$(( ( $(/bin/date +%s) + 28800 ) * 1000 ))
+    record=$(printf '{"claudeAiOauth":{"accessToken":"owner-flow-stand-in","refreshToken":"owner-flow-stand-in","expiresAt":%s,"scopes":["user:inference"]}}' "$expires")
+    if [ -x /usr/bin/security ]; then
+      hex=$(printf %s "$record" | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \\n')
+      printf 'add-generic-password -U -a owner-flow -s "%s" -X %s "%s"\\n' "$service" "$hex" "$keychain" | /usr/bin/security -i >/dev/null || exit 1
+    else
+      (umask 077; printf %s "$record" > "$CLAUDE_CONFIG_DIR/.credentials.json") || exit 1
+    fi
+    : > "$marker"; exit 0 ;;
+  logout)
+    if [ -x /usr/bin/security ]; then /usr/bin/security delete-generic-password -s "$service" "$keychain" >/dev/null 2>&1; fi
+    rm -f "$marker" "$CLAUDE_CONFIG_DIR/.credentials.json"; exit 0 ;;
   status)
     if [ -f "$marker" ]; then
       printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","configDirectory":"%s","email":null,"orgId":null,"orgName":null,"subscriptionType":null}\\n' "$CLAUDE_CONFIG_DIR"
@@ -214,13 +227,18 @@ function recordedCode(database, operationId) {
   }
 }
 
-/** Ends the private tmux server the engine kept for its agent terminals, which outlives the
- * engine by design so live agents can be reattached. Input: the engine's tmux socket path.
- * Output: none; a missing socket or tmux means nothing was left running. */
-function stopTerminals(socket) {
-  if (!existsSync(socket)) return;
+/** Reads what the engine's private tmux server still runs after the engine stopped, then ends
+ * it so the smoke leaves nothing behind. A stopped engine keeps the server only for team
+ * agents that live on. Input: the engine's tmux socket path. Output: null when no server is
+ * left, or the names of the terminals it still ran. */
+function leftTerminals(socket) {
+  if (!existsSync(socket)) return null;
   const tmux = TMUX_SEARCH.map((folder) => join(folder, "tmux")).find((path) => existsSync(path));
-  if (tmux) spawnSync(tmux, ["-S", socket, "kill-server"], { stdio: "ignore", env: { PATH: "/usr/bin:/bin" } });
+  if (!tmux) return [];
+  const env = { PATH: "/usr/bin:/bin" };
+  const listed = spawnSync(tmux, ["-S", socket, "list-windows", "-a", "-F", "#{window_name}"], { encoding: "utf8", env });
+  spawnSync(tmux, ["-S", socket, "kill-server"], { stdio: "ignore", env });
+  return (listed.stdout ?? "").split("\n").filter((name) => name && name !== "_crazyagent");
 }
 
 /** Thrown when a bridge call or receipt stops a step; carries the engine code. */
@@ -650,7 +668,10 @@ async function main() {
         if (Date.now() > deadline) throw new Refused(`team_agent_not_working_${member?.status ?? "missing"}`, member?.problem ?? "-");
       }
       const refused = await call("desktop_logout_native_auth", { ticket: (await connection(used.id)).ticket });
-      if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
+      if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") {
+        if ("value" in refused) await settleAuth(used.id, "logout", "unauthenticated_observed").catch(() => null);
+        throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
+      }
       const using = (await value("desktop_account_use", { accountId: used.id })).agents;
       if (!using.some((view) => view.label === `Team sub-agent ${agent.id}` && view.project === project)) throw new Refused("in_use_without_the_agent", using.map((view) => `${view.label}@${view.project}`).join(",") || "none");
       const left = await value("desktop_release_account", { accountId: used.id, generation: generation() });
@@ -720,7 +741,12 @@ async function main() {
     await stop(bridgeProcess);
     await stop(engine);
     await pause(POLL_MS);
-    stopTerminals(join(crazyHome, "terminal", "tmux.sock"));
+    const left = leftTerminals(join(crazyHome, "terminal", "tmux.sock"));
+    const kept = left?.filter((name) => name.startsWith("team-")) ?? [];
+    const row = { id: "7", title: "The engine stop leaves no tmux server without a live team agent", causes: "-" };
+    if (left === null) results.push({ ...row, result: "PASS", code: "no_server" });
+    else if (kept.length) results.push({ ...row, result: "PASS", code: `kept_for_${kept.join(",")}` });
+    else results.push({ ...row, result: "FAIL", code: "tmux_server_left", causes: left.join(",") || "-" });
   }
   const shutdown = [...new Set(errText().slice(shutdownMark).match(/cause=[^\n]*/g) ?? [])].join("; ") || "-";
   console.log("\nstep | result | engine code | engine stderr | what");

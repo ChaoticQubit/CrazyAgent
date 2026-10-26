@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge, bounded, failure};
+use super::{BridgeError, NativeBridge, bounded, caused, failure};
 use crazyagent::config::ModelConnection;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
@@ -315,34 +315,37 @@ fn auth_id() -> Result<RequestId, BridgeError> {
 }
 
 pub(super) fn auth_error(error: EngineError) -> BridgeError {
-    failure(match error.0.as_str() {
-        "controller_disconnected" => "not_connected",
-        "native_auth_database_mismatch" => "native_auth_database_mismatch",
-        "native_auth_method_mismatch" => "native_auth_method_mismatch",
-        "native_auth_operation_conflict" => "native_auth_operation_conflict",
-        "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
-        "native_auth_operation_missing" => "native_auth_operation_missing",
-        "native_auth_operation_capacity" => "native_auth_operation_capacity",
-        "native_auth_not_active" => "native_auth_not_active",
-        "native_auth_recovery_required" => "native_auth_recovery_required",
-        "native_auth_readonly" => "native_auth_readonly",
-        "native_profile_source_invalid" => "native_profile_source_invalid",
-        "native_profile_source_conflict" => "native_profile_source_conflict",
-        "native_profile_connection_missing" => "native_profile_connection_missing",
-        "native_profile_not_managed" => "native_profile_not_managed",
-        "native_profile_binding_conflict" => "native_profile_binding_conflict",
-        "native_profile_custody_unsafe" => "native_profile_custody_unsafe",
-        "native_profile_incomplete" => "native_profile_incomplete",
-        "native_profile_identity_bounds" => "native_profile_identity_bounds",
-        "native_profile_identity_changed" => "native_profile_identity_changed",
-        "native_profile_identity_invalid" => "native_profile_identity_invalid",
-        "native_profile_capacity" => "native_profile_capacity",
-        "native_profile_new_home_not_empty" => "native_profile_new_home_not_empty",
-        "native_profile_in_use" => "native_profile_in_use",
-        "native_profile_lock_unavailable" => "native_profile_lock_unavailable",
-        "owner_grant_stale_or_revoked" => "owner_revoked",
-        "owner_revoked" => "owner_revoked",
-        "owner_queue_not_submitted" => "owner_queue_not_submitted",
-        _ => "native_auth_outcome_unknown_read_same_operation",
-    })
+    caused(
+        match error.0.as_str() {
+            "controller_disconnected" => "not_connected",
+            "native_auth_database_mismatch" => "native_auth_database_mismatch",
+            "native_auth_method_mismatch" => "native_auth_method_mismatch",
+            "native_auth_operation_conflict" => "native_auth_operation_conflict",
+            "native_auth_operation_scope_conflict" => "native_auth_operation_scope_conflict",
+            "native_auth_operation_missing" => "native_auth_operation_missing",
+            "native_auth_operation_capacity" => "native_auth_operation_capacity",
+            "native_auth_not_active" => "native_auth_not_active",
+            "native_auth_recovery_required" => "native_auth_recovery_required",
+            "native_auth_readonly" => "native_auth_readonly",
+            "native_profile_source_invalid" => "native_profile_source_invalid",
+            "native_profile_source_conflict" => "native_profile_source_conflict",
+            "native_profile_connection_missing" => "native_profile_connection_missing",
+            "native_profile_not_managed" => "native_profile_not_managed",
+            "native_profile_binding_conflict" => "native_profile_binding_conflict",
+            "native_profile_custody_unsafe" => "native_profile_custody_unsafe",
+            "native_profile_incomplete" => "native_profile_incomplete",
+            "native_profile_identity_bounds" => "native_profile_identity_bounds",
+            "native_profile_identity_changed" => "native_profile_identity_changed",
+            "native_profile_identity_invalid" => "native_profile_identity_invalid",
+            "native_profile_capacity" => "native_profile_capacity",
+            "native_profile_new_home_not_empty" => "native_profile_new_home_not_empty",
+            "native_profile_in_use" => "native_profile_in_use",
+            "native_profile_lock_unavailable" => "native_profile_lock_unavailable",
+            "owner_grant_stale_or_revoked" => "owner_revoked",
+            "owner_revoked" => "owner_revoked",
+            "owner_queue_not_submitted" => "owner_queue_not_submitted",
+            _ => "native_auth_outcome_unknown_read_same_operation",
+        },
+        &error.0,
+    )
 }

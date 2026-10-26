@@ -1327,12 +1327,12 @@ impl NativeOwner {
                 .account_use(job.context.connection.id.clone())
                 .await
                 .map(native_auth::Output::Using)
-                .map_err(|error| native_auth::public_problem(&error.0).into()),
+                .map_err(|error| native_auth::public_problem(&error.0)),
             native_auth::Command::Release => controller
                 .release_account(job.context.connection.id.clone(), job.context.generation)
                 .await
                 .map(native_auth::Output::Using)
-                .map_err(|error| native_auth::public_problem(&error.0).into()),
+                .map_err(|error| native_auth::public_problem(&error.0)),
             command => {
                 let reply = match command {
                     native_auth::Command::Start(request) => {
@@ -1353,7 +1353,7 @@ impl NativeOwner {
                 };
                 reply
                     .map(|reply| native_auth::Output::Auth(Box::new(reply)))
-                    .map_err(|error| native_auth::public_problem(&error.0).into())
+                    .map_err(|error| native_auth::public_problem(&error.0))
             }
         }
     }

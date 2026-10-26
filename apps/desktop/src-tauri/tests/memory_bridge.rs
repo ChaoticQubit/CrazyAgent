@@ -107,7 +107,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         .add_memory(None, "Prefer plain words in every screen.".into(), 4)
         .await?;
     assert!(matches!(duplicate.outcome, ActionOutcome::Rejected));
-    assert_eq!(duplicate.rejection, Some("memory_duplicate"));
+    assert_eq!(duplicate.rejection.as_deref(), Some("memory_duplicate"));
     assert_eq!(
         bridge
             .add_memory(None, "x".repeat(NOTE_BYTES_MAX + 1), 5)
@@ -199,12 +199,13 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         )
         .await?;
     assert!(matches!(stale.outcome, ActionOutcome::Rejected));
-    assert_eq!(stale.rejection, Some("memory_selection_stale"));
+    assert_eq!(stale.rejection.as_deref(), Some("memory_selection_stale"));
     assert_eq!(
         bridge
             .save_selection_to_memory(&id, "context/../g".into(), "cooks".into(), 22)
             .await?
-            .rejection,
+            .rejection
+            .as_deref(),
         Some("context_path_invalid")
     );
     assert_eq!(
@@ -237,7 +238,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let stale = bridge
         .promote_memory(&id, &waiting[0].id, waiting[0].version, 8)
         .await?;
-    assert_eq!(stale.rejection, Some("memory_changed"));
+    assert_eq!(stale.rejection.as_deref(), Some("memory_changed"));
     let global = bridge.memories(None, None, None).await?;
     assert_eq!(global.items[0].origin, "promoted");
     assert_eq!(
@@ -270,7 +271,8 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         bridge
             .forget_memory(&id, &waiting[0].id, 10)
             .await?
-            .rejection,
+            .rejection
+            .as_deref(),
         Some("memory_missing")
     );
     assert!(
@@ -301,14 +303,16 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         bridge
             .remember_research(&id, ResearchKind::MarketResearch, Some("Absent".into()), 14)
             .await?
-            .rejection,
+            .rejection
+            .as_deref(),
         Some("research_section_missing")
     );
     assert_eq!(
         bridge
             .remember_research(&id, ResearchKind::MarketResearch, Some("Hidden".into()), 15)
             .await?
-            .rejection,
+            .rejection
+            .as_deref(),
         Some("memory_text_hidden")
     );
     assert_eq!(
@@ -323,7 +327,8 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
                 16,
             )
             .await?
-            .rejection,
+            .rejection
+            .as_deref(),
         Some("invalid_knowledge_text")
     );
     assert!(
@@ -349,7 +354,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(deleted.intent.kind, "memory_delete");
     assert!(bridge.memory(&target).await?.is_none());
     let again = bridge.delete_memory(&target, 18).await?;
-    assert_eq!(again.rejection, Some("memory_missing"));
+    assert_eq!(again.rejection.as_deref(), Some("memory_missing"));
     assert_eq!(
         bridge.memory("bad id").await.unwrap_err().code,
         "invalid_memory"

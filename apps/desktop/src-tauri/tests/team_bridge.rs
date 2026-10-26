@@ -129,7 +129,10 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let refused = bridge
         .team_delegate(&id, Some("gemini".into()), "Nope".into(), 4)
         .await?;
-    assert_eq!(refused.rejection, Some("team_harness_not_in_plan"));
+    assert_eq!(
+        refused.rejection.as_deref(),
+        Some("team_harness_not_in_plan")
+    );
     let warm = bridge.team_keep_warm(&id, true, 5).await?;
     assert!(matches!(warm.outcome, ActionOutcome::Applied), "{warm:?}");
 
@@ -169,7 +172,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         "{cancelled:?}"
     );
     let missing = bridge.team_cancel(&id, Some(task.id + 50), 7).await?;
-    assert_eq!(missing.rejection, Some("team_task_missing"));
+    assert_eq!(missing.rejection.as_deref(), Some("team_task_missing"));
     assert_eq!(
         bridge.team_status(&id).await?.tasks[0].status,
         TaskStatus::Cancelled
@@ -190,7 +193,10 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert!(team.plan.is_empty(), "no master reply proposed steps yet");
     let owner_message = team.messages[0].id;
     let not_a_plan = bridge.team_hand_off(&id, owner_message, 0, 10).await?;
-    assert_eq!(not_a_plan.rejection, Some("team_plan_step_missing"));
+    assert_eq!(
+        not_a_plan.rejection.as_deref(),
+        Some("team_plan_step_missing")
+    );
     assert_eq!(
         bridge
             .team_hand_off(&id, owner_message, 8, 11)

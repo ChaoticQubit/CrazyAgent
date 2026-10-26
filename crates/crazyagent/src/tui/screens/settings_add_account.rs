@@ -16,7 +16,7 @@ use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, Request};
-use crate::tui::text::{cells, join, list_row, status, styled, wrap};
+use crate::tui::text::{cells, coded, join, list_row, status, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, checkbox, menu_item};
 use ratatui::Frame;
@@ -1103,7 +1103,7 @@ impl AddAccount {
                     _ => {}
                 }
             }
-            Err(code) => sign_in.problem = Some(plain_sign_in(code).to_owned()),
+            Err(code) => sign_in.problem = Some(plain_sign_in(code)),
         }
     }
 
@@ -1557,7 +1557,7 @@ impl AddAccount {
     }
 }
 
-fn plain_sign_in(code: &str) -> &'static str {
+fn plain_sign_in(code: &str) -> String {
     match code {
         "native_auth_claude_input_outcome_unknown" => {
             "The code may not have reached Claude. Wait a moment, then try again."
@@ -1568,8 +1568,15 @@ fn plain_sign_in(code: &str) -> &'static str {
         }
         "native_auth_interrupted" => "The sign-in did not finish. Start it again.",
         "native_auth_connection_missing" | "account_not_found" => "This account no longer exists.",
-        other => crate::tui::native_auth::public_problem(other),
+        "native_auth_sign_in_expired" => {
+            "The sign-in code expired before it was approved. Start the sign-in again."
+        }
+        other => {
+            return crate::config::plain_problem(other)
+                .map_or_else(|| coded("The sign-in did not work.", other), str::to_owned);
+        }
     }
+    .to_owned()
 }
 
 fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
@@ -1583,7 +1590,7 @@ fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> Strin
             "The code expired or was not approved.".into()
         }
         _ => match view.problem.as_deref() {
-            Some(code) => plain_sign_in(code).to_owned(),
+            Some(code) => plain_sign_in(code),
             None => "The sign-in did not finish.".into(),
         },
     }

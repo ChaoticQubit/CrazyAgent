@@ -20,7 +20,16 @@ const tones: Record<string, Tone> = { Ready: "neutral", "Thinking...": "info", R
 
 function unwrap<T>(result: Result<T>): T {
   if (result.kind === "ok") return result.value;
-  throw result.kind === "not_ready" ? { code: "not_ready" } : { code: result.code };
+  throw result.kind === "not_ready" ? { code: "not_ready" } : { code: result.code, cause: result.cause };
+}
+
+/** Reads the code and engine cause out of a thrown failure.
+ * Input: anything a master action threw. Output: its code, "unknown" when it has none, and its
+ * string cause when present. */
+function thrown(failure: unknown): { code: string; cause?: string } {
+  const code = typeof failure === "object" && failure !== null && "code" in failure ? String(failure.code) : "unknown";
+  const cause = typeof failure === "object" && failure !== null && "cause" in failure && typeof failure.cause === "string" ? failure.cause : undefined;
+  return cause === undefined ? { code } : { code, cause };
 }
 
 function confirm(receipt: IntentReceipt) {
@@ -74,17 +83,21 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     } else setTurns([]);
   }
 
-  async function act(action: () => Promise<void>, describe: (code: string) => string = failureCopy) {
+  function report(failure: unknown, describe: (failure: { code: string; cause?: string }) => string = failureCopy) {
+    const named = thrown(failure);
+    if (named.code === "not_ready") setNotReady(true);
+    else if (named.code === "master_open_unavailable") setNeedsPool(true);
+    else setProblem(describe(named));
+  }
+
+  async function act(action: () => Promise<void>, describe: (failure: { code: string; cause?: string }) => string = failureCopy) {
     if (working) return;
     setWorking(true);
     setProblem("");
     try {
       await action();
     } catch (failure) {
-      const code = typeof failure === "object" && failure !== null && "code" in failure ? String(failure.code) : "unknown";
-      if (code === "not_ready") setNotReady(true);
-      else if (code === "master_open_unavailable") setNeedsPool(true);
-      else setProblem(describe(code));
+      report(failure, describe);
     }
     setWorking(false);
   }
@@ -108,7 +121,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (!waiting && !unseen) return;
     const timer = window.setInterval(() => {
       setNow(Date.now());
-      void refresh().catch(() => setProblem(failureCopy("owner_read_failed")));
+      void refresh().catch((failure) => report(failure));
     }, 2000);
     return () => window.clearInterval(timer);
   }, [waiting, unseen, ticket, session?.session_id]);
@@ -156,10 +169,10 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (!turn || !session) return;
     const result = await cancelMasterTurn(ticket, session.session_id, turn.id, nextGeneration());
     if (result.kind === "not_ready") return data.notify("Not ready yet: stopping a reply isn't in this build.");
-    if (result.kind === "error") return setProblem(failureCopy(result.code));
+    if (result.kind === "error") return setProblem(failureCopy(result));
     const state = receiptState(result.value);
-    if (state.kind === "rejected") return setProblem(failureCopy(state.code));
-    await refresh().catch(() => setProblem(failureCopy("owner_read_failed")));
+    if (state.kind === "rejected") return setProblem(failureCopy(state));
+    await refresh().catch((failure) => report(failure));
   }
 
   const end = () => act(async () => {

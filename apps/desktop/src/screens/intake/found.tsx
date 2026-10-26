@@ -126,11 +126,11 @@ export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolde
     const result = await startOnboarding(folder.path, pool, nextGeneration());
     setBusy(false);
     if (result.kind !== "ok") {
-      setProblem(result.kind === "not_ready" ? "Setting up a folder isn't in this build." : intakeCopy(result.code));
+      setProblem(result.kind === "not_ready" ? "Setting up a folder isn't in this build." : intakeCopy(result));
       return;
     }
     const started = startedProject(result.value);
-    if (started.kind === "rejected") { setProblem(intakeCopy(started.code)); return; }
+    if (started.kind === "rejected") { setProblem(intakeCopy(started)); return; }
     if (started.kind === "started") { navigate({ name: "onboarding", id: started.id }); return; }
     if (receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm setup started. Check Home and try again."); return; }
     const found = await loadFoundProjects();
@@ -180,9 +180,9 @@ export function FoundProjects() {
     const result = await removeProject(folder.project_id, nextGeneration());
     setBusy(false);
     setRemoving(null);
-    if (result.kind !== "ok") { session.showToast(result.kind === "not_ready" ? "Removing a project isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { session.showToast(result.kind === "not_ready" ? "Removing a project isn't in this build." : intakeCopy(result)); return; }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") session.showToast(intakeCopy(state.code));
+    if (state.kind === "rejected") session.showToast(intakeCopy(state));
     else if (state.kind === "unconfirmed") session.showToast("We couldn't confirm the project was removed. Check Home.");
     else session.showToast(`${folder.name} was removed.`);
     void session.refreshProjects();

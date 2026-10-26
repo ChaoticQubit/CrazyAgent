@@ -8,7 +8,6 @@ pub const SOCKET_NAME: &str = "engine.sock";
 /// The RCLI host executable looked up next to `crazyagent`, then on PATH.
 pub const RCLI_EXECUTABLE: &str = "crazyagent-rcli";
 
-const OWNER_SOCKET_TAIL: &str = "o00000000/owner.sock";
 const GLOBAL_DEFAULTS: &str = "version = 1\ntimeout_ms = 5000\n";
 const PROJECT_DEFAULTS: &str = "version = 1\n";
 
@@ -157,63 +156,15 @@ impl Layout {
         self.logs().join("engine.log")
     }
 
-    /// Refuses a root whose engine sockets would not fit a Unix socket address, measured
-    /// on the path the engine binds after resolving links (macOS `/var` is
-    /// `/private/var`). Input: the platform. Output: an error naming the folder, the length
-    /// and the limit; a path is never shortened. Windows names its pipe from the root and
-    /// has no such limit.
-    pub fn check_socket_length(&self, platform: Platform) -> Result<(), PathsError> {
-        let limit = match platform {
-            Platform::MacOs => 104,
-            Platform::Linux => 108,
-            Platform::Windows => return Ok(()),
-        };
-        let longest = resolved(&self.root).join(OWNER_SOCKET_TAIL);
-        assert!(longest.ends_with(OWNER_SOCKET_TAIL));
-        let length = longest.as_os_str().as_encoded_bytes().len();
-        if length >= limit {
-            return Err(problem(
-                &self.root,
-                format!(
-                    "this data folder is too long for the engine's socket ({length} bytes, the \
-                     limit is {}); set {HOME_ENV} to a shorter folder",
-                    limit - 1
-                ),
-            ));
-        }
-        Ok(())
-    }
-
     /// Creates the data root and its logs folder private to this user (0700) and the
     /// default `global.toml` and `project.toml` (0600) when they are missing; existing
     /// files are kept. Output: an error naming the path for an unsafe or unusable entry.
     pub fn prepare(&self) -> Result<(), PathsError> {
-        self.check_socket_length(Platform::CURRENT)?;
         private_folder(&self.root)?;
         private_folder(&self.logs())?;
         private_settings(&self.global_settings(), GLOBAL_DEFAULTS)?;
         private_settings(&self.project_settings(), PROJECT_DEFAULTS)?;
         Ok(())
-    }
-}
-
-fn resolved(path: &Path) -> PathBuf {
-    let mut existing = path;
-    let mut missing = Vec::new();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(existing) {
-            return missing
-                .iter()
-                .rev()
-                .fold(real, |resolved, name: &&OsStr| resolved.join(name));
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing.push(name);
-                existing = parent;
-            }
-            _ => return path.to_path_buf(),
-        }
     }
 }
 
@@ -512,69 +463,31 @@ mod tests {
         assert!(error.0.contains("is not a folder"), "{error}");
     }
 
+    /// A data root too long for a socket address prepares: the engine reaches its sockets
+    /// through a short address, so a long account name needs no shorter root.
     #[test]
-    fn socket_length_is_refused_with_a_clear_error_never_truncated() {
-        let fits = Layout::new(PathBuf::from(format!("/{}", "a".repeat(60)))).unwrap();
-        fits.check_socket_length(Platform::MacOs).unwrap();
-        let long = Layout::new(PathBuf::from(format!("/{}", "a".repeat(82)))).unwrap();
-        assert_eq!(long.root().join(OWNER_SOCKET_TAIL).as_os_str().len(), 104);
-        let error = long.check_socket_length(Platform::MacOs).unwrap_err();
-        assert!(error.0.contains("104 bytes, the limit is 103"), "{error}");
-        assert!(error.0.contains(HOME_ENV), "{error}");
-        long.check_socket_length(Platform::Linux).unwrap();
-        long.check_socket_length(Platform::Windows).unwrap();
+    fn a_data_root_too_long_for_a_socket_address_still_prepares() {
         let temp = tempfile::tempdir().unwrap();
         let deep = temp.path().join("d".repeat(100));
-        let error = Layout::new(deep.clone()).unwrap().prepare().unwrap_err();
-        assert!(error.0.contains("too long"), "{error}");
-        assert!(!deep.exists());
+        Layout::new(deep.clone()).unwrap().prepare().unwrap();
+        assert!(deep.join("logs").is_dir());
+        assert!(deep.join("global.toml").is_file());
     }
 
-    /// The default macOS data root leaves room for the engine's owner socket for account
-    /// names up to 29 bytes; a longer home is refused with the clear error that names
-    /// CRAZYAGENT_HOME as the fix, never a truncated socket path.
+    /// The default macOS data root's engine sockets have an address for an account name of
+    /// any length, where a home of 30 bytes or more used to be refused.
     #[test]
-    fn the_default_macos_root_fits_the_owner_socket_for_account_names_up_to_29_bytes() {
-        let layout = |name: String| {
-            let home = format!("/Users/{name}");
-            Layout::new(data_root(Platform::MacOs, &env(None, Some(&home), None, None)).unwrap())
-                .unwrap()
-        };
-        layout("u".repeat(29))
-            .check_socket_length(Platform::MacOs)
-            .unwrap();
-        let error = layout("u".repeat(30))
-            .check_socket_length(Platform::MacOs)
-            .unwrap_err();
-        assert!(error.0.contains("104 bytes, the limit is 103"), "{error}");
-        assert!(error.0.contains(HOME_ENV), "{error}");
-    }
-
-    #[test]
-    fn socket_length_is_measured_on_the_resolved_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let real = std::fs::canonicalize(temp.path()).unwrap();
-        let long = real.join("r".repeat(100usize.saturating_sub(real.as_os_str().len())));
-        std::fs::create_dir(&long).unwrap();
-        let link = temp.path().join("l");
-        std::os::unix::fs::symlink(&long, &link).unwrap();
-        let through_link = Layout::new(link.join("e")).unwrap();
-        assert!(
-            through_link
-                .root()
-                .join(OWNER_SOCKET_TAIL)
-                .as_os_str()
-                .len()
-                < 104
-        );
-        let error = through_link
-            .check_socket_length(Platform::MacOs)
-            .unwrap_err();
-        assert!(error.0.contains("too long"), "{error}");
-        assert_eq!(
-            resolved(&link.join("e").join("f")),
-            long.join("e").join("f")
-        );
+    fn the_default_macos_root_has_socket_addresses_for_long_account_names() {
+        for length in [29, 30, 64, 128] {
+            let home = format!("/Users/{}", "u".repeat(length));
+            let root = data_root(Platform::MacOs, &env(None, Some(&home), None, None)).unwrap();
+            for socket in [
+                root.join("o00000000").join("owner.sock"),
+                root.join(SOCKET_NAME),
+            ] {
+                assert!(crate::socket_address::fits(&socket), "{}", socket.display());
+            }
+        }
     }
 
     fn program(path: &Path, mode: u32) {

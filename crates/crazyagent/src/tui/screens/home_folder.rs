@@ -147,11 +147,11 @@ impl Screen for HomeFolder {
                         }
                     }
                     Ok(_) => {
-                        self.problem = Some(copy("intake_change_outcome_unknown").into());
+                        self.problem = Some(copy("intake_change_outcome_unknown"));
                         Flow::Handled
                     }
                     Err(code) => {
-                        self.problem = Some(copy(code).into());
+                        self.problem = Some(copy(code));
                         Flow::Handled
                     }
                 }
