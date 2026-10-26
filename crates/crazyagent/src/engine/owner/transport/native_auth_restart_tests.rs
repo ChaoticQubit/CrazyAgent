@@ -250,6 +250,23 @@ impl Restart {
         tx.commit().unwrap();
     }
 
+    /// Picks the research account for project-z from the engine's own settings, sign-ins
+    /// and observations, the pick every research launch uses. Output: the pick.
+    fn research_pick(&self) -> crate::research::accounts::AccountPick {
+        let projects = self.root.path().join("projects");
+        std::fs::create_dir_all(projects.join("project-z")).unwrap();
+        crate::research::accounts::SettingsResolver::new(
+            &self.global,
+            &self.project,
+            &projects,
+            &self.root.path().join("engine.db"),
+        )
+        .unwrap()
+        .resolve("project-z", "claude")
+        .unwrap()
+        .1
+    }
+
     /// Holds the account the way a running agent or research run does, with a shared
     /// execution lease on its profile, until the lease is dropped. Inputs: the run the
     /// account was signed in on, the sign-in and a launch name. Output: the held lease.
@@ -578,7 +595,7 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
         let second = restart.start().await;
         assert_eq!(
             settled(&restart, &second, AccountStatus::NotSignedIn).await,
-            Ok(())
+            Err("master_sign_in_rejected".into())
         );
         assert_eq!(
             restart.held(),
@@ -772,4 +789,32 @@ async fn an_account_whose_credential_the_engine_could_not_use_is_checked_before_
     })
     .await
     .expect("the doubted account case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn research_passes_over_an_account_whose_sign_in_was_rejected_to_the_next_one() {
+    use crate::research::accounts::AccountPick;
+    let restart = Restart::with(TWO);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let first = CredentialRef::new("connection-y").unwrap();
+        run.sign_in_to(&restart, first.clone(), "research-sign-in-y")
+            .await;
+        run.sign_in(&restart).await;
+        let picked = |pick: AccountPick| match pick {
+            AccountPick::Account { connection, .. } => Some(connection),
+            _ => None,
+        };
+        assert_eq!(picked(restart.research_pick()), Some(first.clone()));
+        restart.reject(&restart.model_of(&first));
+        assert_eq!(picked(restart.research_pick()), Some(connection()));
+        restart.reject(&restart.model());
+        assert!(matches!(
+            restart.research_pick(),
+            AccountPick::NoUsableAccount
+        ));
+        run.stop().await;
+    })
+    .await
+    .expect("the research rejection case exceeded 60 seconds");
 }
