@@ -226,13 +226,14 @@ impl HostProcess {
     }
 
     /// Settles a group signal refused with EPERM, which macOS returns while every group
-    /// member has exited but some are not reaped yet. Input: the retained child. Output: Ok
-    /// once the leader is reaped, marking the group absent only after ESRCH; members that
-    /// are still exiting leave the group present so the cleanup deadline decides.
+    /// member has exited, or is still exiting, but some are not reaped yet. Input: the
+    /// retained child. Output: Ok, marking the group absent only after ESRCH; a leader that
+    /// cannot be reaped yet, or members still exiting, leave the group present so the
+    /// cleanup deadline decides.
     fn exited_group(&mut self) -> Result<(), ProtocolError> {
         self.reap()?;
         if self.status.is_none() {
-            return Err(error("rcli_master_cleanup_incomplete"));
+            return Ok(());
         }
         match rustix::process::test_kill_process_group(self.group()) {
             Ok(()) | Err(rustix::io::Errno::PERM) => Ok(()),
@@ -337,6 +338,24 @@ mod tests {
         assert!(process.status.is_none());
         process.observe_group().unwrap();
         process.signal(Signal::TERM).unwrap();
+        process.cleanup().unwrap();
+        assert!(process.status.is_some());
+        assert!(process.group_absent);
+    }
+
+    #[test]
+    fn a_refused_group_signal_before_the_leader_can_be_reaped_leaves_the_deadline_to_decide() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("5")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        process.exited_group().unwrap();
+        assert!(process.status.is_none());
+        assert!(!process.group_absent);
         process.cleanup().unwrap();
         assert!(process.status.is_some());
         assert!(process.group_absent);
