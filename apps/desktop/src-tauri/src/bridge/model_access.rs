@@ -349,7 +349,7 @@ fn edit_targets_record(edit: &ModelAccessEdit, record: &ModelAccessRecord) -> bo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crazyagent::engine::bootstrap::EngineService;
@@ -358,7 +358,7 @@ mod tests {
     async fn actual_read_bridge() -> (tempfile::TempDir, NativeBridge) {
         let root = tempfile::Builder::new()
             .prefix("ca-dma-invariant-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let (_stop, stopped) = tokio::sync::watch::channel(false);

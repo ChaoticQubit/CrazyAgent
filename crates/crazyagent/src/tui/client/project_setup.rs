@@ -216,7 +216,7 @@ mod tests {
     async fn tui_creates_a_project_with_setup_and_reads_its_jobs_and_context() {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-setup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let sources = tempfile::tempdir().unwrap();

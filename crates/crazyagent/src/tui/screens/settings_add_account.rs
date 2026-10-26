@@ -1,7 +1,5 @@
 use super::settings::draw_page;
-use super::settings_accounts::{
-    Accounts, plain, provider_cell, provider_word, send, settings_event,
-};
+use super::settings_accounts::{Accounts, plain, provider_word, send, settings_event};
 use super::{Flow, Screen, SettingsSection};
 use crate::accounts::{
     AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry,
@@ -27,7 +25,7 @@ use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 
 const FIELD_WIDTH_MAX: usize = 64;
-const KEY_CHARS_MAX: usize = 4096;
+pub(super) const KEY_CHARS_MAX: usize = 4096;
 const KEY_CHARS_MIN: usize = 20;
 const CODE_CHARS_MAX: usize = 2048;
 const URL_CHARS_MAX: usize = crate::accounts::ACCOUNT_URL_MAX;
@@ -62,9 +60,80 @@ pub fn provider_line(provider: Provider) -> &'static str {
     }
 }
 
+/// One entry on the first Add account step: a company with every way to add
+/// its accounts, or one other provider.
+/// Input: built by `provider_tiles`. Output: the name, the provider whose
+/// glyph it shows, its line and its choices in menu order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tile {
+    pub name: &'static str,
+    pub mark: Provider,
+    pub line: &'static str,
+    pub choices: Vec<Choice>,
+}
+
+const COMPANIES: [(&str, Provider, Provider, &str); 2] = [
+    (
+        "OpenAI",
+        Provider::Chatgpt,
+        Provider::OpenaiApi,
+        "Sign in with ChatGPT or use an OpenAI API key",
+    ),
+    (
+        "Anthropic",
+        Provider::Claude,
+        Provider::AnthropicApi,
+        "Sign in with Claude or use an Anthropic API key",
+    ),
+];
+
+/// Groups the catalog into the first step's entries in catalog order: one per
+/// company, whose API key adds an account under the company's API provider
+/// when the catalog lists one, and one per other provider.
+/// Input: the engine's catalog. Output: the entries, each with a choice.
+pub fn provider_tiles(catalog: &[ProviderEntry]) -> Vec<Tile> {
+    let mut out: Vec<Tile> = Vec::new();
+    for entry in catalog {
+        let company = COMPANIES
+            .iter()
+            .find(|(_, subscription, keyed, _)| {
+                *subscription == entry.provider || *keyed == entry.provider
+            })
+            .copied();
+        let keyed_elsewhere = company.is_some_and(|(_, _, keyed, _)| {
+            keyed != entry.provider && catalog.iter().any(|other| other.provider == keyed)
+        });
+        let offered: Vec<Choice> = choices(entry)
+            .into_iter()
+            .filter(|choice| !(keyed_elsewhere && choice.method == SignInMethod::ApiKey))
+            .collect();
+        let existing = company.and_then(|(name, ..)| out.iter().position(|tile| tile.name == name));
+        match (existing, company) {
+            (Some(index), _) => out[index].choices.extend(offered),
+            (None, Some((name, _, keyed, line))) => out.push(Tile {
+                name,
+                mark: keyed,
+                line,
+                choices: offered,
+            }),
+            (None, None) => out.push(Tile {
+                name: provider_word(entry.provider),
+                mark: entry.provider,
+                line: provider_line(entry.provider),
+                choices: offered,
+            }),
+        }
+    }
+    assert!(
+        out.iter().all(|tile| !tile.choices.is_empty()),
+        "every Add account entry offers a way to add an account"
+    );
+    out
+}
+
 /// The sign-in choices of one provider, in menu order.
 /// Input: the engine's catalog entry. Output: choices; a ChatGPT subscription
-/// offers a device code and the Codex sign-in already on this Mac.
+/// offers a device code and, next, the Codex sign-in already on this Mac.
 pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
     let mut out = Vec::new();
     for method in &entry.methods {
@@ -82,11 +151,16 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
                     "Sign in with ChatGPT",
                     "Recommended. Uses your ChatGPT plan. You get a code to enter on any device.",
                 ));
+                out.push(choice(
+                    Some(NativeAuthMethod::CodexExisting),
+                    "Use the Codex sign-in on this Mac",
+                    "Reuses the account Codex is already signed in to.",
+                ));
             }
             (_, SignInMethod::Subscription) => out.push(choice(
                 Some(NativeAuthMethod::ClaudeOfficial),
                 "Sign in with your Claude subscription",
-                "Uses your Claude Pro or Max plan. Claude opens in your browser.",
+                "Recommended. Uses your Claude Pro or Max plan. Claude opens in your browser.",
             )),
             (Provider::Chatgpt | Provider::OpenaiApi, SignInMethod::ApiKey) => out.push(choice(
                 None,
@@ -107,20 +181,6 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
                 "Any server that speaks the OpenAI API.",
             )),
         }
-    }
-    if entry.provider == Provider::Chatgpt
-        && entry
-            .methods
-            .iter()
-            .any(|method| method.method == SignInMethod::Subscription)
-    {
-        out.push(Choice {
-            provider: Provider::Chatgpt,
-            method: SignInMethod::Subscription,
-            native: Some(NativeAuthMethod::CodexExisting),
-            title: "Use the Codex sign-in on this Mac",
-            description: "Reuses the account Codex is already signed in to.",
-        });
     }
     out
 }
@@ -162,7 +222,7 @@ fn url_problem(provider: Provider, text: &str) -> Option<&'static str> {
         Err(error) if error.0 == "account_local_url_required" => {
             Some("Use an http address on this Mac, such as http://127.0.0.1:11434/v1.")
         }
-        Err(_) => Some("This address is not a valid http or https URL."),
+        Err(_) => Some("Use an https address. Plain http works only on this Mac."),
     }
 }
 
@@ -684,13 +744,8 @@ impl Done {
 }
 
 enum Stage {
-    Provider {
-        selected: usize,
-    },
-    Method {
-        entry: ProviderEntry,
-        selected: usize,
-    },
+    Provider { selected: usize },
+    Method { tile: Tile, selected: usize },
     Form(Box<Form>),
     SignIn(Box<SignIn>),
     Done(Box<Done>),
@@ -765,6 +820,10 @@ impl AddAccount {
 
     fn entries(&self) -> &[ProviderEntry] {
         self.catalog.ready().map_or(&[], Vec::as_slice)
+    }
+
+    fn tiles(&self) -> Vec<Tile> {
+        provider_tiles(self.entries())
     }
 
     fn start_sign_in(&mut self, ctx: &mut Ctx) {
@@ -846,29 +905,27 @@ impl AddAccount {
         self.stage = Stage::Form(Box::new(form));
     }
 
-    fn open_provider(&mut self, entry: ProviderEntry, ctx: &mut Ctx) {
-        let options = choices(&entry);
-        if options.len() == 1 {
-            let choice = options.into_iter().next().expect("one choice");
+    fn open_tile(&mut self, tile: Tile, ctx: &mut Ctx) {
+        if tile.choices.len() == 1 {
+            let choice = tile.choices.into_iter().next().expect("one choice");
             self.choose(choice, ctx);
         } else {
-            self.stage = Stage::Method { entry, selected: 0 };
+            self.stage = Stage::Method { tile, selected: 0 };
         }
     }
 
     fn back_to_choice(&mut self, provider: Provider) {
-        let entry = self
-            .entries()
+        let tiles = self.tiles();
+        let index = tiles
             .iter()
-            .find(|entry| entry.provider == provider)
-            .cloned();
-        let index = self
-            .entries()
-            .iter()
-            .position(|entry| entry.provider == provider)
+            .position(|tile| {
+                tile.choices
+                    .iter()
+                    .any(|choice| choice.provider == provider)
+            })
             .unwrap_or(0);
-        self.stage = match entry {
-            Some(entry) if choices(&entry).len() > 1 => Stage::Method { entry, selected: 0 },
+        self.stage = match tiles.into_iter().nth(index) {
+            Some(tile) if tile.choices.len() > 1 => Stage::Method { tile, selected: 0 },
             _ => Stage::Provider { selected: index },
         };
     }
@@ -1146,7 +1203,8 @@ impl AddAccount {
     }
 
     fn provider_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        let count = self.entries().len();
+        let tiles = self.tiles();
+        let count = tiles.len();
         let Stage::Provider { selected } = &mut self.stage else {
             return Flow::Ignored;
         };
@@ -1155,8 +1213,11 @@ impl AddAccount {
             Key::Down if count > 0 => *selected = (*selected + 1).min(count - 1),
             Key::Enter if count > 0 => {
                 let index = (*selected).min(count - 1);
-                let entry = self.entries()[index].clone();
-                self.open_provider(entry, ctx);
+                let tile = tiles
+                    .into_iter()
+                    .nth(index)
+                    .expect("index is below the count");
+                self.open_tile(tile, ctx);
             }
             Key::Char('r') if matches!(self.catalog, Load::Failed(_)) => {
                 self.catalog = Load::Loading;
@@ -1170,10 +1231,10 @@ impl AddAccount {
     }
 
     fn method_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        let Stage::Method { entry, selected } = &mut self.stage else {
+        let Stage::Method { tile, selected } = &mut self.stage else {
             return Flow::Ignored;
         };
-        let options = choices(entry);
+        let options = tile.choices.clone();
         match key {
             Key::Up => *selected = selected.saturating_sub(1),
             Key::Down => *selected = (*selected + 1).min(options.len() - 1),
@@ -1182,11 +1243,11 @@ impl AddAccount {
                 self.choose(choice, ctx);
             }
             Key::Esc => {
-                let provider = entry.provider;
+                let name = tile.name;
                 let index = self
-                    .entries()
+                    .tiles()
                     .iter()
-                    .position(|entry| entry.provider == provider)
+                    .position(|tile| tile.name == name)
                     .unwrap_or(0);
                 self.stage = Stage::Provider { selected: index };
             }
@@ -1432,13 +1493,14 @@ impl AddAccount {
                 ];
                 match &self.catalog {
                     Load::Ready(entries) => {
-                        for (index, entry) in entries.iter().enumerate() {
+                        for (index, tile) in provider_tiles(entries).iter().enumerate() {
+                            let mark = ctx.glyphs.provider(provider_word(tile.mark));
                             lines.push(list_row(
                                 cells(
                                     &[24, limit.saturating_sub(28)],
                                     vec![
-                                        Line::raw(provider_cell(entry.provider, ctx.glyphs)),
-                                        styled(provider_line(entry.provider), Role::Muted, theme),
+                                        Line::raw(format!("{mark} {}", tile.name)),
+                                        styled(tile.line, Role::Muted, theme),
                                     ],
                                     2,
                                     ctx.glyphs,
@@ -1470,13 +1532,13 @@ impl AddAccount {
                 }
                 (lines, None)
             }
-            Stage::Method { entry, selected } => {
+            Stage::Method { tile, selected } => {
                 let mut lines = vec![
-                    styled(provider_word(entry.provider), Role::Accent, theme),
+                    styled(tile.name, Role::Accent, theme),
                     Line::raw("How do you want to connect?"),
                     Line::default(),
                 ];
-                for (index, choice) in choices(entry).iter().enumerate() {
+                for (index, choice) in tile.choices.iter().enumerate() {
                     lines.extend(menu_item(
                         choice.title,
                         choice.description,
@@ -1501,6 +1563,10 @@ fn plain_sign_in(code: &str) -> &'static str {
             "The code may not have reached Claude. Wait a moment, then try again."
         }
         "native_auth_method_mismatch" => "This account cannot use that sign-in method.",
+        "native_auth_recovery_required" => {
+            "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent."
+        }
+        "native_auth_interrupted" => "The sign-in did not finish. Start it again.",
         "native_auth_connection_missing" | "account_not_found" => "This account no longer exists.",
         other => crate::tui::native_auth::public_problem(other),
     }
@@ -1532,7 +1598,7 @@ impl Screen for AddAccount {
         ];
         match &self.stage {
             Stage::Provider { .. } => {}
-            Stage::Method { entry, .. } => crumbs.push(provider_word(entry.provider).into()),
+            Stage::Method { tile, .. } => crumbs.push(tile.name.into()),
             Stage::Form(form) => crumbs.push(provider_word(form.choice.provider).into()),
             Stage::SignIn(sign_in) => {
                 crumbs.push(provider_word(sign_in.choice.provider).into());

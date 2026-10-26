@@ -46,13 +46,17 @@ struct Case {
 
 impl Case {
     async fn new() -> Self {
+        Self::with_config(MIXED).await
+    }
+
+    async fn with_config(config: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-owner-setup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        fs::write(&global, MIXED).unwrap();
+        fs::write(&global, config).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = watch::channel(false);
         let mut case = Self {
@@ -458,6 +462,51 @@ async fn a_mixed_pool_assigned_to_a_project_selects_an_eligible_master_member() 
     assert_eq!(selection.target_profile_ref.as_str(), "codex-b");
     drop(controller);
     case.close().await;
+}
+
+/// Builds the mixed catalog grown to `count` accounts and `count` connections, with a
+/// 30 s owner timeout so a settings rewrite of that size fits the owner deadline.
+/// Input: the total count, at least five. Output: global settings text in which each
+/// extra account backs one local model connection.
+fn large_catalog(count: usize) -> String {
+    let extra = count - 5;
+    let accounts: String = (0..extra).map(|i| format!(", \"extra-{i:04}\"")).collect();
+    let connections: String = (0..extra)
+        .map(|i| format!("  {{ id = \"extra-c-{i:04}\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"extra-{i:04}\", endpoint = {{ kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }}, model = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}, auth = {{ method = \"none\" }} }},\n"))
+        .collect();
+    MIXED
+        .replace("timeout_ms = 2000", "timeout_ms = 30000")
+        .replace("\"local-1\"]", &format!("\"local-1\"{accounts}]"))
+        .replace(
+            "connections = [\n",
+            &format!("connections = [\n{connections}"),
+        )
+}
+
+#[tokio::test]
+async fn the_default_master_open_reads_every_account_and_connection_the_config_allows() {
+    for count in [65, crazyagent::config::ACCOUNTS_MAX] {
+        let case = Case::with_config(&large_catalog(count)).await;
+        let mut controller = case.controller().await;
+        let page = controller
+            .read(OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Connections,
+                id: reference(&format!("extra-c-{:04}", count - 6)),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(page.data, OwnerData::ModelAccessRecord { .. }));
+        let MasterOwnerAction::Open { selection, .. } =
+            open_master(&mut controller, "pool-mixed", &["local-a"], "large-project").await
+        else {
+            panic!("open action required");
+        };
+        assert_eq!(selection.pool_ref.as_str(), "pool-mixed");
+        assert_eq!(selection.backend, MasterBackend::Rcli);
+        assert_eq!(selection.route.account_ref.as_str(), "local-1");
+        drop(controller);
+        case.close().await;
+    }
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use crazyagent::onboarding::service::{
 };
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::plugins::Scope;
-use crazyagent::project_setup::Platform;
+use crazyagent::project_setup::{Platform, ProjectSetup};
 use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::research::accounts::SettingsResolver;
@@ -39,6 +39,8 @@ const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"demo-app\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 const SAVED_DRAFT: &str = r#"{"name":"Demo Tool","draft":{"about":"Kept by the owner.","tech_stack":["Postgres"],"platforms":["cli"],"research":[],"pool":null,"team":null,"documents":[]},"facts":{"languages":[],"build_commands":[],"test_commands":[],"entry_points":[]}}"#;
 const OWNER_OVERVIEW: &str = "# Owner overview\n\nWritten by hand.\n";
+const OWNER_ABOUT: &str = "A browser helper the owner described by hand.";
+const OWNER_NAME: &str = "Demo Browser";
 
 /// Fails the test with the command that fixes it unless the local Ollama serves the pool
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
@@ -250,7 +252,7 @@ impl Folders {
     fn new(prepare: impl FnOnce(&Path)) -> Self {
         let runtime = tempfile::Builder::new()
             .prefix("ca-onboard-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = runtime.path().canonicalize().unwrap();
@@ -262,7 +264,7 @@ impl Folders {
         fs::set_permissions(&project_settings, fs::Permissions::from_mode(0o600)).unwrap();
         let repos = tempfile::Builder::new()
             .prefix("ca-onboard-repos-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let repo = repos.path().canonicalize().unwrap().join(PROJECT);
         rust_repo(&repo);
@@ -476,6 +478,106 @@ impl Bench {
         (Arc::new(runner), state.join("agents"))
     }
 
+    /// Stops the in-process engine and starts a new one on the same runtime
+    /// folder, as the owner's next launch does. Returns the bench on it.
+    async fn restart(self) -> Self {
+        self.restart_with(|_| {}).await
+    }
+
+    /// Restarts like [`Bench::restart`] and runs `between` on the runtime
+    /// folder while no engine is running.
+    async fn restart_with(self, between: impl FnOnce(&Path)) -> Self {
+        let Self {
+            _runtime,
+            _repos,
+            skills,
+            root,
+            repo,
+            global,
+            project_settings,
+            engine,
+            owner,
+            generation,
+        } = self;
+        drop(owner);
+        let Engine::InProcess(mut service, _stop) = engine else {
+            panic!("a restart needs the in-process engine");
+        };
+        service.shutdown().await.unwrap();
+        between(&root);
+        let (stop, stopped) = watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            &root,
+            "e.sock",
+            &global,
+            &project_settings,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let owner = OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(5))
+            .await
+            .unwrap();
+        Self {
+            _runtime,
+            _repos,
+            skills,
+            root,
+            repo,
+            global,
+            project_settings,
+            engine: Engine::InProcess(Box::new(service), stop),
+            owner,
+            generation,
+        }
+    }
+
+    /// The repositories the engine stored in the project's specification,
+    /// read from its database.
+    fn repositories(&self, project: &ProjectId) -> Vec<String> {
+        let db = rusqlite::Connection::open_with_flags(
+            self.root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let body: String = db
+            .query_row(
+                "SELECT body FROM projects WHERE id=?1",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        serde_json::from_value(body["spec"]["repositories"].clone()).unwrap()
+    }
+
+    /// Saves the owner's setup for `project` from the review form: the
+    /// onboarding draft with the owner's name, about text and platforms.
+    async fn save_setup(&mut self, project: &ProjectId, draft: &ProjectSetup) {
+        let saved = self
+            .owner
+            .project_setup(project.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut setup = draft.clone();
+        setup.about = OWNER_ABOUT.into();
+        setup.platforms = vec![Platform::Cli];
+        self.generation += 1;
+        let response = self
+            .owner
+            .update_project_setup(
+                project.clone(),
+                saved.revision,
+                Some(OWNER_NAME.into()),
+                setup,
+                self.generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejection(&response), None, "{response:?}");
+    }
+
     async fn stop(self) {
         let Self { engine, owner, .. } = self;
         drop(owner);
@@ -495,6 +597,42 @@ async fn stop_service(service: OnboardingService) {
     tokio::task::spawn_blocking(move || service.stop())
         .await
         .unwrap();
+}
+
+/// A local model endpoint that answers every request with HTTP 400 and an
+/// OpenAI-style error naming the missing model, so a real Codex run fails at
+/// once. Returns the port; the serving thread ends with the test process.
+fn rejecting_endpoint() -> u16 {
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
+            let Ok(stream) = stream else { break };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut reader = BufReader::new(stream);
+            let mut length = 0_usize;
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut body = vec![0_u8; length.min(1 << 20)];
+            let _ = reader.read_exact(&mut body);
+            let error = br#"{"error":{"message":"The model closed-model does not exist","type":"invalid_request_error"}}"#;
+            let mut stream = reader.into_inner();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                error.len()
+            );
+            let _ = stream.write_all(error);
+        }
+    });
+    port
 }
 
 fn agent_runs(agents: &Path, prefix: &str) -> usize {
@@ -1066,5 +1204,247 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_until_both_steps_ar
         vec![(FoundState::Onboarding, Some(project), true)],
         "a failed step keeps the project setting up; Ready needs both steps done"
     );
+    bench.stop().await;
+}
+
+/// Counts the rows `table` still holds for the bench project in the engine database.
+/// Takes the bench root and the table. Returns the row count.
+fn project_rows(root: &Path, table: &str) -> i64 {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE project=?1"),
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_working_project() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let database = rusqlite::Connection::open(bench.root.join("engine.db")).unwrap();
+    database
+        .execute_batch(&format!(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES ('{PROJECT}','owner','Old question','answered',1);
+             INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES ('{PROJECT}','owner','codex',0,'Old step','done',1,1);
+             INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES ('{PROJECT}','market_research','codex',0,'failed',1);"
+        ))
+        .unwrap();
+    drop(database);
+    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+        assert_eq!(project_rows(&bench.root, table), 1, "{table}");
+    }
+
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .remove_project(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+        assert_eq!(project_rows(&bench.root, table), 0, "{table} after removal");
+    }
+    assert!(
+        bench.owner.onboarding(project.clone()).await.is_err(),
+        "a removed project's waiting steps are gone, so no worker can claim them"
+    );
+
+    let again = bench.start_onboarding().await;
+    assert_eq!(again, project);
+    let setup = bench.owner.project_setup(project.clone()).await.unwrap();
+    assert_eq!(
+        setup.map(|setup| setup.project_id),
+        Some(project.clone()),
+        "re-adding the folder recreates the project"
+    );
+    let view = bench.view(&project).await;
+    assert_eq!(view.project_id, project);
+    let team = bench.owner.team_status(project.clone()).await.unwrap();
+    assert!(team.messages.is_empty(), "{:?}", team.messages);
+    assert!(team.tasks.is_empty(), "{:?}", team.tasks);
+    assert!(
+        bench
+            .owner
+            .research_jobs(project.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(project_rows(&bench.root, "onboarding"), 1);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saving_the_setup_after_mapping_fails_finishes_onboarding_and_reopening_shows_it() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let (runner, _) = bench.runner_without_codex(false);
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        || None,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(view.mapping, failed(CODEX_MISSING), "{view:?}");
+    assert!(!view.finished, "{view:?}");
+    assert!(view.missing.contains(&"about".to_owned()), "{view:?}");
+    assert_eq!(bench.home_entry().await.state, FoundState::Onboarding);
+
+    bench.save_setup(&project, &view.draft).await;
+
+    let found = bench.owner.found_projects().await.unwrap();
+    let entries: Vec<_> = found
+        .iter()
+        .filter(|entry| Path::new(&entry.path) == bench.repo)
+        .map(|entry| (entry.state, entry.project_id.clone()))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![(FoundState::Ready, Some(project.clone()))],
+        "a saved setup finishes onboarding: {found:?}"
+    );
+    let reopened = bench.view(&project).await;
+    assert!(reopened.finished, "{reopened:?}");
+    assert_eq!(reopened.name, OWNER_NAME);
+    assert_eq!(reopened.draft.about, OWNER_ABOUT);
+    assert_eq!(reopened.draft.platforms, [Platform::Cli]);
+    assert!(
+        !reopened.missing.contains(&"about".to_owned()),
+        "{reopened:?}"
+    );
+    assert_eq!(reopened.mapping, failed(CODEX_MISSING));
+
+    let mut bench = bench.restart().await;
+    assert_eq!(bench.home_entry().await.state, FoundState::Ready);
+    assert_eq!(bench.view(&project).await.draft.about, OWNER_ABOUT);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_running() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let draft = bench.view(&project).await.draft;
+    bench.save_setup(&project, &draft).await;
+    let (runner, _) = bench.runner_without_codex(false);
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef, _: &[ResearchHarness]| None,
+        || None,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !settled(&bench.view(&project).await.graph) {
+        assert!(Instant::now() < deadline, "the graph step did not finish");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let view = bench.view(&project).await;
+    stop_service(service).await;
+    assert_eq!(view.graph, failed(GRAPHIFY_MISSING), "{view:?}");
+    assert_eq!(
+        view.mapping,
+        Step::Waiting,
+        "a saved setup needs no mapping agent: {view:?}"
+    );
+    assert!(view.finished, "{view:?}");
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_mapping_agent_reports_its_own_reason() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let port = rejecting_endpoint();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "closed-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| Some(account.clone()),
+        || None,
+        OnboardingLimits {
+            graph_time: Duration::from_secs(60),
+            mapping_time: Duration::from_secs(240),
+        },
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(300)).await;
+    stop_service(service).await;
+    let Step::Failed { reason } = &view.mapping else {
+        panic!("the mapping agent cannot reach its model: {view:?}");
+    };
+    assert_eq!(
+        reason,
+        "Agent stopped: The model closed-model does not exist"
+    );
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_onboarded_project_can_be_added_again() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    bench.generation += 1;
+    let removed = bench
+        .owner
+        .remove_project(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&removed), None, "{removed:?}");
+    assert_eq!(bench.home_entry().await.state, FoundState::Found);
+
+    let again = bench.start_onboarding().await;
+    assert_eq!(again, project);
+    let entry = bench.home_entry().await;
+    assert_eq!(
+        (entry.state, entry.project_id),
+        (FoundState::Onboarding, Some(project.clone()))
+    );
+    assert!(
+        bench
+            .owner
+            .project_setup(project.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_added_folder_is_its_project_repository_and_older_projects_are_repaired_on_start() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.to_str().unwrap().to_owned();
+    assert_eq!(bench.repositories(&project), std::slice::from_ref(&repo));
+
+    let bench = bench
+        .restart_with(|root| {
+            let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+            let changed = db
+                .execute(
+                    "UPDATE projects SET body=json_set(body,'$.spec.repositories',json('[]'))
+                     WHERE id=?1",
+                    [project.as_str()],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+        })
+        .await;
+    assert_eq!(bench.repositories(&project), [repo]);
     bench.stop().await;
 }

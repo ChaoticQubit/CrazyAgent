@@ -1177,14 +1177,9 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let seen = folder.join("seen-config.toml");
     let executable = harness(
         &base,
-        format!(
-            "#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > \"{}\"\nexit 1\n",
-            seen.display()
-        )
-        .as_bytes(),
+        b"#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > seen-config.toml\nexit 1\n",
     );
     let engine_folder = base.join("engine-bin");
     std::fs::create_dir(&engine_folder).unwrap();
@@ -1238,6 +1233,9 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         Some(format!("worktrees/agent-{}", master.id)),
         "the master works in its own git worktree like every agent"
     );
+    let seen = folder
+        .join(master.worktree.as_deref().unwrap())
+        .join("seen-config.toml");
     let config: toml::Table = std::fs::read_to_string(&seen)
         .unwrap_or_else(|e| panic!("the probe harness saw no config ({e}): {team_now:#?}"))
         .parse()
@@ -1610,4 +1608,201 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
     assert_eq!(closed.state, AgentState::Closed);
     assert_eq!(closed.status, "Stopped when CrazyAgent closed");
     until("the last process group to be gone", || !alive(group));
+}
+
+fn project_rows(connection: &Connection, table: &str, project: &str) -> Vec<i64> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id FROM {table} WHERE project=?1 ORDER BY id"
+        ))
+        .unwrap();
+    statement
+        .query_map([project], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn the_conversation_keeps_its_newest_rows_and_bounds_only_waiting_messages() {
+    let (_directory, mut connection) = database();
+    let project = ProjectId::new("team-window").unwrap();
+    let other = ProjectId::new("team-other").unwrap();
+    let tx = connection.transaction().unwrap();
+    let neighbour = append_message(
+        &tx,
+        &other,
+        MessageAuthor::Master,
+        "kept",
+        MessageState::Reply,
+        0,
+    )
+    .unwrap()
+    .unwrap();
+    let waiting: Vec<i64> = (0..MESSAGES_WAITING_MAX)
+        .map(|index| {
+            append_message(
+                &tx,
+                &project,
+                MessageAuthor::Owner,
+                "wait",
+                MessageState::Pending,
+                index,
+            )
+            .unwrap()
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        append_message(
+            &tx,
+            &project,
+            MessageAuthor::Owner,
+            "one more",
+            MessageState::Pending,
+            0
+        )
+        .unwrap(),
+        Err("team_conversation_full")
+    );
+    let history: Vec<i64> = (0..MESSAGES_PER_PROJECT_MAX)
+        .map(|index| {
+            append_message(
+                &tx,
+                &project,
+                MessageAuthor::Master,
+                "reply",
+                MessageState::Reply,
+                index,
+            )
+            .unwrap()
+            .unwrap()
+        })
+        .collect();
+    let note = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Engine,
+        "note",
+        MessageState::Note,
+        0,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let rows = project_rows(&connection, "team_messages", "team-window");
+    assert_eq!(rows.len() as i64, MESSAGES_PER_PROJECT_MAX);
+    assert_eq!(
+        rows[..waiting.len()],
+        waiting[..],
+        "waiting messages are never pruned"
+    );
+    let kept = rows.len() - waiting.len() - 1;
+    assert_eq!(
+        rows[waiting.len()..rows.len() - 1],
+        history[history.len() - kept..]
+    );
+    assert_eq!(rows.last(), Some(&note));
+    assert_eq!(
+        project_rows(&connection, "team_messages", "team-other"),
+        [neighbour]
+    );
+}
+
+#[test]
+#[should_panic(expected = "team_live_rows_fill_the_window")]
+fn live_messages_filling_the_window_trip_the_retention_invariant() {
+    let (_directory, mut connection) = database();
+    let project = ProjectId::new("team-flooded").unwrap();
+    let tx = connection.transaction().unwrap();
+    for index in 0..MESSAGES_PER_PROJECT_MAX {
+        tx.execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES ('team-flooded','owner','x','pending',?1)",
+            [index],
+        )
+        .unwrap();
+    }
+    let _ = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Engine,
+        "note",
+        MessageState::Note,
+        0,
+    );
+}
+
+#[test]
+fn delivered_task_history_makes_room_while_undelivered_results_and_live_work_stay() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-tasks",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    let pool = access("team-tasks", &["local-a"]);
+    let insert = |tx: &Transaction<'_>, source: &str, status: &str, delivered: i64| {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES ('team-tasks',?1,'codex',0,'step',?2,?3,0)",
+            params![source, status, delivered],
+        )
+        .unwrap();
+        tx.last_insert_rowid()
+    };
+    let tx = connection.transaction().unwrap();
+    let undelivered = insert(&tx, "master", "done", 0);
+    let running = insert(&tx, "master", "running", 0);
+    let owner_done = insert(&tx, "owner", "failed", 0);
+    let delivered = insert(&tx, "master", "done", 1);
+    for _ in 4..TASKS_PER_PROJECT_MAX {
+        insert(&tx, "master", "cancelled", 1);
+    }
+    let admitted = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "new step",
+        TaskSource::Owner,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = project_rows(&tx, "team_tasks", "team-tasks");
+    assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
+    assert_eq!(rows[..4], [undelivered, running, delivered, rows[3]]);
+    assert!(
+        !rows.contains(&owner_done),
+        "the oldest history row made room"
+    );
+    assert_eq!(rows.last(), Some(&admitted));
+
+    tx.execute(
+        "UPDATE team_tasks SET delivered=0, source='master', status='done' WHERE project='team-tasks' AND status<>'running'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        admit(
+            &tx,
+            &pool,
+            &setup,
+            None,
+            "refused",
+            TaskSource::Owner,
+            None,
+            2
+        )
+        .unwrap(),
+        Err("team_task_limit")
+    );
+    assert_eq!(
+        project_rows(&tx, "team_tasks", "team-tasks"),
+        rows,
+        "a refusal deletes nothing"
+    );
 }

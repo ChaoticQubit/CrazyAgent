@@ -67,7 +67,7 @@ struct Harness {
 
 impl Harness {
     async fn open() -> Self {
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Engine::open(&root.path().join("db"), config.clone())

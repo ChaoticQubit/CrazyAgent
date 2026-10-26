@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 fn private_root(prefix: &str) -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     root

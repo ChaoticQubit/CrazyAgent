@@ -92,7 +92,7 @@ fn validate_prepared(
         || session.owner.engine_epoch != identity.engine_epoch
         || prepared.attempt.completion.is_some()
         || request.project_id != session.project_id
-        || request.task_id != session.bootstrap_task_id
+        || !prepared.attempt_on_current_turn()
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
         || request.target_profile_ref != session.selection.target_profile_ref
@@ -308,7 +308,7 @@ fallback_allowed = false
             assert!(config.contains(&format!("timeout_ms = {timeout_ms}\n")));
             let root = tempfile::Builder::new()
                 .prefix("ca-mrl-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let state = root.path().join("state");

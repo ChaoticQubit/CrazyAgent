@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge, failure};
+use super::{BridgeError, NativeBridge, Unlocked, failure};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::AccountSecret;
 use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
@@ -202,12 +202,12 @@ impl NativeBridge {
 
     /// Starts a command MCP server, lists its tools and stops it.
     /// Output: the server with its tools or the plain reason it can't start.
-    pub async fn check_mcp_server(&mut self, id: String) -> Result<ServerView, BridgeError> {
+    pub fn check_mcp_server(&mut self, id: String) -> Result<Unlocked<ServerView>, BridgeError> {
         self.plugins_ready()?;
-        self.controller()?
-            .check_mcp_server(id)
-            .await
-            .map_err(plugin_failure)
+        let client = self.controller()?.shared_client().map_err(plugin_failure)?;
+        Ok(Box::pin(async move {
+            client.check_mcp_server(id).await.map_err(plugin_failure)
+        }))
     }
 
     /// Reads what agents launched for a project receive: skill folders and approved servers.

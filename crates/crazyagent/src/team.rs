@@ -20,6 +20,10 @@ pub const DELEGATIONS_PER_REPLY_MAX: usize = 8;
 pub const TASKS_ACTIVE_MAX: i64 = 32;
 pub const TASKS_PER_PROJECT_MAX: i64 = 1000;
 pub const MESSAGES_PER_PROJECT_MAX: i64 = 2000;
+pub const MESSAGES_WAITING_MAX: i64 = 64;
+const MESSAGE_HISTORY: &str = "state NOT IN ('pending','sent')";
+const TASK_HISTORY: &str =
+    "status IN ('done','failed','cancelled') AND (source='owner' OR delivered=1)";
 pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
@@ -27,9 +31,10 @@ pub const DELEGATE_MARKER: &str = "DELEGATE";
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
 
-/// Text the owner typed straight into one team agent's terminal. It is recorded on the
-/// agent's task, and the master hears a short note of it on its next turn.
-/// `agent` is the team agent id; `text` is at most `DIRECT_INPUT_BYTES_MAX` bytes.
+/// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
+/// on the agent's task until the master hears a short note of it on its next turn.
+/// Keys typed into the terminal are never kept. `agent` is the team agent id; `text` is at
+/// most `DIRECT_INPUT_BYTES_MAX` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectInput {
     pub project: ProjectId,
@@ -665,19 +670,19 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 record TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS team_direct_inputs (
+            CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
                 agent INTEGER NOT NULL,
                 task INTEGER,
                 harness TEXT NOT NULL,
                 text TEXT NOT NULL,
-                created_ms INTEGER NOT NULL,
-                delivered INTEGER NOT NULL DEFAULT 0
+                created_ms INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS team_direct_inputs_project ON team_direct_inputs(project, delivered);",
+            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    direct::erase_typed_input(connection)
 }
 
 fn slot<'a>(plan: &'a TeamPlan, harness: &str) -> Option<&'a HarnessSlot> {
@@ -745,20 +750,27 @@ pub fn admit(
     if active_tasks(tx, &stored.project_id, None)? >= TASKS_ACTIVE_MAX {
         return Ok(Err("team_queue_full"));
     }
-    let total: i64 = tx
+    let kept: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM team_tasks WHERE project=?1",
+            &format!("SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND NOT ({TASK_HISTORY})"),
             [stored.project_id.as_str()],
             |row| row.get(0),
         )
         .map_err(error)?;
-    if total >= TASKS_PER_PROJECT_MAX {
+    if kept >= TASKS_PER_PROJECT_MAX {
         return Ok(Err("team_task_limit"));
     }
     let status = match eligible_accounts(access, &stored.project_id, launch) {
         Accounts::Usable(accounts) if !accounts.is_empty() => TaskStatus::Queued,
         _ => TaskStatus::NeedsPool,
     };
+    make_room(
+        tx,
+        "team_tasks",
+        TASK_HISTORY,
+        &stored.project_id,
+        TASKS_PER_PROJECT_MAX,
+    )?;
     tx.execute(
         "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
@@ -782,9 +794,43 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Appends one message to a project's team conversation.
+/// Deletes a project's oldest history rows so that one more row fits within `max`.
+/// Takes the transaction, the table, the SQL condition that marks history, the project and the bound.
+/// Returns any SQLite failure; live rows are never deleted, so live rows filling the bound is a broken invariant.
+fn make_room(
+    tx: &Transaction<'_>,
+    table: &str,
+    history: &str,
+    project: &ProjectId,
+    max: i64,
+) -> Result<(), EngineError> {
+    let count = |tx: &Transaction<'_>| -> Result<i64, EngineError> {
+        tx.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE project=?1"),
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+    };
+    let excess = count(tx)? + 1 - max;
+    if excess > 0 {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE id IN
+                 (SELECT id FROM {table} WHERE project=?1 AND {history} ORDER BY id LIMIT ?2)"
+            ),
+            params![project.as_str(), excess],
+        )
+        .map_err(error)?;
+    }
+    assert!(count(tx)? < max, "team_live_rows_fill_the_window");
+    Ok(())
+}
+
+/// Appends one message to a project's team conversation, keeping its newest
+/// `MESSAGES_PER_PROJECT_MAX` rows: older answered, failed, reply and note rows make room.
 /// Takes the transaction, project, author, text, delivery state and time.
-/// Returns the message id, or a rejection when the conversation is full.
+/// Returns the message id, or a rejection when too many messages already wait for the master.
 pub fn append_message(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -793,16 +839,27 @@ pub fn append_message(
     state: MessageState,
     now: i64,
 ) -> Result<Result<i64, &'static str>, EngineError> {
-    let count: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM team_messages WHERE project=?1",
-            [project.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if count >= MESSAGES_PER_PROJECT_MAX {
-        return Ok(Err("team_conversation_full"));
+    if matches!(state, MessageState::Pending | MessageState::Sent) {
+        let waiting: i64 = tx
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM team_messages WHERE project=?1 AND NOT ({MESSAGE_HISTORY})"
+                ),
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if waiting >= MESSAGES_WAITING_MAX {
+            return Ok(Err("team_conversation_full"));
+        }
     }
+    make_room(
+        tx,
+        "team_messages",
+        MESSAGE_HISTORY,
+        project,
+        MESSAGES_PER_PROJECT_MAX,
+    )?;
     let bounded = bound_text(text, MESSAGE_BYTES_MAX * 2);
     tx.execute(
         "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,?2,?3,?4,?5)",

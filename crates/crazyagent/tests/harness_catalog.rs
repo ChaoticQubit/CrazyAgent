@@ -1,8 +1,10 @@
 #![cfg(unix)]
 
+use crazyagent::harnesses::interactive::{Support, support};
 use crazyagent::harnesses::{
-    AccountKind, HarnessStatus, Search, ToolControl, catalog, spec, specs,
+    AccountKind, HarnessStatus, Search, TeamUse, ToolControl, catalog, spec, specs,
 };
+use crazyagent::team::launch_harness;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -184,6 +186,57 @@ fn installed_codex_and_claude_are_ready_from_the_real_environment() {
 }
 
 #[test]
+fn only_harnesses_whose_replies_the_engine_reads_are_offered_for_team_agents() {
+    let bin = private_dir("ca-harness-team-");
+    for name in ["codex", "claude", "gemini", "opencode", "aider"] {
+        install(bin.path(), name, 0o755);
+    }
+    let entries = catalog(&Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    for id in ["codex", "claude-code"] {
+        let found = entry(&entries, id);
+        assert_eq!(found.status, HarnessStatus::Ready, "{id}");
+        assert_eq!(found.team, TeamUse::Available, "{id}");
+    }
+    for id in ["gemini-cli", "opencode", "aider"] {
+        let found = entry(&entries, id);
+        assert!(found.executable.is_some(), "{id} is installed");
+        assert_eq!(
+            found.team,
+            TeamUse::Unavailable {
+                reason: "CrazyAgent cannot read its replies yet".into()
+            },
+            "{id}"
+        );
+    }
+    assert!(matches!(
+        entry(&entries, "rcli").team,
+        TeamUse::Unavailable { .. }
+    ));
+    for found in &entries {
+        let runs = launch_harness(&found.id).is_some();
+        assert_eq!(found.team == TeamUse::Available, runs, "{}", found.id);
+        assert_eq!(
+            support(&found.id) == Support::Terminal,
+            runs,
+            "{}",
+            found.id
+        );
+    }
+    let codex = serde_json::to_value(entry(&entries, "codex")).unwrap();
+    assert_eq!(codex["team"]["kind"], "available");
+    let gemini = serde_json::to_value(entry(&entries, "gemini-cli")).unwrap();
+    assert_eq!(gemini["team"]["kind"], "unavailable");
+    assert_eq!(
+        gemini["team"]["reason"],
+        "CrazyAgent cannot read its replies yet"
+    );
+}
+
+#[test]
 fn entries_serialize_with_plain_wire_names() {
     let entries = catalog(&Search::new(Vec::new(), None, Vec::new()));
     let value = serde_json::to_value(entry(&entries, "antigravity")).unwrap();
@@ -204,4 +257,26 @@ fn connection_harness_names_resolve_to_their_catalog_entry() {
     for listed in specs() {
         assert_eq!(spec(listed.id).unwrap().id, listed.id);
     }
+}
+
+#[test]
+fn each_entry_names_the_connection_harnesses_that_resolve_to_it() {
+    let entries = catalog(&Search::new(Vec::new(), None, Vec::new()));
+    let claude = entry(&entries, "claude-code");
+    assert_eq!(claude.aliases, ["claude"]);
+    let value = serde_json::to_value(claude).unwrap();
+    assert_eq!(value["aliases"][0], "claude");
+    for listed in &entries {
+        for alias in &listed.aliases {
+            assert_eq!(spec(alias).unwrap().id, listed.id, "{alias}");
+        }
+    }
+    assert!(entry(&entries, "codex").aliases.is_empty());
+    assert_eq!(
+        entries
+            .iter()
+            .map(|listed| listed.aliases.len())
+            .sum::<usize>(),
+        1
+    );
 }

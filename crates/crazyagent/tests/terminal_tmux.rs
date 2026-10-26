@@ -54,7 +54,7 @@ impl Drop for Server {
 fn root() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("ca-tmux-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     root
@@ -440,6 +440,71 @@ fn the_screen_on_attach_keeps_the_spaces_the_program_wrote() {
         String::from_utf8_lossy(&screen)
     );
     host.kill(&agent).unwrap();
+}
+
+fn attach_screen(host: &Tmux, agent: &AgentId, drawn: &[u8]) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let stream = host.attach(agent).unwrap();
+        if contains(&stream.screen, drawn) {
+            return stream.screen;
+        }
+        assert!(Instant::now() < deadline, "the pane never drew its text");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn the_screen_on_attach_turns_on_the_input_modes_the_agent_app_set() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let host = Tmux::open(Some(tmux), &folder);
+    let moded = AgentId::team(7).unwrap();
+    host.spawn(
+        &moded,
+        &shell(
+            root.path(),
+            Vec::new(),
+            &[
+                "/bin/sh",
+                "-c",
+                "printf '\\033[?2004h\\033[?1hmodes-set'; exec cat",
+            ],
+        ),
+    )
+    .unwrap();
+    let plain = AgentId::team(8).unwrap();
+    host.spawn(
+        &plain,
+        &shell(
+            root.path(),
+            Vec::new(),
+            &["/bin/sh", "-c", "printf 'modes-off'; exec cat"],
+        ),
+    )
+    .unwrap();
+
+    let screen = attach_screen(&host, &moded, b"modes-set");
+    assert!(
+        contains(&screen, b"\x1b[?2004h"),
+        "a view attaching after the app turned bracketed paste on is told so: {:?}",
+        String::from_utf8_lossy(&screen)
+    );
+    assert!(
+        contains(&screen, b"\x1b[?1h"),
+        "and gets the app's cursor key mode: {:?}",
+        String::from_utf8_lossy(&screen)
+    );
+    let screen = attach_screen(&host, &plain, b"modes-off");
+    assert!(!contains(&screen, b"\x1b[?2004h"));
+    assert!(!contains(&screen, b"\x1b[?1h"));
+    host.kill(&moded).unwrap();
+    host.kill(&plain).unwrap();
 }
 
 #[test]

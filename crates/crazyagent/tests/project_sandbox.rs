@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
@@ -614,4 +614,67 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         SandboxError::Unavailable("bubblewrap is missing".into()).to_string(),
         "sandbox unavailable: bubblewrap is missing"
     );
+}
+
+#[test]
+fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let one = case.project.join("worktrees").join("one");
+    let two = case.project.join("worktrees").join("two");
+    for worktree in [&one, &two] {
+        let added = owner_git(
+            &case.project,
+            &case.home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+    }
+    let confine = |worktree: &Path| {
+        sandbox(&case, SandboxNetwork::Only(Vec::new())).confine_to_worktree(worktree)
+    };
+    let refused = |result: Result<ProjectSandbox, SandboxError>| {
+        assert!(
+            matches!(result, Err(SandboxError::Invalid(_))),
+            "{:?}",
+            result.map(|sandbox| sandbox.profile())
+        );
+    };
+    let link = one.join(".git");
+    let original = fs::read_to_string(&link).unwrap();
+    let confined = confine(&one).unwrap();
+    assert!(confined.read_roots().contains(&case.project));
+    assert!(confined.writable_roots().all(|root| root != &case.project));
+    refused(confined.confine_to_worktree(&one));
+    refused(confine(&case.outside));
+    refused(confine(&case.project.join("worktrees")));
+    let git = case.project.join(".git");
+    for forged in [
+        format!("gitdir: {}\n", git.display()),
+        format!("gitdir: {}\n", git.join("worktrees").join("two").display()),
+        format!("gitdir: {}", git.join("worktrees").join("one").display()),
+        String::from("gitdir: \n"),
+    ] {
+        fs::write(&link, forged).unwrap();
+        refused(confine(&one));
+    }
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(two.join(".git"), &link).unwrap();
+    refused(confine(&one));
+    fs::remove_file(&link).unwrap();
+    fs::write(&link, &original).unwrap();
+    assert!(confine(&one).is_ok());
 }

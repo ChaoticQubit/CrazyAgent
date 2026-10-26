@@ -83,11 +83,15 @@ fn git_entries(folder: &Path) -> Vec<(PathBuf, bool)> {
     found
 }
 
+/// Wiring test: a codex stand-in that exits at once fills the harness slot, so no agent
+/// runs; this checks only that the team agent of an onboarded repo gets a worktree of the
+/// owner's committed code at HEAD. A real codex team run: team_engine.rs
+/// the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_team_agent_of_an_onboarded_repo_works_on_the_owners_code() {
+async fn wiring_a_team_agent_of_an_onboarded_repo_gets_a_worktree_at_the_owners_head() {
     let runtime = tempfile::Builder::new()
         .prefix("ca-root-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let root = runtime.path().canonicalize().unwrap();
@@ -97,7 +101,7 @@ async fn a_team_agent_of_an_onboarded_repo_works_on_the_owners_code() {
     let settings = root.join("project.toml");
     let repos = tempfile::Builder::new()
         .prefix("ca-root-repos-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let repo = repos.path().canonicalize().unwrap().join(PROJECT);
     fs::create_dir_all(repo.join("src")).unwrap();

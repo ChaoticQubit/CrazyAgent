@@ -100,7 +100,7 @@ impl Drop for Running {
 fn root() -> Arc<tempfile::TempDir> {
     let root = tempfile::Builder::new()
         .prefix("ca-pair-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     Arc::new(root)

@@ -27,7 +27,7 @@ impl Fixture {
     async fn start_with(timeout_ms: u32) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-acct-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -52,10 +52,15 @@ impl Fixture {
     }
 
     async fn restart(&mut self) {
+        self.restart_after(|_| {}).await;
+    }
+
+    async fn restart_after(&mut self, change: impl FnOnce(&Path)) {
         tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
             .await
             .unwrap()
             .unwrap();
+        change(self.root.path());
         let stopped = self._shutdown.subscribe();
         self.service = EngineService::start_with_settings_sources(
             self.root.path(),
@@ -428,8 +433,12 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
     fixture.stop().await;
 }
 
+/// Wiring test: a local stand-in server answers /v1/models with an invented model list
+/// and an invented 401, so this checks what the engine sends and how it keeps the key,
+/// not a provider. Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
+/// A real 401 needs an approved provider profile and is not covered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() {
+async fn wiring_api_key_reaches_a_stand_in_server_only_in_the_authorization_header() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let secret = format!("sk-local-{}", std::process::id());
@@ -530,8 +539,226 @@ async fn api_key_reaches_a_real_local_server_only_in_the_authorization_header() 
     fixture.stop().await;
 }
 
+/// Rewrites the saved address of one account in the stopped engine's registry, as an
+/// account saved before plain-http addresses outside this machine were refused would hold.
+/// Inputs: the engine root, the account id and the old address. Output: none.
+fn saved_before_the_fix(root: &Path, id: &CredentialRef, url: &str) {
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let body: Vec<u8> = db
+        .query_row(
+            "SELECT body FROM accounts WHERE id = ?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    record["connection"]["endpoint"]["url"] = url.into();
+    let changed = db
+        .execute(
+            "UPDATE accounts SET body = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_vec(&record).unwrap(), id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// Accepts every connection already waiting on `listener`, or arriving within a short
+/// window, and reads what each one sent until it closes or goes quiet.
+/// Input: the listener. Output: the bytes of each connection, in arrival order.
+async fn received(listener: &TcpListener) -> Vec<Vec<u8>> {
+    let mut requests = Vec::new();
+    while let Ok(Ok((mut stream, _))) = tokio::time::timeout(
+        Duration::from_millis(300),
+        crazyagent::spawn_gate::accept_tcp(listener),
+    )
+    .await
+    {
+        let mut request = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(300), stream.read_to_end(&mut request))
+            .await;
+        requests.push(request);
+    }
+    requests
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_account_check_slower_than_the_owner_wait_still_answers() {
+async fn a_saved_key_never_goes_out_over_plain_http_to_another_host() {
+    let mut fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let secret = format!("sk-remote-{}", std::process::id());
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let remote = format!("http://0.0.0.0:{port}/v1");
+    let lab = |url: &str| {
+        draft(
+            Provider::OpenaiCompatible,
+            SignInMethod::Url,
+            "Lab server",
+            Some(url.into()),
+            Some("lab-model"),
+        )
+    };
+    assert_eq!(
+        client
+            .add_account(lab(&remote), key(&secret))
+            .await
+            .unwrap_err()
+            .0,
+        "account_url_invalid"
+    );
+    assert!(
+        holders(fixture.root.path(), secret.as_bytes()).is_empty(),
+        "a refused account keeps no key"
+    );
+
+    let account = client
+        .add_account(lab(&format!("http://127.0.0.1:{port}/v1")), key(&secret))
+        .await
+        .unwrap();
+    drop(client);
+    received(&listener).await;
+    fixture
+        .restart_after(|root| saved_before_the_fix(root, &account.id, &remote))
+        .await;
+    let client = fixture.client().await;
+    let checked = client.check_account(account.id.clone()).await;
+    let requests = received(&listener).await;
+    assert!(
+        !requests.iter().any(|request| request
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes())),
+        "the saved key went out over plain http to a host outside this machine"
+    );
+    assert!(
+        requests.is_empty(),
+        "Check connected over plain http to a host outside this machine"
+    );
+    assert_eq!(checked.unwrap_err().0, "account_url_invalid");
+    client.remove_account(account.id.clone()).await.unwrap();
+    assert!(holders(fixture.root.path(), secret.as_bytes()).is_empty());
+    fixture.stop().await;
+}
+
+/// Wiring test: a local stand-in server answers the check with an invented model list,
+/// so this checks the key replacement and what the engine sends, not a provider.
+/// Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let old = format!("sk-old-{}-leaked", std::process::id());
+    let new = format!("sk-new-{}-rotated", std::process::id());
+    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let account = client
+        .add_account(
+            draft(
+                Provider::OpenaiCompatible,
+                SignInMethod::Url,
+                "Lab server",
+                Some(url),
+                Some("lab-model"),
+            ),
+            key(&old),
+        )
+        .await
+        .unwrap();
+    assert_eq!(holders(fixture.root.path(), old.as_bytes()).len(), 1);
+
+    let replaced = client
+        .replace_account_key(account.id.clone(), key(&new).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replaced.id, account.id, "the same account keeps its id");
+    assert_eq!(replaced.name, "Lab server");
+    assert_eq!(replaced.status_label, "Key saved");
+    assert!(!format!("{replaced:?}").contains(&new));
+    let listed = all_accounts(&client).await;
+    assert_eq!(listed.len(), 1, "no second account: {listed:?}");
+    assert_eq!(listed[0].id, account.id);
+    assert!(
+        holders(fixture.root.path(), old.as_bytes()).is_empty(),
+        "the old key is gone from disk"
+    );
+    let held = holders(fixture.root.path(), new.as_bytes());
+    assert_eq!(
+        held.len(),
+        1,
+        "only the key file holds the new key: {held:?}"
+    );
+    assert!(held[0].parent().unwrap().ends_with("account-keys"));
+    assert_eq!(
+        std::fs::metadata(&held[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_dir(held[0].parent().unwrap())
+            .unwrap()
+            .count(),
+        1,
+        "no temporary key file is left behind"
+    );
+
+    let (request, checked) = tokio::join!(
+        serve_once(&listener, "200 OK", r#"{"data":[{"id":"lab-model"}]}"#),
+        client.check_account(account.id.clone()),
+    );
+    assert_eq!(checked.unwrap().account.status_label, "Key saved");
+    assert!(
+        request.contains(&format!("\r\nAuthorization: Bearer {new}\r\n")),
+        "the new key reaches the request"
+    );
+    assert!(!request.contains(&old), "the old key is never sent again");
+
+    let local = client
+        .add_account(
+            draft(
+                Provider::Local,
+                SignInMethod::Url,
+                "Ollama",
+                None,
+                Some("qwen2.5:0.5b"),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .replace_account_key(local.id.clone(), key(&new).unwrap())
+            .await
+            .unwrap_err()
+            .0,
+        "account_key_not_allowed"
+    );
+    client.remove_account(account.id.clone()).await.unwrap();
+    assert_eq!(
+        client
+            .replace_account_key(account.id.clone(), key(&new).unwrap())
+            .await
+            .unwrap_err()
+            .0,
+        "account_not_found"
+    );
+    assert!(
+        holders(fixture.root.path(), new.as_bytes()).is_empty(),
+        "a refused replace saves nothing"
+    );
+    fixture.stop().await;
+}
+
+/// Wiring test: a local stand-in server holds an invented model list past the owner wait,
+/// so this checks the engine's deadline handling; a slow real provider cannot be arranged.
+/// Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_an_account_check_slower_than_the_owner_wait_still_answers() {
     let fixture = Fixture::start_with(1000).await;
     let client = fixture.client().await;
     let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
@@ -603,6 +830,37 @@ async fn local_model_discovery_reads_the_real_ollama() {
             .0,
         "account_local_url_required"
     );
+    fixture.stop().await;
+}
+
+/// Checks an OpenAI-compatible account pointed at the real local Ollama through the owner
+/// API: the engine reads the model list Ollama really serves at /v1/models. This is the
+/// real-provider counterpart of the stand-in server wiring tests; Ollama ignores the key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_openai_compatible_account_check_lists_the_real_ollama_models() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let account = client
+        .add_account(
+            draft(
+                Provider::OpenaiCompatible,
+                SignInMethod::Url,
+                "Local Ollama",
+                Some("http://127.0.0.1:11434/v1".into()),
+                Some("qwen2.5:0.5b"),
+            ),
+            key("sk-local-ollama-check"),
+        )
+        .await
+        .unwrap();
+    let checked = client.check_account(account.id.clone()).await.unwrap();
+    assert!(
+        checked.models.iter().any(|model| model == "qwen2.5:0.5b"),
+        "real local ollama models: {:?}",
+        checked.models
+    );
+    assert_eq!(checked.account.status_label, "Key saved");
+    client.remove_account(account.id.clone()).await.unwrap();
     fixture.stop().await;
 }
 

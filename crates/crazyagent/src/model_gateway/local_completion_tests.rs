@@ -196,9 +196,9 @@ fn local_completion_ordinary_finish_still_records_provider_failure_observation()
     finish_attempt(&tx, &fixture.request.id, &finished).unwrap();
     tx.commit().unwrap();
     let after = observation_rows(&fixture.database);
-    assert_eq!(after.len(), before.len() + 1);
-    assert!(after.contains(&before[0]));
-    let added = after.iter().find(|row| row.0 != before[0].0).unwrap();
+    assert_eq!(after.len(), 1);
+    assert!(!after.contains(&before[0]));
+    let added = &after[0];
     let observed: Observation = serde_json::from_str(&added.3).unwrap();
     assert_eq!(
         observed.id.as_str(),
@@ -212,7 +212,7 @@ fn local_completion_ordinary_finish_still_records_provider_failure_observation()
     assert_eq!(observed.observed_at_ms, finished.finished_at_ms);
     assert_eq!(
         observed.valid_until_ms,
-        finished.finished_at_ms + OBSERVATION_LIFETIME_MAX_MS
+        finished.finished_at_ms + FAILURE_HOLD_MS
     );
     assert_eq!(observed.kind, ObservationKind::Unknown);
     assert_eq!(fixture.persisted().completion, Some(finished));
@@ -332,9 +332,14 @@ fn local_completion_bounds_match_ordinary_finish_and_preserve_active_attempt() {
             if name == "local" {
                 assert_eq!(observation_rows(&boundary.database), observations);
             } else {
+                let rows = observation_rows(&boundary.database);
+                assert_eq!(rows.len(), 1, "finisher {name}, completion {value:?}");
                 assert_eq!(
-                    observation_rows(&boundary.database).len(),
-                    observations.len() + 1
+                    rows[0].0,
+                    format!(
+                        "failure:{}",
+                        crate::memory::hash(boundary.request.id.as_str().as_bytes())
+                    )
                 );
             }
         }

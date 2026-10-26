@@ -107,9 +107,9 @@ pub(in crate::tui) fn line_text(line: &MdLine) -> String {
     line.iter().map(|(text, _)| text.as_str()).collect()
 }
 
-/// Removes terminal escape sequences, control characters and text direction overrides.
-/// Takes untrusted text.
-/// Returns text with only printable characters, newlines and tabs expanded to spaces.
+/// Removes terminal escape sequences and control characters, and shows hidden, zero-width,
+/// tag and direction-changing characters as visible escapes. Takes untrusted text.
+/// Returns printable text with newlines kept and tabs expanded to spaces.
 pub(in crate::tui) fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
@@ -145,11 +145,10 @@ pub(in crate::tui) fn sanitize(text: &str) -> String {
             '\n' => out.push('\n'),
             '\t' => out.push_str("    "),
             c if c.is_control() => {}
-            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' => {}
             c => out.push(c),
         }
     }
-    out
+    crate::memory::visible_text(&out)
 }
 
 fn is_rule(line: &str) -> bool {
@@ -388,7 +387,7 @@ mod tests {
     fn terminal_escapes_and_control_characters_never_reach_the_screen() {
         let hostile = "\u{1b}[2J\u{1b}[31mRed\u{1b}[0m text\u{7}\u{0}\u{8}\r\n\u{1b}]52;c;cGF5bG9hZA==\u{7}clip\u{1b}]8;;https://x\u{1b}\\link\u{9b}31m\u{202e}evil\ttab";
         let lines = render(hostile, 40);
-        assert_eq!(texts(&lines), ["Red text", "cliplink31mevil    tab"]);
+        assert_eq!(texts(&lines), ["Red text", "cliplink31m\\u202eevil    tab"]);
         for line in &lines {
             for (text, _) in line {
                 assert!(text.chars().all(|c| !c.is_control()), "{text:?}");
@@ -396,6 +395,30 @@ mod tests {
         }
         assert_eq!(sanitize("a\u{1b}"), "a");
         assert_eq!(sanitize("\u{1b}Xb"), "b");
+    }
+
+    #[test]
+    fn hidden_and_reordering_characters_show_as_escapes() {
+        assert_eq!(
+            sanitize("Plain\u{200b} text\u{e0041}\u{e0042} and \u{202e}evil\u{2028}end"),
+            "Plain\\u200b text\\u{e0041}\\u{e0042} and \\u202eevil\\u2028end"
+        );
+        assert_eq!(
+            sanitize("Thumbs \u{1f44d}\u{fe0f} up"),
+            "Thumbs \u{1f44d}\u{fe0f} up"
+        );
+        assert_eq!(
+            sanitize("\u{1f469}\u{200d}\u{1f4bb} codes"),
+            "\u{1f469}\u{200d}\u{1f4bb} codes"
+        );
+        assert_eq!(
+            super::super::new_project_view::printable("tag\u{e0067}\nnext\u{feff}".into()),
+            "tag\\u{e0067} next\\ufeff"
+        );
+        assert_eq!(
+            texts(&render("Saved \u{2060}text", 40)),
+            ["Saved \\u2060text"]
+        );
     }
 
     #[test]

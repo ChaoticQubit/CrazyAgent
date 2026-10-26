@@ -245,7 +245,7 @@ impl Fixture {
     async fn new(backend: MasterBackend, with_repository: bool) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-mrt-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -825,7 +825,7 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     assert_eq!(prepared.attempt.request.project_id, case.session.project_id);
     assert_eq!(
         prepared.attempt.request.task_id,
-        case.session.bootstrap_task_id
+        crate::storage::turn_task_id(&case.session.session_id, &case.turn.id).unwrap()
     );
     assert_eq!(prepared.attempt.connection, proof.connection);
     assert_eq!(

@@ -51,7 +51,7 @@ impl Engine {
     async fn with(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-tui-intake-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -77,7 +77,7 @@ impl Engine {
             .unwrap();
         let user = tempfile::Builder::new()
             .prefix("ca-tui-intake-user-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(user.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         Self {
@@ -524,6 +524,25 @@ fn tools_found(status: &crate::setup::SetupStatus) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready() {
     let mut engine = Engine::start().await;
+    engine
+        .controller
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::AnthropicApi,
+                method: crate::accounts::SignInMethod::ApiKey,
+                name: "Team key".into(),
+                url: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    b"unit-placeholder-anthropic-key-0001".to_vec(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
     let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
@@ -535,22 +554,97 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
     assert_eq!(
         shows(&rows, "Get set up"),
         !found,
-        "the pool has a ready local account, so only tools decide; the engine reports {:?}: {rows:#?}",
+        "a pool exists and an account has a saved key, so only tools decide; the engine reports {:?}: {rows:#?}",
         status.dependencies
     );
     assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
 }
 
-fn waiting_review() -> (Shell, ProjectId) {
-    onboarding_with(
-        Step::Done,
-        Step::Failed {
-            reason: "No model answered.".into(),
-        },
-    )
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_an_account_is_done_only_when_an_engine_account_is_ready_for_agents() {
+    use crate::accounts::{AccountDraft, AccountStatus, Provider, SignInMethod};
+    use crate::engine::owner::AccountSecret;
+
+    let engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;
+    let draft = |provider, method, name: &str, model: Option<&str>| AccountDraft {
+        provider,
+        method,
+        name: name.into(),
+        url: None,
+        model: model.map(Into::into),
+    };
+    for _ in 0..2 {
+        let waiting = engine
+            .controller
+            .add_account(
+                draft(
+                    Provider::Claude,
+                    SignInMethod::Subscription,
+                    "ChaoticQubit",
+                    None,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.status, AccountStatus::NotSignedIn);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    for line in [
+        "No account is ready for",
+        "agents yet. Sign one in",
+        "or check its key or URL.",
+    ] {
+        assert!(shows(&rows, line), "{line}: {rows:#?}");
+    }
+    assert!(shows(&rows, "Enter opens Settings"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Settings(super::SettingsSection::Accounts))
+    );
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+
+    let saved = engine
+        .controller
+        .add_account(
+            draft(
+                Provider::AnthropicApi,
+                SignInMethod::ApiKey,
+                "Team key",
+                Some("claude-sonnet-4-5"),
+            ),
+            Some(AccountSecret::new(b"unit-placeholder-anthropic-key-0001".to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status, AccountStatus::KeySaved);
+    shell.refresh();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[x] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "Team key is ready for"), "{rows:#?}");
+    assert!(shows(&rows, "agents."), "{rows:#?}");
+    assert!(
+        rows.iter().all(|row| row.chars().count() <= 80),
+        "{rows:#?}"
+    );
 }
 
-fn onboarding_with(graph: Step, mapping: Step) -> (Shell, ProjectId) {
+fn waiting_review() -> (Shell, ProjectId) {
+    review_with(|_| {})
+}
+
+/// The onboarding page of `notes` after its onboarding read arrives: the graph
+/// done and the mapping failed, changed by `change` first.
+fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
     let project = ProjectId::new("project-notes").unwrap();
     let mut ctx = ctx(80, 40);
     let screen = open(
@@ -565,8 +659,10 @@ fn onboarding_with(graph: Step, mapping: Step) -> (Shell, ProjectId) {
     while shell.ctx.next_request().is_some() {}
     let draft = OnboardingView {
         project_id: project.clone(),
-        graph,
-        mapping,
+        graph: Step::Done,
+        mapping: Step::Failed {
+            reason: "No model answered.".into(),
+        },
         name: "notes".into(),
         draft: ProjectSetup {
             about: String::new(),
@@ -585,7 +681,10 @@ fn onboarding_with(graph: Step, mapping: Step) -> (Shell, ProjectId) {
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
+        finished: false,
     };
+    let mut draft = draft;
+    change(&mut draft);
     shell.arrive(intake(
         IntakeQuery::Onboarding {
             project: project.clone(),
@@ -597,7 +696,10 @@ fn onboarding_with(graph: Step, mapping: Step) -> (Shell, ProjectId) {
 
 #[test]
 fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
-    let (mut shell, _) = onboarding_with(Step::Off, Step::Running);
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Off;
+        view.mapping = Step::Running;
+    });
     let rows = render(&mut shell, 80, 40);
     let off = format!("{} Turned off", shell.ctx.glyphs.status(Status::Off));
     assert!(shows(&rows, "Build the code graph"), "{rows:#?}");
@@ -638,6 +740,51 @@ fn the_review_marks_what_is_missing_and_clears_it_as_the_owner_fills_it() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "[x] CLI"), "{rows:#?}");
     assert!(shows(&rows, "Check the setup and confirm it."), "{rows:#?}");
+}
+
+#[test]
+fn a_failed_mapping_shows_its_reason_and_r_on_confirm_maps_again() {
+    let (mut shell, _) = review_with(|view| {
+        view.draft.pool = Some(crate::protocol::CredentialRef::new("main").unwrap());
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Mapping failed: No model answered."),
+        "{rows:#?}"
+    );
+    shell.key(Key::BackTab);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Retry mapping"), "{rows:#?}");
+    shell.key(Key::Char('r'));
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("r on Confirm maps the project again");
+    };
+    let IntakeJob::Query(IntakeQuery::StartOnboarding { path, pool, .. }) = *job else {
+        panic!("a retry starts the onboarding again");
+    };
+    assert_eq!(path, "/Users/owner/Projects/notes");
+    assert_eq!(pool.as_str(), "main");
+}
+
+#[test]
+fn a_saved_setup_opens_with_its_saved_values_and_saves_changes() {
+    let (mut shell, _) = review_with(|view| {
+        view.finished = true;
+        view.graph = Step::Running;
+        view.mapping = Step::Waiting;
+        view.draft.about = "Keeps notes in the terminal.".into();
+        view.missing = vec!["platforms".into()];
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "This project is set up."), "{rows:#?}");
+    assert!(shows(&rows, "Keeps notes in the terminal."), "{rows:#?}");
+    assert!(!shows(&rows, "Mapping failed"), "{rows:#?}");
+    shell.key(Key::BackTab);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Save changes"), "{rows:#?}");
+    assert!(!shows(&rows, "Retry mapping"), "{rows:#?}");
 }
 
 #[test]

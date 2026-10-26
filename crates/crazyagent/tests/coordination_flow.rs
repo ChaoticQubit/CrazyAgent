@@ -25,7 +25,7 @@ impl Harness {
     }
 
     async fn with_routing(routing: &str) -> Self {
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(
             root.path().join("g"),

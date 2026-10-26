@@ -464,6 +464,12 @@ impl Engine {
     }
 }
 
+/// Encodes this protocol's refusal of a request the engine did not run.
+/// Input: the refusal code. Output: the reply frame.
+pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
+    encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
+}
+
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -613,28 +619,35 @@ async fn handle(
             let root = engine_root(authority)?;
             let reference = crate::storage::plugins::new_secret_reference()?;
             crate::storage::plugins::store_secret(&root, &reference, secret.into_bytes())?;
-            let attached = actor(
-                engine,
-                Command::AttachSecret {
-                    id,
-                    name,
-                    reference: reference.clone(),
-                },
-            )
-            .await;
-            match attached {
-                Ok(ResultValue::Secret(view, replaced)) => {
-                    if let Some(old) = replaced {
-                        crate::storage::plugins::remove_secret(&root, &old)?;
-                    }
-                    Reply::Server { server: *view }
-                }
-                Ok(_) => return Err(unknown()),
-                Err(problem) => {
-                    let _ = crate::storage::plugins::remove_secret(&root, &reference);
-                    return Err(problem);
-                }
-            }
+            let stored = reference.clone();
+            let attached = engine
+                .settled_job(
+                    |reply| {
+                        Job::Plugins(
+                            Command::AttachSecret {
+                                id,
+                                name,
+                                reference,
+                            },
+                            reply,
+                        )
+                    },
+                    move |result| match result {
+                        Ok(ResultValue::Secret(_, Some(old))) => {
+                            crate::storage::plugins::remove_secret(&root, old)
+                        }
+                        Ok(_) => Ok(()),
+                        Err(_) => {
+                            let _ = crate::storage::plugins::remove_secret(&root, &stored);
+                            Ok(())
+                        }
+                    },
+                )
+                .await?;
+            let ResultValue::Secret(view, _) = attached else {
+                return Err(unknown());
+            };
+            Reply::Server { server: *view }
         }
         Action::RemoveSecret { id, name } => {
             let ResultValue::Secret(view, removed) =

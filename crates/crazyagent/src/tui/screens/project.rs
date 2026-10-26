@@ -1,6 +1,7 @@
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
-use super::project_markdown::{MdLine, render};
+use super::new_project_view::wrap_words;
+use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -17,6 +18,8 @@ use std::path::PathBuf;
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
 const MEMORY_BYTES_MAX: usize = 4096;
+pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
+pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 256;
 const STACK_BYTES_MAX: usize = 2048;
@@ -180,8 +183,8 @@ pub(in crate::tui) struct Transcript {
 }
 
 /// A loaded context file for the reader.
-/// Holds the path inside the project folder, the text read so far and where the next chunk starts.
-/// Rendered lines are cached per width.
+/// Holds the path inside the project folder, the text read so far, where the next chunk starts,
+/// whether a chunk has arrived and why the read failed. Rendered lines are cached per width.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(in crate::tui) struct Preview {
     pub path: String,
@@ -189,6 +192,8 @@ pub(in crate::tui) struct Preview {
     pub binary: bool,
     pub next: Option<u64>,
     pub scroll: usize,
+    pub loaded: bool,
+    pub problem: Option<String>,
     cache: Option<(usize, Vec<MdLine>)>,
 }
 
@@ -218,6 +223,33 @@ pub(in crate::tui) struct MemoryEdit {
     pub entry: RequestId,
     pub version: u64,
     pub input: TextInput,
+}
+
+/// The whole text of a suggested memory, shown before the owner saves it.
+/// Holds the memory, its stored text and the first line on screen.
+/// y saves once the last line is on screen; e edits, n dismisses, Esc goes back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct MemoryReview {
+    pub entry: RequestId,
+    pub version: u64,
+    pub text: String,
+    pub scroll: usize,
+}
+
+impl MemoryReview {
+    /// Wraps the memory the way the review box shows it.
+    /// Takes nothing; hidden characters show as escapes and terminal controls are dropped.
+    /// Returns the lines, at most REVIEW_WIDTH cells each.
+    pub fn lines(&self) -> Vec<String> {
+        wrap_words(&sanitize(&self.text), REVIEW_WIDTH)
+    }
+
+    /// Tells whether the last line of the memory is on screen.
+    /// Takes nothing.
+    /// Returns true once the owner has scrolled to the end.
+    pub fn at_end(&self) -> bool {
+        self.scroll + REVIEW_ROWS >= self.lines().len()
+    }
 }
 
 /// The Add file box over the Context tab: the full path of one file to copy
@@ -452,6 +484,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub preview: Option<Preview>,
     pub reading: bool,
     pub edit: Option<MemoryEdit>,
+    pub review: Option<MemoryReview>,
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
@@ -466,6 +499,7 @@ pub(in crate::tui) struct ProjectScreen {
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
     memories_read_ms: Option<i64>,
+    setup_failed_ms: Option<i64>,
     setup_due: bool,
     waiting: Option<SetupQuery>,
 }
@@ -501,6 +535,7 @@ impl ProjectScreen {
             preview: None,
             reading: false,
             edit: None,
+            review: None,
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
@@ -514,6 +549,7 @@ impl ProjectScreen {
             jobs_read_ms: None,
             context_read_ms: None,
             memories_read_ms: None,
+            setup_failed_ms: None,
             setup_due: false,
             waiting: None,
         }
@@ -543,20 +579,21 @@ impl ProjectScreen {
         }
         let project = self.project.clone();
         let due = |last: Option<i64>| last.is_none_or(|last| now_ms - last >= REFRESH_MS);
-        let query = if (self.setup.is_none() || self.setup_due) && !self.setup_missing {
+        let setup_wanted = (self.setup.is_none() || self.setup_due) && !self.setup_missing;
+        let query = if setup_wanted && due(self.setup_failed_ms) {
             SetupQuery::Setup { project }
-        } else if self.setup_missing {
+        } else if self.setup_missing || self.setup.is_none() {
             return None;
         } else if self.jobs_read_ms.is_none() || (due(self.jobs_read_ms) && self.jobs_live()) {
             SetupQuery::Jobs { project }
         } else if let Some(job) = self.log_due(now_ms) {
             SetupQuery::Log { project, job }
-        } else if self.context.is_none()
-            || (matches!(self.tab, Tab::Context) && due(self.context_read_ms))
+        } else if due(self.context_read_ms)
+            && (self.context.is_none() || matches!(self.tab, Tab::Context))
         {
             SetupQuery::Context { project }
-        } else if self.memories.is_none()
-            || (matches!(self.tab, Tab::Overview) && due(self.memories_read_ms))
+        } else if due(self.memories_read_ms)
+            && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
             SetupQuery::Memories {
                 project,
@@ -565,7 +602,7 @@ impl ProjectScreen {
         } else if let Some(preview) = self
             .preview
             .as_ref()
-            .filter(|p| p.text.is_empty() && !p.binary)
+            .filter(|p| p.text.is_empty() && !p.binary && !p.loaded && p.problem.is_none())
         {
             SetupQuery::Item {
                 project,
@@ -669,8 +706,20 @@ impl ProjectScreen {
                     return;
                 }
                 match query {
-                    SetupQuery::Setup { .. } => self.setup_due = false,
+                    SetupQuery::Setup { .. } => {
+                        self.setup_due = false;
+                        self.setup_failed_ms = Some(self.now_ms);
+                    }
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
+                    SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
+                    SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
+                    SetupQuery::Item { path, .. } => {
+                        if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
+                            preview.next = None;
+                            preview.problem = Some(plain_problem(&problem));
+                            preview.cache = None;
+                        }
+                    }
                     SetupQuery::Log { job, .. } => self.log_read(*job, None),
                     SetupQuery::Change {
                         action:
@@ -688,6 +737,7 @@ impl ProjectScreen {
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
                 self.setup_due = false;
+                self.setup_failed_ms = None;
             }
             SetupView::Setup(None) => self.setup_missing = true,
             SetupView::Jobs(jobs) => {
@@ -706,6 +756,7 @@ impl ProjectScreen {
             }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
+                    preview.loaded = true;
                     match chunk.text {
                         Some(text) => {
                             preview.text.push_str(&text);
@@ -908,6 +959,9 @@ impl ProjectScreen {
         if self.edit.is_some() {
             return self.edit_key(key);
         }
+        if self.review.is_some() {
+            return self.review_key(key);
+        }
         if self.adding.is_some() {
             return self.add_key(key);
         }
@@ -1005,6 +1059,9 @@ impl ProjectScreen {
     pub fn paste(&mut self, text: &str) -> ProjectReply {
         if let Some(edit) = self.edit.as_mut() {
             edit.input.insert_str(text);
+            return ProjectReply::Handled;
+        }
+        if self.review.is_some() {
             return ProjectReply::Handled;
         }
         if let Some(adding) = self.adding.as_mut().filter(|adding| !adding.busy) {
@@ -1120,25 +1177,85 @@ impl ProjectScreen {
         let Some((entry, version, text)) = memory else {
             return ProjectReply::Handled;
         };
-        let decision = match code {
-            KeyCode::Char('y') => ReviewDecision::Keep,
-            KeyCode::Char('n') => ReviewDecision::Reject,
-            _ => {
-                let mut input = TextInput::multi(MEMORY_BYTES_MAX);
-                input.set(&super::project_markdown::sanitize(&text));
-                self.edit = Some(MemoryEdit {
+        match code {
+            KeyCode::Char('y') => {
+                self.review = Some(MemoryReview {
                     entry,
                     version,
-                    input,
+                    text,
+                    scroll: 0,
                 });
-                return ProjectReply::Handled;
+                ProjectReply::Handled
             }
-        };
-        ProjectReply::Review {
+            KeyCode::Char('n') => ProjectReply::Review {
+                entry,
+                version,
+                decision: ReviewDecision::Reject,
+            },
+            _ => {
+                self.edit_memory(entry, version, &text);
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    fn edit_memory(&mut self, entry: RequestId, version: u64, text: &str) {
+        let mut input = TextInput::multi(MEMORY_BYTES_MAX);
+        input.set(&sanitize(text));
+        self.edit = Some(MemoryEdit {
             entry,
             version,
-            decision,
+            input,
+        });
+    }
+
+    fn review_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(review) = self.review.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        let last = review.lines().len().saturating_sub(REVIEW_ROWS);
+        match key.code {
+            KeyCode::Esc => self.review = None,
+            KeyCode::Up => review.scroll = review.scroll.saturating_sub(1),
+            KeyCode::Down => review.scroll = (review.scroll + 1).min(last),
+            KeyCode::PageUp => review.scroll = review.scroll.saturating_sub(REVIEW_ROWS),
+            KeyCode::PageDown => review.scroll = (review.scroll + REVIEW_ROWS).min(last),
+            KeyCode::Char('y') if review.at_end() => {
+                let Some(review) = self.review.take() else {
+                    return ProjectReply::Ignored;
+                };
+                let shown = sanitize(&review.text);
+                let decision = if shown == review.text {
+                    ReviewDecision::Keep
+                } else {
+                    ReviewDecision::Edit {
+                        text: shown.trim().to_owned(),
+                    }
+                };
+                return ProjectReply::Review {
+                    entry: review.entry,
+                    version: review.version,
+                    decision,
+                };
+            }
+            KeyCode::Char('n') => {
+                let Some(review) = self.review.take() else {
+                    return ProjectReply::Ignored;
+                };
+                return ProjectReply::Review {
+                    entry: review.entry,
+                    version: review.version,
+                    decision: ReviewDecision::Reject,
+                };
+            }
+            KeyCode::Char('e') => {
+                if let Some(review) = self.review.take() {
+                    self.edit_memory(review.entry, review.version, &review.text);
+                }
+            }
+            _ => {}
         }
+        ProjectReply::Handled
     }
 
     fn overview_key(&mut self, key: KeyEvent) -> ProjectReply {
@@ -1271,7 +1388,11 @@ impl ProjectScreen {
         if let Some(index) = self.tree().iter().position(|item| item.path == path) {
             self.tree_cursor = index;
         }
-        if self.preview.as_ref().is_none_or(|p| p.path != path) {
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|p| p.path != path || p.problem.is_some())
+        {
             self.preview = Some(Preview {
                 path: path.to_owned(),
                 ..Preview::default()
@@ -1567,11 +1688,15 @@ impl ProjectScreen {
         assert!(self.confirm_stop.is_none() || self.confirm_delete.is_none());
         let boxes = [
             self.edit.is_some(),
+            self.review.is_some(),
             self.adding.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if let Some(review) = &self.review {
+            assert!(review.scroll < review.lines().len().max(1));
+        }
         if let Some(general) = &self.general {
             assert!(general.cursor < GENERAL_FIELDS);
         }
@@ -1674,6 +1799,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "project_spec_bounds" => "Enter a project name of 1 to 256 characters.",
         "project_setup_bounds" => "Some answers are too long or repeated. Check each one.",
+        "team_harness_unavailable" => {
+            "A harness in this team can't run team agents yet. Pick another harness."
+        }
         "project_about_invalid" => {
             "The description is too long or has characters that can't be saved."
         }

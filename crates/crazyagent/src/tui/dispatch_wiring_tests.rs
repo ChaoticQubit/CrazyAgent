@@ -209,7 +209,7 @@ async fn exercise(socket: PathBuf, config_id: ConfigId, service: Arc<Mutex<Engin
 async fn actual_selected_attempt_owner_socket_read_and_revoke_are_honest() {
     let root = tempfile::Builder::new()
         .prefix("ca-dispatch-ui-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");

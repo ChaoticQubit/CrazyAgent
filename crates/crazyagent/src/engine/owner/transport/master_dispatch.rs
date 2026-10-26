@@ -6,7 +6,7 @@ use crate::master_session::{MasterOwnerAction, TURNS_MAX};
 use crate::protocol::{ProjectId, RequestId, SessionId};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::{Instant, timeout_at};
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
@@ -18,11 +18,17 @@ struct Dispatch {
     project_id: ProjectId,
     session_id: SessionId,
     turn_id: RequestId,
-    task: Option<JoinHandle<Result<(), EngineError>>>,
+    task: Id,
+    finished: bool,
 }
 
+/// The master turn drivers this engine run started, at most `TURNS_MAX` remembered. A
+/// finished driver is joined and its result recorded as soon as the next turn arrives, so
+/// only live drivers count against the bound; finished entries stay, oldest evicted
+/// first, so a repeated commit of a recent turn never starts a second driver.
 pub(super) struct MasterDispatch {
     entries: Vec<Dispatch>,
+    tasks: JoinSet<Result<(), EngineError>>,
     closing: Option<Instant>,
     uncertain: bool,
     first_error: Option<String>,
@@ -33,12 +39,40 @@ impl MasterDispatch {
     pub(super) fn new() -> Self {
         let dispatcher = Self {
             entries: Vec::new(),
+            tasks: JoinSet::new(),
             closing: None,
             uncertain: false,
             first_error: None,
         };
         dispatcher.assert_consistent();
         dispatcher
+    }
+
+    /// Checks, before storage commits a master Submit, that its driver could start now,
+    /// so a refusal reaches the owner as a request that changed nothing. Finished drivers
+    /// are reaped first. Input: the request; any other request passes. Output: Ok, or
+    /// `master_dispatch_stopped` or `master_dispatch_capacity`.
+    pub(super) fn room(&mut self, request: &OwnerRequest) -> Result<(), EngineError> {
+        self.assert_consistent();
+        if !matches!(
+            &request.operation,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Submit { .. }
+                }
+            }
+        ) {
+            return Ok(());
+        }
+        if self.closing.is_some() {
+            return Err(failure("master_dispatch_stopped"));
+        }
+        self.reap();
+        if self.entries.len() == TURNS_MAX && self.entries.iter().all(|entry| !entry.finished) {
+            return Err(failure("master_dispatch_capacity"));
+        }
+        self.assert_consistent();
+        Ok(())
     }
 
     pub(super) fn committed(
@@ -76,6 +110,7 @@ impl MasterDispatch {
             return Ok(false);
         }
         validate_commit(&runtime, request, operation)?;
+        self.reap();
         if self.entries.iter().any(|entry| {
             entry.project_id == *project_id
                 && entry.session_id == *session_id
@@ -84,40 +119,49 @@ impl MasterDispatch {
             return Ok(false);
         }
         if self.entries.len() == TURNS_MAX {
-            return Err(failure("master_dispatch_capacity"));
+            let oldest = self
+                .entries
+                .iter()
+                .position(|entry| entry.finished)
+                .ok_or_else(|| failure("master_dispatch_capacity"))?;
+            self.entries.remove(oldest);
         }
         let executor = tokio::runtime::Handle::try_current()
             .map_err(|_| failure("master_dispatch_runtime_unavailable"))?;
         let project = project_id.clone();
         let session = session_id.clone();
         let turn = request.request_id.clone();
-        let task = executor.spawn(async move {
-            let result = drive_until_settled(
-                || async {
-                    runtime
-                        .drive_master_turn(&project, &session, &turn)
-                        .await
-                        .map(|_| ())
-                },
-                DRIVE_PAUSE,
-            )
-            .await;
-            if let Err(error) = &result {
-                eprintln!(
-                    "master_turn_not_completed cause={}",
-                    super::native_auth_dispatch_diagnostic(error)
-                );
-                if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
-                    eprintln!("master_turn_debug_cause={}", error.0.escape_debug());
+        let task = self.tasks.spawn_on(
+            async move {
+                let result = drive_until_settled(
+                    || async {
+                        runtime
+                            .drive_master_turn(&project, &session, &turn)
+                            .await
+                            .map(|_| ())
+                    },
+                    DRIVE_PAUSE,
+                )
+                .await;
+                if let Err(error) = &result {
+                    eprintln!(
+                        "master_turn_not_completed cause={}",
+                        super::native_auth_dispatch_diagnostic(error)
+                    );
+                    if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+                        eprintln!("master_turn_debug_cause={}", error.0.escape_debug());
+                    }
                 }
-            }
-            result
-        });
+                result
+            },
+            &executor,
+        );
         self.entries.push(Dispatch {
             project_id: project_id.clone(),
             session_id: session_id.clone(),
             turn_id: request.request_id.clone(),
-            task: Some(task),
+            task: task.id(),
+            finished: false,
         });
         self.assert_consistent();
         Ok(true)
@@ -128,26 +172,21 @@ impl MasterDispatch {
         let deadline = *self
             .closing
             .get_or_insert_with(|| Instant::now() + SHUTDOWN_GRACE);
-        for index in 0..self.entries.len() {
-            let Some(task) = self.entries[index].task.as_mut() else {
-                continue;
-            };
-            match timeout_at(deadline, task).await {
-                Ok(result) => {
-                    drop(self.entries[index].task.take());
-                    self.record_join(result);
-                }
+        while !self.tasks.is_empty() {
+            match timeout_at(deadline, self.tasks.join_next_with_id()).await {
+                Ok(Some(joined)) => self.joined(joined),
+                Ok(None) => break,
                 Err(_) => {
                     self.uncertain = true;
-                    break;
+                    self.tasks.abort_all();
+                    while let Some(joined) = self.tasks.join_next_with_id().await {
+                        self.joined(joined);
+                    }
                 }
             }
         }
-        if self.uncertain {
-            self.abort_remaining();
-            self.join_remaining().await;
-        }
-        assert!(self.entries.iter().all(|entry| entry.task.is_none()));
+        assert!(self.tasks.is_empty());
+        assert!(self.entries.iter().all(|entry| entry.finished));
         self.assert_consistent();
         if self.uncertain {
             Err(failure("master_dispatch_cleanup_uncertain"))
@@ -158,8 +197,24 @@ impl MasterDispatch {
         }
     }
 
-    fn record_join(&mut self, result: Result<Result<(), EngineError>, tokio::task::JoinError>) {
-        assert!(self.closing.is_some());
+    fn reap(&mut self) {
+        while let Some(joined) = self.tasks.try_join_next_with_id() {
+            self.joined(joined);
+        }
+    }
+
+    fn joined(&mut self, joined: Result<(Id, Result<(), EngineError>), JoinError>) {
+        let (id, result) = match joined {
+            Ok((id, result)) => (id, Ok(result)),
+            Err(error) => (error.id(), Err(error)),
+        };
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.task == id)
+            .expect("every master driver task keeps its entry until it is joined");
+        assert!(!entry.finished);
+        entry.finished = true;
         match result {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -169,40 +224,12 @@ impl MasterDispatch {
         }
     }
 
-    fn abort_remaining(&self) {
-        for entry in &self.entries {
-            if let Some(task) = &entry.task {
-                task.abort();
-            }
-        }
-    }
-
-    async fn join_remaining(&mut self) {
-        assert!(self.closing.is_some());
-        assert!(self.uncertain);
-        for index in 0..self.entries.len() {
-            let Some(task) = self.entries[index].task.as_mut() else {
-                continue;
-            };
-            let result = task.await;
-            drop(self.entries[index].task.take());
-            self.record_join(result);
-        }
-        assert!(self.entries.iter().all(|entry| entry.task.is_none()));
-    }
-
     fn assert_consistent(&self) {
         assert!(self.entries.len() <= TURNS_MAX);
-        if self.closing.is_none() {
-            assert!(!self.uncertain && self.first_error.is_none());
-            assert!(self.entries.iter().all(|entry| entry.task.is_some()));
-        }
-    }
-}
-
-impl Drop for MasterDispatch {
-    fn drop(&mut self) {
-        self.abort_remaining();
+        assert_eq!(
+            self.entries.iter().filter(|entry| !entry.finished).count(),
+            self.tasks.len()
+        );
     }
 }
 

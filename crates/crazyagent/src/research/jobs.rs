@@ -251,17 +251,22 @@ impl ResearchJobs {
         Ok(job)
     }
 
-    /// Records liveness and output size; returns whether cancel was requested.
-    pub fn heartbeat(&self, id: i64, claimer: &str, output_bytes: u64) -> Result<bool, JobError> {
+    /// Records liveness and output size for the claim `held`, the job a claim
+    /// returned; returns whether cancel was requested. A claim is fenced by its
+    /// claimer and attempt, so a run whose claim stale recovery took back is no
+    /// longer held once the job is claimed again, even by the same runner.
+    pub fn heartbeat(&self, held: &ResearchJob, output_bytes: u64) -> Result<bool, JobError> {
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
         let cancel = self
             .connection
             .query_row(
-                "UPDATE research_jobs SET heartbeat_ms = ?3, output_bytes = ?4
-                 WHERE id = ?1 AND claimer = ?2 AND status = 'running'
+                "UPDATE research_jobs SET heartbeat_ms = ?4, output_bytes = ?5
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING cancel_requested",
                 params![
-                    id,
+                    held.id,
                     claimer,
+                    held.attempts,
                     now_ms(),
                     output_bytes.min(i64::MAX as u64) as i64
                 ],
@@ -271,23 +276,23 @@ impl ResearchJobs {
         cancel.ok_or(JobError::NotHeld)
     }
 
-    /// Marks a held job done with its report path inside the project folder.
-    pub fn finish(&self, id: i64, claimer: &str, report_path: &str) -> Result<(), JobError> {
+    /// Marks the job of the claim `held` done with its report path inside the
+    /// project folder.
+    pub fn finish(&self, held: &ResearchJob, report_path: &str) -> Result<(), JobError> {
         bounded(report_path, REPORT_PATH_BYTES_MAX)?;
         self.transition(
-            id,
-            claimer,
-            "status = 'done', report_path = ?3, finished_ms = ?4, claimer = NULL",
+            held,
+            "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL",
             &[&report_path, &now_ms()],
         )
     }
 
-    /// Records a failed attempt: requeues while attempts remain under
-    /// `attempts_max`, otherwise marks the job failed. Returns the new status.
+    /// Records a failed attempt of the claim `held`: a job whose cancel was
+    /// requested ends cancelled, otherwise it requeues while attempts remain under
+    /// `attempts_max`, otherwise it is marked failed. Returns the new status.
     pub fn fail(
         &self,
-        id: i64,
-        claimer: &str,
+        held: &ResearchJob,
         error: &str,
         attempts_max: u32,
     ) -> Result<ResearchStatus, JobError> {
@@ -295,15 +300,24 @@ impl ResearchJobs {
             return Err(JobError::Invalid("attempt limit must be 1..10"));
         }
         let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
         let status = self
             .connection
             .query_row(
                 "UPDATE research_jobs
-                 SET status = CASE WHEN attempts < ?4 THEN 'queued' ELSE 'failed' END,
-                     error = ?3, finished_ms = ?5, claimer = NULL
-                 WHERE id = ?1 AND claimer = ?2 AND status = 'running'
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled'
+                                   WHEN attempts < ?5 THEN 'queued' ELSE 'failed' END,
+                     error = ?4, finished_ms = ?6, claimer = NULL
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
-                params![id, claimer, error, attempts_max, now_ms()],
+                params![
+                    held.id,
+                    claimer,
+                    held.attempts,
+                    error,
+                    attempts_max,
+                    now_ms()
+                ],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -311,19 +325,36 @@ impl ResearchJobs {
         let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
         assert!(matches!(
             status,
-            ResearchStatus::Queued | ResearchStatus::Failed
+            ResearchStatus::Queued | ResearchStatus::Failed | ResearchStatus::Cancelled
         ));
         Ok(status)
     }
 
-    /// Parks a held job until its project has a pool, without using an attempt.
-    pub fn needs_pool(&self, id: i64, claimer: &str) -> Result<(), JobError> {
-        self.transition(
-            id,
-            claimer,
-            "status = 'needs_pool', attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL",
-            &[],
-        )
+    /// Parks the job of the claim `held` until its project has a pool, without
+    /// using an attempt; a job whose cancel was requested ends cancelled instead.
+    /// Returns the new status.
+    pub fn needs_pool(&self, held: &ResearchJob) -> Result<ResearchStatus, JobError> {
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let status = self
+            .connection
+            .query_row(
+                "UPDATE research_jobs
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'needs_pool' END,
+                     finished_ms = CASE WHEN cancel_requested = 1 THEN ?4 ELSE finished_ms END,
+                     attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
+                 RETURNING status",
+                params![held.id, claimer, held.attempts, now_ms()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JobError::NotHeld)?;
+        let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
+        assert!(matches!(
+            status,
+            ResearchStatus::NeedsPool | ResearchStatus::Cancelled
+        ));
+        Ok(status)
     }
 
     /// Requeues every job of `project` for `harness` that waited for a pool.
@@ -355,12 +386,11 @@ impl ResearchJobs {
         )?)
     }
 
-    /// Returns a held job to the queue without spending its attempt, for a run
-    /// the engine itself interrupted.
-    pub fn release(&self, id: i64, claimer: &str) -> Result<(), JobError> {
+    /// Returns the job of the claim `held` to the queue without spending its
+    /// attempt, for a run the engine itself interrupted.
+    pub fn release(&self, held: &ResearchJob) -> Result<(), JobError> {
         self.transition(
-            id,
-            claimer,
+            held,
             "status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, attempts = attempts - 1, claimer = NULL",
             &[],
         )
@@ -398,12 +428,12 @@ impl ResearchJobs {
         Ok(changed == 1)
     }
 
-    /// Marks a held, cancel-flagged job cancelled after its process stopped.
-    pub fn cancelled(&self, id: i64, claimer: &str) -> Result<(), JobError> {
+    /// Marks the cancel-flagged job of the claim `held` cancelled after its
+    /// process stopped.
+    pub fn cancelled(&self, held: &ResearchJob) -> Result<(), JobError> {
         self.transition(
-            id,
-            claimer,
-            "status = 'cancelled', finished_ms = ?3, claimer = NULL",
+            held,
+            "status = 'cancelled', finished_ms = ?4, claimer = NULL",
             &[&now_ms()],
         )
     }
@@ -474,18 +504,18 @@ impl ResearchJobs {
 
     fn transition(
         &self,
-        id: i64,
-        claimer: &str,
+        held: &ResearchJob,
         assignments: &str,
         values: &[&dyn rusqlite::ToSql],
     ) -> Result<(), JobError> {
         assert!(values.len() <= 2);
-        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&id, &claimer];
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&held.id, &claimer, &held.attempts];
         bound.extend_from_slice(values);
         let changed = self.connection.execute(
             &format!(
                 "UPDATE research_jobs SET {assignments}
-                 WHERE id = ?1 AND claimer = ?2 AND status = 'running'"
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'"
             ),
             bound.as_slice(),
         )?;

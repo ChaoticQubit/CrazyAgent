@@ -1,0 +1,327 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NODE_VERSION: "26.12.1"
+  BUN_VERSION: "1.4.3"
+  RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
+  RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
+  ARTIFACT_SIGNING_CLIENT_VERSION: "1.0.146"
+  ARTIFACT_SIGNING_CLIENT_SHA256: 7761e5d8f31e54b764da21d33cd8b0a2940e1b05526c7dfcb5e94b0431426f70
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = tag ]; then
+            version="$(node scripts/release/version.mjs stable "$REF_NAME")"
+            channel=stable
+            tag="$REF_NAME"
+          else
+            version="$(node scripts/release/version.mjs dev)"
+            channel=dev
+            tag=dev
+          fi
+          {
+            echo "version=$version"
+            echo "channel=$channel"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $version on channel $channel"
+
+  ci:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [prepare, ci]
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            os: macos
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            os: macos
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            os: linux
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            os: windows
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      CHANNEL: ${{ needs.prepare.outputs.channel }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
+          ref: ${{ env.RCLI_SOURCE_REVISION }}
+          path: .local-state/tools/rcli-source
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - id: bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install Linux build packages
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential file patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
+      - name: Install SQLite for Windows
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: release-${{ matrix.target }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      - name: Set release version
+        run: node scripts/release/version.mjs set "$VERSION"
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install rcli source dependencies
+        working-directory: .local-state/tools/rcli-source
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build command line binaries
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "$TARGET" -p crazyagent --bins
+          if [ "$PLATFORM" = windows ]; then
+            cargo build --release --locked --target "$TARGET" -p crazyagent-win-sandbox --bin crazyagent-win-boundary
+          fi
+      - name: Build rcli host
+        env:
+          BUN_PATH: ${{ steps.bun.outputs.bun-path }}
+        run: |
+          set -euo pipefail
+          exe=""
+          if [ "$PLATFORM" = windows ]; then exe=".exe"; fi
+          mkdir -p "$RUNNER_TEMP/rcli"
+          node scripts/release/rcli.mjs --sdk "$GITHUB_WORKSPACE/.local-state/tools/rcli-source" --bun "$BUN_PATH" --output "$RUNNER_TEMP/rcli/crazyagent-rcli$exe"
+          echo "RCLI_HOST=$RUNNER_TEMP/rcli/crazyagent-rcli$exe" >> "$GITHUB_ENV"
+      - name: Stage desktop sidecars
+        run: node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "target/$TARGET/release" --rcli "$RCLI_HOST" --tauri-dir apps/desktop/src-tauri
+      - name: Prepare Windows signing tools
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/artifact-signing.nupkg"
+          curl -fsSL --retry 3 -o "$package" "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$ARTIFACT_SIGNING_CLIENT_VERSION/microsoft.artifactsigning.client.$ARTIFACT_SIGNING_CLIENT_VERSION.nupkg"
+          echo "$ARTIFACT_SIGNING_CLIENT_SHA256  $package" | sha256sum -c -
+          unzip -q "$package" -d "$RUNNER_TEMP/artifact-signing"
+          signtool="/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/signtool.exe"
+          test -f "$signtool"
+          test -f "$RUNNER_TEMP/artifact-signing/bin/x64/Azure.CodeSigning.Dlib.dll"
+          {
+            echo "CRAZYAGENT_SIGNTOOL=$(cygpath -w "$signtool")"
+            echo "CRAZYAGENT_SIGNING_DLIB=$(cygpath -w "$RUNNER_TEMP/artifact-signing/bin/x64/Azure.CodeSigning.Dlib.dll")"
+          } >> "$GITHUB_ENV"
+      - id: desktop
+        name: Build desktop bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ matrix.os == 'macos' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.os == 'macos' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_TEAM_ID: ${{ matrix.os == 'macos' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_API_KEY: ${{ matrix.os == 'macos' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_ISSUER: ${{ matrix.os == 'macos' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY_CONTENT: ${{ matrix.os == 'macos' && secrets.APPLE_API_KEY_PATH || '' }}
+          APPLE_ID: ${{ matrix.os == 'macos' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.os == 'macos' && secrets.APPLE_PASSWORD || '' }}
+          AZURE_CLIENT_ID: ${{ matrix.os == 'windows' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ matrix.os == 'windows' && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_TENANT_ID: ${{ matrix.os == 'windows' && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ matrix.os == 'windows' && secrets.AZURE_TRUSTED_SIGNING_ENDPOINT || '' }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ matrix.os == 'windows' && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT || '' }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ matrix.os == 'windows' && secrets.AZURE_TRUSTED_SIGNING_PROFILE || '' }}
+        run: |
+          set -euo pipefail
+          key_dir="$RUNNER_TEMP/apple"
+          trap 'rm -rf "$key_dir"' EXIT
+          if [ -n "$APPLE_API_KEY_CONTENT" ]; then
+            (umask 077 && mkdir -p "$key_dir" && printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key_dir/AuthKey.p8")
+            export APPLE_API_KEY_PATH="$key_dir/AuthKey.p8"
+          fi
+          unset APPLE_API_KEY_CONTENT
+          for name in TAURI_SIGNING_PRIVATE_KEY_PASSWORD APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_TEAM_ID APPLE_API_KEY APPLE_API_ISSUER APPLE_ID APPLE_PASSWORD AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT AZURE_TRUSTED_SIGNING_PROFILE; do
+            if [ -z "${!name}" ]; then unset "$name"; fi
+          done
+          status="$(node scripts/release/signing.mjs "$PLATFORM" "$CHANNEL")"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "Platform signing: $status"
+          if [ "$CHANNEL" = stable ]; then export CRAZYAGENT_REQUIRE_SIGNING=1; fi
+          if [ "$PLATFORM" = windows ]; then
+            for binary in apps/desktop/src-tauri/binaries/*.exe; do node scripts/release/sign-windows.mjs "$binary"; done
+          fi
+          rm -rf "target/$TARGET/release/bundle"
+          cd apps/desktop
+          node node_modules/@tauri-apps/cli/tauri.js build --ci --target "$TARGET" --config src-tauri/binaries/release.conf.json
+      - name: Package release assets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIGNING_STATUS: ${{ steps.desktop.outputs.status }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then unset TAURI_SIGNING_PRIVATE_KEY_PASSWORD; fi
+          bundle="target/$TARGET/release/bundle"
+          mkdir -p dist signing
+          if [ "$PLATFORM" = macos ]; then
+            node scripts/release/assets.mjs package --target "$TARGET" --version "$VERSION" --source "$bundle/macos/CrazyAgent.app/Contents/MacOS" --out dist --sign
+          else
+            node scripts/release/assets.mjs package --target "$TARGET" --version "$VERSION" --source apps/desktop/src-tauri/binaries --suffixed --out dist --sign
+          fi
+          node scripts/release/assets.mjs collect --target "$TARGET" --version "$VERSION" --bundle-dir "$bundle" --out dist
+          printf '%s\n' "$SIGNING_STATUS" > "signing/$TARGET.txt"
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: signing-${{ matrix.target }}
+          path: signing/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      CHANNEL: ${{ needs.prepare.outputs.channel }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: signing-*
+          path: signing
+          merge-multiple: true
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA:0:7}"
+          if [ "$CHANNEL" = stable ]; then
+            printf 'CrazyAgent %s\n' "$VERSION" > notes.txt
+          else
+            printf 'Dev build %s of %s.\n' "$VERSION" "$short" > notes.txt
+          fi
+          for file in signing/*.txt; do
+            if [ "$(cat "$file")" = unsigned ]; then
+              printf 'Not code signed: %s\n' "$(basename "$file" .txt)" >> notes.txt
+            fi
+          done
+          cat notes.txt
+      - name: Write update manifests and checksums
+        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --notes "$(cat notes.txt)"
+      - name: Publish dev prerelease
+        if: needs.prepare.outputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view dev --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete dev --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev" > /dev/null 2>&1; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev"
+          fi
+          gh release create dev --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --target "$GITHUB_SHA" --title "Dev build $VERSION" --notes-file notes.txt dist/*
+      - name: Publish stable release
+        if: needs.prepare.outputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "CrazyAgent $VERSION" --notes-file notes.txt
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" dist/*
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

@@ -177,7 +177,7 @@ impl Drop for Runner {
 fn private_root() -> tempfile::TempDir {
     let root = tempfile::Builder::new()
         .prefix("ca-rd-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     root
@@ -374,7 +374,11 @@ where
 }
 
 impl Context {
-    async fn prepare_delivery(&self, paused: bool) -> (Runner, RequestId, RunnerReady) {
+    async fn prepare_delivery(
+        &self,
+        paused: bool,
+        preclaim: bool,
+    ) -> (Runner, RequestId, RunnerReady) {
         let repository = self.root.join("repository");
         fs::create_dir(&repository).unwrap();
         git(&self.root, &repository, "init", &["init", "-b", "main"]);
@@ -570,6 +574,35 @@ impl Context {
             item_id: binding.task_id.clone(),
             reservation_cursor: reservation.cursor.clone(),
         };
+        if preclaim {
+            for command in [
+                Command::CoordinationState {
+                    plan_id: plan.id.clone(),
+                },
+                Command::TaskContext {
+                    task_id: scope.task_id.clone(),
+                },
+            ] {
+                let engine_key = format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&command).unwrap())
+                );
+                let claimed = client
+                    .request(WireRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        client_id: ClientId::new("trusted-runner-host").unwrap(),
+                        request_id: RequestId::new(engine_key).unwrap(),
+                        expected_revision: Cursor::new(1),
+                        command,
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    !matches!(claimed.outcome, Outcome::Rejected { .. }),
+                    "{claimed:?}"
+                );
+            }
+        }
         let allocated = client
             .request(wire(
                 "allocate",
@@ -621,7 +654,7 @@ impl Context {
     }
 
     async fn delivered(&self) -> (Runner, RequestId) {
-        let (runner, dispatch, _) = self.prepare_delivery(false).await;
+        let (runner, dispatch, _) = self.prepare_delivery(false, false).await;
         let actual = exchange(
             &runner.root,
             json!({"kind":"dispatch_status", "dispatch_id":dispatch}),
@@ -643,10 +676,30 @@ impl Context {
     }
 }
 
+/// Security lead V19: an ordinary-socket peer sends the engine's own runner reads first,
+/// under the engine's runner client id and request ids with another revision, so a shared
+/// operations ledger would refuse the engine's later reads of that plan and task. The
+/// reserved attempt must still be prepared, attached and answer Ready.
+#[tokio::test]
+async fn an_ordinary_peer_cannot_pre_claim_the_engines_runner_reads() {
+    with_engine(|context| async move {
+        let (runner, _, ready) = context.prepare_delivery(true, true).await;
+        let client = RunnerClient::new(
+            &runner.root,
+            &ready.registration_id,
+            &ready.boot,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(client.ready().await.unwrap(), ready);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn actual_engine_fence_prevents_unconsumed_generation_delivery() {
     with_engine(|context| async move {
-        let (runner, dispatch, ready) = context.prepare_delivery(true).await;
+        let (runner, dispatch, ready) = context.prepare_delivery(true, false).await;
         let client = RunnerClient::new(
             &runner.root,
             &ready.registration_id,

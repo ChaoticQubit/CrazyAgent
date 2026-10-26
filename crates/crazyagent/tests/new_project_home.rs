@@ -92,7 +92,7 @@ fn one_folder_name_rule_covers_new_projects_and_intake() {
     }
     assert!(plain_problem("home_folder_name_invalid").is_some());
 
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = temp.path().canonicalize().unwrap();
     fs::create_dir(home.join("taken")).unwrap();
     assert_eq!(destination(&home, "free").unwrap(), home.join("free"));
@@ -109,7 +109,7 @@ fn one_folder_name_rule_covers_new_projects_and_intake() {
 
 #[test]
 fn the_state_folder_is_crazyagent_when_present_and_never_a_link() {
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let home_project = root.join("home-project");
     fs::create_dir_all(home_project.join(CRAZYAGENT_DIRECTORY)).unwrap();
@@ -132,7 +132,7 @@ fn the_state_folder_is_crazyagent_when_present_and_never_a_link() {
 
 #[test]
 fn only_plain_unused_top_level_home_folders_can_be_deleted() {
-    let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
     let home = root.join("home");
     for folder in [
@@ -202,7 +202,7 @@ impl Engine {
     async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-new-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -241,6 +241,25 @@ fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
 }
 
+/// The repositories the engine stored in a project's specification, read
+/// from the database in the runtime folder `root`.
+fn repositories(root: &Path, project: &ProjectId) -> Vec<String> {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT body FROM projects WHERE id=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    serde_json::from_value(body["spec"]["repositories"].clone()).unwrap()
+}
+
 fn setup() -> ProjectSetup {
     ProjectSetup {
         about: "Tracks the books I want to read.".into(),
@@ -263,7 +282,7 @@ fn spec(name: &str) -> ProjectSpec {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_project_lands_in_the_home_as_a_ready_git_repository() {
     let engine = Engine::start().await;
-    let place = tempfile::tempdir_in("/private/tmp").unwrap();
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = place.path().canonicalize().unwrap().join("projects");
     fs::create_dir(&home).unwrap();
     let mut owner = OwnerController::attach(
@@ -331,6 +350,10 @@ async fn a_new_project_lands_in_the_home_as_a_ready_git_repository() {
     assert_eq!(entry.state, FoundState::Ready);
     assert_eq!(entry.project_id.as_ref(), Some(&reading));
     assert!(entry.git && entry.known);
+    assert_eq!(
+        repositories(engine.root.path(), &reading),
+        [folder.to_str().unwrap()]
+    );
     let context = owner.project_context(reading.clone()).await.unwrap();
     assert_eq!(context.folder, state.to_str().unwrap());
     assert!(
@@ -458,7 +481,7 @@ fn staging_left(home: &Path) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
     let engine = Engine::with_settings("").await;
-    let place = tempfile::tempdir_in("/private/tmp").unwrap();
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = place.path().canonicalize().unwrap().join("projects");
     fs::create_dir(&home).unwrap();
     let mut owner = OwnerController::attach(

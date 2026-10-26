@@ -4,8 +4,8 @@ use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
 use super::project::{
-    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, Speaker, Tab, Transcript,
-    memory_source, research_kind,
+    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, REVIEW_ROWS, Speaker, Tab,
+    Transcript, memory_source, research_kind,
 };
 use super::project_markdown::{MdLine, Role, render};
 use super::project_time::{clock, duration};
@@ -115,6 +115,52 @@ pub(in crate::tui) fn project_screen(
         return Screen {
             rows,
             cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if let Some(review) = &screen.review {
+        let lines = review.lines();
+        let end = (review.scroll + REVIEW_ROWS).min(lines.len());
+        let mut body: Vec<Row> = lines[review.scroll.min(end)..end]
+            .iter()
+            .map(|line| Row::of(line.clone(), look.fg))
+            .collect();
+        body.resize(REVIEW_ROWS, Row::default());
+        body.push(Row::default());
+        let at_end = review.at_end();
+        body.push(if at_end {
+            Row::of("End of the memory. y saves all of it.", look.muted)
+        } else {
+            Row::of(
+                format!(
+                    "Lines {}-{end} of {}. Read to the end to save it.",
+                    review.scroll + 1,
+                    lines.len()
+                ),
+                look.muted,
+            )
+        });
+        rows = modal(&rows, width, 58, "Save to memory", body, 2, look);
+        help = if at_end {
+            vec![
+                ("y", "Save to memory"),
+                ("e", "Edit first"),
+                ("n", "Dismiss"),
+                ("Esc", "Back"),
+            ]
+        } else {
+            vec![
+                ("Down", "Read on"),
+                ("e", "Edit first"),
+                ("n", "Dismiss"),
+                ("Esc", "Back"),
+            ]
+        };
+        return Screen {
+            rows,
+            cursor: None,
             crumbs,
             help,
             status: header_status(running, look),
@@ -1290,7 +1336,11 @@ fn preview_rows(screen: &mut ProjectScreen, width: usize, room: usize, look: &Lo
         return rows;
     }
     if preview.text.is_empty() {
-        rows.push(Row::of("Loading...", look.muted));
+        rows.push(match &preview.problem {
+            Some(problem) => Row::of(problem.clone(), look.error),
+            None if preview.loaded => Row::of("This file is empty.", look.muted),
+            None => Row::of("Loading...", look.muted),
+        });
         return rows;
     }
     let available = room.saturating_sub(if suggestion.is_some() { 6 } else { 2 });

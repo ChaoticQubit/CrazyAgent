@@ -20,6 +20,8 @@ mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
 mod migrations;
+#[cfg(all(test, unix))]
+pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
     native_sign_in, validate_configured_initial_conversation_receipt,
@@ -78,6 +80,10 @@ pub(crate) enum Job {
     NativeAuthCustodyLost(
         Arc<NativeAuthDispatch>,
         oneshot::Sender<Result<NativeAuthFact, EngineError>>,
+    ),
+    NativeAuthCustodyReleased(
+        Arc<NativeAuthDispatch>,
+        oneshot::Sender<Result<Option<NativeAuthFact>, EngineError>>,
     ),
     NativeAuth(
         Admission,
@@ -173,6 +179,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    RunnerRead(Command, oneshot::Sender<Result<Outcome, EngineError>>),
     Plugins(
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
@@ -347,6 +354,19 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::NativeAuthCustodyReleased(dispatch, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &native_auth::dispatch_host(&dispatch),
+                                    Some(dispatch.fact()),
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::NativeAuth(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
@@ -454,6 +474,14 @@ impl Storage {
                             };
                             if let Ok(started) = &result {
                                 owner_runtime = Some(started.host.clone());
+                                if let Err(error) = native_auth::recover_native_auth(
+                                    &mut connection,
+                                    custody.as_mut().unwrap(),
+                                    &started.host,
+                                    None,
+                                ) {
+                                    eprintln!("native_auth_recovery_deferred cause={}", error.0);
+                                }
                             }
                             let _ = reply.send(result);
                         }
@@ -690,6 +718,13 @@ impl Storage {
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
                         }
+                        Job::RunnerRead(command, reply) => {
+                            if let Err(e) = settings::ensure_clear(&connection) {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
+                            let _ = reply.send(runner_read(&mut connection, &config, &path, &command));
+                        }
                         Job::Plugins(command, reply) => {
                             let result = if readonly {
                                 Err(error("plugins_readonly"))
@@ -857,6 +892,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
+    crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     plugins::initialize(connection)?;
     setup::initialize(connection)?;
@@ -1113,6 +1149,32 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
 /// Applies one revision-checked operation through the storage transaction.
 /// Takes current config, storage path and an identified request.
 /// Returns a durable reply while preserving replay and sensitive input hashes.
+/// Serves one engine-internal runner read, CoordinationState or TaskContext, at the
+/// current revision without touching the caller-keyed operations ledger, so no socket
+/// peer can pre-claim, replay or conflict with it.
+/// Output: the read's outcome, or `runner_read_kind` for any other command.
+fn runner_read(
+    connection: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    command: &Command,
+) -> Result<Outcome, EngineError> {
+    if !matches!(
+        command,
+        Command::CoordinationState { .. } | Command::TaskContext { .. }
+    ) {
+        return Err(error("runner_read_kind"));
+    }
+    let transaction = connection.transaction().map_err(error)?;
+    let revision: i64 = transaction
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    let revision = u64::try_from(revision).map_err(error)?;
+    execute(&transaction, config, path, command, revision)
+}
+
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
@@ -3474,7 +3536,7 @@ fallback_allowed = false
     -> ConfiguredInitialConversationFixture {
         let root = tempfile::Builder::new()
             .prefix("ca-cgf-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global_path = root.path().join("global.toml");
@@ -3634,7 +3696,11 @@ fallback_allowed = false
         };
         let request = AttemptRequest {
             id: RequestId::new("configured-gateway-first-attempt").unwrap(),
-            task_id: session.bootstrap_task_id.clone(),
+            task_id: master_session::turn_task_id(
+                &session.session_id,
+                session.current_turn.as_ref().unwrap(),
+            )
+            .unwrap(),
             project_id: project,
             role: crate::coordination::Role::ProjectLeader,
             pool_ref: session.selection.pool_ref.clone(),

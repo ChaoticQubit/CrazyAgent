@@ -1,19 +1,31 @@
 use super::*;
+
 use crate::config::{
     AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
+
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
+
 use crate::project_setup::{HarnessSlot, TeamPlan};
+
 use crate::team::status;
+
 use crate::terminal::FOLDER;
+
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
+
 use std::process::{Command, Stdio};
+
 use std::time::SystemTime;
 
 const PROJECT: &str = "team-panes";
+
 const ENDPOINT: &str = "local-a";
+
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
+
 const TURN_DONE: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}"#;
+
 const WAIT: Duration = Duration::from_secs(30);
 
 fn reference(value: &str) -> CredentialRef {
@@ -33,7 +45,7 @@ impl Fixture {
     fn new(subs: u8) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-team-panes-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
@@ -391,4 +403,335 @@ fn a_removed_project_stops_its_agents_and_their_panes() {
     }
     assert!(!fixture.recorded(sub));
     assert!(team.shutdown().unwrap().is_empty());
+}
+
+fn count(connection: &Connection, sql: &str) -> i64 {
+    connection
+        .query_row(sql, [PROJECT], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results() {
+    use crate::protocol::Outcome;
+    use crate::team::{MESSAGES_PER_PROJECT_MAX, TASKS_PER_PROJECT_MAX, TeamAction};
+    let mut fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let tx = fixture.connection.transaction().unwrap();
+    let waiting = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "An early message the master has not answered",
+        MessageState::Pending,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    tx.execute(
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,result,created_ms,finished_ms) VALUES (?1,'master','codex',0,'Early step','done','early result',1,1)",
+        [PROJECT],
+    )
+    .unwrap();
+    let undelivered = tx.last_insert_rowid();
+    for index in 1..TASKS_PER_PROJECT_MAX {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES (?1,'master','codex',0,'Old step','done',1,?2)",
+            params![PROJECT, index],
+        )
+        .unwrap();
+    }
+    for index in 1..MESSAGES_PER_PROJECT_MAX {
+        let (author, state) = if index % 2 == 1 {
+            (MessageAuthor::Owner, MessageState::Answered)
+        } else {
+            (MessageAuthor::Master, MessageState::Reply)
+        };
+        append_message(&tx, &project, author, "Old history", state, index)
+            .unwrap()
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    let all_messages = "SELECT COUNT(*) FROM team_messages WHERE project=?1";
+    let all_tasks = "SELECT COUNT(*) FROM team_tasks WHERE project=?1";
+    assert_eq!(
+        count(&fixture.connection, all_messages),
+        MESSAGES_PER_PROJECT_MAX
+    );
+    assert_eq!(count(&fixture.connection, all_tasks), TASKS_PER_PROJECT_MAX);
+
+    let tx = fixture.connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &TeamAction::Message {
+                project_id: project.clone(),
+                text: "Build the landing page".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied,
+        "message 2001 is accepted"
+    );
+    tx.commit().unwrap();
+    let latest: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1 AND author='owner'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let state = |id: i64| -> Option<String> {
+        Connection::open(fixture.base.join("engine.db"))
+            .unwrap()
+            .query_row("SELECT state FROM team_messages WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap()
+    };
+    assert_eq!(
+        state(waiting).as_deref(),
+        Some("pending"),
+        "the unanswered owner message outlived the append that pruned history"
+    );
+    let mut team = fixture.runtime();
+    team.finish_message(&project, waiting, "Noted.", TurnEnd::Success, vec![])
+        .unwrap();
+    team.finish_message(
+        &project,
+        latest,
+        "Here is the plan.\nDELEGATE: Write the landing page",
+        TurnEnd::Success,
+        vec![],
+    )
+    .unwrap();
+    let team_status = status(&fixture.connection, &fixture.setup).unwrap();
+    let replies: Vec<&str> = team_status
+        .messages
+        .iter()
+        .filter(|message| message.author == MessageAuthor::Master && message.id > latest)
+        .map(|message| message.text.as_str())
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            "Noted.",
+            "Here is the plan.\nDELEGATE: Write the landing page"
+        ]
+    );
+    assert_eq!(state(latest).as_deref(), Some("answered"));
+    assert_eq!(
+        state(waiting),
+        None,
+        "once answered, the oldest message is history and made room for its own reply"
+    );
+    let handed: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE project=?1 AND prompt='Write the landing page' AND source='master'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(count(&fixture.connection, all_messages) <= MESSAGES_PER_PROJECT_MAX);
+    assert!(count(&fixture.connection, all_tasks) <= TASKS_PER_PROJECT_MAX);
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_tasks SET status='done', result='page written', finished_ms=2 WHERE id=?1",
+            [handed],
+        )
+        .unwrap();
+    team.deliver(&fixture.setup).unwrap();
+    let delivered: String = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM team_messages WHERE project=?1 AND author='engine' AND state='pending'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(delivered.contains("early result"), "{delivered}");
+    assert!(delivered.contains("page written"), "{delivered}");
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND delivered=0 AND source='master'"
+        ),
+        0
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row(
+                "SELECT delivered FROM team_tasks WHERE id=?1",
+                [undelivered],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the oldest undelivered result was kept until it was delivered"
+    );
+    assert!(count(&fixture.connection, all_messages) <= MESSAGES_PER_PROJECT_MAX);
+}
+
+#[test]
+fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Write the page','running',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner','Plan it','sent',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    for statement in [
+        "DELETE FROM team_tasks WHERE project=?1",
+        "DELETE FROM team_messages WHERE project=?1",
+        "DELETE FROM project_setups WHERE project=?1",
+        "DELETE FROM projects WHERE id=?1",
+    ] {
+        fixture.connection.execute(statement, [PROJECT]).unwrap();
+    }
+    let mut team = fixture.runtime();
+    team.finish_task(task, "page written", TurnEnd::Success)
+        .unwrap();
+    team.finish_task(task, "", TurnEnd::Closed).unwrap();
+    team.finish_message(&project, message, "", TurnEnd::Interrupted, vec![])
+        .unwrap();
+    team.finish_message(&project, message, "Done", TurnEnd::Success, vec![])
+        .unwrap();
+    for table in ["team_tasks", "team_messages"] {
+        assert_eq!(
+            count(
+                &fixture.connection,
+                &format!("SELECT COUNT(*) FROM {table} WHERE project=?1")
+            ),
+            0,
+            "{table}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
+    let fixture = Fixture::new(2);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let project = fixture.base.join("project");
+    std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let plan = |id: i64| {
+        runtime
+            .prepare(&fixture.setup, id, AgentRole::Sub, "codex", true, &account)
+            .unwrap()
+            .1
+    };
+    let first = plan(1);
+    let second = plan(2);
+    let object = project.join(".git").join("objects");
+    let head = String::from_utf8(
+        crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&project)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .stdout,
+    )
+    .unwrap();
+    let head = head.trim();
+    let object = object.join(&head[..2]).join(&head[2..]);
+    let fanout = object.parent().unwrap();
+    let before = std::fs::read(&object).unwrap();
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "g='/usr/bin/git -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null'\n\
+         echo mine > mine.txt && $g add mine.txt && $g commit -q -m mine && echo committed\n\
+         (echo x > {sibling}) 2>/dev/null && echo sibling=written || echo sibling=refused\n\
+         (echo x >> {owner}) 2>/dev/null && echo owner=written || echo owner=refused\n\
+         (echo x > {fresh}) 2>/dev/null && echo project=written || echo project=refused\n\
+         (ln {owner} linked.txt) 2>/dev/null && echo link=made || echo link=refused\n\
+         (rm -f {object}; echo junk > {object}) 2>/dev/null; echo object=tried\n\
+         (mv {fanout} {moved}) 2>/dev/null; echo fanout=tried\n",
+        sibling = quoted(&second.working_dir.join("escaped.txt")),
+        owner = quoted(&project.join("owner.txt")),
+        fresh = quoted(&project.join("fresh.txt")),
+        object = quoted(&object),
+        fanout = quoted(fanout),
+        moved = quoted(&fanout.with_extension("moved")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&first.sandbox_profile)
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&first.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(1).join("home"))
+            .env("TMPDIR", runtime.agent_folder(1).join("tmp"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        text,
+        "committed\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\nobject=tried\nfanout=tried\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!second.working_dir.join("escaped.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("owner.txt")).unwrap(),
+        "owner\n"
+    );
+    assert!(!project.join("fresh.txt").exists());
+    assert_eq!(
+        std::fs::read(&object).unwrap(),
+        before,
+        "the worker replaced a git object"
+    );
+    assert!(!fanout.with_extension("moved").exists());
 }

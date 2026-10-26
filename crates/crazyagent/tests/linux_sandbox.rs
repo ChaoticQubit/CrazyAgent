@@ -1,12 +1,16 @@
 #![cfg(target_os = "linux")]
-
 use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox};
+
 use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
+
 use std::ffi::{OsStr, OsString};
+
 use std::fs;
+
 use std::path::{Path, PathBuf};
+
 use std::process::{Command, Output, Stdio};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_crazyagent-landlock");
@@ -344,4 +348,260 @@ fn only_agent_worktrees_in_the_crazyagent_folder_are_writable() {
     for refused in [state.clone(), state.join("context")] {
         assert!(!policy.write.contains(&refused), "{}", refused.display());
     }
+}
+
+const REACH: &str = "import os, socket, sys
+try:
+    socket.socketpair()
+    print('pair=ok')
+except OSError:
+    print('pair=refused')
+try:
+    socket.socket(socket.AF_UNIX).connect(sys.argv[1])
+    print('unix=ok')
+except OSError:
+    print('unix=refused')
+try:
+    socket.create_connection(('127.0.0.1', int(sys.argv[2])), 5).close()
+    print('tcp=ok')
+except OSError:
+    print('tcp=refused')
+print('runtime=present' if os.path.exists(sys.argv[3]) else 'runtime=absent')
+";
+
+fn reach(
+    sandbox: Option<&dyn Sandbox>,
+    case: &Case,
+    socket: &Path,
+    port: u16,
+    runtime: &Path,
+) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", REACH])
+        .arg(socket)
+        .arg(port.to_string())
+        .arg(runtime)
+        .current_dir(case.project.join("worktrees"));
+    let mut command = match sandbox {
+        Some(sandbox) => sandbox.wrap(&harness).unwrap(),
+        None => harness,
+    };
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let runtime = case.outside.parent().unwrap().join("runtime");
+    let terminal = runtime.join("terminal");
+    fs::create_dir_all(&terminal).unwrap();
+    let socket = terminal.join("tmux.sock");
+    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let guarded = || {
+        policy(&case, SandboxNetwork::Open)
+            .guard_engine(&runtime)
+            .unwrap()
+    };
+    assert_eq!(
+        reach(None, &case, &socket, port, &runtime),
+        "pair=ok\nunix=ok\ntcp=ok\nruntime=present\n",
+        "the unsandboxed control must reach the socket"
+    );
+    let landlock = LinuxSandbox::detect(guarded(), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock and seccomp: {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        reach(Some(&landlock), &case, &socket, port, &runtime),
+        "pair=ok\nunix=refused\ntcp=ok\nruntime=present\n"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        guarded(),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reach(Some(&bubblewrap), &case, &socket, port, &runtime),
+        "pair=ok\nunix=refused\ntcp=ok\nruntime=absent\n"
+    );
+}
+
+struct Checkouts {
+    _temp: tempfile::TempDir,
+    project: PathBuf,
+    home: PathBuf,
+    tmp: PathBuf,
+    own: PathBuf,
+    sibling: PathBuf,
+}
+
+fn git(cwd: &Path, arguments: &[&str]) {
+    let output = crazyagent::spawn_gate::output(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@crazyagent.invalid",
+            ])
+            .args(arguments)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn checkouts() -> Checkouts {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let project = root.join("project");
+    let home = root.join("agent").join("home");
+    let tmp = root.join("agent").join("tmp");
+    for directory in [&project, &home, &tmp, &project.join("worktrees")] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    git(&project, &["init", "-q"]);
+    git(&project, &["add", "owner.txt"]);
+    git(&project, &["commit", "-q", "-m", "start"]);
+    let own = project.join("worktrees").join("agent-1");
+    let sibling = project.join("worktrees").join("agent-2");
+    for worktree in [&own, &sibling] {
+        git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+    }
+    Checkouts {
+        _temp: temp,
+        project,
+        home,
+        tmp,
+        own,
+        sibling,
+    }
+}
+
+fn confined(checkouts: &Checkouts) -> ProjectSandbox {
+    ProjectSandbox::new(
+        &checkouts.project,
+        &checkouts.home,
+        &checkouts.tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap()
+    .confine_to_worktree(&checkouts.own)
+    .unwrap()
+}
+
+fn assert_confined(sandbox: &dyn Sandbox, checkouts: &Checkouts) {
+    let script = format!(
+        "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\n\
+         g='git -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null'\n\
+         echo mine > mine.txt && $g add mine.txt && $g commit -q -m mine && echo committed\n\
+         (echo x > {sibling}) 2>/dev/null && echo sibling=written || echo sibling=refused\n\
+         (echo x >> {owner}) 2>/dev/null && echo owner=written || echo owner=refused\n\
+         (echo x > {fresh}) 2>/dev/null && echo project=written || echo project=refused\n\
+         (ln {owner} linked.txt) 2>/dev/null && echo link=made || echo link=refused\n",
+        sibling = quoted(&checkouts.sibling.join("escaped.txt")),
+        owner = quoted(&checkouts.project.join("owner.txt")),
+        fresh = quoted(&checkouts.project.join("fresh.txt")),
+    );
+    let mut harness = Command::new("/bin/sh");
+    harness.arg("-c").arg(script).current_dir(&checkouts.own);
+    let output = crazyagent::spawn_gate::output(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "committed\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!checkouts.sibling.join("escaped.txt").exists());
+    assert_eq!(
+        fs::read_to_string(checkouts.project.join("owner.txt")).unwrap(),
+        "owner\n"
+    );
+    assert!(!checkouts.project.join("fresh.txt").exists());
+}
+
+#[test]
+fn a_confined_landlock_agent_writes_only_its_own_worktree() {
+    let checkouts = checkouts();
+    let sandbox = LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock (Linux 5.13 or newer): {:?}",
+        sandbox.backend()
+    );
+    assert_confined(&sandbox, &checkouts);
+}
+
+#[test]
+fn a_confined_bubblewrap_agent_writes_only_its_own_worktree() {
+    let checkouts = checkouts();
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let sandbox = LinuxSandbox::new(
+        confined(&checkouts),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_confined(&sandbox, &checkouts);
 }

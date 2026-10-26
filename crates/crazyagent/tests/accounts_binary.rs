@@ -154,11 +154,14 @@ async fn serve_models(listener: &TcpListener) -> String {
     String::from_utf8(request).unwrap()
 }
 
+/// Wiring test: the engine binary is real, but a local stand-in server answers the check
+/// with an invented model list, so this checks accounts and keys across a restart, not a
+/// provider. Real model list: accounts.rs an_openai_compatible_account_check_lists_the_real_ollama_models.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_engine_binary_keeps_accounts_and_keys_across_restart() {
+async fn wiring_real_engine_binary_keeps_accounts_and_keys_across_restart() {
     let root = tempfile::Builder::new()
         .prefix("ca-bacct-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = std::fs::canonicalize(root.path()).unwrap();
@@ -425,7 +428,7 @@ async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through
     let bundle = rcli_bundle();
     let root = tempfile::Builder::new()
         .prefix("ca-macct-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = std::fs::canonicalize(root.path()).unwrap();

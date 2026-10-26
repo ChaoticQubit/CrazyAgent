@@ -36,6 +36,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
     pub(super) capture: File,
+    pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
 }
 
 pub(super) struct Capture {
@@ -317,7 +318,7 @@ impl OwnerRuntimeHandle {
             || prepared.session.session_id != *session_id
             || prepared.session.current_turn.as_ref() != Some(turn_id)
             || prepared.attempt.request.project_id != *project_id
-            || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
+            || !prepared.attempt_on_current_turn()
             || prepared.attempt.connection != prepared.profile.binding().connection
         {
             return Err(failure("master_runtime_binding"));
@@ -368,6 +369,7 @@ impl OwnerRuntimeHandle {
         };
         let profile = self.acquire_master_profile(prepared, turn_id).await?;
         let launch = self.prepare_master_host(prepared, &profile)?;
+        let _folder = launch.folder;
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -784,7 +786,7 @@ mod tests {
         async fn start() -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-md-")
-                .tempdir_in("/private/tmp")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let config = resolve_config(

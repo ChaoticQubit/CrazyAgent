@@ -231,7 +231,7 @@ async fn start_service(root: &Path) -> EngineService {
 async fn native_auth_engine_service_registers_distinct_codex_before_ready() {
     let root = tempfile::Builder::new()
         .prefix("ca-ep-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut service = start_service(root.path()).await;
@@ -311,7 +311,7 @@ where
 {
     let root = tempfile::Builder::new()
         .prefix("ca-ee-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let service = Arc::new(tokio::sync::Mutex::new(start_service(root.path()).await));

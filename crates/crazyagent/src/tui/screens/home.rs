@@ -1,9 +1,10 @@
 use super::intake::{ask, event, not_ready};
 use super::new_project::display_path;
 use super::new_project_page::kept_draft;
-use super::settings_accounts::send;
+use super::settings_accounts::{load_accounts, send};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
-use crate::pools::{MemberStatus, PoolSummary};
+use crate::accounts::AccountStatus;
+use crate::pools::PoolSummary;
 use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
 use crate::setup::{DependencyState, SetupStatus};
 use crate::tui::client::app_setup::AppSetupJob;
@@ -13,8 +14,8 @@ use crate::tui::clock;
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, ProjectCard, Request};
-use crate::tui::text::{join, pad, restyle, row, status, styled, width, wrap};
+use crate::tui::seam::{AccountRow, Arrival, ProjectCard, Request};
+use crate::tui::text::{cut, join, pad, restyle, row, status, styled, width, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::TextField;
 use ratatui::Frame;
@@ -44,47 +45,73 @@ enum Entry {
 }
 
 /// Setup progress shown in the "Get set up" panel.
-/// Input: engine pools and whether the tools are found. Output: which items are
-/// done; the panel hides when an account is ready, a pool exists and the tools
-/// are found.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Input: engine pools, accounts and whether the tools are found. Output: which
+/// items are done and what Add an account says; the panel hides when an account
+/// is ready for agents, a pool exists and the tools are found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Setup {
-    pub account_ready: bool,
+    pub ready_accounts: Vec<String>,
+    pub accounts: usize,
     pub pool_exists: bool,
     pub tools_ready: bool,
-    pub ready_in_first_pool: usize,
 }
 
 impl Setup {
-    /// Reads setup progress from the pool list and the tools check.
-    /// Input: the pools and whether every tool is found. Output: whether a ready
-    /// account, a pool and the tools exist.
-    pub fn of(pools: &[PoolSummary], tools_ready: bool) -> Self {
-        let ready = |pool: &PoolSummary| {
-            pool.members
-                .iter()
-                .filter(|member| {
-                    matches!(member.status, MemberStatus::SignedIn | MemberStatus::SetUp)
-                })
-                .count()
-        };
+    /// Reads setup progress from the pool list, the account list and the tools
+    /// check. An account is ready for agents when it is signed in (a reachable
+    /// URL or local model counts) or has a saved key.
+    /// Input: the pools, the accounts and whether every tool is found. Output:
+    /// whether a ready account, a pool and the tools exist.
+    pub fn of(pools: &[PoolSummary], accounts: &[AccountRow], tools_ready: bool) -> Self {
         Self {
-            account_ready: pools.iter().any(|pool| ready(pool) > 0),
+            ready_accounts: accounts
+                .iter()
+                .filter(|account| ready_for_agents(account))
+                .map(|account| account.name.clone())
+                .collect(),
+            accounts: accounts.len(),
             pool_exists: !pools.is_empty(),
             tools_ready,
-            ready_in_first_pool: pools
-                .iter()
-                .map(ready)
-                .find(|count| *count > 0)
-                .unwrap_or(0),
+        }
+    }
+
+    /// True when at least one account is ready for agents.
+    /// Input: none. Output: whether Add an account is done.
+    pub fn account_ready(&self) -> bool {
+        !self.ready_accounts.is_empty()
+    }
+
+    /// What Add an account says: the account ready for agents, how many are,
+    /// that none is yet, or how to add the first one. A name is cut to one
+    /// panel line so the text stays within three lines.
+    /// Input: the ellipsis glyph. Output: the sentence.
+    pub fn account_line(&self, ellipsis: &str) -> String {
+        match self.ready_accounts.as_slice() {
+            [one] => format!(
+                "{} is ready for agents.",
+                cut(one, TOOLS_TEXT_CHARS, ellipsis)
+            ),
+            [] if self.accounts == 0 => {
+                "Sign in with ChatGPT or Claude, or add an API key or local model.".into()
+            }
+            [] => "No account is ready for agents yet. Sign one in or check its key or URL.".into(),
+            many => format!("{} accounts are ready for agents.", many.len()),
         }
     }
 
     /// True when nothing is left to set up.
     /// Input: none. Output: whether the panel hides.
     pub fn done(&self) -> bool {
-        self.account_ready && self.pool_exists && self.tools_ready
+        self.account_ready() && self.pool_exists && self.tools_ready
     }
+}
+
+/// True when agents can use the account: signed in (a reachable URL or local
+/// model counts) or with a saved key.
+/// Input: the account row. Output: whether it is ready for agents.
+fn ready_for_agents(account: &AccountRow) -> bool {
+    account.status == AccountStatus::SignedIn.label()
+        || account.status == AccountStatus::KeySaved.label()
 }
 
 /// True while the engine still checks a tool's version in the background.
@@ -180,10 +207,15 @@ impl Home {
             .setup
             .ready()
             .is_some_and(|status| missing_tools(status).is_empty());
+        let accounts = match &ctx.store.accounts {
+            Load::Ready(rows) => rows.as_slice(),
+            Load::Failed(_) | Load::NotReady => &[],
+            Load::Idle | Load::Loading => return None,
+        };
         ctx.store
             .pools
             .ready()
-            .map(|pools| Setup::of(pools, tools_ready))
+            .map(|pools| Setup::of(pools, accounts, tools_ready))
     }
 
     fn panel_visible(ctx: &Ctx) -> bool {
@@ -261,13 +293,9 @@ impl Home {
         };
         [
             (
-                setup.account_ready,
+                setup.account_ready(),
                 "Add an account",
-                vec![
-                    "Sign in with ChatGPT or".into(),
-                    "Claude, or add an API".into(),
-                    "key or local model.".into(),
-                ],
+                wrap(&setup.account_line(ctx.glyphs.ellipsis), TOOLS_TEXT_CHARS),
                 Place::Settings(SettingsSection::Accounts),
             ),
             (
@@ -713,30 +741,20 @@ impl Home {
         }
     }
 
-    /// Says "Setup done." when the last item gets done, and focuses the panel
-    /// on the first answer when something is left.
-    /// Input: the context, once pools and the tools check have answered.
+    /// Says "Setup done." with the accounts ready for agents when the last item
+    /// gets done, and focuses the panel on the first answer when something is left.
+    /// Input: the context, once pools, accounts and the tools check have answered.
     /// Output: none.
     fn notice(&mut self, ctx: &mut Ctx) {
         if !Self::checked(ctx) {
             return;
         }
-        let (Some(setup), Some(pools)) = (Self::setup(ctx), ctx.store.pools.ready()) else {
+        let Some(setup) = Self::setup(ctx) else {
             return;
         };
-        let pool = pools
-            .iter()
-            .find(|pool| !pool.members.is_empty())
-            .map_or_else(String::new, |pool| pool.name.clone());
         if self.was_done == Some(false) && setup.done() {
-            let count = setup.ready_in_first_pool;
-            ctx.say(Message::success(
-                "Setup done.",
-                &format!(
-                    "{count} account{} ready in pool {pool}.",
-                    if count == 1 { "" } else { "s" }
-                ),
-            ));
+            let line = setup.account_line(ctx.glyphs.ellipsis);
+            ctx.say(Message::success("Setup done.", &line));
         }
         if self.was_done.is_none() && !setup.done() {
             self.panel = Panel::Setup;
@@ -980,6 +998,14 @@ impl Screen for Home {
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
+        let ready = ctx
+            .store
+            .accounts
+            .ready()
+            .is_some_and(|rows| rows.iter().any(ready_for_agents));
+        if !ready {
+            load_accounts(ctx);
+        }
         ask(ctx, IntakeQuery::Home);
         ask(ctx, IntakeQuery::Found);
         if ctx.store.harnesses.ready().is_none() {
@@ -1045,7 +1071,7 @@ impl Screen for Home {
 #[cfg(test)]
 pub(in crate::tui) mod tests {
     use super::*;
-    use crate::pools::{MemberKind, PoolMember};
+    use crate::pools::{MemberKind, MemberStatus, PoolMember};
     use crate::protocol::CredentialRef;
     use crate::setup::{Dependency, DependencyStatus, Version};
     use crate::tui::client::OwnerEvent;
@@ -1116,28 +1142,107 @@ pub(in crate::tui) mod tests {
             .count()
     }
 
+    fn account(index: usize, name: &str, status: AccountStatus) -> AccountRow {
+        AccountRow {
+            id: CredentialRef::new(format!("account-{index}")).unwrap(),
+            name: name.into(),
+            provider: "Claude".into(),
+            status: status.label().into(),
+        }
+    }
+
     #[test]
-    fn setup_is_done_with_a_ready_account_in_a_pool_and_tools_found() {
-        assert!(!Setup::of(&[], true).done());
-        let empty = Setup::of(&[pool("Main", &[])], true);
-        assert!(empty.pool_exists && !empty.account_ready && !empty.done());
-        let waiting = Setup::of(&[pool("Main", &[MemberStatus::NotSignedIn])], true);
-        assert!(!waiting.done());
-        let pools = [
-            pool("Empty", &[]),
-            pool(
-                "Main",
-                &[
-                    MemberStatus::SignedIn,
-                    MemberStatus::SetUp,
-                    MemberStatus::NotSignedIn,
-                ],
-            ),
+    fn setup_is_done_with_an_account_ready_for_agents_a_pool_and_tools_found() {
+        assert!(!Setup::of(&[], &[], true).done());
+        let empty = Setup::of(&[pool("Main", &[])], &[], true);
+        assert!(empty.pool_exists && !empty.account_ready() && !empty.done());
+        assert_eq!(
+            empty.account_line("…"),
+            "Sign in with ChatGPT or Claude, or add an API key or local model."
+        );
+
+        let pools = [pool("Main", &[MemberStatus::SetUp, MemberStatus::SignedIn])];
+        let waiting = [
+            account(1, "ChaoticQubit", AccountStatus::NotSignedIn),
+            account(2, "ChaoticQubit", AccountStatus::SigningIn),
+            account(3, "Qwen 2.5 - 7B", AccountStatus::Unreachable),
         ];
-        let ready = Setup::of(&pools, true);
-        assert!(ready.done());
-        assert_eq!(ready.ready_in_first_pool, 2);
-        assert!(!Setup::of(&pools, false).done());
+        let none = Setup::of(&pools, &waiting, true);
+        assert!(
+            !none.account_ready() && !none.done(),
+            "pool members count for nothing while no account is ready"
+        );
+        assert_eq!(
+            none.account_line("…"),
+            "No account is ready for agents yet. Sign one in or check its key or URL."
+        );
+        assert_eq!(wrap(&none.account_line("…"), TOOLS_TEXT_CHARS).len(), 3);
+
+        let one = [
+            waiting[0].clone(),
+            account(4, "Qwen 2.5 - 7B", AccountStatus::SignedIn),
+        ];
+        let ready = Setup::of(&[pool("Empty", &[])], &one, true);
+        assert!(
+            ready.done(),
+            "an account outside every pool still counts as ready for agents"
+        );
+        assert_eq!(
+            ready.account_line("…"),
+            "Qwen 2.5 - 7B is ready for agents."
+        );
+        let long = Setup::of(
+            &[],
+            &[account(6, &"Seat ".repeat(19), AccountStatus::SignedIn)],
+            true,
+        );
+        assert_eq!(
+            long.account_line("…"),
+            "Seat Seat Seat Seat Sea… is ready for agents."
+        );
+        assert_eq!(wrap(&long.account_line("…"), TOOLS_TEXT_CHARS).len(), 2);
+        assert!(!Setup::of(&[pool("Empty", &[])], &one, false).done());
+        let two = [
+            one[1].clone(),
+            account(5, "Team key", AccountStatus::KeySaved),
+        ];
+        assert_eq!(
+            Setup::of(&pools, &two, true).account_line("…"),
+            "2 accounts are ready for agents."
+        );
+    }
+
+    #[test]
+    fn home_reads_accounts_on_each_refresh_only_until_one_is_ready_for_agents() {
+        let account_reads = |shell: &mut Shell| {
+            std::iter::from_fn(|| shell.ctx.next_request())
+                .filter(|request| {
+                    matches!(
+                        request,
+                        Request::Settings(job) if matches!(job.as_ref(), SettingsJob::AllAccounts)
+                    )
+                })
+                .count()
+        };
+        let mut ctx = ctx(80, 24);
+        ctx.store.accounts =
+            Load::Ready(vec![account(1, "ChaoticQubit", AccountStatus::NotSignedIn)]);
+        let mut shell = Shell::with(ctx, Box::new(Home::new()));
+        assert_eq!(account_reads(&mut shell), 1);
+        shell.refresh();
+        assert_eq!(
+            account_reads(&mut shell),
+            1,
+            "while no account is ready, each refresh reads them again"
+        );
+        shell.ctx.store.accounts =
+            Load::Ready(vec![account(2, "Team key", AccountStatus::KeySaved)]);
+        shell.refresh();
+        assert_eq!(
+            account_reads(&mut shell),
+            0,
+            "a ready account is not read again on every refresh"
+        );
     }
 
     #[test]
@@ -1161,6 +1266,7 @@ pub(in crate::tui) mod tests {
         let mut ctx = ctx(80, 24);
         ctx.store.projects = Load::Ready(Vec::new());
         ctx.store.pools = Load::Ready(vec![pool("Main", &[MemberStatus::SetUp])]);
+        ctx.store.accounts = Load::Ready(vec![account(1, "Team key", AccountStatus::KeySaved)]);
         let mut shell = Shell::with(ctx, Box::new(Home::new()));
         assert_eq!(status_reads(&mut shell), 1, "Home asks for the setup check");
         let rows = render(&mut shell, 80, 24);
@@ -1244,8 +1350,11 @@ pub(in crate::tui) mod tests {
 
         shell.arrive(status(tools(&[])));
         assert_eq!(
-            shell.ctx.message().map(|message| message.lead.clone()),
-            Some("Setup done.".into())
+            shell
+                .ctx
+                .message()
+                .map(|message| (message.lead.clone(), message.rest.clone())),
+            Some(("Setup done.".into(), "Team key is ready for agents.".into()))
         );
         let rows = render(&mut shell, 80, 24);
         assert!(

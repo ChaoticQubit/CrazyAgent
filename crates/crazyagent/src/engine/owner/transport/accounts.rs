@@ -34,6 +34,9 @@ enum Action {
     Remove {
         id: CredentialRef,
     },
+    ReplaceKey {
+        id: CredentialRef,
+    },
     Check {
         id: CredentialRef,
     },
@@ -50,6 +53,7 @@ impl Action {
         match self {
             Self::Check { .. } | Self::LocalModels { .. } => owner + CHECK_PROBE,
             Self::List { .. } | Self::Add { .. } | Self::Rename { .. } => owner + LIST_PROBE,
+            Self::ReplaceKey { .. } => owner * 2 + LIST_PROBE,
             Self::Catalog | Self::Remove { .. } => owner,
         }
     }
@@ -150,6 +154,23 @@ impl OwnerClient {
         }
     }
 
+    /// Replaces the saved key of one account that uses a key, in place: the account keeps
+    /// its id, name and pools, and the old key file is swapped out atomically. The key
+    /// travels only as a separate socket frame. Inputs: account id and new key. Output: it.
+    pub async fn replace_account_key(
+        &self,
+        id: CredentialRef,
+        key: AccountSecret,
+    ) -> Result<AccountView, EngineError> {
+        match self
+            .accounts_exchange(Action::ReplaceKey { id }, Some(key))
+            .await?
+        {
+            Reply::Account { account } => Ok(account),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Checks one account now: its address answers and, over plain HTTP, accepts the saved
     /// key on `/models`. Input: the account id. Output: fresh status and any listed models.
     pub async fn check_account(&self, id: CredentialRef) -> Result<AccountCheck, EngineError> {
@@ -226,6 +247,12 @@ impl OwnerClient {
     }
 }
 
+/// Encodes this protocol's refusal of a request the engine did not run.
+/// Input: the refusal code. Output: the reply frame.
+pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
+    encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
+}
+
 /// Serves one accounts owner request after the owner exchange deadline: the action runs
 /// under its own budget, which covers its network probes, and the reply write under the
 /// owner wait. Inputs: the stream, engine, authority, owner packet, admission and request
@@ -280,7 +307,7 @@ async fn handle(
     key: Option<AccountSecret>,
 ) -> Result<Reply, EngineError> {
     authenticate(engine, authority, packet, admission).await?;
-    if key.is_some() && !matches!(action, Action::Add { .. }) {
+    if key.is_some() && !matches!(action, Action::Add { .. } | Action::ReplaceKey { .. }) {
         return Err(failure("accounts_key_unexpected"));
     }
     let root = &authority.root;
@@ -323,21 +350,26 @@ async fn handle(
             if let (Some(credential), Some(key)) = (&credential, key) {
                 store_key(root, credential, key)?;
             }
-            let added = actor(
-                engine,
-                admission,
-                Command::Add(Box::new(connection), details),
-            )
-            .await;
-            let added = match added {
-                Ok(ResultValue::Account(listed)) => listed,
-                Ok(_) => return Err(unknown()),
-                Err(error) => {
-                    if let Some(credential) = &credential {
-                        let _ = remove_key(root, credential);
-                    }
-                    return Err(error);
-                }
+            let keys = authority.clone();
+            let added = engine
+                .settled_job(
+                    |reply| {
+                        Job::Accounts(
+                            admission.clone(),
+                            Command::Add(Box::new(connection), details),
+                            reply,
+                        )
+                    },
+                    move |result| {
+                        if let (Err(_), Some(credential)) = (result, &credential) {
+                            let _ = remove_key(&keys.root, credential);
+                        }
+                        Ok(())
+                    },
+                )
+                .await?;
+            let ResultValue::Account(added) = added else {
+                return Err(unknown());
             };
             Reply::Account {
                 account: views(root, vec![*added]).await?.remove(0),
@@ -363,6 +395,31 @@ async fn handle(
                 remove_key(root, credential_ref)?;
             }
             Reply::Removed
+        }
+        Action::ReplaceKey { id } => {
+            let key = key.ok_or_else(|| failure("account_key_required"))?;
+            let listed = match actor(engine, admission, Command::Get(id.clone())).await {
+                Ok(ResultValue::Account(listed)) => listed,
+                refused => {
+                    key.into_bytes().fill(0);
+                    return Err(refused.err().unwrap_or_else(unknown));
+                }
+            };
+            let ModelAuthentication::ApiKey { credential_ref } = &listed.connection.auth else {
+                key.into_bytes().fill(0);
+                return Err(failure("account_key_not_allowed"));
+            };
+            replace_key(root, credential_ref, key)?;
+            let listed = match actor(engine, admission, Command::Get(id)).await {
+                Ok(ResultValue::Account(current)) => current,
+                gone => {
+                    remove_key(root, credential_ref)?;
+                    return Err(gone.err().unwrap_or_else(unknown));
+                }
+            };
+            Reply::Account {
+                account: views(root, vec![*listed]).await?.remove(0),
+            }
         }
         Action::Check { id } => {
             let ResultValue::Account(listed) = actor(engine, admission, Command::Get(id)).await?
@@ -494,9 +551,21 @@ fn store_key(
 ) -> Result<(), EngineError> {
     let directory =
         keys_directory(root, true)?.ok_or_else(|| failure("account_key_store_unavailable"))?;
+    write_key(&directory, key_name(credential)?, key)?;
+    directory
+        .sync_all()
+        .map_err(|_| failure("account_key_store_unavailable"))?;
+    Ok(())
+}
+
+/// Writes a key into a new owner-only file in the key directory, removing the file again
+/// when the write fails. Inputs: the key directory, a file name that must not exist yet,
+/// and the key, which is zeroed after the write. Output: the file is synced to disk.
+#[cfg(unix)]
+fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), EngineError> {
     let fd: OwnedFd = rustix::fs::openat(
-        &directory,
-        key_name(credential)?,
+        directory,
+        name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o600),
     )
@@ -506,11 +575,29 @@ fn store_key(
     let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all());
     bytes.fill(0);
     if written.is_err() {
-        let _ = rustix::fs::unlinkat(
-            &directory,
-            key_name(credential)?,
-            rustix::fs::AtFlags::empty(),
-        );
+        let _ = rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty());
+        return Err(failure("account_key_store_unavailable"));
+    }
+    Ok(())
+}
+
+/// Swaps the saved key of one credential for a new one: the new key is written to a
+/// staged file, then renamed over the old file, so the old key is unlinked and the file
+/// never holds a partial key. Inputs: owner root, credential reference and the new key.
+/// Output: the key directory synced; on failure the old key stays and nothing is staged.
+#[cfg(unix)]
+fn replace_key(
+    root: &Root,
+    credential: &CredentialRef,
+    key: AccountSecret,
+) -> Result<(), EngineError> {
+    let directory =
+        keys_directory(root, true)?.ok_or_else(|| failure("account_key_store_unavailable"))?;
+    let name = key_name(credential)?;
+    let staged = format!(".replace-{}", crate::engine::owner::random_id()?);
+    write_key(&directory, &staged, key)?;
+    if rustix::fs::renameat(&directory, staged.as_str(), &directory, name).is_err() {
+        let _ = rustix::fs::unlinkat(&directory, staged.as_str(), rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
     }
     directory
@@ -560,6 +647,19 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
         return Err(failure("account_key_store_unsafe"));
     }
     Ok(Some(file))
+}
+
+/// Refuses to replace an account key where the Unix owner-only key directory does not exist.
+/// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
+/// Returns `account_key_store_unavailable`.
+#[cfg(not(unix))]
+fn replace_key(
+    _root: &Root,
+    _credential: &CredentialRef,
+    key: AccountSecret,
+) -> Result<(), EngineError> {
+    key.into_bytes().fill(0);
+    Err(failure("account_key_store_unavailable"))
 }
 
 /// Refuses to open an account key where the Unix owner-only key directory does not exist.
@@ -757,6 +857,7 @@ async fn check(root: &Root, listed: Listed) -> Result<(AccountView, Vec<String>)
     let Some(url) = http_url(&listed.connection) else {
         return Ok((view(&listed, base), Vec::new()));
     };
+    crate::accounts::account_url(url.as_str())?;
     let key = match &listed.connection.auth {
         ModelAuthentication::ApiKey { credential_ref } => read_key(root, credential_ref)?,
         _ => None,

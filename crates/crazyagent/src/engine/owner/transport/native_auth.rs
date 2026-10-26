@@ -96,6 +96,17 @@ impl OwnerClient {
     }
 }
 
+/// Encodes this protocol's refusal of a request the engine did not run, naming the
+/// request it answers. Inputs: the request body and the refusal code. Output: the frame.
+pub(super) fn refusal(bytes: &[u8], code: &str) -> Result<Vec<u8>, EngineError> {
+    let envelope: Envelope =
+        serde_json::from_slice(bytes).map_err(|_| failure("native_auth_request_invalid"))?;
+    auth::encode_reply(
+        Err(failure(code)),
+        envelope.native_auth.request_id().clone(),
+    )
+}
+
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,

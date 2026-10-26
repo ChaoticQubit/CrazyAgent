@@ -528,8 +528,26 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
     Ok(line)
 }
 
-fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16)) -> Vec<u8> {
-    let mut bytes = b"\x1b[0m\x1b[H\x1b[2J".to_vec();
+const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
+const CURSOR_KEYS_ON: &[u8] = b"\x1b[?1h";
+
+/// The pane's input modes a new viewer must take on so its keys and pastes reach the agent's
+/// app as a terminal attached from the start would send them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Modes {
+    bracketed_paste: bool,
+    cursor_keys: bool,
+}
+
+fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16), modes: Modes) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if modes.bracketed_paste {
+        bytes.extend_from_slice(BRACKETED_PASTE_ON);
+    }
+    if modes.cursor_keys {
+        bytes.extend_from_slice(CURSOR_KEYS_ON);
+    }
+    bytes.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
     for (row, line) in screen.iter().take(usize::from(rows)).enumerate() {
         if row > 0 {
             bytes.extend_from_slice(b"\r\n");
@@ -548,24 +566,34 @@ struct Located {
     cols: u16,
     rows: u16,
     cursor: (u16, u16),
+    modes: Modes,
 }
 
 fn located(lines: &[Vec<u8>]) -> Option<Located> {
     let text = std::str::from_utf8(lines.first()?).ok()?;
     let fields: Vec<&str> = text.split(' ').collect();
-    let [pane, window, x, y, cols, rows] = fields.as_slice() else {
+    let [pane, window, x, y, cols, rows, paste, keys] = fields.as_slice() else {
         return None;
     };
     if !pane.starts_with('%') || !window.starts_with('@') {
         return None;
     }
     let number = |text: &str| text.parse::<u16>().ok();
+    let flag = |text: &str| match text {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    };
     Some(Located {
         pane: pane.as_bytes().to_vec(),
         window: window.as_bytes().to_vec(),
         cols: number(cols)?,
         rows: number(rows)?,
         cursor: (number(x)?, number(y)?),
+        modes: Modes {
+            bracketed_paste: flag(paste)?,
+            cursor_keys: flag(keys)?,
+        },
     })
 }
 
@@ -581,6 +609,7 @@ fn viewer(
         cols,
         rows,
         cursor,
+        modes,
     } = located(located_lines).ok_or_else(|| failure("terminal_command_failed"))?;
     state.viewers.retain(|viewer| viewer.feed.open());
     if state.viewers.len() >= VIEWERS_MAX {
@@ -593,7 +622,7 @@ fn viewer(
         agent,
         cols,
         rows,
-        screen: render(screen, cols, rows, cursor),
+        screen: render(screen, cols, rows, cursor, modes),
         chunks: receiver,
     })
 }
@@ -769,7 +798,7 @@ impl Host for Tmux {
         let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
-            "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}' ; capture-pane {} -t {target}",
+            "display-message -p -t {target} '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}}' ; capture-pane {} -t {target}",
             control.capture
         );
         let (reply, answer) = sync_channel(1);

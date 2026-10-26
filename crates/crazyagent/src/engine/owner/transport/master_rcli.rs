@@ -155,7 +155,7 @@ impl OwnerRuntimeHandle {
         if prepared.session.selection.backend != MasterBackend::Rcli
             || prepared.session.current_turn.as_ref() != Some(turn_id)
             || prepared.attempt.request.project_id != prepared.session.project_id
-            || prepared.attempt.request.task_id != prepared.session.bootstrap_task_id
+            || !prepared.attempt_on_current_turn()
             || prepared.attempt.connection != prepared.profile.binding().connection
         {
             return Err(failure("master_runtime_binding"));
@@ -199,6 +199,8 @@ impl OwnerRuntimeHandle {
         }
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
+        let _folder =
+            super::master_host_launch::MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
         let sandbox = super::master_host_launch::master_sandbox(
             &self.authority.root,
             &runtime_ref,

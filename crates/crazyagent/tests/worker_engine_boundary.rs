@@ -79,7 +79,7 @@ fn snapshot(id: &str) -> WireRequest {
 async fn worker_cannot_control_engine() {
     let root = tempfile::Builder::new()
         .prefix("crazyagent-web-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap()
         .keep();
     let root = root.canonicalize().unwrap();

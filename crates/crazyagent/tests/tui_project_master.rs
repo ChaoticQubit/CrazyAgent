@@ -112,7 +112,7 @@ async fn unavailable_catalog_retains_setup_fields_and_project_draft() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let root = tempfile::Builder::new()
             .prefix("ca-tm686-unit-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let (_stop, stopped) = watch::channel(false);
@@ -360,7 +360,7 @@ async fn read_owner(
 async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
     let root = tempfile::Builder::new()
         .prefix("ca-tm686-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let mut driver = Driver::start(root.path());

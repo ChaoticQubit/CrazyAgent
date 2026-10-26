@@ -153,7 +153,7 @@ impl ProfileCase {
     async fn new(catalog: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-pu-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
         let state = root.path().join("s");

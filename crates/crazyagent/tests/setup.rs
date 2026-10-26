@@ -29,7 +29,7 @@ impl Case {
     async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-setup-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -283,8 +283,12 @@ fn graphify(status: &SetupStatus) -> DependencyState {
         .clone()
 }
 
+/// Wiring test: a fake graphify that sleeps and prints an invented version stands in for
+/// the real tool, so this checks the status read deadline only. No test reads the real
+/// installed graphify version: setup_status_lists_the_dependencies_and_the_shipped_pack
+/// accepts Found or Missing.
 #[tokio::test]
-async fn a_version_check_slower_than_the_reply_deadline_does_not_fail_the_status_read() {
+async fn wiring_a_version_check_slower_than_the_reply_deadline_does_not_fail_the_status_read() {
     let case = Case::new().await;
     let setup = case.root.path().join("setup");
     let bin = setup.join("bin");

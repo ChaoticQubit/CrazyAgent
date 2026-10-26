@@ -10,7 +10,7 @@ use tokio::sync::watch;
 async fn real_owner_database_installs_empty_bootstrap_receipts_without_execution_tasks() {
     let root = tempfile::Builder::new()
         .prefix("ca-mb-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(

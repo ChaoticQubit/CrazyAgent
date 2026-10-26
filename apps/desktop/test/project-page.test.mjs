@@ -240,12 +240,13 @@ test("a failed research row shows its plain reason and Try again", async () => {
 
 test("a stopped or failed master turn offers its own message to send again", () => {
   const turn = (ordinal, phase) => ({ id: `t${ordinal}`, ordinal, phase, reason: null, reply: phase === "succeeded" ? { text: "hi" } : null });
-  assert.equal(research.resendText([turn(1, "succeeded"), turn(2, "failed")], { 1: "first", 2: "second" }), "second");
-  assert.equal(research.resendText([turn(1, "cancelled")], { 1: "first" }), "first");
-  assert.equal(research.resendText([turn(2, "blocked"), turn(1, "succeeded")], { 1: "a", 2: "b" }), "b");
-  assert.equal(research.resendText([turn(1, "failed"), turn(2, "succeeded")], { 1: "first", 2: "second" }), null);
-  assert.equal(research.resendText([turn(1, "running")], { 1: "first" }), null);
+  assert.equal(research.resendText([turn(1, "succeeded"), turn(2, "failed")], { t1: "first", t2: "second" }), "second");
+  assert.equal(research.resendText([turn(1, "cancelled")], { t1: "first" }), "first");
+  assert.equal(research.resendText([turn(2, "blocked"), turn(1, "succeeded")], { t1: "a", t2: "b" }), "b");
+  assert.equal(research.resendText([turn(1, "failed"), turn(2, "succeeded")], { t1: "first", t2: "second" }), null);
+  assert.equal(research.resendText([turn(1, "running")], { t1: "first" }), null);
   assert.equal(research.resendText([turn(1, "failed")], {}), null);
+  assert.equal(research.resendText([turn(1, "failed")], { 1: "guessed from the ordinal" }), null);
   assert.equal(research.resendText([], {}), null);
 });
 
@@ -288,7 +289,7 @@ test("Stop targets the master turn that is still replying", () => {
 });
 
 test("the master's harness that is not installed gets the design's line", () => {
-  const entry = (id, name, kind) => ({ id, name, status: { kind }, status_label: "", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [] });
+  const entry = (id, name, kind) => ({ id, name, status: { kind }, status_label: "", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], aliases: [] });
   const catalog = [entry("codex", "Codex", "not_installed"), entry("claude", "Claude Code", "ready")];
   assert.equal(research.masterMissingLine(catalog, "codex"), "Codex isn't installed on this Mac.");
   assert.equal(research.masterMissingLine(catalog, "claude"), null);

@@ -20,6 +20,7 @@ pub mod memory;
 pub mod model_gateway;
 pub mod onboarding;
 pub mod owner_profile;
+pub mod paths;
 pub mod platform;
 pub mod plugins;
 pub mod pools;
@@ -31,6 +32,7 @@ pub mod rcli_host;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod service;
 pub mod setup;
 /// The one place this crate starts child processes and creates sockets, so no child
 /// inherits a pipe or socket another thread has not marked close-on-exec yet.
@@ -39,6 +41,9 @@ pub mod storage;
 pub mod team;
 pub mod terminal;
 pub mod tui;
+/// `crazyagent update`: release channel, signed download, verification and executable swap.
+pub mod update;
 pub mod verification;
+pub mod version;
 pub mod worker_dispatch;
 pub mod worktrees;

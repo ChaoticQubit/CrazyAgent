@@ -1,6 +1,7 @@
 use super::new_project_view::{Look, Row};
 use super::project::{
-    JobLog, PoolInfo, ProjectReply, ProjectScreen, Tab, memory_source, plain_problem, research_kind,
+    JobLog, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, memory_source, plain_problem,
+    research_kind,
 };
 use super::project_markdown::line_width;
 use super::project_view::{activity, project_screen};
@@ -160,7 +161,7 @@ async fn send(screen: &mut ProjectScreen, controller: &mut OwnerController, quer
 async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-project-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let sources = tempfile::tempdir().unwrap();
@@ -451,6 +452,39 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     );
     assert!(shown.contains("From Competitor research"), "{shown}");
     assert!(drawn.help.contains(&("y", "Save to memory")));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Handled,
+        "y must show the whole memory before it saves"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("# Competitors"), "{shown}");
+    assert!(!drawn.help.contains(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(text(&drawn.rows).contains("word word"));
+    assert!(drawn.help.contains(&("y", "Save to memory")));
+    let kept = screen.key(key(KeyCode::Char('y')));
+    assert!(
+        matches!(
+            kept,
+            ProjectReply::Review {
+                decision: ReviewDecision::Keep,
+                ..
+            }
+        ),
+        "{kept:?}"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
 
     screen.width = 80;
     screen.read(&research);
@@ -461,6 +495,12 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert!(shown.contains("Suggested memory"), "{shown}");
     assert!(shown.contains("y Save to memory   n Dismiss   e Edit first"));
     assert_eq!(drawn.help.first(), Some(&("y", "Save to memory")));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("# Competitors"));
+    assert!(drawn.rows.iter().all(|row| row.width() == 80));
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.reading);
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
     screen.edit = None;
@@ -592,8 +632,9 @@ fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
         screen.problem.as_deref(),
         Some("Not connected to the engine. Retrying.")
     );
+    assert_eq!(screen.next_query(20), None);
     assert_eq!(
-        screen.next_query(20),
+        screen.next_query(10 + REFRESH_MS),
         Some(SetupQuery::Setup {
             project: project.clone()
         })
@@ -605,7 +646,7 @@ fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
         Ok(SetupView::Setup(None)),
     );
     assert!(screen.setup_missing);
-    assert_eq!(screen.next_query(30), None);
+    assert_eq!(screen.next_query(20 + REFRESH_MS), None);
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     assert!(text(&drawn.rows).contains("Its master conversation still works in Conversation."));
 }
@@ -719,7 +760,7 @@ fn the_agent_activity_lists_only_what_the_engine_recorded() {
 async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-agents-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
@@ -1420,5 +1461,142 @@ fn the_add_file_box_general_form_and_remove_question_draw_with_their_keys() {
     assert_eq!(
         drawn.help,
         [("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")]
+    );
+}
+
+#[tokio::test]
+async fn failed_and_empty_reads_settle_back_off_and_say_why() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-quiet-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    std::fs::write(sources.path().join("empty.md"), "").unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let project = ProjectId::new("quiet-notes").unwrap();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Quiet notes".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Notes that load once.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![sources.path().join("empty.md").to_str().unwrap().into()],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+    let look = Look::plain();
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let start = 1_793_000_000_000;
+    assert_eq!(
+        settle(&mut screen, &mut controller, start).await,
+        ["setup", "jobs", "context", "memories"]
+    );
+
+    screen.read("context/documents/empty.md");
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 100).await,
+        ["item"],
+        "an empty file is read once"
+    );
+    let shown = text(&project_screen(&mut screen, 120, 36, &look).rows);
+    assert!(shown.contains("This file is empty."), "{shown}");
+    assert!(!shown.contains("Loading..."), "{shown}");
+
+    screen.read("context/documents/gone.md");
+    assert_eq!(
+        settle(&mut screen, &mut controller, start + 200).await,
+        ["item"],
+        "a missing file is asked for once"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("That file is already gone.")
+    );
+    screen.problem = None;
+    assert!(
+        settle(&mut screen, &mut controller, start + 200 + REFRESH_MS)
+            .await
+            .iter()
+            .all(|read| *read != "item"),
+        "a missing file is not asked for again"
+    );
+    assert_eq!(screen.problem, None);
+    let shown = text(&project_screen(&mut screen, 120, 36, &look).rows);
+    assert!(shown.contains("That file is already gone."), "{shown}");
+    assert!(!shown.contains("Loading..."), "{shown}");
+    screen.read("context/documents/gone.md");
+    assert!(
+        settle(&mut screen, &mut controller, start + 300 + REFRESH_MS)
+            .await
+            .contains(&"item"),
+        "opening a failed file again asks for it again"
+    );
+    screen.problem = None;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let later = start + 10 * REFRESH_MS;
+    screen.open(Tab::Context);
+    assert_eq!(
+        settle(&mut screen, &mut controller, later).await,
+        ["context"],
+        "a failed context read waits before it is sent again"
+    );
+    assert!(screen.problem.take().is_some(), "the failure is shown");
+    assert!(
+        settle(&mut screen, &mut controller, later + 10)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        settle(&mut screen, &mut controller, later + REFRESH_MS).await,
+        ["context"]
+    );
+
+    let mut fresh = ProjectScreen::new(project.clone(), "loading".into(), None);
+    assert_eq!(
+        settle(&mut fresh, &mut controller, later).await,
+        ["setup"],
+        "a failed setup read waits instead of starving every other read"
+    );
+    assert!(fresh.problem.is_some());
+    assert!(
+        settle(&mut fresh, &mut controller, later + 10)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        settle(&mut fresh, &mut controller, later + REFRESH_MS).await,
+        ["setup"]
     );
 }

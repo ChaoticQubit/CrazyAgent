@@ -1,10 +1,10 @@
-import { call, classifyFailure, connect, plainError, status, type Result } from "./api";
+import { call, classifyFailure, plainError, type Result } from "./api";
 import {
-  closeMaster, editModelAccess, inspectModelAccess, masterState, masterTurns, modelAccessPage,
+  allMasterTurns, closeMaster, editModelAccess, inspectModelAccess, masterState, modelAccessPage,
   openMaster, openProject, projects, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, IntentReceipt, MasterState, MasterTurns, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, IntentReceipt, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
 } from "./engine-client";
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
@@ -127,13 +127,13 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
 }
 
 const copy: Record<string, string> = {
-  pending_intent: "Another change is still being saved. Wait for it to finish, then try again.",
+  pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   not_connected: "CrazyAgent's engine isn't running.",
   not_configured: "CrazyAgent's engine isn't running.",
   owner_unavailable: "CrazyAgent's engine isn't running.",
-  busy: "Another change is still being saved. Wait for it to finish, then try again.",
+  busy: "Another change is still running. Wait for it to finish.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   invalid_project: "This project no longer exists.",
@@ -167,6 +167,7 @@ const copy: Record<string, string> = {
   projects_root_not_a_directory: "CrazyAgent can't write the project folder. Check the disk and try again.",
   project_setup_missing: "This project was created before project setup existed.",
   team_harness_invalid: "Pick a harness for the master and for each agent row.",
+  team_harness_unavailable: "A harness in this team can't run team agents yet. Pick another harness.",
   team_harnesses_too_many: "Use at most 8 agent harnesses.",
   team_agent_count_invalid: "Each harness runs 1 to 15 agents.",
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
@@ -179,7 +180,7 @@ const copy: Record<string, string> = {
   team_task_invalid: "The task is empty or too long.",
   team_queue_full: "Too much work is waiting already. Try again when some finishes.",
   team_task_limit: "This project has reached its task limit.",
-  team_conversation_full: "This team's conversation has reached its 2000-message limit.",
+  team_conversation_full: "Too many of your messages are waiting for the master. Send more once it has answered.",
   team_message_invalid: "The message is empty or too long.",
   team_plan_step_missing: "That step is no longer in the master's plan.",
   team_plan_step_handed: "That step was handed off already.",
@@ -203,6 +204,7 @@ const copy: Record<string, string> = {
   master_outcome_pending: "We couldn't confirm your last change. Check it and save again.",
   master_source_conflict: "Settings changed since the master started. End the conversation and start it again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
+  resync_required: "The conversation changed while it loaded. Try again.",
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
   unavailable: "The engine couldn't do this right now. Try again.",
   rejected: "The engine refused this change.",
@@ -234,10 +236,10 @@ export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string
 /** Classifies an intent receipt for the screens.
  * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
 export function receiptState(receipt: IntentReceipt): ReceiptState {
-  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
   if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "not_recorded_at_barrier") {
     return { kind: "unconfirmed" };
   }
+  if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
   if (receipt.outcome === "applied") return { kind: "applied" };
   return { kind: "rejected", code: receipt.outcome };
 }
@@ -255,18 +257,6 @@ export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation:
  * Input: the receipt from Create project. Output: true when it should reconcile once. */
 export function needsReconcile(receipt: IntentReceipt): boolean {
   return receipt.pending && receipt.rejection === null && (receipt.outcome === "unknown" || receipt.outcome === "uncertain");
-}
-
-/** Reconciles the kept New Project intent once by its operation id and hash, reconnecting
- * first when the reply was lost and the bridge let go of the engine.
- * Input: none. Output: the reconcile receipt, or why it couldn't run. */
-export async function reconcileSetup(): Promise<Result<IntentReceipt>> {
-  const current = await status();
-  if (current.kind === "ok" && !current.value.connected) {
-    const connected = await connect();
-    if (connected.kind !== "ok") return connected;
-  }
-  return call<IntentReceipt>("desktop_reconcile_intent");
 }
 
 /** The New Project receipt after one reconcile: the reconcile's answer when it settled the
@@ -488,8 +478,8 @@ export function readMaster(ticket: string): Promise<Result<MasterState>> {
   return wrap(() => masterState(ticket));
 }
 
-export function readMasterTurns(ticket: string, session: string): Promise<Result<MasterTurns>> {
-  return wrap(() => masterTurns(ticket, session));
+export function readMasterTurns(ticket: string, session: string): Promise<Result<MasterTurn[]>> {
+  return wrap(() => allMasterTurns(ticket, session));
 }
 
 export function startMaster(ticket: string, generation: number): Promise<Result<IntentReceipt>> {

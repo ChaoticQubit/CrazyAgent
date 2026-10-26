@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::plugins::{Scope, ServerSpec, ServerStatus};
 use crazyagent_desktop::bridge::NativeBridge;
@@ -74,6 +76,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert_eq!(approved.status, ServerStatus::Approved);
     let checked = bridge
         .check_mcp_server(server.id.clone())
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(checked.tools, vec!["echo", "authorized"]);
@@ -91,7 +94,7 @@ async fn flow(root: &Path) -> Result<(), String> {
 async fn the_desktop_bridge_adds_checks_and_removes_skills_and_mcp_servers() {
     let root = tempfile::Builder::new()
         .prefix("ca-desk-plugins-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

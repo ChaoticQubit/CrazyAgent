@@ -7,6 +7,7 @@ use crate::engine::owner::{
 use crate::engine::{Client, EngineError};
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod account_profile;
@@ -43,7 +44,7 @@ pub struct ControllerView {
 }
 
 pub struct OwnerController {
-    client: Option<OwnerClient>,
+    client: Option<Arc<OwnerClient>>,
     identity: OwnerConnectionIdentity,
     view: Option<ControllerView>,
     pending: Option<PendingMutation>,
@@ -100,7 +101,7 @@ impl OwnerController {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .start_native_auth(request)
             .await
@@ -111,7 +112,7 @@ impl OwnerController {
         request: NativeAuthQuery,
     ) -> Result<NativeAuthReply, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .read_native_auth(request)
             .await
@@ -122,7 +123,7 @@ impl OwnerController {
         request: NativeAuthCancel,
     ) -> Result<NativeAuthReply, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .cancel_native_auth(request)
             .await
@@ -140,7 +141,7 @@ impl OwnerController {
             return Err(EngineError("native_auth_database_mismatch".into()));
         }
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .submit_claude_auth_code(request, secret)
             .await
@@ -154,7 +155,7 @@ impl OwnerController {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.client
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .logout_native_auth(request)
             .await
@@ -172,7 +173,7 @@ impl OwnerController {
         Ok((
             ordinary,
             Self {
-                client: Some(client),
+                client: Some(Arc::new(client)),
                 identity,
                 view: None,
                 pending: None,
@@ -193,7 +194,7 @@ impl OwnerController {
     ) -> Result<Self, EngineError> {
         let (client, identity) = OwnerClient::discover(anchor, kind, timeout).await?;
         Ok(Self {
-            client: Some(client),
+            client: Some(Arc::new(client)),
             identity,
             view: None,
             pending: None,
@@ -228,7 +229,16 @@ impl OwnerController {
     /// mutations, such as GitHub and setup. Output: the client, or `controller_disconnected`.
     pub fn owner_client(&self) -> Result<&OwnerClient, EngineError> {
         self.client
-            .as_ref()
+            .as_deref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
+    /// Shares the owner socket client so a long stateless call, such as a GitHub clone, an
+    /// MCP check or an agent stop, runs without exclusive access to this controller.
+    /// Output: the shared client, or `controller_disconnected`.
+    pub fn shared_client(&self) -> Result<Arc<OwnerClient>, EngineError> {
+        self.client
+            .clone()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
@@ -287,7 +297,7 @@ impl OwnerController {
         if self.identity.database_instance() != identity.database_instance() {
             self.view = None;
         }
-        self.client = Some(client);
+        self.client = Some(Arc::new(client));
         self.identity = identity;
         Ok(())
     }
@@ -340,6 +350,7 @@ impl OwnerController {
         if pending.identity.database_instance() != self.identity.database_instance() {
             return Err(EngineError("controller_pending_database_mismatch".into()));
         }
+        let first = !pending.uncertain;
         pending.uncertain = true;
         let request = pending.request.clone();
         if let Some(view) = &mut self.view {
@@ -350,7 +361,7 @@ impl OwnerController {
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?;
         let response = client.request(request).await?.response;
-        self.settle_response(response)
+        self.settle_response(response, first)
     }
 
     /// Reconciles the original mutation through the actual owner actor.
@@ -379,13 +390,17 @@ impl OwnerController {
             view.fresh = false;
         }
         let response = client.request(request).await?.response;
-        self.settle_response(response)
+        self.settle_response(response, false)
     }
 
-    fn settle_response(&mut self, response: OwnerResponse) -> Result<OwnerResponse, EngineError> {
+    fn settle_response(
+        &mut self,
+        response: OwnerResponse,
+        first_send: bool,
+    ) -> Result<OwnerResponse, EngineError> {
         let pending = self
             .pending
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| EngineError("controller_no_pending_intent".into()))?;
         match &response {
             OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
@@ -404,9 +419,25 @@ impl OwnerController {
             OwnerResponse::Read { .. } => {
                 return Err(EngineError("controller_mutation_response".into()));
             }
+            OwnerResponse::Rejected { .. } if first_send => pending.uncertain = false,
             _ => {}
         }
         Ok(response)
+    }
+
+    /// Drops a retained mutation the owner refused on its first and only send, so no copy of
+    /// it can still be recorded. Output: Ok once dropped, `controller_pending_uncertain` while
+    /// any send of it may still be recorded, or no pending intent.
+    pub fn discard_refused(&mut self) -> Result<(), EngineError> {
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_no_pending_intent".into()))?;
+        if pending.uncertain {
+            return Err(EngineError("controller_pending_uncertain".into()));
+        }
+        self.pending = None;
+        Ok(())
     }
 
     /// Explicitly retries the exact retained original mutation.

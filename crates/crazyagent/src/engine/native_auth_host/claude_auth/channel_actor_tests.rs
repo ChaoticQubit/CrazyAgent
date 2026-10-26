@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 async fn claude_private_input_real_owner_refuses_unobserved_stale_and_cancelled_prompts() {
     let root = tempfile::Builder::new()
         .prefix("ca-claude-input-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("global.toml");

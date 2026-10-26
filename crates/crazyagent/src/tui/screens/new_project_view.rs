@@ -103,17 +103,13 @@ pub(in crate::tui) struct Row(pub Vec<Span<'static>>);
 
 /// Makes text safe to draw on one terminal row.
 /// Takes any text, including names and reports from outside CrazyAgent.
-/// Returns it without escape sequences, control characters or direction overrides; line breaks become spaces.
+/// Returns it without escape sequences or control characters, with hidden and direction-changing characters shown as escapes; line breaks become spaces.
 pub(in crate::tui) fn printable(text: String) -> String {
-    let risky = |c: char| {
-        c.is_control()
-            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
-    };
-    if !text.chars().any(risky) {
+    if !text.chars().any(char::is_control) && !crate::memory::hidden_text(&text) {
         return text;
     }
     let clean = sanitize(&text).replace('\n', " ");
-    assert!(!clean.chars().any(risky));
+    assert!(!clean.chars().any(char::is_control) && !crate::memory::hidden_text(&clean));
     clean
 }
 
@@ -1266,7 +1262,7 @@ fn picker_box(
     body.push(Row::default());
     if wizard.harnesses.is_some() {
         body.push(Row::of(
-            "Harnesses that are not installed cannot be picked.",
+            "Harnesses that are not installed or can't run team agents cannot be picked.",
             look.fg,
         ));
         body.push(Row::of(

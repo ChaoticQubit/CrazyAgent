@@ -25,6 +25,7 @@ mod local_completion_tests;
 
 const OBSERVATION_LIFETIME_MAX_MS: u64 = 86_400_000;
 const SUCCESS_READY_LIFETIME_MS: u64 = 3_600_000;
+const FAILURE_HOLD_MS: u64 = 60_000;
 const ATTEMPTS_MAX: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,11 +260,14 @@ pub fn connection_state(
         return Ok(state);
     };
     validate_observation(&observation)?;
-    if now_ms < observation.observed_at_ms || now_ms >= observation.valid_until_ms {
+    if now_ms < observation.observed_at_ms {
         return Ok(state);
     }
     state.cooldown_until_ms =
         persistence::active_cooldown(connection, &revision, &observation, now_ms)?;
+    if now_ms >= observation.valid_until_ms {
+        return Ok(state);
+    }
     match observation.kind {
         ObservationKind::Ready {
             remaining,
@@ -552,6 +556,11 @@ fn validate_initial_conversation(
     Ok(())
 }
 
+/// Decides whether an authenticated conversation turn may use a connection. A known
+/// health follows ordinary eligibility; an unknown or expired readiness admits the turn
+/// as a probe unless the observation is dated in the future, the quota is exhausted or
+/// a cooldown is active. Inputs: the connection state, route, quota policy and time.
+/// Output: Ok when the turn is admitted.
 fn initial_conversation_eligible(
     state: &ConnectionState,
     route: &RouteRequest,
@@ -561,9 +570,7 @@ fn initial_conversation_eligible(
     if state.health != Health::Unknown {
         return eligible(state, route, policy);
     }
-    if state.observed_at_ms.is_some_and(|at| now_ms < at)
-        || state.valid_until_ms.is_some_and(|until| now_ms >= until)
-    {
+    if state.observed_at_ms.is_some_and(|at| now_ms < at) {
         return Err(error("gateway_initial_readiness_stale"));
     }
     match state.quota {
@@ -815,7 +822,9 @@ fn finish_attempt_inner(
             connection: attempt.connection.clone(),
             sequence,
             observed_at_ms: completion.finished_at_ms,
-            valid_until_ms: completion.finished_at_ms + OBSERVATION_LIFETIME_MAX_MS,
+            valid_until_ms: completion
+                .retry_at_ms
+                .unwrap_or(completion.finished_at_ms + FAILURE_HOLD_MS),
             kind,
         };
         validate_observation(&observation)?;

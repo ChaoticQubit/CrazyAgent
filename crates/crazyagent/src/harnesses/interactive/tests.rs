@@ -13,7 +13,7 @@ impl Case {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-interactive-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let case = Self { root };
@@ -154,7 +154,9 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
             ("rcli", Support::HeadlessOnly { reason }) => {
                 assert_eq!(reason, "runs only as a CrazyAgent master");
             }
-            (_, Support::Terminal) if wanted.is_some() => {}
+            (_, Support::Unavailable { reason }) if wanted.is_some() => {
+                assert_eq!(reason, "CrazyAgent cannot read its replies yet");
+            }
             (id, other) => panic!("{id}: {other:?}"),
         }
     }

@@ -7,7 +7,6 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 const FOUND_REPLY_BYTES: usize = 48 * 1024;
-const REGISTERED_MAX: usize = 256;
 
 /// Starts the folder watch for the saved projects home, when there is one.
 /// Input: the engine connection. Output: the running watch, or None when no
@@ -30,11 +29,11 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(parent).map_err(error)
 }
 
-/// Lists the set-up projects for the projects home: each project's own
-/// folder and whether its onboarding is still under way, read from the
-/// onboarding table. An onboarded project is Ready once both its graph and
-/// mapping steps are done; a project made with New Project has no
-/// onboarding row and is Ready at once.
+/// Lists every set-up project, none left out, so the trash guard and the
+/// Found list see them all: each project's folder and whether onboarding is
+/// still under way. An onboarded project is Ready once the owner saved its
+/// setup, or its graph step is done or off and its mapping is done; a project
+/// made with New Project has no onboarding row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
     let off = crate::onboarding::Step::Off.columns().0;
@@ -42,11 +41,11 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
         .prepare(
             "SELECT s.body, o.graph_state, o.mapping_state FROM project_setups s
              LEFT JOIN onboarding o ON o.project=s.project
-             ORDER BY s.project LIMIT ?1",
+             ORDER BY s.project",
         )
         .map_err(error)?;
     let rows = statement
-        .query_map([REGISTERED_MAX as i64], |row| {
+        .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -59,9 +58,10 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
         let (body, graph, mapping) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
-        let onboarding = graph
-            .zip(mapping)
-            .is_some_and(|(graph, mapping)| (graph != done && graph != off) || mapping != done);
+        let onboarding = !stored.saved()
+            && graph
+                .zip(mapping)
+                .is_some_and(|(graph, mapping)| (graph != done && graph != off) || mapping != done);
         projects.push(Registered {
             folder: stored.project_folder(),
             project_id: stored.project_id,
@@ -69,7 +69,6 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
             onboarding,
         });
     }
-    assert!(projects.len() <= REGISTERED_MAX);
     Ok(projects)
 }
 

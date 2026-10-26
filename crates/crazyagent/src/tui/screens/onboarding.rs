@@ -225,7 +225,25 @@ impl OnboardingPage {
 
     fn settled(onboarding: &OnboardingView) -> bool {
         let done = |step: &Step| matches!(step, Step::Done | Step::Off | Step::Failed { .. });
-        done(&onboarding.graph) && done(&onboarding.mapping)
+        onboarding.finished || (done(&onboarding.graph) && done(&onboarding.mapping))
+    }
+
+    /// Whether the review offers to map again: the mapping agent failed and
+    /// the owner has not saved the setup yet.
+    fn retryable(onboarding: &OnboardingView) -> bool {
+        matches!(onboarding.mapping, Step::Failed { .. }) && !onboarding.finished
+    }
+
+    /// Starts the onboarding again on the draft's pool so the failed mapping
+    /// runs once more; the review's edits are dropped for the new draft.
+    fn retry(&mut self, ctx: &mut Ctx) {
+        let Phase::Review(review) = &self.phase else {
+            return;
+        };
+        match review.onboarding.draft.pool.clone() {
+            Some(pool) => self.start(pool, ctx),
+            None => self.problem = Some("Pick a pool for this project first.".into()),
+        }
     }
 
     fn read_revision(project: &ProjectId, review: &mut Review, ctx: &mut Ctx) {
@@ -451,8 +469,31 @@ impl OnboardingPage {
     ) -> (Vec<Line<'static>>, Option<Position>) {
         let theme = &ctx.theme;
         let mut lines = Vec::new();
+        if let Step::Failed { reason } = &review.onboarding.mapping
+            && !review.onboarding.finished
+        {
+            lines.extend(
+                wrap(&format!("Mapping failed: {reason}"), limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Error, theme)),
+            );
+            lines.extend(
+                wrap(
+                    "Fill in the setup yourself to skip it, or press r on Confirm to map again.",
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+            );
+            lines.push(Line::default());
+        }
         let missing = review.missing_labels();
-        if missing.is_empty() {
+        if review.onboarding.finished {
+            lines.push(status("Saved", theme, ctx.glyphs));
+            lines.push(Line::raw(
+                "This project is set up. Change anything, then save.",
+            ));
+        } else if missing.is_empty() {
             lines.push(status("Ready", theme, ctx.glyphs));
             lines.push(Line::raw("Check the setup and confirm it."));
         } else {
@@ -552,6 +593,7 @@ impl OnboardingPage {
         } else {
             let label = match review.revision {
                 Load::Loading => "Loading",
+                _ if review.onboarding.finished => "Save changes",
                 _ => "Confirm setup",
             };
             lines.push(buttons(
@@ -587,11 +629,21 @@ impl Screen for OnboardingPage {
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
                 ],
-                Focus::Confirm => vec![
-                    hint("Enter", "Confirm setup"),
-                    hint("Shift-Tab", "Previous"),
-                    hint("Esc", "Back"),
-                ],
+                Focus::Confirm => {
+                    let mut hints = vec![hint(
+                        "Enter",
+                        if review.onboarding.finished {
+                            "Save changes"
+                        } else {
+                            "Confirm setup"
+                        },
+                    )];
+                    if Self::retryable(&review.onboarding) {
+                        hints.push(hint("r", "Retry mapping"));
+                    }
+                    hints.extend([hint("Shift-Tab", "Previous"), hint("Esc", "Back")]);
+                    hints
+                }
                 _ => vec![
                     hint("Tab", "Next"),
                     hint("Shift-Tab", "Previous"),
@@ -634,6 +686,10 @@ impl Screen for OnboardingPage {
                 match (review.focus, key) {
                     (Focus::Confirm, Key::Enter) => {
                         self.confirm(ctx);
+                        return Flow::Handled;
+                    }
+                    (Focus::Confirm, Key::Char('r')) if Self::retryable(&review.onboarding) => {
+                        self.retry(ctx);
                         return Flow::Handled;
                     }
                     (_, Key::Tab | Key::Enter) => review.focus = review.focus.step(true),

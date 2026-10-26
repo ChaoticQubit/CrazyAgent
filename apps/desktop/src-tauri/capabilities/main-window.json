@@ -35,6 +35,7 @@
     "allow-desktop-team-graph",
     "allow-desktop-terminal-attach",
     "allow-desktop-terminal-input",
+    "allow-desktop-terminal-prompt",
     "allow-desktop-terminal-resize",
     "allow-desktop-terminal-detach",
     "allow-desktop-update-project-setup",
@@ -131,6 +132,14 @@
     "allow-desktop-pick-documents",
     "allow-desktop-open-link",
     "allow-desktop-reveal-project-folder",
-    "allow-desktop-open-context-item"
+    "allow-desktop-open-context-item",
+    "allow-desktop-update-settings",
+    "allow-desktop-set-update-channel",
+    "allow-desktop-check-update",
+    "allow-desktop-install-update",
+    "allow-desktop-restart-app",
+    "allow-desktop-link-cli",
+    "allow-desktop-engine-versions",
+    "allow-desktop-restart-engine"
   ]
 }

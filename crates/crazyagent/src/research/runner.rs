@@ -211,6 +211,14 @@ impl From<JobError> for RunError {
     }
 }
 
+/// Refreshes a claim while its run prepares, so slow preparation is not taken back as
+/// stale, and stops the run once the claim was taken back. Inputs: the job store and
+/// the claimed job. Output: `RunError::Jobs(JobError::NotHeld)` when it is no longer held.
+fn still_held(jobs: &ResearchJobs, job: &ResearchJob) -> Result<(), RunError> {
+    jobs.heartbeat(job, 0)?;
+    Ok(())
+}
+
 impl From<SandboxError> for RunError {
     fn from(value: SandboxError) -> Self {
         Self::Sandbox(value)
@@ -458,52 +466,41 @@ impl ResearchRunner {
             process_group,
         };
         let Some(harness) = ResearchHarness::of(&job.harness) else {
-            jobs.fail(
-                job.id,
-                &self.claimer,
-                "This harness cannot run research yet",
-                1,
-            )?;
-            return Ok(run(ResearchStatus::Failed, None, None));
+            let status = jobs.fail(&job, "This harness cannot run research yet", 1)?;
+            return Ok(run(status, None, None));
         };
         let Some(account) = project
             .account
             .as_ref()
             .filter(|account| account.harness() == harness)
         else {
-            jobs.needs_pool(job.id, &self.claimer)?;
-            return Ok(run(ResearchStatus::NeedsPool, None, None));
+            let status = jobs.needs_pool(&job)?;
+            return Ok(run(status, None, None));
         };
         if harness == ResearchHarness::ClaudeCode && self.claude.is_none() {
-            jobs.fail(
-                job.id,
-                &self.claimer,
-                "This harness is not installed on this computer",
-                1,
-            )?;
-            return Ok(run(ResearchStatus::Failed, None, None));
+            let status = jobs.fail(&job, "This harness is not installed on this computer", 1)?;
+            return Ok(run(status, None, None));
         }
         match self.launch(jobs, &job, project, account) {
             Ok((Ending::Exited(true), group, output)) => {
                 let report = match self.publish(&job, harness, project.root, &output) {
                     Ok(report) => report,
                     Err(reason) => {
-                        let status =
-                            jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
+                        let status = jobs.fail(&job, reason, self.limits.attempts_max)?;
                         return Ok(run(status, None, Some(group)));
                     }
                 };
                 let relative = format!("context/research/{}.md", job.kind);
-                jobs.finish(job.id, &self.claimer, &relative)?;
+                jobs.finish(&job, &relative)?;
                 Ok(run(ResearchStatus::Done, Some(report), Some(group)))
             }
             Ok((ending, group, _)) => {
                 if let Ending::Cancelled = ending {
-                    jobs.cancelled(job.id, &self.claimer)?;
+                    jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
                 if let Ending::Interrupted = ending {
-                    let _ = jobs.release(job.id, &self.claimer);
+                    let _ = jobs.release(&job);
                     let status = jobs
                         .get(job.id)?
                         .map_or(ResearchStatus::Queued, |job| job.status);
@@ -514,26 +511,32 @@ impl ResearchRunner {
                     Ending::Overflowed => "Agent output exceeded the limit",
                     _ => "Agent stopped with an error",
                 };
-                let status = jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
+                let status = jobs.fail(&job, reason, self.limits.attempts_max)?;
                 Ok(run(status, None, Some(group)))
             }
+            Err(RunError::Jobs(JobError::NotHeld)) => {
+                let status = jobs
+                    .get(job.id)?
+                    .map_or(ResearchStatus::Queued, |job| job.status);
+                Ok(run(status, None, None))
+            }
             Err(RunError::Busy) => {
-                jobs.release(job.id, &self.claimer)?;
+                jobs.release(&job)?;
                 let status = jobs
                     .get(job.id)?
                     .map_or(ResearchStatus::Queued, |job| job.status);
                 Ok(run(status, None, None))
             }
             Err(RunError::Account(_)) => {
-                jobs.needs_pool(job.id, &self.claimer)?;
-                Ok(run(ResearchStatus::NeedsPool, None, None))
+                let status = jobs.needs_pool(&job)?;
+                Ok(run(status, None, None))
             }
             Err(error) => {
                 let reason = match error {
                     RunError::Context(_) => "Could not give the agent this project's context",
                     _ => "Could not prepare the research sandbox",
                 };
-                jobs.fail(job.id, &self.claimer, reason, self.limits.attempts_max)?;
+                jobs.fail(&job, reason, self.limits.attempts_max)?;
                 Err(error)
             }
         }
@@ -549,6 +552,7 @@ impl ResearchRunner {
         if !valid_kind(&job.kind) {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
+        still_held(jobs, job)?;
         let root = project.root.canonicalize()?;
         if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
             return Err(RunError::Invalid("project folder must be canonical".into()));
@@ -620,7 +624,10 @@ impl ResearchRunner {
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
+        let sandbox = sandbox.confine_to_worktree(&worktree)?;
+        sandbox.install(&profile)?;
         drop(setup);
+        still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
         if let Some(host) = &self.terminal {
@@ -780,7 +787,7 @@ impl ResearchRunner {
             }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
-                match jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed)) {
+                match jobs.heartbeat(job, counted.load(Ordering::Relaxed)) {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
@@ -789,7 +796,7 @@ impl ResearchRunner {
             std::thread::sleep(POLL);
         };
         agent.stop();
-        let _ = jobs.heartbeat(job.id, &self.claimer, counted.load(Ordering::Relaxed));
+        let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         Ok(ending)
     }
 
@@ -820,7 +827,7 @@ impl ResearchRunner {
             }
             if beat.elapsed() >= HEARTBEAT {
                 beat = Instant::now();
-                match jobs.heartbeat(job.id, &self.claimer, counted) {
+                match jobs.heartbeat(job, counted) {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
@@ -843,7 +850,7 @@ impl ResearchRunner {
                 }
             }
         };
-        let _ = jobs.heartbeat(job.id, &self.claimer, counted);
+        let _ = jobs.heartbeat(job, counted);
         if matches!(ending, Ending::Exited(true)) {
             assert!(last.len() as u64 <= counted);
             write_private(output, last.as_bytes())?;
@@ -918,7 +925,7 @@ pub(crate) enum ReadOnlyEnding {
     #[cfg(unix)]
     Answered(String),
     #[cfg(unix)]
-    Failed(&'static str),
+    Failed(String),
     #[cfg(unix)]
     TimedOut,
     #[cfg(unix)]
@@ -1054,10 +1061,11 @@ impl ResearchRunner {
             let _ = stdin.write_all(run.prompt.as_bytes());
         }
         let started = Instant::now();
+        let mut exited_failing = false;
         let ending = loop {
             if let Some(status) = running.child.try_wait()? {
-                break (!status.success())
-                    .then_some(ReadOnlyEnding::Failed("Agent stopped with an error"));
+                exited_failing = !status.success();
+                break None;
             }
             if started.elapsed() >= run.wall_time {
                 break Some(ReadOnlyEnding::TimedOut);
@@ -1066,7 +1074,7 @@ impl ResearchRunner {
                 break Some(ReadOnlyEnding::Stopped);
             }
             if counted.load(Ordering::Relaxed) > self.limits.output_bytes_max {
-                break Some(ReadOnlyEnding::Failed("Agent wrote too much output"));
+                break Some(ReadOnlyEnding::Failed("Agent wrote too much output".into()));
             }
             std::thread::sleep(POLL);
         };
@@ -1076,6 +1084,13 @@ impl ResearchRunner {
             let _ = handle.join();
         }
         drop(lease);
+        if exited_failing {
+            return Ok(ReadOnlyEnding::Failed(agent_failure(
+                &agent.join(stdout_log),
+                harness,
+                self.limits.output_bytes_max,
+            )));
+        }
         if let Some(ending) = ending {
             return Ok(ending);
         }
@@ -1083,7 +1098,7 @@ impl ResearchRunner {
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         Ok(if answer.is_empty() {
-            ReadOnlyEnding::Failed("Agent returned no answer")
+            ReadOnlyEnding::Failed("Agent returned no answer".into())
         } else {
             ReadOnlyEnding::Answered(answer)
         })
@@ -1790,6 +1805,43 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
+/// The plain reason a read-only agent stopped with an error: Codex's own
+/// message from its last `turn.failed` event, else its last `error` event,
+/// else the generic reason; a message that is a provider's JSON error body
+/// gives its inner message. Takes the agent's stdout log, its harness and
+/// the log bound; the log is read bounded and never through a link.
+#[cfg(unix)]
+fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
+    const GENERIC: &str = "Agent stopped with an error";
+    if harness != ResearchHarness::Codex {
+        return GENERIC.to_owned();
+    }
+    let Ok(text) = read_bounded(log, max) else {
+        return GENERIC.to_owned();
+    };
+    let (mut turn, mut error) = (None, None);
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (slot, message) = match event["type"].as_str() {
+            Some("turn.failed") => (&mut turn, &event["error"]["message"]),
+            Some("error") => (&mut error, &event["message"]),
+            _ => continue,
+        };
+        if let Some(message) = message.as_str().map(str::trim).filter(|m| !m.is_empty()) {
+            let inner = serde_json::from_str::<serde_json::Value>(message)
+                .ok()
+                .and_then(|body| body["error"]["message"].as_str().map(str::to_owned));
+            *slot = Some(inner.unwrap_or_else(|| message.to_owned()));
+        }
+    }
+    turn.or(error).map_or_else(
+        || GENERIC.to_owned(),
+        |message| format!("Agent stopped: {message}"),
+    )
+}
+
 fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
     let file = open_read(path)?;
     let metadata = file.metadata()?;
@@ -2022,7 +2074,7 @@ mod tests {
     fn engine_root() -> EngineRoot {
         let temp = tempfile::Builder::new()
             .prefix("ca-research-lease-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let base = temp.path().canonicalize().unwrap();

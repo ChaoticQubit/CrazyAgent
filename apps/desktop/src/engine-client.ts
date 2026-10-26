@@ -16,10 +16,54 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
   }
 }
 
-/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal.
+export type SettledCall = { ok: true; value: unknown } | { ok: false; failure: unknown };
+
+const unconfirmedWatchers = new Set<() => void>();
+
+/** Whether a bridge reply leaves an owner change unconfirmed: a reply the bridge still marks
+ * pending, or a refusal because an earlier change is still pending.
+ * Input: the settled call. Output: true when the app should check the kept change. */
+export function leavesUnconfirmed(settled: SettledCall): boolean {
+  if (settled.ok) {
+    const value = settled.value;
+    return typeof value === "object" && value !== null && !Array.isArray(value) && "pending" in value && value.pending === true;
+  }
+  const failure = settled.failure;
+  return typeof failure === "object" && failure !== null && "code" in failure && failure.code === "pending_intent";
+}
+
+/** Subscribes to bridge replies that leave an owner change unconfirmed, so the app can name
+ * the change and check it. Input: the listener. Output: a function that unsubscribes it. */
+export function watchUnconfirmed(listener: () => void): () => void {
+  unconfirmedWatchers.add(listener);
+  return () => { unconfirmedWatchers.delete(listener); };
+}
+
+/** Tells every watcher when one settled bridge call left a change unconfirmed.
+ * Input: the settled call. Output: none. */
+export function reportReply(settled: SettledCall): void {
+  if (!leavesUnconfirmed(settled)) return;
+  for (const listener of [...unconfirmedWatchers]) listener();
+}
+
+/** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal, and
+ * reports a reply that leaves an owner change unconfirmed.
+ * Inputs: the command name and its arguments. Output: the command result or its failure. */
+export async function bridgeCall<T>(command: string, args?: InvokeArgs): Promise<T> {
+  try {
+    const value = await retryBusy(() => native<T>(command, args));
+    reportReply({ ok: true, value });
+    return value;
+  } catch (failure) {
+    reportReply({ ok: false, failure });
+    throw failure;
+  }
+}
+
+/** Calls one native bridge command through the shared bridge call.
  * Inputs: the command name and its arguments. Output: the command result or its failure. */
 function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
-  return retryBusy(() => native<T>(command, args));
+  return bridgeCall<T>(command, args);
 }
 
 export function startNativeAuth(ticket: string, method: NativeAuthMethod): Promise<NativeAuthView> {
@@ -95,6 +139,8 @@ export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { ki
 
 export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
 
+export type TeamUse = { kind: "available" } | { kind: "unavailable"; reason: string };
+
 export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
 export interface HarnessEntry {
@@ -107,6 +153,8 @@ export interface HarnessEntry {
   tools: ToolControl;
   model_selection: boolean;
   account_kinds: AccountKind[];
+  team: TeamUse;
+  aliases: string[];
 }
 
 /** Lists every harness the engine knows, in owner order, with its status on this machine.
@@ -770,6 +818,7 @@ export interface OnboardingView {
   facts: MappingFacts;
   missing: string[];
   overview: string | null;
+  finished: boolean;
 }
 
 export interface GitHubDeviceCode {
@@ -1013,6 +1062,13 @@ export function terminalAttach(agent: string, output: Channel<TerminalMessage>):
  * and 1 to 4096 bytes. Output: resolves once the bridge queued them in order. */
 export function terminalInput(agent: string, bytes: number[]): Promise<void> {
   return invoke<void>("desktop_terminal_input", { agent, bytes });
+}
+
+/** Sends the owner's explicit prompt to an attached agent terminal as one submission; a
+ * sub-agent's master hears a note of it. Inputs: the terminal name and up to 4096 bytes of
+ * text. Output: resolves once the bridge queued it in order. */
+export function terminalPrompt(agent: string, text: string): Promise<void> {
+  return invoke<void>("desktop_terminal_prompt", { agent, text });
 }
 
 /** Sets an attached agent terminal's size for its app and every viewer. Inputs: the terminal
@@ -1399,15 +1455,40 @@ export interface MasterState {
 
 export interface MasterTurns {
   ticket: string;
-  page: { turns: MasterTurn[] };
+  page: { turns: MasterTurn[]; next: unknown };
 }
 
 export function masterState(ticket: string): Promise<MasterState> {
   return invoke<MasterState>("desktop_master_state", { ticket });
 }
 
-export function masterTurns(ticket: string, sessionId: string): Promise<MasterTurns> {
-  return invoke<MasterTurns>("desktop_master_turns", { ticket, sessionId });
+export function masterTurns(ticket: string, sessionId: string, cursor: unknown = null): Promise<MasterTurns> {
+  return invoke<MasterTurns>("desktop_master_turns", { ticket, sessionId, cursor });
+}
+
+const MASTER_TURNS_MAX = 1024;
+const MASTER_READ_TRIES = 3;
+
+/** Reads every turn of one master session, oldest first, by following the engine's pages.
+ * Inputs: the selection ticket and the session id. Output: the turns with the ordinals the
+ * engine returned; a read the engine keeps changing under it fails with resync_required. */
+export async function allMasterTurns(ticket: string, sessionId: string): Promise<MasterTurn[]> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const turns: MasterTurn[] = [];
+      let cursor: unknown = null;
+      for (let pages = 0; pages <= MASTER_TURNS_MAX; pages += 1) {
+        const { page } = await masterTurns(ticket, sessionId, cursor);
+        turns.push(...page.turns);
+        if (page.next === null) return turns;
+        cursor = page.next;
+      }
+      throw { code: "projection_limit" };
+    } catch (failure) {
+      const resync = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "resync_required";
+      if (!resync || attempt >= MASTER_READ_TRIES) throw failure;
+    }
+  }
 }
 
 export function openMaster(ticket: string, generation: number): Promise<IntentReceipt> {
