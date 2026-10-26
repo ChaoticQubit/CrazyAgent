@@ -84,6 +84,7 @@ impl NativeProfileUse {
         &self,
         _agent_home: &Path,
         _turn: Duration,
+        _executable: &Path,
     ) -> Result<AgentCredential, EngineError> {
         match *self {}
     }

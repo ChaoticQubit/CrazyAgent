@@ -599,15 +599,25 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
+        let harness = account.harness();
+        let executable = match harness {
+            ResearchHarness::Codex => self
+                .codex
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
+            ResearchHarness::ClaudeCode => self
+                .claude
+                .as_deref()
+                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
+        };
         let credential = match &lease {
             Some((lease, _)) => Some(
                 lease
-                    .hand_to_agent(&home, self.limits.wall_time)
+                    .hand_to_agent(&home, self.limits.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
             None => None,
         };
-        let harness = account.harness();
         let installed = context
             .install(harness.id(), &home, job.tools)
             .map_err(|problem| {
@@ -620,16 +630,6 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let executable = match harness {
-            ResearchHarness::Codex => self
-                .codex
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
-            ResearchHarness::ClaudeCode => self
-                .claude
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
-        };
         let network = if job.tools {
             SandboxNetwork::Open
         } else {
@@ -1030,18 +1030,6 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
-        let credential = match &lease {
-            Some(lease) => Some(
-                lease
-                    .hand_to_agent(&home, run.wall_time)
-                    .map_err(|problem| RunError::Account(problem.0))?,
-            ),
-            None => None,
-        };
-        let work = agent.join("work");
-        private_directory(&work)?;
-        let tmp = agent.join("tmp");
-        private_directory(&tmp)?;
         let harness = run.account.harness();
         let executable = match harness {
             ResearchHarness::Codex => self
@@ -1053,6 +1041,18 @@ impl ResearchRunner {
                 .as_deref()
                 .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
         };
+        let credential = match &lease {
+            Some(lease) => Some(
+                lease
+                    .hand_to_agent(&home, run.wall_time, executable)
+                    .map_err(|problem| RunError::Account(problem.0))?,
+            ),
+            None => None,
+        };
+        let work = agent.join("work");
+        private_directory(&work)?;
+        let tmp = agent.join("tmp");
+        private_directory(&tmp)?;
         let mut sandbox = ProjectSandbox::new(
             &work,
             &home,

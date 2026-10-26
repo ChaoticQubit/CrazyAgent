@@ -17,6 +17,7 @@ use std::path::Path;
 mod agent_copy;
 mod configured_rcli;
 mod generated_configured_rcli;
+mod renewal;
 mod staging;
 pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
 use configured_rcli::lock;

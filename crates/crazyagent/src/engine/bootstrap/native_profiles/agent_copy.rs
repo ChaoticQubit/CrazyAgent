@@ -1,3 +1,4 @@
+use super::renewal::{Keeper, since_epoch};
 use super::{NativeProfileUse, failure};
 use crate::engine::EngineError;
 use base64::Engine;
@@ -6,11 +7,12 @@ use serde_json::{Map, Value, json};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const CODEX_RECORD: &str = "auth.json";
 const CLAUDE_RECORD: &str = ".credentials.json";
 const RECORD_BYTES_MAX: u64 = 65_536;
+const USABLE_MIN: Duration = Duration::from_secs(60);
 #[cfg(target_os = "macos")]
 const SECURITY: &str = "/usr/bin/security";
 #[cfg(target_os = "macos")]
@@ -28,67 +30,126 @@ fn unsafe_home() -> EngineError {
     failure("native_profile_agent_home_unsafe")
 }
 
-/// An account credential copied into one agent's own home for one turn. Dropping it removes
-/// the copy from that home, so nothing outlives the turn that needed it.
+/// The harness whose credential record a managed account keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Harness {
+    Codex,
+    Claude,
+}
+
+impl Harness {
+    /// The file name an agent's copy has in its home. Output: the name.
+    fn copy_name(self) -> &'static str {
+        match self {
+            Self::Codex => CODEX_RECORD,
+            Self::Claude => CLAUDE_RECORD,
+        }
+    }
+}
+
+/// An agent's copy of the account's credential and the moment its access token lapses.
+pub(super) struct Record {
+    pub(super) copy: Vec<u8>,
+    pub(super) expires: Duration,
+}
+
+/// An account credential copied into one agent's own home for one turn, with the keeper
+/// that renews it when the turn may outlast it. Dropping it stops the keeper and then
+/// removes the copy, so nothing outlives the turn that needed it.
 pub(crate) struct AgentCredential {
     home: File,
     name: &'static str,
+    keeper: Option<Keeper>,
 }
 
 impl Drop for AgentCredential {
-    /// Removes the copy beneath the agent home's descriptor when the turn ends.
+    /// Stops the keeper, then removes the copy beneath the agent home's descriptor.
     /// Input: the credential being dropped. Output: none; a copy already gone is fine.
     fn drop(&mut self) {
+        drop(self.keeper.take());
         let _ = rustix::fs::unlinkat(&self.home, self.name, AtFlags::empty());
     }
+}
+
+/// Reads the account's credential record and builds the agent's copy from it.
+/// Inputs: the harness, the managed home's descriptor and path. Output: the record.
+pub(super) fn account_record(
+    harness: Harness,
+    home: &File,
+    path: &Path,
+) -> Result<Record, EngineError> {
+    match harness {
+        Harness::Codex => codex_copy(&read_record(home, CODEX_RECORD)?),
+        Harness::Claude => claude_copy(&claude_source(home, path)?),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn claude_source(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
+    keychain_record(home, path)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn claude_source(home: &File, _path: &Path) -> Result<Vec<u8>, EngineError> {
+    read_record(home, CLAUDE_RECORD)
 }
 
 impl NativeProfileUse {
     /// Gives an agent's own home a copy of this account's credential that cannot refresh it,
     /// so the agent signs in without ever writing to, or reading from, the managed home.
     /// Codex gets `auth.json` with an empty refresh token and no API key; Claude Code gets
-    /// `.credentials.json` holding only its OAuth record, with no refresh token.
-    /// Inputs: the agent's private home and the turn's time bound. Output: the copy, removed
-    /// when dropped; `native_profile_credential_expiring` when the access token lapses within
-    /// the turn; `native_profile_credential_unavailable` or `native_profile_agent_home_unsafe`.
+    /// `.credentials.json` holding only its OAuth record, with no refresh token. When the
+    /// access token lapses within the turn, the harness first renews the account in the
+    /// managed home, and a keeper renews it again and replaces the copy while the turn runs.
+    /// Inputs: the agent's private home, the turn's time bound and the harness executable.
+    /// Output: the copy, removed when dropped; `native_profile_credential_expiring` when the
+    /// token still lapses within a minute; `native_profile_credential_unavailable`,
+    /// `native_profile_renewal_busy` or `native_profile_agent_home_unsafe`.
     pub(crate) fn hand_to_agent(
         &self,
         agent_home: &Path,
         turn: Duration,
+        executable: &Path,
     ) -> Result<AgentCredential, EngineError> {
         self.revalidate_retained()?;
         if self.configured.is_some() {
             return Err(unavailable());
         }
         let home = open_agent_home(agent_home)?;
-        let until = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| unavailable())?
-            .checked_add(turn)
-            .ok_or_else(expiring)?;
-        let harness =
-            crate::harnesses::spec(self.binding.connection.harness.as_str()).map(|spec| spec.id);
-        let (name, copy) = match harness {
-            Some("codex") => (
-                CODEX_RECORD,
-                codex_copy(&read_record(&self.home.file, CODEX_RECORD)?, until)?,
-            ),
-            Some("claude-code") => (CLAUDE_RECORD, claude_copy(&self.claude_record()?, until)?),
+        let harness = match crate::harnesses::spec(self.binding.connection.harness.as_str())
+            .map(|spec| spec.id)
+        {
+            Some("codex") => Harness::Codex,
+            Some("claude-code") => Harness::Claude,
             _ => return Err(unavailable()),
         };
-        place(&home, name, &copy)?;
-        Ok(AgentCredential { home, name })
-    }
-
-    #[cfg(target_os = "macos")]
-    fn claude_record(&self) -> Result<Vec<u8>, EngineError> {
         let path = self.profile_path()?;
-        keychain_record(&self.home.file, &path)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn claude_record(&self) -> Result<Vec<u8>, EngineError> {
-        read_record(&self.home.file, CLAUDE_RECORD)
+        let mut record = account_record(harness, &self.home.file, &path)?;
+        let turn_end = since_epoch()?.checked_add(turn).ok_or_else(expiring)?;
+        let renewal = if record.expires <= turn_end {
+            let renewal = self.renewal(harness, executable)?;
+            record = renewal.renew(record.expires)?;
+            Some(renewal)
+        } else {
+            None
+        };
+        if record.expires <= since_epoch()? + USABLE_MIN {
+            return Err(expiring());
+        }
+        let name = harness.copy_name();
+        place(&home, name, &record.copy)?;
+        let mut credential = AgentCredential {
+            home,
+            name,
+            keeper: None,
+        };
+        if let Some(renewal) = renewal
+            && record.expires <= turn_end
+        {
+            let agent = credential.home.try_clone().map_err(|_| unavailable())?;
+            credential.keeper = Some(Keeper::start(renewal, agent, name, record.expires)?);
+        }
+        Ok(credential)
     }
 }
 
@@ -145,7 +206,7 @@ fn read_record(folder: &File, name: &str) -> Result<Vec<u8>, EngineError> {
 /// Writes the copy under a fresh private name in the agent home and renames it into place,
 /// so a link an agent left at that name is replaced, never followed.
 /// Inputs: the agent home, the file name and the bytes. Output: done, or unavailable.
-fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
+pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| unavailable())?;
     let temporary = format!(".{name}.{:016x}", u64::from_le_bytes(nonce));
@@ -171,9 +232,9 @@ fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
 }
 
 /// Builds the agent's Codex `auth.json` from the account's: the ChatGPT tokens with the
-/// refresh token emptied, no API key and nothing else. Inputs: the account's record and the
-/// moment the turn must end by. Output: the copy, or the expiring or unavailable refusal.
-fn codex_copy(record: &[u8], until: Duration) -> Result<Vec<u8>, EngineError> {
+/// refresh token emptied, no API key and nothing else. Input: the account's record.
+/// Output: the copy with its access token's expiry, or the unavailable refusal.
+fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
     let tokens = record
         .get("tokens")
@@ -188,9 +249,7 @@ fn codex_copy(record: &[u8], until: Duration) -> Result<Vec<u8>, EngineError> {
     };
     let access = text("access_token")?;
     let identity = text("id_token")?;
-    if Duration::from_secs(token_expiry(access)?) <= until {
-        return Err(expiring());
-    }
+    let expires = Duration::from_secs(token_expiry(access)?);
     let copy = json!({
         "OPENAI_API_KEY": null,
         "tokens": {
@@ -201,9 +260,9 @@ fn codex_copy(record: &[u8], until: Duration) -> Result<Vec<u8>, EngineError> {
         },
         "last_refresh": record.get("last_refresh").cloned().unwrap_or(Value::Null)
     });
-    let bytes = serde_json::to_vec(&copy).map_err(|_| unavailable())?;
-    assert!(!bytes.is_empty());
-    Ok(bytes)
+    let copy = serde_json::to_vec(&copy).map_err(|_| unavailable())?;
+    assert!(!copy.is_empty());
+    Ok(Record { copy, expires })
 }
 
 /// Reads the `exp` claim of a ChatGPT access token without checking its signature, which
@@ -221,10 +280,10 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
 }
 
 /// Builds the agent's Claude Code `.credentials.json`: the account's OAuth record alone,
-/// with no refresh token and none of the other records the account keeps. Inputs: the
-/// account's credential record and the moment the turn must end by. Output: the copy, or
-/// the expiring or unavailable refusal.
-fn claude_copy(record: &[u8], until: Duration) -> Result<Vec<u8>, EngineError> {
+/// with no refresh token and none of the other records the account keeps. Input: the
+/// account's credential record. Output: the copy with its access token's expiry, or the
+/// unavailable refusal.
+fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
     let mut oauth: Map<String, Value> = record
         .get("claudeAiOauth")
@@ -238,18 +297,16 @@ fn claude_copy(record: &[u8], until: Duration) -> Result<Vec<u8>, EngineError> {
     {
         return Err(unavailable());
     }
-    let expires = oauth
-        .get("expiresAt")
-        .and_then(Value::as_u64)
-        .ok_or_else(unavailable)?;
-    if Duration::from_millis(expires) <= until {
-        return Err(expiring());
-    }
+    let expires = Duration::from_millis(
+        oauth
+            .get("expiresAt")
+            .and_then(Value::as_u64)
+            .ok_or_else(unavailable)?,
+    );
     oauth.insert("refreshToken".to_owned(), Value::Null);
-    let bytes =
-        serde_json::to_vec(&json!({ "claudeAiOauth": oauth })).map_err(|_| unavailable())?;
-    assert!(!bytes.is_empty());
-    Ok(bytes)
+    let copy = serde_json::to_vec(&json!({ "claudeAiOauth": oauth })).map_err(|_| unavailable())?;
+    assert!(!copy.is_empty());
+    Ok(Record { copy, expires })
 }
 
 /// Reads the account's Claude Code credential from the managed home's own keychain, where
