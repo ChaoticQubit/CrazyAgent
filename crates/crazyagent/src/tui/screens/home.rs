@@ -473,6 +473,8 @@ impl Home {
             )
         } else if card.research.needs_pool > 0 {
             status("Needs a pool", theme, ctx.glyphs)
+        } else if card.research.rate_limited > 0 {
+            status("Rate limited", theme, ctx.glyphs)
         } else {
             styled("Idle", Role::Muted, theme)
         };

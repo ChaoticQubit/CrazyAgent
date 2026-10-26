@@ -11,7 +11,7 @@ const { ICON_NAMES } = await import("../src/ui/icon.tsx");
 const TABLE = [
   [["Signed in", "Connected", "Ready", "Done", "Approved", "Saved", "Research done", "Replied"], "circle-check", "ok"],
   [["Key saved"], "key-round", "ok"],
-  [["Not signed in", "Needs a pool", "Needs approval", "Needs you"], "circle-alert", "warn"],
+  [["Not signed in", "Needs a pool", "Needs approval", "Needs you", "Rate limited until 12:32 AM"], "circle-alert", "warn"],
   [["Limited control"], "triangle-alert", "warn"],
   [["Can't reach this URL", "Failed", "Can't start"], "circle-x", "danger"],
   [["Running", "Signing in...", "Starting", "Thinking...", "Writing"], "loader-circle", "info"],
