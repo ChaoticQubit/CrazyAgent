@@ -1728,13 +1728,8 @@ impl TeamRuntime {
                 let remote = model_remote(&endpoint).map_err(|e| plain(&e))?;
                 (own_home, remote, Some(model.clone()))
             }
-            TeamReach::Managed { profile_ref, model } => {
-                let custody = self.custody.as_ref().map_err(|e| e.0.clone())?;
-                (
-                    custody.profile_home(profile_ref),
-                    SandboxRemote::AnyHost(443),
-                    model.clone(),
-                )
+            TeamReach::Managed { model, .. } => {
+                (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
         let context = self.context(&stored.project_id, id, role, tools)?;
@@ -2493,13 +2488,19 @@ fn per_turn(
             return Some("The agent was given a turn without its signed-in account".into());
         };
         let Grant { profile, context } = *grant;
-        if profile.profile_path().ok().as_deref() != Some(home) {
-            let _ = reports.send(Report::Finished {
-                text: String::new(),
-                end: TurnEnd::Closed,
-            });
-            return Some("The signed-in account changed".into());
-        }
+        let credential = match profile.hand_to_agent(home, turn_time) {
+            Ok(credential) => credential,
+            Err(problem) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                });
+                return Some(format!(
+                    "The signed-in account could not reach the agent ({})",
+                    problem.0
+                ));
+            }
+        };
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
@@ -2519,6 +2520,7 @@ fn per_turn(
         });
         let (text, end) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let _ = session.stop();
+        drop(credential);
         drop(profile);
         let reusable = matches!(
             end,
@@ -2774,3 +2776,11 @@ pub fn agents(
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/managed_agent.rs"]
+pub(crate) mod managed_agent;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/dec_090_tests.rs"]
+mod dec_090_tests;

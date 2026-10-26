@@ -148,6 +148,7 @@ pub enum MasterReason {
     OutputLimit,
     UnsupportedCapability,
     RepositoryMissing,
+    RepositoryConfigRefused,
     Cancelled,
     Unknown,
 }
@@ -231,6 +232,8 @@ pub struct MasterTurnView {
     pub attempt: Option<Attempt>,
     pub runtime: Option<MasterRuntimeView>,
     pub reply: Option<MasterReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<MasterAccountState>,
 }

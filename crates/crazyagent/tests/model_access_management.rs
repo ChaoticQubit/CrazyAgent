@@ -352,21 +352,6 @@ async fn eight_edits_preserve_unrelated_toml_and_project_precedence() {
     assert!(
         matches!(record.data, OwnerData::ModelAccessRecord { record: ModelAccessRecord::Connection { connection }, .. } if connection == replacement)
     );
-    let assigned = fixture
-        .edit(
-            "remove-assigned-pool",
-            RemovePool {
-                id: reference("pool"),
-            },
-        )
-        .await;
-    assert_eq!(
-        assigned.result,
-        OwnerResult::Rejected {
-            code: "pool_in_use".into()
-        }
-    );
-    assert_eq!(assigned.current_revision.value(), 4);
     let mut replacement_pool = pool;
     replacement_pool.fallback_allowed = false;
     replacement_pool.projects = vec![];
@@ -1765,4 +1750,133 @@ async fn imp1038_owner_round_trips_unassigned_pool_before_projects() {
     ));
     assert_eq!(resolve_config(&global, &project).unwrap(), config);
     assert!(root.path().join("engine.db").is_file());
+}
+
+fn pool_projects(items: &[ModelAccessRecord]) -> Vec<(String, Vec<String>)> {
+    items
+        .iter()
+        .filter_map(|record| match record {
+            ModelAccessRecord::Pool { pool } => Some((
+                pool.id.as_str().to_owned(),
+                pool.projects
+                    .iter()
+                    .map(|project| project.as_str().to_owned())
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_project_pool_changes_or_clears_and_deleting_a_used_pool_unassigns_it() {
+    use crazyagent::config::ModelAccessEdit::*;
+    let fixture = Fixture::start(
+        true,
+        r#"version = 1
+
+[model_access]
+accounts = ["account", "spare"]
+connections = [
+  { id = "connection", provider = "self-hosted", harness = "gateway", protocol = "openai-compatible", account_ref = "account", endpoint = { kind = "http", url = "http://127.0.0.1:1234/v1" }, model = { id = "model", author = "model-author" }, auth = { method = "none" } },
+  { id = "spare-connection", provider = "self-hosted", harness = "gateway", protocol = "openai-compatible", account_ref = "spare", endpoint = { kind = "http", url = "http://127.0.0.1:1235/v1" }, model = { id = "spare-model", author = "model-author" }, auth = { method = "none" } },
+]
+pools = [
+  { id = "first", members = ["connection"], projects = ["demo", "other"], roles = ["project_leader"], fallback_allowed = false },
+  { id = "second", members = ["connection", "spare-connection"], projects = [], roles = [], fallback_allowed = false },
+]
+"#,
+    )
+    .await;
+    let pools = || async {
+        pool_projects(
+            &catalog_page(&fixture.client, ModelAccessCollection::Pools, None, 16)
+                .await
+                .2,
+        )
+    };
+    let moved = fixture
+        .edit(
+            "move-demo",
+            AssignProjectPool {
+                project: reference("demo"),
+                pool: Some(reference("second")),
+            },
+        )
+        .await;
+    assert_eq!(moved.result, OwnerResult::Applied);
+    assert_eq!(
+        pools().await,
+        [
+            ("first".to_owned(), vec!["other".to_owned()]),
+            ("second".to_owned(), vec!["demo".to_owned()]),
+        ]
+    );
+    let cleared = fixture
+        .edit(
+            "clear-demo",
+            AssignProjectPool {
+                project: reference("demo"),
+                pool: None,
+            },
+        )
+        .await;
+    assert_eq!(cleared.result, OwnerResult::Applied);
+    assert_eq!(
+        pools().await,
+        [
+            ("first".to_owned(), vec!["other".to_owned()]),
+            ("second".to_owned(), vec![]),
+        ]
+    );
+    let removed = fixture
+        .edit(
+            "remove-used",
+            RemovePool {
+                id: reference("first"),
+            },
+        )
+        .await;
+    assert_eq!(removed.result, OwnerResult::Applied);
+    assert_eq!(pools().await, [("second".to_owned(), vec![])]);
+    let pool_with = |members: &[&str]| crazyagent::config::AccountPool {
+        id: reference("second"),
+        name: None,
+        members: members.iter().map(|id| reference(id)).collect(),
+        projects: vec![],
+        roles: vec![],
+        fallback_allowed: false,
+        provider_quota_policy: crazyagent::config::ProviderQuotaPolicy::BoundedAttempt,
+    };
+    let one_left = fixture
+        .edit(
+            "remove-one-member",
+            ReplacePool {
+                pool: pool_with(&["spare-connection"]),
+            },
+        )
+        .await;
+    assert_eq!(one_left.result, OwnerResult::Applied);
+    let (_, _, items) = catalog_page(&fixture.client, ModelAccessCollection::Pools, None, 16).await;
+    assert!(
+        matches!(&items[..], [ModelAccessRecord::Pool { pool }] if pool.members == [reference("spare-connection")]),
+        "{items:?}"
+    );
+    let emptied = fixture
+        .edit(
+            "empty-pool",
+            ReplacePool {
+                pool: pool_with(&[]),
+            },
+        )
+        .await;
+    assert_eq!(
+        emptied.result,
+        OwnerResult::Rejected {
+            code: "pool_needs_account".into()
+        }
+    );
+    let saved = std::fs::read_to_string(fixture.root.path().join("global.toml")).unwrap();
+    assert!(!saved.contains("\"first\""), "{saved}");
+    fixture.close().await;
 }

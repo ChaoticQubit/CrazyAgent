@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { projectsUsing } from "../../api-projects";
 import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolBase, type PoolMember, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
   StatusBadge, TextField, WindowedList, navigate, Checkbox,
 } from "../../ui";
+import { andList } from "./account-drawer";
 import { filterAccounts } from "./accounts";
 import { takePoolDraft } from "./pool-draft";
 
@@ -41,12 +43,18 @@ export function notSignedInNote(members: string[], status: Map<string, string>):
     : `${count} accounts aren't signed in. Agents skip them until you sign in again.`;
 }
 
-/** The message when the engine refuses to delete a pool a project uses. Input: the pool.
- * Output: the sentence. */
-export function deleteRefusal(pool: PoolSummary): string {
-  const count = pool.project_count;
-  const users = count === 1 ? "1 project uses it" : count > 1 ? `${count} projects use it` : "A project uses it";
-  return `Can't delete ${pool.name}. ${users}. Choose another pool for ${count === 1 ? "it" : "them"} first.`;
+/** The delete confirm for a pool: deleting takes it off every project that uses it in the same
+ * engine step. Inputs: the pool and the names of its projects (undefined when not read).
+ * Output: the body, the button label and the line shown once deleted. */
+export function deleteCopy(pool: PoolSummary, users: readonly string[] | undefined): { body: string; confirmLabel: string; done: string } {
+  const count = users?.length || pool.project_count;
+  if (count === 0) return { body: "Its accounts stay in your list. Only the pool goes away.", confirmLabel: "Delete pool", done: `${pool.name} deleted.` };
+  const named = users?.length ? andList(users) : `${count} ${count === 1 ? "project" : "projects"}`;
+  return {
+    body: `Used by ${named}. ${count === 1 ? "It" : "They"} will have no pool until you pick one. Its accounts stay in your list.`,
+    confirmLabel: "Unassign and delete",
+    done: `${pool.name} deleted. Its projects have no pool now. Pick a pool to start in each project's Settings.`,
+  };
 }
 
 /** The accounts newly added to a pool that agents can use only after the engine sets them
@@ -255,6 +263,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const [editing, setEditing] = useState<{ id?: string; opened?: PoolBase } | undefined>(creating ? {} : undefined);
   const [draft, setDraft] = useState<string[]>([]);
   const [deleting, setDeleting] = useState<PoolSummary>();
+  const [users, setUsers] = useState<string[]>();
   const [removing, setRemoving] = useState(false);
   const [refusal, setRefusal] = useState<string>();
   useEffect(() => {
@@ -299,19 +308,28 @@ export function Pools({ creating }: { creating: boolean }) {
     setRemoving(false);
     const pool = deleting;
     setDeleting(undefined);
-    if (result.kind === "ok") { session.showToast(`${pool.name} deleted.`); reload(); }
-    else setRefusal(result.kind === "error" && result.code === "pool_in_use" ? deleteRefusal(pool)
-      : result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
+    if (result.kind === "ok") { session.showToast(deleteCopy(pool, users).done); reload(); }
+    else setRefusal(result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
   };
+
+  const askDelete = async (pool: PoolSummary) => {
+    setRefusal(undefined);
+    setUsers(undefined);
+    setDeleting(pool);
+    if (pool.project_count === 0) return;
+    const names = await projectsUsing(pool.id);
+    if (names.kind === "ok") setUsers(names.value);
+  };
+
+  const copy = deleting && deleteCopy(deleting, users);
 
   return <div className="stack">
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
     <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
-      onDelete={(pool) => { setRefusal(undefined); setDeleting(pool); }} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
-    <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel="Delete pool" pending={removing}
+      onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
+    <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
-      {deleting && deleting.project_count > 0 ? `${poolUse(deleting.project_count)}. The engine refuses while a project uses it.`
-        : "Its accounts stay in your list. Only the pool goes away."}
+      {copy?.body}
     </ConfirmDialog>
   </div>;
 }

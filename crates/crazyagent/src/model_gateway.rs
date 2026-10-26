@@ -527,7 +527,7 @@ fn validate_initial_conversation(
                 | NativeAuthMethod::CodexExisting,
         } => auth.binding.connection.harness.as_str() == "codex",
         NativeAuthAction::SignIn {
-            method: NativeAuthMethod::ClaudeOfficial,
+            method: NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting,
         } => auth.binding.connection.harness.as_str() == "claude",
         NativeAuthAction::Logout => false,
     };

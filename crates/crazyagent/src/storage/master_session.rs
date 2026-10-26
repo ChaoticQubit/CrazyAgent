@@ -102,6 +102,7 @@ pub(crate) enum MasterRuntimeCommand {
         session_id: SessionId,
         turn_id: RequestId,
         reason: MasterReason,
+        cause: String,
     },
 }
 
@@ -1635,6 +1636,20 @@ fn block_on_gaps(
     persist_runtime(tx, config, session, turn)
 }
 
+/// Names the native connection whose sign-in a master session's turns launch on.
+/// Inputs: the transaction and the session. Output: that connection, or none for a
+/// missing session or a backend that launches without a native sign-in.
+pub(super) fn native_target(
+    tx: &Transaction<'_>,
+    session: &SessionId,
+) -> Result<Option<crate::protocol::CredentialRef>, EngineError> {
+    let Some(session) = load_session(tx, session, owner_revision(tx)?)? else {
+        return Ok(None);
+    };
+    Ok((session.selection.backend != MasterBackend::Rcli)
+        .then(|| session.selection.target_profile_ref.clone()))
+}
+
 /// Proves the latest sign-in of a native managed connection can authorize a launch on
 /// this engine run, the same check every master turn uses. Input: the transaction, the
 /// active host, the connection and, for a master, the account its route names. Output:
@@ -1663,7 +1678,11 @@ pub(crate) fn native_sign_in(
     if let Some(gap) = sign_in_gap(fact.phase) {
         return Err(error(gap));
     }
-    let start: NativeAuthStart = serde_json::from_slice(&request).map_err(error)?;
+    if !matches!(fact.action, NativeAuthAction::SignIn { .. }) {
+        return Err(error("master_authentication_unknown"));
+    }
+    let start: NativeAuthStart =
+        serde_json::from_slice(&request).map_err(|_| error("master_authentication_stale"))?;
     if fact.operation_id.as_str() != id
         || signed(fact.generation)? != generation
         || fact.phase.name() != phase
@@ -2372,6 +2391,22 @@ fn provision_bootstrap(
         Err(failure) if failure.0 == "master_bootstrap_receipt_missing" => {}
         Err(failure) => return Err(failure),
     }
+    let repository = master_repository(&tx, project_id)?;
+    let runtime_dir = path
+        .parent()
+        .ok_or_else(|| error("master_runtime_directory_missing"))?;
+    super::master_bootstrap::reserve(&tx, runtime_dir, &session, &repository, &auth)?;
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit());
+    crate::worktrees::provision(db, &session.bootstrap_task_id, &repository)?;
+    assert!(db.is_autocommit());
+    Ok(())
+}
+
+/// Reads the repository a project's master works in: the first one the project lists.
+/// Inputs: the transaction and the project. Output: the repository path, or
+/// `master_repository_missing` when the project lists none.
+fn master_repository(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<String, EngineError> {
     let body: String = tx
         .query_row(
             "SELECT body FROM projects WHERE id=?1",
@@ -2384,20 +2419,12 @@ fn provision_bootstrap(
     if project.project_id != *project_id {
         return Err(error("master_project_scope_conflict"));
     }
-    let repository = project
+    project
         .spec
         .repositories
         .first()
-        .ok_or_else(|| error("master_repository_missing"))?;
-    let runtime_dir = path
-        .parent()
-        .ok_or_else(|| error("master_runtime_directory_missing"))?;
-    super::master_bootstrap::reserve(&tx, runtime_dir, &session, repository, &auth)?;
-    tx.commit().map_err(error)?;
-    assert!(db.is_autocommit());
-    crate::worktrees::provision(db, &session.bootstrap_task_id, repository)?;
-    assert!(db.is_autocommit());
-    Ok(())
+        .cloned()
+        .ok_or_else(|| error("master_repository_missing"))
 }
 
 fn registration_session(
@@ -3211,7 +3238,7 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
-        MasterRuntimeCommand::Fail { reason, .. } => {
+        MasterRuntimeCommand::Fail { reason, cause, .. } => {
             if matches!(
                 turn.phase,
                 MasterTurnPhase::Queued | MasterTurnPhase::Prepared
@@ -3229,6 +3256,10 @@ pub(super) fn runtime(
                     && let Some(attempt) = &turn.attempt
                 {
                     pause_member(&tx, &attempt.connection.id)?;
+                }
+                if reason == MasterReason::RepositoryConfigRefused {
+                    let repository = master_repository(&tx, &session.project_id)?;
+                    turn.detail = crate::worktrees::refused_config_line(&cause, &repository);
                 }
                 persist_runtime(&tx, config, &mut session, &turn)?;
                 assert!(session.current_turn.is_none());
@@ -3392,6 +3423,7 @@ fn execute(
                 runtime: None,
                 reply: None,
                 accounts: Vec::new(),
+                detail: None,
             };
             let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(next)?, encode(&turn)?]).map_err(error)?;
             assert_eq!(changed, 1);

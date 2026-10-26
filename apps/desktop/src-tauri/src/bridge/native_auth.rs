@@ -82,7 +82,7 @@ impl NativeBridge {
             NativeAuthMethod::CodexBrowser
             | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting => "codex",
-            NativeAuthMethod::ClaudeOfficial => "claude",
+            NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting => "claude",
         };
         if connection.harness.as_str() != valid {
             return Err(failure("native_auth_method_mismatch"));

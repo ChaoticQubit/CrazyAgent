@@ -288,15 +288,16 @@ impl OwnerRuntimeHandle {
     }
 
     /// Settles a master turn whose dispatch failed before it ran, so it never stays queued.
-    /// Inputs: the turn's project, session and id, and the reason the owner sees.
-    /// Output: the turn as stored: blocked (never admitted) or failed (admitted) with the
-    /// reason when it was the session's queued or prepared current turn, else unchanged.
+    /// Inputs: the turn's project, session and id, and the dispatch error, which names the
+    /// reason the owner sees. Output: the turn as stored: blocked (never admitted) or failed
+    /// (admitted) with the reason when it was the session's queued or prepared current
+    /// turn, else unchanged.
     async fn fail_master_turn(
         &self,
         project_id: &ProjectId,
         session_id: &SessionId,
         turn_id: &RequestId,
-        reason: MasterReason,
+        cause: &EngineError,
     ) -> Result<MasterTurnView, EngineError> {
         match self
             .master_runtime_command(MasterRuntimeCommand::Fail {
@@ -304,7 +305,8 @@ impl OwnerRuntimeHandle {
                 project_id: project_id.clone(),
                 session_id: session_id.clone(),
                 turn_id: turn_id.clone(),
-                reason,
+                reason: reason_for_error(cause),
+                cause: cause.0.clone(),
             })
             .await?
         {
@@ -329,7 +331,7 @@ impl OwnerRuntimeHandle {
             && cause.0 != super::master_dispatch::UNKNOWN_OUTCOME
         {
             let settled = self
-                .fail_master_turn(project_id, session_id, turn_id, reason_for_error(cause))
+                .fail_master_turn(project_id, session_id, turn_id, cause)
                 .await?;
             assert_eq!(&settled.id, turn_id);
             assert_eq!(&settled.session_id, session_id);
@@ -351,6 +353,9 @@ impl OwnerRuntimeHandle {
             MasterTurnPhase::Queued | MasterTurnPhase::Prepared
         ) {
             return Ok(routed);
+        }
+        if routed.phase == MasterTurnPhase::Queued {
+            self.reprove_sign_ins(Some(session_id.clone())).await;
         }
         let prepared = match self
             .prepare_master_turn(project_id, session_id, turn_id)
@@ -702,6 +707,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "codex_host_cancelled" => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
+        code if code.starts_with("repository_config_refused:") => {
+            MasterReason::RepositoryConfigRefused
+        }
         "native_profile_lock_unavailable" | "master_runtime_host_unavailable" => {
             MasterReason::RuntimeUnavailable
         }
@@ -961,6 +969,10 @@ mod tests {
                 MasterReason::ConnectionChanged,
             ),
             ("gateway_health_unknown", MasterReason::ReadinessUnknown),
+            (
+                "repository_config_refused:core_hookspath",
+                MasterReason::RepositoryConfigRefused,
+            ),
             ("gateway_quota_unknown", MasterReason::QuotaUnknown),
             ("gateway_quota_exhausted", MasterReason::QuotaExhausted),
             ("gateway_rate_limited", MasterReason::RateLimited),
