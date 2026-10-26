@@ -28,6 +28,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(in crate::engine) mod diagnostic;
 #[cfg(unix)]
 mod process;
 
@@ -41,6 +42,13 @@ const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
 const TOOL_STEPS_MAX: &str = "24";
 #[cfg(unix)]
 const TOOLS_SHELL: &str = "/bin/zsh";
+/// Turns off Claude Code's background Bash commands and background agents for a tools-on
+/// master. In Claude Code 2.1.309 `claude -p` keeps running after a turn's result while a
+/// background task runs and then answers that task's `task_notification` with another turn,
+/// which would outlive the master turn; this variable makes the Bash tool ignore
+/// `run_in_background` and refuses background agent launches.
+#[cfg(unix)]
+const BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const NO_SERVERS: &str = "{\"mcpServers\":{}}";
 const MCP_CONFIG_FLAG: &str = "--mcp-config";
 
@@ -262,7 +270,9 @@ fn command_for(
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
     if tools.is_some() {
-        command.env("SHELL", TOOLS_SHELL);
+        command
+            .env("SHELL", TOOLS_SHELL)
+            .env(BACKGROUND_TASKS_OFF.0, BACKGROUND_TASKS_OFF.1);
     }
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
@@ -364,6 +374,7 @@ pub(in crate::engine) struct ClaudeHost {
     status: watch::Receiver<Status>,
     stop: Arc<AtomicBool>,
     group: Arc<AtomicU32>,
+    diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
     expires: tokio::time::Instant,
 }
@@ -390,12 +401,14 @@ impl ClaudeHost {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let group = Arc::new(AtomicU32::new(0));
+        let kept = Arc::new(std::sync::Mutex::new(None));
         let mut host = Self {
             turns,
             events,
             status,
             stop: Arc::clone(&stop),
             group: Arc::clone(&group),
+            diagnostic: Arc::clone(&kept),
             close_time: limits.cleanup_time,
             expires: tokio::time::Instant::now() + limits.run_time,
         };
@@ -415,6 +428,7 @@ impl ClaudeHost {
                         report,
                         stop,
                         group,
+                        diagnostic: kept,
                     },
                 );
             })
@@ -519,6 +533,17 @@ impl ClaudeHost {
         Some(self.group.load(Ordering::Acquire)).filter(|group| *group > 1)
     }
 
+    /// What the harness stream left for the engine log once the custodian retired it: its
+    /// fault, the kind of the line the protocol refused, the lines after the turn's result
+    /// and the last raw bytes. Input: the host. Output: the diagnostic, or none before the
+    /// harness is retired.
+    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
+        self.diagnostic
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
         self.stop.store(true, Ordering::Release);
         self.close().await
@@ -585,6 +610,11 @@ impl ClaudeHost {
 
     /// Never names a group: takes the host. Unreachable without a host value.
     pub(in crate::engine) fn process_group(&self) -> Option<u32> {
+        match *self {}
+    }
+
+    /// Never keeps a stream: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
         match *self {}
     }
 

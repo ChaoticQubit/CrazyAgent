@@ -653,6 +653,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
     assert_eq!(
         environment,
         [
+            ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
             ("CLAUDE_CONFIG_DIR", home),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home),
             ("HOME", home),
@@ -944,4 +945,241 @@ async fn a_tools_on_claude_master_passes_its_tool_steps_through_and_a_tools_off_
             .any(|kind| matches!(kind, EventKind::TurnFinished { .. })),
         "{kinds:?}"
     );
+}
+
+const LATE_RESULT_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"step-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"sleep 30","run_in_background":true}}]}}'
+printf '%s\n' '{"type":"user","uuid":"step-2","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"Command running in background with ID: b1"}]}}'
+printf '%s\n' '{"type":"system","subtype":"task_started","uuid":"task-1","session_id":"native-session","task_id":"b1","run_id":"r1","tool_use_id":"tool-1","description":"sleep 30","task_type":"local_bash","is_backgrounded":true}'
+printf '%s\n' "{\"type\":\"assistant\",\"uuid\":\"step-3\",\"session_id\":\"native-session\",\"parent_tool_use_id\":null,\"message\":{\"id\":\"message-2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"observed-model\",\"content\":[{\"type\":\"text\",\"text\":\"STARTED $CLAUDE_CODE_DISABLE_BACKGROUND_TASKS\"}]}}"
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"STARTED"}'
+printf '%s\n' '{"type":"system","subtype":"task_notification","uuid":"task-2","session_id":"native-session","task_id":"b1","run_id":"r1","tool_use_id":"tool-1","status":"completed","output_file":"","summary":"sleep 30 finished"}'
+printf '%s\n' '{"type":"assistant","uuid":"step-4","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-3","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"The background task finished."}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-2","session_id":"native-session","is_error":false,"result":"The background task finished."}'
+long=aaaaaaaaaa
+for step in 1 2 3 4 5 6 7 8 9 10 11 12 13; do long=$long$long; done
+printf '%s\n' "$long"
+printf '%s' '{"type":"system","subtype":"task_'
+/bin/cat > /dev/null
+printf 'closed' > input-closed
+exit 0
+"#;
+
+#[tokio::test]
+async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continues_the_session() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-late-turn", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("claude", LATE_RESULT_HARNESS);
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let command = tools_launch_command(
+        &harness,
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        MasterTools {
+            engine: &engine,
+            drop: &drop,
+        },
+    )
+    .unwrap();
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut claude = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: crate::protocol::SessionId::new("claude-late-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: CredentialRef::new("late-master-profile").unwrap(),
+            worktree_lease: RequestId::new("claude-late-lease").unwrap(),
+        },
+        fixture.connection.account_ref.clone(),
+        ResourceBudget::unit(),
+    )
+    .await
+    .unwrap();
+    claude
+        .start_turn(RequestId::new("claude-late-turn").unwrap(), "Start a task")
+        .await
+        .unwrap();
+    let mut kinds = Vec::new();
+    loop {
+        let event = claude.next_event().await.unwrap();
+        let finished = matches!(event.kind, EventKind::TurnFinished { .. });
+        kinds.push(event.kind);
+        if finished {
+            break;
+        }
+    }
+    let waited = std::time::Instant::now();
+    while claude.diagnostic().is_none() && waited.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        fixture.project.join("input-closed").exists() && claude.diagnostic().is_some(),
+        "the host closes the harness input at the turn's result and the harness ends by itself"
+    );
+    let closed = claude.close().await.map_err(|error| error.0);
+    assert_eq!(closed, Ok(()), "{kinds:?}");
+    let diagnostic = claude.diagnostic().unwrap();
+    assert_eq!(diagnostic.fault, None);
+    assert_eq!(diagnostic.message, None);
+    assert_eq!(diagnostic.late_lines, 5);
+    assert_eq!(
+        diagnostic.late,
+        [
+            "system/task_notification",
+            "assistant",
+            "result/success",
+            "unreadable",
+            "unreadable"
+        ]
+    );
+    assert_eq!(
+        diagnostic.tail(),
+        "\n{\"type\":\"system\",\"subtype\":\"task_"
+    );
+    assert!(
+        matches!(
+            kinds.last(),
+            Some(EventKind::TurnFinished {
+                outcome: TurnOutcome::Success,
+                ..
+            })
+        ),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| matches!(kind,
+            EventKind::AssistantText { text, .. } if text == "STARTED 1")),
+        "the master runs with background tasks off: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| matches!(kind,
+            EventKind::AssistantText { text, .. } if text.contains("background task finished"))),
+        "{kinds:?}"
+    );
+}
+
+const EARLY_ASSISTANT_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"assistant","uuid":"early-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"sk-ant-oat01-notarealtoken"}]}}'
+/bin/cat > /dev/null
+exit 0
+"#;
+
+#[tokio::test]
+async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_a_redacted_tail() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, EARLY_ASSISTANT_HARNESS).await;
+    claude
+        .start_turn(RequestId::new("claude-early-turn").unwrap(), "Reply")
+        .await
+        .unwrap();
+    let failed = loop {
+        match claude.next_event().await {
+            Ok(_) => continue,
+            Err(error) => break error.0,
+        }
+    };
+    assert_eq!(failed, "claude_host_protocol_invalid_state");
+    assert_eq!(
+        claude.close().await.map_err(|error| error.0),
+        Err("claude_host_protocol_invalid_state".to_owned())
+    );
+    let diagnostic = claude.diagnostic().unwrap();
+    assert_eq!(
+        diagnostic.fault.as_deref(),
+        Some("claude_host_protocol_invalid_state")
+    );
+    assert_eq!(diagnostic.message.as_deref(), Some("assistant"));
+    assert_eq!(diagnostic.late_lines, 0);
+    let tail = diagnostic.tail();
+    assert!(tail.contains("\"uuid\":\"early-1\""), "{tail}");
+    assert!(tail.contains("sk-ant-[redacted]"), "{tail}");
+    assert!(!tail.contains("notarealtoken"), "{tail}");
+}
+
+#[test]
+fn a_stream_tail_keeps_its_last_bytes_without_a_cut_credential() {
+    let mut diagnostic = diagnostic::StreamDiagnostic::default();
+    let mut stream = b"{\"text\":\"sk-ant-oat01-SECRETPART\"}\n".to_vec();
+    let cut = stream.len() - "PART\"}\n".len();
+    stream.extend(std::iter::repeat_n(
+        b'b',
+        diagnostic::TAIL_BYTES - (stream.len() - cut),
+    ));
+    for chunk in stream.chunks(4096) {
+        diagnostic.keep(chunk);
+    }
+    let tail = diagnostic.tail();
+    assert!(!tail.contains("SECRET") && !tail.contains("PART"), "{tail}");
+    assert!(tail.starts_with("\"}\n"), "{tail}");
+    assert_eq!(tail.len(), diagnostic::TAIL_BYTES - "PART".len());
+    let mut whole = diagnostic::StreamDiagnostic::default();
+    whole.keep(b"{\"text\":\"sk-ant-ort01-SECRET_PART-2\"}\n");
+    assert_eq!(whole.tail(), "{\"text\":\"sk-ant-[redacted]\"}\n");
+    whole.late(b"{\"type\":\"sk-ant-oat01-SECRET\"}");
+    whole.late(b"{\"type\":\"system\",\"subtype\":\"Task Notification\"}");
+    for _ in 0..20 {
+        whole.late(b"{\"type\":\"assistant\"}");
+    }
+    assert_eq!(whole.late_lines, 22);
+    assert_eq!(whole.late.len(), 16);
+    assert_eq!(
+        whole.late[..3],
+        ["unreadable", "system/unreadable", "assistant"]
+    );
+}
+
+#[test]
+fn a_stream_diagnostic_is_appended_private_rotated_and_never_through_a_link() {
+    let directories = Directories::new();
+    let logs = directories.root.join("logs");
+    let entry = serde_json::json!({"fault": "claude_host_protocol_invalid_state", "tail": "x".repeat(10_000)});
+    diagnostic::append(&logs, &entry).unwrap();
+    let log = logs.join(diagnostic::LOG_FILE);
+    assert_eq!(
+        fs::metadata(&logs).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&log).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    let text = fs::read_to_string(&log).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    let written: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+    assert_eq!(written, entry);
+    for _ in 0..40 {
+        diagnostic::append(&logs, &entry).unwrap();
+    }
+    let rotated = logs.join(format!("{}.1", diagnostic::LOG_FILE));
+    assert_eq!(
+        fs::metadata(&rotated).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    assert!(fs::metadata(&log).unwrap().len() <= diagnostic::ROTATE_BYTES);
+    assert!(fs::metadata(&rotated).unwrap().len() <= diagnostic::ROTATE_BYTES);
+    fs::remove_file(&log).unwrap();
+    let elsewhere = directories.root.join("elsewhere");
+    fs::write(&elsewhere, "kept").unwrap();
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &log).unwrap();
+    assert_eq!(
+        diagnostic::append(&logs, &entry).map_err(|error| error.0),
+        Err("master_stream_log_unsafe".to_owned())
+    );
+    assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
 }
