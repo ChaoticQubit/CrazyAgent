@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub const PATH_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
+pub const LINKED_WORKTREES_MAX: usize = 4096;
 const RESERVED_NAMES: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -212,13 +213,44 @@ fn git_links(folder: &Path) -> bool {
     }
 }
 
+/// True when `folder` is itself a checkout whose git data lives in another repository:
+/// its `.git` is a file (a linked worktree or submodule checkout) or a link. A copy of it
+/// would still use that repository's data. An unreadable `.git` counts.
+fn linked_checkout(folder: &Path) -> bool {
+    match std::fs::symlink_metadata(folder.join(".git")) {
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        Ok(metadata) => !metadata.is_dir() || metadata.file_type().is_symlink(),
+    }
+}
+
+/// Counts the git worktrees linked to the repository in `folder`, which a Copy leaves
+/// with the original. Input: the folder. Output: the entries of its `.git/worktrees`,
+/// at most [`LINKED_WORKTREES_MAX`]; 0 without a plain `.git` folder or when unreadable.
+pub fn linked_worktrees(folder: &Path) -> usize {
+    let git = folder.join(".git");
+    let plain = std::fs::symlink_metadata(&git)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !plain {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(git.join("worktrees")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .take(LINKED_WORKTREES_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .count()
+}
+
 /// Plans bringing an existing folder into the projects home.
 /// Input: the canonical home, the engine data folder, the owner's source
 /// text, the mode and the set-up projects. Output: the real source and the
 /// free destination in the home, or a refusal for sources inside the home,
 /// the home itself, `/`, the user's home folder, any folder holding the home
-/// or engine data, hidden folders, names already taken in the home, and a
-/// Move of a folder with git worktree links or nested with a set-up project.
+/// or engine data, hidden folders, names already taken in the home, a Move
+/// of a folder with git worktree links or nested with a set-up project, and a
+/// Copy of a folder that is itself a linked worktree or submodule checkout.
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
@@ -257,6 +289,9 @@ pub fn plan_add(
         {
             return Err(refused("home_move_project"));
         }
+    }
+    if mode == AddMode::Copy && linked_checkout(&real) {
+        return Err(refused("home_copy_linked_checkout"));
     }
     let destination = destination(home, name)?;
     Ok(AddPlan::new(real, destination, mode))
@@ -575,6 +610,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_project" => {
             "This folder holds or sits inside a project you already added. Use it where it is or copy it."
+        }
+        "home_copy_linked_checkout" => {
+            "This folder is a git worktree or submodule of another repository, so a copy would still share that repository. Use it where it is, or copy the main repository folder."
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that cannot be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",

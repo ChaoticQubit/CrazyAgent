@@ -405,6 +405,83 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let outside = engine.user().join("outside");
+    let source = outside.join("shop");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("README.md"), "shop\n").unwrap();
+    let git = |args: &[&str]| {
+        let done = crate::spawn_gate::output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args),
+        )
+        .unwrap();
+        assert!(done.status.success(), "{done:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "README.md"]);
+    git(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    for branch in ["side", "other"] {
+        let tree = outside.join(format!("shop-{branch}"));
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            tree.to_str().unwrap(),
+        ]);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Size: "), "{rows:#?}");
+    assert!(
+        shows(&rows, "This folder has 2 linked git worktrees. They stay"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "the copy gets the main checkout and every branch."),
+        "{rows:#?}"
+    );
+
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert!(home.join("shop").join("README.md").is_file());
+    assert!(!home.join("shop").join(".git").join("worktrees").exists());
+    assert!(
+        source
+            .join(".git")
+            .join("worktrees")
+            .join("shop-side")
+            .is_dir()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn onboarding_starts_on_a_pool_and_shows_both_steps() {
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;

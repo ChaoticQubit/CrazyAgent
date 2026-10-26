@@ -371,3 +371,58 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     let found = service::engine_graphify(root.path()).expect("the system graphify");
     assert_eq!(found.canonicalize().unwrap(), system);
 }
+
+#[test]
+fn the_graph_leaves_out_the_engine_files_in_the_project() {
+    let graphify = service::installed_graphify()
+        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/shop.py"),
+        "def shop_total(items):\n    return sum(items)\n",
+    )
+    .unwrap();
+    let engine = repo.join(".crazyagent").join("setup");
+    std::fs::create_dir_all(&engine).unwrap();
+    std::fs::write(
+        engine.join("probe.py"),
+        "def crazyagent_probe():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join(".crazyagent/overview.md"), "# Overview\n").unwrap();
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-state-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state = scratch.path().canonicalize().unwrap();
+    for folder in ["agents", "profiles"] {
+        std::fs::create_dir(state.join(folder)).unwrap();
+    }
+
+    let ending = graph::update(
+        &graphify,
+        &repo,
+        &state,
+        "onboard-g-hide",
+        std::time::Duration::from_secs(300),
+        &|| false,
+    )
+    .unwrap();
+
+    assert_eq!(ending, graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(graph.contains("shop_total"), "{graph}");
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        assert!(
+            !text.contains(".crazyagent") && !text.contains("crazyagent_probe"),
+            "{name}: {text}"
+        );
+    }
+    assert!(engine.join("probe.py").is_file());
+}

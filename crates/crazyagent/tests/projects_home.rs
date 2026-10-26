@@ -915,3 +915,180 @@ fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_stil
     assert!(git(&repo, &["worktree", "list"]).contains("repo-side"));
     assert_eq!(names(&case.home), ["plain"]);
 }
+
+fn commit(repo: &Path, message: &str) {
+    git(
+        repo,
+        &[
+            "-c",
+            "user.name=Owner",
+            "-c",
+            "user.email=owner@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
+fn worktree_paths(repo: &Path) -> Vec<String> {
+    git(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_copy_of_a_repo_with_linked_worktrees_is_standalone_and_git_in_it_never_reaches_the_source() {
+    let case = case();
+    let repo = case.sources.join("repo");
+    let sibling = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &sibling);
+    let nested = repo.join(".tool").join("worktrees").join("inner");
+    let gone = case.sources.join("repo-gone");
+    for (branch, path) in [("inner", &nested), ("gone", &gone)] {
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+    }
+    fs::remove_dir_all(&gone).unwrap();
+    let library = case.sources.join("library");
+    fs::create_dir(&library).unwrap();
+    fs::write(library.join("lib.txt"), "lib\n").unwrap();
+    git(&library, &["init", "-q"]);
+    git(&library, &["add", "lib.txt"]);
+    commit(&library, "lib");
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            library.to_str().unwrap(),
+            "libs/library",
+        ],
+    );
+    commit(&repo, "add library");
+    fs::write(repo.join(".gitignore"), ".tool/\n").unwrap();
+    git(&repo, &["config", "extensions.worktreeconfig", "true"]);
+    for branch in ["main", "side", "inner"] {
+        git(
+            &repo,
+            &[
+                "config",
+                &format!("branch.{branch}.vscode-merge-base"),
+                "origin/main",
+            ],
+        );
+    }
+    fs::write(
+        repo.join(".git/worktrees/repo-side/config.worktree"),
+        "[codex]\n\tlocalEnvironmentConfigPath = __none__\n",
+    )
+    .unwrap();
+    fs::write(repo.join("README.md"), "changed\n").unwrap();
+    let listed = git(&repo, &["worktree", "list", "--porcelain"]);
+    let links = [&sibling, &nested].map(|tree| fs::read_to_string(tree.join(".git")).unwrap());
+    assert_eq!(worktree_paths(&repo).len(), 4);
+    assert_eq!(linked_worktrees(&repo), 3);
+
+    plan_add(&case.home, &case.engine, text(&repo), AddMode::Copy, &[])
+        .unwrap()
+        .run()
+        .unwrap();
+    let copy = case.home.join("repo");
+    verify_added(&case.home, text(&repo), AddMode::Copy).unwrap();
+
+    assert_eq!(worktree_paths(&copy), [text(&copy)]);
+    assert_eq!(linked_worktrees(&copy), 0);
+    assert!(!copy.join(".git").join("worktrees").exists());
+    assert!(!copy.join(".tool").join("worktrees").join("inner").exists());
+    assert_eq!(
+        fs::read_to_string(copy.join("README.md")).unwrap(),
+        "changed\n"
+    );
+    for branch in ["main", "side", "inner", "gone"] {
+        assert_eq!(
+            git(&copy, &["branch", "--list", branch]).trim_start_matches(['*', ' ']),
+            format!("{branch}\n")
+        );
+    }
+    let common = git(
+        &copy.join("libs").join("library"),
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    assert!(
+        Path::new(common.trim())
+            .canonicalize()
+            .unwrap()
+            .starts_with(&copy),
+        "{common}"
+    );
+
+    let checkout = case.root.join("copy-inner");
+    git(&copy, &["worktree", "prune"]);
+    git(&copy, &["branch", "-D", "side"]);
+    git(
+        &copy,
+        &["worktree", "add", "-q", checkout.to_str().unwrap(), "inner"],
+    );
+    git(&copy, &["worktree", "remove", checkout.to_str().unwrap()]);
+    git(&copy, &["worktree", "prune"]);
+
+    assert_eq!(git(&repo, &["worktree", "list", "--porcelain"]), listed);
+    for (tree, link) in [&sibling, &nested].into_iter().zip(&links) {
+        assert_eq!(&fs::read_to_string(tree.join(".git")).unwrap(), link);
+    }
+    assert_eq!(
+        git(&sibling, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "side\n"
+    );
+    assert_eq!(
+        git(&nested, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "inner\n"
+    );
+    assert!(git(&repo, &["branch", "--list", "side"]).contains("side"));
+    assert!(
+        repo.join(".git")
+            .join("worktrees")
+            .join("repo-gone")
+            .is_dir()
+    );
+}
+
+#[test]
+fn a_linked_worktree_or_a_link_to_a_git_folder_is_not_copied() {
+    let case = case();
+    let repo = case.sources.join("repo");
+    let sibling = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &sibling);
+    let linked = case.sources.join("linked");
+    fs::create_dir(&linked).unwrap();
+    symlink(repo.join(".git"), linked.join(".git")).unwrap();
+    for source in [&sibling, &linked] {
+        assert_eq!(
+            plan_add(&case.home, &case.engine, text(source), AddMode::Copy, &[])
+                .unwrap_err()
+                .0,
+            "home_copy_linked_checkout",
+            "{}",
+            source.display()
+        );
+    }
+    assert!(plain_problem("home_copy_linked_checkout").is_some());
+    assert_eq!(linked_worktrees(&sibling), 0);
+    assert_eq!(names(&case.home), Vec::<String>::new());
+    assert_eq!(worktree_paths(&repo).len(), 2);
+}

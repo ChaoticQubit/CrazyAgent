@@ -113,6 +113,14 @@ export function sizeLine(mode: AddWay, bytes: number | null, home: string): { te
   return { text: `Copies ${formatBytes(bytes)} into ${where}. The original stays where it is.`, warn: false };
 }
 
+/** Says that a Copy leaves the folder's linked git worktrees with the original, since a copy
+ * that kept them would share them with it. Input: how many linked worktrees the folder has.
+ * Output: one sentence. */
+export function worktreesLine(count: number): string {
+  const many = count !== 1;
+  return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
+}
+
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it
  * arrived and now, in milliseconds. Output: whether it expired and one sentence. */
 export function deviceLine(expiresS: number, startedMs: number, nowMs: number): { expired: boolean; text: string } {

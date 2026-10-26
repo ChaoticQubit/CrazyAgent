@@ -80,6 +80,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed. Try again."
         }
+        "home_copy_linked_checkout" => {
+            "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder."
+        }
         "home_copy_unverified" | "home_add_unverified" => {
             "The copy did not match the original, so the original was kept."
         }
@@ -210,6 +213,18 @@ mod tests {
             copy("database is locked"),
             "Something went wrong. Try again. (code: engine_error_unplain)"
         );
+        assert!(copy("home_copy_linked_checkout").contains("worktree or submodule"));
+        for code in [
+            "home_move_worktrees",
+            "home_move_project",
+            "home_trash_outside",
+        ] {
+            assert_eq!(
+                Some(copy(code).as_str()),
+                crate::projects_home::plain_problem(code),
+                "{code}"
+            );
+        }
         assert!(not_ready("github_unsupported"));
         assert!(!not_ready("github_unreachable"));
     }

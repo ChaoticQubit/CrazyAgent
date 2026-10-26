@@ -798,6 +798,7 @@ export interface FoundProject {
 export interface FolderSize {
   bytes: number;
   github?: string | null;
+  worktrees?: number;
 }
 
 export type AddFolderMode = "move" | "copy";

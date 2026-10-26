@@ -56,6 +56,7 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("github_sign_in_expired"), "The GitHub code expired before it was entered. Start again.");
   assert.equal(api.intakeCopy("home_move_partial"), "Some projects were moved and couldn't be moved back. Check both folders.");
   assert.equal(api.intakeCopy("home_move_worktrees"), "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it.");
+  assert.equal(api.intakeCopy("home_copy_linked_checkout"), "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.");
   assert.equal(api.intakeCopy("home_move_project"), "This folder holds or sits inside a project you already added. Use it where it is or copy it.");
   assert.equal(api.intakeCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again.");
