@@ -374,6 +374,33 @@ fn paths_outside_the_provider_base_and_other_methods_are_refused() {
 }
 
 #[test]
+fn percent_encoded_dot_segments_are_refused() {
+    let provider = Provider::json();
+    let relay = Relay::start(&format!("{}/v1", provider.origin()), key()).unwrap();
+    let auth = format!("Authorization: Bearer {}", relay.token());
+    for target in [
+        "/v1/%2e%2e/admin",
+        "/v1/%2E%2E/admin",
+        "/v1/%2E%2e/admin",
+        "/v1/.%2e/admin",
+        "/v1/%2e./admin",
+        "/v1/%2e/models",
+        "/v1/x/%2E%2e%2fadmin",
+        "/v1/x%2f%2e%2e%2f%2e%2e/admin",
+        "/v1/x/..%5cadmin",
+        "/v1/%252e%252e/admin",
+        "/v1/%25252525252e/admin",
+    ] {
+        let (status, _, _) = send(relay.port(), &post(target, &auth, "{}"));
+        assert_eq!(status, 404, "{target}");
+    }
+    assert!(provider.seen().is_empty());
+    let (status, _, _) = send(relay.port(), &post("/v1/models/a%2Db.c", &auth, "{}"));
+    assert_eq!(status, 200);
+    assert_eq!(provider.seen().len(), 1);
+}
+
+#[test]
 fn chunked_request_bodies_reach_the_provider_whole() {
     let provider = Provider::json();
     let relay = Relay::start(&provider.origin(), key()).unwrap();

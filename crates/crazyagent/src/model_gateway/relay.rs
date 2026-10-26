@@ -22,6 +22,7 @@ const HEADER_BYTES_MAX: usize = 64 * 1024;
 const HEADERS_MAX: usize = 100;
 const BODY_BYTES_MAX: usize = 64 << 20;
 const RESPONSE_BYTES_MAX: u64 = 512 << 20;
+const DECODE_ROUNDS_MAX: usize = 4;
 const TARGET_BYTES_MAX: usize = 8 * 1024;
 const CLIENT_TIME: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_SECS: &str = "15";
@@ -606,7 +607,8 @@ pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> 
 }
 
 /// Keeps the agent inside the provider base path: the target's path must be the base path
-/// or below it, with no `..` segment. Output: Ok, or 404.
+/// or below it, with no `.` or `..` segment as written or percent-decoded (see
+/// [`dot_segment`]). Output: Ok, or 404.
 pub(crate) fn confined(target: &str, upstream: &Upstream) -> Result<(), u16> {
     let path = target.split('?').next().unwrap_or_default();
     let inside = upstream.path.is_empty()
@@ -614,14 +616,59 @@ pub(crate) fn confined(target: &str, upstream: &Upstream) -> Result<(), u16> {
         || path
             .strip_prefix(&upstream.path)
             .is_some_and(|rest| rest.starts_with('/'));
-    if !inside
-        || path
-            .split('/')
-            .any(|segment| segment == ".." || segment == ".")
-    {
+    if !inside || dot_segment(path) {
         return Err(404);
     }
     Ok(())
+}
+
+/// Whether a request path holds a `.` or `..` segment as written or after percent-decoding
+/// it up to [`DECODE_ROUNDS_MAX`] times, as a provider might; `/` and `\` both end a
+/// segment, and a path that still decodes further after the last round counts as one.
+/// Input: the path. Output: true when the path must be refused.
+fn dot_segment(path: &str) -> bool {
+    let mut bytes = path.as_bytes().to_vec();
+    for _ in 0..=DECODE_ROUNDS_MAX {
+        if bytes
+            .split(|byte| matches!(byte, b'/' | b'\\'))
+            .any(|segment| segment == b"." || segment == b"..")
+        {
+            return true;
+        }
+        let decoded = percent_decoded(&bytes);
+        if decoded == bytes {
+            return false;
+        }
+        bytes = decoded;
+    }
+    true
+}
+
+/// Decodes every `%` followed by two hex digits once and keeps every other byte as it is.
+/// Input: the bytes. Output: the decoded bytes, never longer than the input.
+fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
+    let hex = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    };
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2]))
+        {
+            decoded.push(high * 16 + low);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    assert!(decoded.len() <= bytes.len());
+    decoded
 }
 
 fn quoted(value: &str) -> Result<String, EngineError> {
