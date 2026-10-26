@@ -963,6 +963,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
         "gateway_rate_limited" => MasterReason::RateLimited,
         "gateway_cooldown" => MasterReason::CooldownActive,
+        "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit" => MasterReason::OutputLimit,
         "codex_host_capture_incomplete"

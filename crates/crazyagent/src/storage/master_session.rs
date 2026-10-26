@@ -1646,6 +1646,11 @@ fn member_gap(failure: &EngineError) -> Option<Gap> {
     Some((reason, cause_code(&failure.0)))
 }
 
+/// How long a pool account whose turn failed for a moment, such as a sign-in renewal that
+/// ended without a fresh token, is skipped before a turn tries it again. A renewal refuses
+/// a token that lapses within a minute, so a retry sooner meets the same lapsing token.
+const TRANSIENT_RETRY_MS: u64 = 60_000;
+
 fn fails_over(reason: MasterReason) -> bool {
     matches!(
         reason,
@@ -1655,6 +1660,7 @@ fn fails_over(reason: MasterReason) -> bool {
             | MasterReason::QuotaExhausted
             | MasterReason::RateLimited
             | MasterReason::CooldownActive
+            | MasterReason::TransientFailure
     )
 }
 
@@ -2246,6 +2252,7 @@ fn admission_reason(code: &str) -> MasterReason {
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_rate_limited" => MasterReason::RateLimited,
         "gateway_cooldown" => MasterReason::CooldownActive,
+        "gateway_transient_failure" => MasterReason::TransientFailure,
         "gateway_capability_unavailable" | "gateway_incompatible_connection" => {
             MasterReason::UnsupportedCapability
         }
@@ -2562,6 +2569,7 @@ fn observe_turn(
                 MasterReason::InvalidAuthentication => Some(FailureKind::InvalidAuthentication),
                 MasterReason::QuotaExhausted => Some(FailureKind::QuotaExhausted),
                 MasterReason::RateLimited => Some(FailureKind::RateLimited),
+                MasterReason::TransientFailure => Some(FailureKind::TransientFailure),
                 _ => None,
             };
             if let Some(kind) = provider {
@@ -2569,11 +2577,14 @@ fn observe_turn(
                     .attempt
                     .as_ref()
                     .ok_or_else(|| error("master_attempt_missing"))?;
+                let finished_at_ms = now_ms()?.max(attempt.selected_at_ms);
+                let retry_at_ms = (kind == FailureKind::TransientFailure)
+                    .then(|| finished_at_ms.saturating_add(TRANSIENT_RETRY_MS));
                 let completion = AttemptCompletion {
                     outcome: AttemptOutcome::Failed(kind),
                     effects: Effects::Uncertain,
-                    finished_at_ms: now_ms()?.max(attempt.selected_at_ms),
-                    retry_at_ms: None,
+                    finished_at_ms,
+                    retry_at_ms,
                 };
                 model_gateway::finish_attempt(tx, &attempt.request.id, &completion)?;
                 turn.attempt = model_gateway::read_attempt(tx, &attempt.request.id)?;

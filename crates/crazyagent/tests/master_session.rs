@@ -528,6 +528,7 @@ fn master_wire_types_are_closed_snake_case_without_producer_actions() {
         "quota_exhausted",
         "rate_limited",
         "cooldown_active",
+        "transient_failure",
         "connection_changed",
         "scope_revoked",
         "capacity_unavailable",

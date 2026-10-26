@@ -942,6 +942,27 @@ impl Fixture {
         crate::model_gateway::sign_in_rejected(&self.db(), &model).unwrap()
     }
 
+    fn gateway_state(
+        &self,
+        connection: &str,
+        now_ms: u64,
+    ) -> crate::model_gateway::ConnectionState {
+        let config = crate::config::resolve_config(
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+        )
+        .unwrap();
+        let model = config
+            .settings
+            .model_access
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|item| item.id == reference(connection))
+            .unwrap();
+        crate::model_gateway::connection_state(&self.db(), &model, now_ms).unwrap()
+    }
+
     fn db(&self) -> Connection {
         let db = Connection::open_with_flags(
             self.root.path().join("engine.db"),
@@ -1870,6 +1891,63 @@ async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_nex
     assert_eq!(case.paused_until("claude-a"), None);
     assert!(!case.rejected("claude-a"));
     assert_eq!(case.stale().await, vec![reference("claude-a")]);
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-b"));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_turn_whose_sign_in_renewal_fails_holds_the_account_briefly_and_hands_the_next_turn_on() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    let renewal = EngineError("native_profile_renewal_failed".into());
+    let result = case
+        .command(MasterRuntimeCommand::Observe {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: first.attempt.request.id.clone(),
+            observation: MasterRuntimeObservation::Failed {
+                reason: reason_for_error(&renewal),
+                cause: renewal.0.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let observed = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let MasterRuntimeResult::Turn(failed) = result else {
+        panic!("the turn whose sign-in renewal failed did not settle");
+    };
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(failed.reason, Some(MasterReason::TransientFailure));
+    assert_eq!(
+        failed.cause.as_deref(),
+        Some("native_profile_renewal_failed")
+    );
+    drop(first);
+    let held = case.gateway_state("claude-a", observed);
+    assert_eq!(held.health, crate::model_gateway::Health::TransientFailure);
+    let retry = held
+        .cooldown_until_ms
+        .expect("a failed renewal holds the account until a retry time");
+    assert!(
+        retry > observed && retry <= observed + 60_000,
+        "retry {retry} is not within a minute of {observed}"
+    );
+    assert_eq!(case.paused_until("claude-a"), None);
+    assert!(!case.rejected("claude-a"));
     let second = case.submit("Summarize what we discussed so far.").await;
     let next = case.prepared(&second).await;
     assert_eq!(next.attempt.connection.id, reference("claude-b"));

@@ -2567,6 +2567,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::QuotaExhausted => "Usage limit reached for this account",
         MasterReason::RateLimited => "Rate limited; try again shortly",
         MasterReason::CooldownActive => "Account is cooling down; try again shortly",
+        MasterReason::TransientFailure => "Account is unavailable for a moment; try again shortly",
         MasterReason::ConnectionChanged => concat!(
             "Settings or engine changed since this master opened: ",
             "close it (F4), open it again (F2, Enter), then send again"
