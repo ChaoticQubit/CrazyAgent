@@ -1234,11 +1234,7 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
-        if let Some(warden) = self.warden.take()
-            && let Err(code) = warden.fire(crate::sandbox::warden::FIRE_TIME)
-        {
-            eprintln!("harness_warden_unconfirmed cause={code}");
-        }
+        crate::sandbox::warden::fire_reported(self.warden.take(), "harness");
         assert!(self.stdin.is_none());
         assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))

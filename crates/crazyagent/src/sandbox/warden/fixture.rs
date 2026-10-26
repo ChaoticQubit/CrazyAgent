@@ -175,3 +175,68 @@ pub(crate) fn survivors(processes: [Pid; 3], wait: Duration) -> Vec<Pid> {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// This user's processes whose command line contains `needle`, read with `ps`. Input: the
+/// text. Output: their ids and command lines.
+pub(crate) fn processes_naming(needle: &str) -> Vec<(i32, String)> {
+    let listing = crate::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    assert!(!listing.stdout.is_empty());
+    naming(
+        &String::from_utf8_lossy(&listing.stdout),
+        &rustix::process::getuid().as_raw().to_string(),
+        i32::try_from(std::process::id()).unwrap(),
+        needle,
+    )
+}
+
+/// Picks from a `ps -o pid=,uid=,command=` listing the processes of `user` other than `own`
+/// whose command line contains `needle`. Inputs: the listing, the user id, this process's id
+/// and the text. Output: their ids and command lines.
+pub(crate) fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(i32, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let owner = fields.next()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (owner == user && pid != own && command.contains(needle)).then_some((pid, command))
+        })
+        .collect()
+}
+
+/// Waits until `deadline` for no process of this user to name any of `needles`, then kills
+/// by id whatever still does, so a failing run leaves nothing behind. Inputs: the deadline
+/// and the texts. Output: the processes that outlived it.
+pub(crate) fn detached_survivors(
+    deadline: std::time::Instant,
+    needles: &[&str],
+) -> Vec<(i32, String)> {
+    loop {
+        let left: Vec<(i32, String)> = needles
+            .iter()
+            .flat_map(|needle| processes_naming(needle))
+            .collect();
+        if left.is_empty() || std::time::Instant::now() >= deadline {
+            for (pid, _) in &left {
+                if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
