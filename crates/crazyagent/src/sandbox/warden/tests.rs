@@ -1,5 +1,6 @@
 use super::fixture::{DetachingRun, reaped_within, survivors};
 use super::*;
+use rustix::process::Pid;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
@@ -161,4 +162,120 @@ fn a_warden_that_fired_and_closed_before_the_engine_reads_is_confirmed() {
     assert_eq!(survivors(processes, Duration::from_secs(1)), []);
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(warden.fire(FIRE_TIME), Ok(()));
+}
+
+/// Starts runs at the same time, each through [`spawn`] from its own thread. Takes the runs.
+/// Returns each run's child, warden and three processes, in the order given.
+fn started_together(runs: &[&DetachingRun]) -> Vec<(std::process::Child, Warden, [Pid; 3])> {
+    let barrier = std::sync::Barrier::new(runs.len());
+    let barrier = &barrier;
+    let started: Vec<(std::process::Child, Warden)> = std::thread::scope(|scope| {
+        let threads: Vec<_> = runs
+            .iter()
+            .map(|run| {
+                scope.spawn(move || {
+                    barrier.wait();
+                    let (child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
+                    (child, warden.unwrap())
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect()
+    });
+    assert_eq!(started.len(), runs.len());
+    started
+        .into_iter()
+        .zip(runs)
+        .map(|((child, warden), run)| (child, warden, run.processes()))
+        .collect()
+}
+
+/// Checks that a run still stands: its harness is not reaped and its detached processes
+/// still take signals. Takes the label, the child and its three processes.
+fn standing(label: &str, child: &mut std::process::Child, processes: [Pid; 3]) {
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(child.try_wait().unwrap().is_none(), "{label} harness ended");
+    for process in processes {
+        assert_eq!(
+            rustix::process::test_kill_process(process),
+            Ok(()),
+            "{label} lost {process:?}"
+        );
+    }
+}
+
+/// Starts three runs at the same time, ends the first by firing its warden and the second by
+/// killing a process that holds its warden's end, as when the engine dies, and checks after
+/// each end that only the ended run is gone. The third run's warden then still reports its
+/// own kill. Takes the three runs.
+fn each_warden_ends_only_its_own_run(runs: [&DetachingRun; 3]) {
+    let mut started = started_together(&runs).into_iter();
+    let (mut fired, fired_warden, fired_processes) = started.next().unwrap();
+    let (mut orphaned, orphaned_warden, orphaned_processes) = started.next().unwrap();
+    let (mut spared, spared_warden, spared_processes) = started.next().unwrap();
+    assert!(started.next().is_none());
+    standing("orphaned", &mut orphaned, orphaned_processes);
+    standing("spared", &mut spared, spared_processes);
+
+    assert_eq!(fired_warden.fire(FIRE_TIME), Ok(()));
+    assert!(reaped_within(&mut fired, Duration::from_secs(2)));
+    assert_eq!(survivors(fired_processes, Duration::from_secs(1)), []);
+    standing("orphaned after the fire", &mut orphaned, orphaned_processes);
+    standing("spared after the fire", &mut spared, spared_processes);
+
+    let Warden { engine, .. } = orphaned_warden;
+    let mut engine_process = crate::spawn_gate::spawn_handing(
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        std::os::fd::OwnedFd::from(engine),
+    )
+    .unwrap();
+    standing(
+        "orphaned with its end handed",
+        &mut orphaned,
+        orphaned_processes,
+    );
+    engine_process.kill().unwrap();
+    engine_process.wait().unwrap();
+    assert!(reaped_within(&mut orphaned, Duration::from_secs(2)));
+    assert_eq!(survivors(orphaned_processes, Duration::from_secs(1)), []);
+    standing(
+        "spared after the engine kill",
+        &mut spared,
+        spared_processes,
+    );
+
+    assert_eq!(spared_warden.fire(FIRE_TIME), Ok(()));
+    assert!(reaped_within(&mut spared, Duration::from_secs(2)));
+    assert_eq!(survivors(spared_processes, Duration::from_secs(1)), []);
+}
+
+#[test]
+fn runs_started_together_from_one_profile_file_are_each_ended_only_by_their_own_warden() {
+    let run = DetachingRun::new();
+    let runs = [
+        run.beside("fired"),
+        run.beside("orphaned"),
+        run.beside("spared"),
+    ];
+    assert!(runs.iter().all(|beside| beside.profile == run.profile));
+    each_warden_ends_only_its_own_run([&runs[0], &runs[1], &runs[2]]);
+}
+
+#[test]
+fn runs_started_together_from_their_own_profiles_are_each_ended_only_by_their_own_warden() {
+    let runs = [
+        DetachingRun::new(),
+        DetachingRun::new(),
+        DetachingRun::new(),
+    ];
+    assert_ne!(runs[0].profile, runs[1].profile);
+    assert_ne!(runs[1].profile, runs[2].profile);
+    each_warden_ends_only_its_own_run([&runs[0], &runs[1], &runs[2]]);
 }
