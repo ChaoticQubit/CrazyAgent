@@ -23,18 +23,18 @@ required-features = ["native-webdriver"]
 
 [[bin]]
 name = "desktop-e2e-bridge"
-path = "src/bin/e2e_bridge/main.rs"
+path = "e2e_bridge/main.rs"
 required-features = ["e2e-bridge"]
 
 [build-dependencies]
-tauri-build = "=2.7.3"
+tauri-build = { version = "=2.7.3", features = [] }
 
 [dependencies]
 crazyagent = { path = "../../../crates/crazyagent" }
 getrandom = "=0.4.3"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
-tauri = "=2.12.4"
+tauri = { version = "=2.12.4", features = [] }
 tauri-plugin-updater = "=2.14.0"
 tauri-plugin-wdio-webdriver = { version = "=1.5.0", optional = true }
 tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "sync", "time"] }

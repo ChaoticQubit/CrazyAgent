@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.meta.url));
-export const ROUTES = fileURLToPath(new URL("../../src-tauri/src/bin/e2e_bridge/routes.rs", import.meta.url));
+export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 
 const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|WebviewWindow/;
