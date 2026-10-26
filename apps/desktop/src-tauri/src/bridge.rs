@@ -1022,7 +1022,6 @@ fn rejection_code(code: &str) -> &'static str {
         "knowledge_entry_missing" => "knowledge_entry_missing",
         "knowledge_version_conflict" => "knowledge_version_conflict",
         "invalid_project" => "invalid_project",
-        "project_master_open" => "project_master_open",
         "research_job_missing" => "research_job_missing",
         "research_job_finished" => "research_job_finished",
         "research_job_not_retryable" => "research_job_not_retryable",

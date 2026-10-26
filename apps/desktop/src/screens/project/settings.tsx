@@ -122,7 +122,7 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
  * null when the project has no saved setup. Output: one plain paragraph. */
 export function removeLine(folder: string | null): string {
   const where = folder ? `at ${folderLabel(folder)}` : "where it is";
-  return `Its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
+  return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
 }
 
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {

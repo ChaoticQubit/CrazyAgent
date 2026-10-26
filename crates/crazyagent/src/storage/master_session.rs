@@ -621,6 +621,57 @@ fn cancel_turn(
     Ok(turn)
 }
 
+/// Ends a master conversation: its outstanding turn is cancelled and the session closes.
+/// Takes the transaction, the session and the revision it was read at.
+/// Returns once the turn is cancelled; the caller saves the session.
+fn end_session(
+    tx: &Transaction<'_>,
+    session: &mut MasterSessionView,
+    revision: u64,
+) -> Result<(), EngineError> {
+    if let Some(turn_id) = &session.current_turn {
+        let turn = load_turn(tx, session, turn_id, revision)?
+            .ok_or_else(|| error("master_current_turn_record"))?;
+        cancel_turn(tx, turn)?;
+    }
+    session.current_turn = None;
+    session.phase = MasterSessionPhase::Closed;
+    Ok(())
+}
+
+/// Ends a project's open master conversation as the project is removed, as the owner's
+/// End conversation does, in the removal's own transaction and at its revision.
+/// Takes the transaction, the project and the revision before the removal.
+/// Returns Ok, also when no conversation is open.
+pub(crate) fn close_master_for_removal(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    revision: u64,
+) -> Result<(), EngineError> {
+    let open: Option<String> = tx
+        .query_row(
+            "SELECT id FROM master_sessions WHERE project=?1 AND phase='configured'",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(open) = open else {
+        return Ok(());
+    };
+    let id = SessionId::new(open).map_err(error)?;
+    let mut session =
+        load_session(tx, &id, revision)?.ok_or_else(|| error("master_session_record"))?;
+    assert_eq!(session.phase, MasterSessionPhase::Configured);
+    end_session(tx, &mut session, revision)?;
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| error("master_integer_bounds"))?;
+    session.version = Cursor::new(next);
+    save_session(tx, &session)?;
+    Ok(())
+}
+
 fn preparation(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -2976,15 +3027,7 @@ fn execute(
             cancel_turn(tx, turn)?;
             session.current_turn = None;
         }
-        MasterOwnerAction::Close { .. } => {
-            if let Some(turn_id) = &session.current_turn {
-                let turn = load_turn(tx, &session, turn_id, revision)?
-                    .ok_or_else(|| error("master_current_turn_record"))?;
-                cancel_turn(tx, turn)?;
-            }
-            session.current_turn = None;
-            session.phase = MasterSessionPhase::Closed;
-        }
+        MasterOwnerAction::Close { .. } => end_session(tx, &mut session, revision)?,
         MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
         }
@@ -4380,6 +4423,46 @@ fallback_allowed = false
             }
         );
         assert_eq!(case.view().await.1, turns);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn removing_the_project_ends_its_open_master_conversation_in_the_same_action() {
+        let case = Fixture::new(false).await;
+        let project = case.session.project_id.clone();
+        let remove = (
+            "remove-project".to_owned(),
+            OwnerMutation::RemoveProject {
+                project_id: project.clone(),
+            },
+        );
+        assert_eq!(case.result(remove).await, OwnerResult::Applied);
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let revision = owner_revision(&tx).unwrap();
+        let session = load_session(&tx, &case.session.session_id, revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.phase, MasterSessionPhase::Closed);
+        assert_eq!(session.current_turn, None);
+        assert_eq!(
+            session.version.value(),
+            revision,
+            "the conversation ends in the removal itself, not in a later change"
+        );
+        let turn = load_turn(&tx, &session, &case.turn.id, revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.phase, MasterTurnPhase::Cancelled);
+        let projects: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id=?1",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projects, 0, "the project is removed in the same action");
+        drop(tx);
         case.close().await;
     }
 }

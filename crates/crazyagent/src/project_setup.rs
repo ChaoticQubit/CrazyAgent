@@ -1681,7 +1681,7 @@ pub(crate) fn execute(
             name.as_deref(),
             setup,
         ),
-        SetupAction::Remove { project_id } => remove(tx, project_id),
+        SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
@@ -2090,26 +2090,26 @@ const REMOVED_WITH_PROJECT: [&str; 8] = [
 ];
 
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
-/// Takes the transaction and the project. Its onboarding, research jobs, team conversation,
-/// tasks, settings and ended agents are deleted, so a waiting step is never claimed, a
-/// running step or job stops when it finds its row gone, and the folder can be added again.
-/// Returns `project_master_open` while its master conversation is open, since ending it
-/// releases the master's worktree, and `invalid_project` for an unknown project.
-fn remove(tx: &Transaction<'_>, project_id: &ProjectId) -> Result<Outcome, EngineError> {
-    let (exists, master_open): (bool, bool) = tx
+/// Takes the transaction, the project and the revision before the removal. Its open master
+/// conversation ends in the same change; its onboarding, research jobs, team conversation,
+/// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
+/// running one stops. Returns `invalid_project` for an unknown project.
+fn remove(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let exists: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1),
-            EXISTS(SELECT 1 FROM master_sessions WHERE project=?1 AND phase='configured')",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
             [project_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .map_err(error)?;
     if !exists {
         return Ok(rejected("invalid_project"));
     }
-    if master_open {
-        return Ok(rejected("project_master_open"));
-    }
+    crate::storage::close_master_for_removal(tx, project_id, revision)?;
     for table in REMOVED_WITH_PROJECT {
         tx.execute(
             &format!("DELETE FROM {table} WHERE project=?1"),
