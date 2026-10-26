@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod account_profile;
 pub(crate) mod accounts;
+mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
@@ -934,7 +935,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
     native_auth::initialize(connection)?;
-    master_bootstrap::initialize(connection)
+    master_bootstrap::initialize(connection)?;
+    harness_groups::initialize(connection)
 }
 
 fn finish_native_auth_without_host(

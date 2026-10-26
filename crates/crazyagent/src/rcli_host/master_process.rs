@@ -188,6 +188,13 @@ impl HostProcess {
         Ok(())
     }
 
+    /// Names the process group the rcli master was started in. Input: the process.
+    /// Output: the group, which is the host's own process id.
+    pub(super) fn process_group(&self) -> u32 {
+        assert!(self.child.id() > 1);
+        self.child.id()
+    }
+
     fn group(&self) -> Pid {
         assert!(self.child.id() > 1);
         Pid::from_raw(i32::try_from(self.child.id()).expect("OS child PID range"))

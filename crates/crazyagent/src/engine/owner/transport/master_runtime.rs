@@ -88,6 +88,13 @@ impl MasterHost {
             Self::Claude(host) => host.close().await,
         }
     }
+
+    fn process_group(&self) -> Option<u32> {
+        match self {
+            Self::Codex(host) => Some(host.process_group()),
+            Self::Claude(host) => host.process_group(),
+        }
+    }
 }
 
 impl Capture {
@@ -280,6 +287,34 @@ impl OwnerRuntimeHandle {
             )
         });
         Ok((profile, hold))
+    }
+
+    /// Records the process group a master turn's harness started in, so a later engine run
+    /// can tell whether it may still write in the conversation worktree (LB-23). Takes the
+    /// prepared turn, its id and the group. Returns success, or the refusal ending the turn.
+    pub(super) async fn record_master_child(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        group: Option<u32>,
+    ) -> Result<(), EngineError> {
+        let group = group
+            .and_then(|group| i32::try_from(group).ok())
+            .filter(|group| *group > 1)
+            .ok_or_else(|| failure("master_runtime_group_unknown"))?;
+        match self
+            .master_runtime_command(MasterRuntimeCommand::RecordChild {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+                group,
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(_) => Ok(()),
+            _ => Err(failure("master_runtime_result")),
+        }
     }
 
     pub(super) async fn observe_master_turn(
@@ -523,6 +558,8 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
         active: &mut ActiveMaster,
     ) -> Result<MasterRuntimeObservation, EngineError> {
+        self.record_master_child(prepared, turn_id, active.host.process_group())
+            .await?;
         self.observe_master_turn(
             prepared,
             turn_id,

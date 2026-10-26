@@ -1184,6 +1184,28 @@ pub(crate) fn provision(
     result
 }
 
+/// Returns a lease an engine restart left RecoveryRequired to Ready when its worktree still
+/// verifies. The caller has already proved that no writer from an earlier run can still
+/// run in it. Inputs: the connection, task and repository. Output: true when the lease is
+/// Ready now; any other state, or a worktree that no longer verifies, is left unchanged.
+pub(crate) fn requalify(
+    connection: &Connection,
+    task: &TaskId,
+    repository: &str,
+) -> Result<bool, EngineError> {
+    let mut record = load(connection, task, repository)?.ok_or_else(|| error("lease_missing"))?;
+    if record.lease.state != LeaseState::RecoveryRequired || verify_record(&record).is_err() {
+        return Ok(false);
+    }
+    record.lease.state = LeaseState::Ready;
+    save(connection, &record)?;
+    assert_eq!(
+        load(connection, task, repository)?.map(|stored| stored.lease.state),
+        Some(LeaseState::Ready)
+    );
+    Ok(true)
+}
+
 /// Refuses to materialize a worktree where no directory-relative no-follow writes exist.
 /// Takes the lease record, unchanged. Returns `worktree_filesystem_unavailable`.
 #[cfg(not(unix))]

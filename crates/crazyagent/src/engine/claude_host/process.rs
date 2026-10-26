@@ -11,7 +11,7 @@ use std::os::fd::AsFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
@@ -29,6 +29,7 @@ pub(super) struct Channels {
     pub(super) output: mpsc::Sender<ObservedEvent>,
     pub(super) report: watch::Sender<Status>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) group: Arc<AtomicU32>,
 }
 
 struct PendingInput {
@@ -75,6 +76,7 @@ pub(super) fn run(
         output,
         report,
         stop,
+        group,
     } = channels;
     if let Err(error) = validate_command(&command, &profile) {
         report.send_replace(Status {
@@ -136,6 +138,8 @@ pub(super) fn run(
             return;
         }
     };
+    assert!(child.id() > 1);
+    group.store(child.id(), Ordering::Release);
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,

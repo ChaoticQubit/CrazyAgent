@@ -89,6 +89,13 @@ pub(crate) enum MasterRuntimeCommand {
         turn_id: RequestId,
         attempt_id: RequestId,
     },
+    RecordChild {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        group: i32,
+    },
     Observe {
         host: HostStamp,
         project_id: ProjectId,
@@ -3203,6 +3210,13 @@ pub(super) fn runtime(
             turn_id,
             ..
         }
+        | MasterRuntimeCommand::RecordChild {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
+        }
         | MasterRuntimeCommand::Observe {
             host,
             project_id,
@@ -3272,6 +3286,7 @@ pub(super) fn runtime(
             let record = verify_preparation(&tx, config, host, &session, &turn)?;
             turn.phase = MasterTurnPhase::Delivering;
             persist_runtime(&tx, config, &mut session, &turn)?;
+            super::harness_groups::launching(&tx, &session.session_id, &turn.id)?;
             tx.commit().map_err(error)?;
             assert!(db.is_autocommit());
             let custody = custody.as_mut().map_err(|error| error.clone())?;
@@ -3292,6 +3307,11 @@ pub(super) fn runtime(
                 )?,
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
+        }
+        MasterRuntimeCommand::RecordChild { group, .. } => {
+            super::harness_groups::record(&tx, &session.session_id, &turn.id, group)?;
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
         MasterRuntimeCommand::Observe {
             ref host,
@@ -3535,6 +3555,9 @@ fn execute(
                     Some(turn)
                 }
             };
+            if moved && !super::master_bootstrap::requalify(tx, &session)? {
+                return Ok(reject("master_source_conflict"));
+            }
             let (count, maximum): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(MAX(ordinal),0) FROM (SELECT ordinal FROM master_turns WHERE session=?1 ORDER BY ordinal LIMIT 1025)", [id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?;
             if count != maximum || count < 0 {
                 return Err(error("master_turn_order"));
