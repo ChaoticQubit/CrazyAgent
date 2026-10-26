@@ -9,6 +9,7 @@ use super::screens::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use super::seam::{Activity, ProjectCard, ResearchCounts};
 use super::shell::Shell;
 use super::theme::{Appearance, Colors, Depth};
+use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod};
 use crate::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::Platform;
@@ -377,6 +378,7 @@ fn home_frames_match_the_design() {
         let mut ctx = ready(width, height);
         ctx.store.projects = Load::Ready(Vec::new());
         ctx.store.pools = Load::Ready(Vec::new());
+        ctx.store.accounts = Load::Ready(Vec::new());
         ctx.store.setup = Load::Ready(tools(&[Dependency::Uv, Dependency::Graphify]));
         let mut shell = shell_at(ctx, Place::Home);
         shell.arrive(super::seam::Arrival::Pools(Ok(Vec::new())));
@@ -397,6 +399,7 @@ fn home_frames_match_the_design() {
         let mut ctx = ready(width, height);
         ctx.store.projects = Load::Ready(projects());
         ctx.store.pools = Load::Ready(pools());
+        ctx.store.accounts = Load::Ready(accounts());
         let mut shell = shell_at(ctx, Place::Home);
         shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
         check(
@@ -412,6 +415,7 @@ fn home_frames_match_the_design() {
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(projects());
     ctx.store.pools = Load::Ready(pools());
+    ctx.store.accounts = Load::Ready(accounts());
     ctx.store.projects_seen = Some("10:42".into());
     let mut shell = shell_at(ctx, Place::Home);
     shell.arrive(super::seam::Arrival::Disconnected(
@@ -423,11 +427,35 @@ fn home_frames_match_the_design() {
         &swapped(&swaps),
     );
 
+    let loaded = |statuses: &[AccountStatus]| {
+        super::seam::Arrival::Owner(Box::new(super::client::OwnerEvent::Settings(Box::new(
+            super::client::settings::SettingsEvent::AllAccounts(Ok(statuses
+                .iter()
+                .enumerate()
+                .map(|(index, status)| AccountView {
+                    id: CredentialRef::new(format!("account-{index}")).unwrap(),
+                    name: format!("Claude {index}"),
+                    provider: Provider::Claude,
+                    provider_name: "Claude".into(),
+                    method: SignInMethod::Subscription,
+                    method_label: String::new(),
+                    url: None,
+                    model: None,
+                    status: *status,
+                    status_label: status.label().into(),
+                })
+                .collect())),
+        ))))
+    };
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(Vec::new());
     let mut shell = shell_at(ctx, Place::Home);
-    shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 0, 0, 0)])));
+    shell.arrive(loaded(&[
+        AccountStatus::NotSignedIn,
+        AccountStatus::NotSignedIn,
+    ]));
     shell.arrive(super::seam::Arrival::Pools(Ok(vec![pool("Main", 2, 0, 0)])));
+    shell.arrive(loaded(&[AccountStatus::SignedIn, AccountStatus::SignedIn]));
     check("home-ready-80", &render(&mut shell, 80, 24), &[]);
 }
 

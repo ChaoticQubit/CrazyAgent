@@ -1,4 +1,4 @@
-use super::super::settings_add_account::{AddAccount, choices, key_problem};
+use super::super::settings_add_account::{AddAccount, choices, key_problem, provider_tiles};
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
@@ -660,7 +660,8 @@ fn add_account_provider_and_method_frames_match_the_design() {
 #[test]
 fn api_key_form_masks_the_key_and_counts_it() {
     let mut shell = add_shell(80, 24);
-    for _ in 0..3 {
+    shell.key(Key::Enter);
+    for _ in 0..2 {
         shell.key(Key::Down);
     }
     shell.key(Key::Enter);
@@ -696,8 +697,8 @@ fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
         titles,
         [
             "Sign in with ChatGPT",
-            "Use an API key",
-            "Use the Codex sign-in on this Mac"
+            "Use the Codex sign-in on this Mac",
+            "Use an API key"
         ]
     );
     assert_eq!(
@@ -706,6 +707,38 @@ fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
     );
     assert_eq!(key_problem(Provider::OpenaiApi, 51, true), None);
     assert_eq!(key_problem(Provider::OpenaiCompatible, 0, false), None);
+}
+
+#[test]
+fn without_a_separate_api_provider_a_company_keeps_its_own_key_choice() {
+    let older: Vec<_> = catalog()
+        .into_iter()
+        .filter(|entry| !matches!(entry.provider, Provider::OpenaiApi | Provider::AnthropicApi))
+        .collect();
+    let tiles = provider_tiles(&older);
+    let anthropic = tiles.iter().find(|tile| tile.name == "Anthropic").unwrap();
+    assert_eq!(
+        anthropic
+            .choices
+            .iter()
+            .map(|choice| (choice.provider, choice.method))
+            .collect::<Vec<_>>(),
+        [
+            (Provider::Claude, SignInMethod::Subscription),
+            (Provider::Claude, SignInMethod::ApiKey)
+        ]
+    );
+    assert_eq!(tiles.len(), 5);
+}
+
+#[test]
+#[should_panic(expected = "every Add account entry offers a way to add an account")]
+fn a_catalog_provider_with_no_way_to_add_an_account_trips_the_entry_check() {
+    provider_tiles(&[crate::accounts::ProviderEntry {
+        provider: Provider::Openrouter,
+        name: "OpenRouter".into(),
+        methods: Vec::new(),
+    }]);
 }
 
 #[cfg(unix)]

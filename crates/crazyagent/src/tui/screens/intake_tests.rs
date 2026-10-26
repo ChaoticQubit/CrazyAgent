@@ -524,6 +524,25 @@ fn tools_found(status: &crate::setup::SetupStatus) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready() {
     let mut engine = Engine::start().await;
+    engine
+        .controller
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::AnthropicApi,
+                method: crate::accounts::SignInMethod::ApiKey,
+                name: "Team key".into(),
+                url: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    b"unit-placeholder-anthropic-key-0001".to_vec(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
     let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
@@ -535,10 +554,88 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
     assert_eq!(
         shows(&rows, "Get set up"),
         !found,
-        "the pool has a ready local account, so only tools decide; the engine reports {:?}: {rows:#?}",
+        "a pool exists and an account has a saved key, so only tools decide; the engine reports {:?}: {rows:#?}",
         status.dependencies
     );
     assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_an_account_is_done_only_when_an_engine_account_is_ready_for_agents() {
+    use crate::accounts::{AccountDraft, AccountStatus, Provider, SignInMethod};
+    use crate::engine::owner::AccountSecret;
+
+    let engine = Engine::with("version = 1\ntimeout_ms = 10000\n").await;
+    let draft = |provider, method, name: &str, model: Option<&str>| AccountDraft {
+        provider,
+        method,
+        name: name.into(),
+        url: None,
+        model: model.map(Into::into),
+    };
+    for _ in 0..2 {
+        let waiting = engine
+            .controller
+            .add_account(
+                draft(
+                    Provider::Claude,
+                    SignInMethod::Subscription,
+                    "ChaoticQubit",
+                    None,
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.status, AccountStatus::NotSignedIn);
+    }
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    for line in [
+        "No account is ready for",
+        "agents yet. Sign one in",
+        "or check its key or URL.",
+    ] {
+        assert!(shows(&rows, line), "{line}: {rows:#?}");
+    }
+    assert!(shows(&rows, "Enter opens Settings"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Settings(super::SettingsSection::Accounts))
+    );
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+
+    let saved = engine
+        .controller
+        .add_account(
+            draft(
+                Provider::AnthropicApi,
+                SignInMethod::ApiKey,
+                "Team key",
+                Some("claude-sonnet-4-5"),
+            ),
+            Some(AccountSecret::new(b"unit-placeholder-anthropic-key-0001".to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status, AccountStatus::KeySaved);
+    shell.refresh();
+    pump(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "[x] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "Team key is ready for"), "{rows:#?}");
+    assert!(shows(&rows, "agents."), "{rows:#?}");
+    assert!(
+        rows.iter().all(|row| row.chars().count() <= 80),
+        "{rows:#?}"
+    );
 }
 
 fn waiting_review() -> (Shell, ProjectId) {

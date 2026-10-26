@@ -68,6 +68,21 @@ test("a full pool marks unchecked rows unavailable but focusable and shows the l
   assert.match(markup, /Back to pools/);
 });
 
+test("the pool editor keeps a member the account list does not show, with explicit checkboxes for the rest", () => {
+  const saved = pool(2, { members: [member(90), member(1)] });
+  const markup = renderToStaticMarkup(createElement(PoolEditorView, { pool: saved, accounts: { kind: "ok", value: [account(1), account(2)] },
+    onSave: forbidden, onCancel: forbidden }));
+  const rows = [...markup.matchAll(/<label class="pick"[^>]*>([\s\S]*?)<\/label>/g)].map((match) => match[1]);
+  const row = (name) => rows.find((text) => text.includes(`>${name}<`));
+  assert.match(row("Account 1"), /<input type="checkbox" checked=""/);
+  assert.match(row("Account 2"), /<input type="checkbox"/);
+  assert.doesNotMatch(row("Account 2"), /checked=""/);
+  for (const text of rows) assert.doesNotMatch(text, /\sdisabled=""/);
+  assert.match(markup, /2 of 15/);
+  assert.equal((markup.match(/class="member"/g) ?? []).length, 2, "a member missing from the account list stays in the pool");
+  assert.deepEqual(saved.members.map((item) => item.id), ["acct-90", "acct-1"]);
+});
+
 test("a new pool starts empty and windows a long account list", () => {
   const accounts = Array.from({ length: 1000 }, (_, index) => account(index));
   const markup = renderToStaticMarkup(createElement(PoolEditorView, { pool: undefined, accounts: { kind: "ok", value: accounts }, onSave: forbidden, onCancel: forbidden }));

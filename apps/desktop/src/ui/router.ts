@@ -3,9 +3,10 @@ import { useEffect, useState } from "react";
 export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "pack", "home", "github", "memory", "profile", "updates"] as const;
 export const PROJECT_TABS = ["overview", "conversation", "agents", "context", "settings"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
-const SETTINGS_ACTIONS = ["add", "new"] as const;
+const SETTINGS_ACTIONS = ["add", "new", "sign_in"] as const;
 export const ADD_PROJECT_WAYS = ["clone", "folder"] as const;
 const PROJECT_ID_MAX = 256;
+const ACCOUNT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
 export type ProjectTab = typeof PROJECT_TABS[number];
@@ -20,14 +21,16 @@ export type Route =
   | { name: "project"; id: string; tab: ProjectTab }
   | { name: "add-project"; way: AddProjectWay }
   | { name: "onboarding"; id: string }
-  | { name: "settings"; tab: SettingsTab; action?: SettingsAction };
+  | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
   return choices.find((choice) => choice === value) ?? fallback;
 }
 
 /** Reads the app's hash route. Unknown or malformed routes go Home; a missing tab or step
- * goes to the first one. Input: a location hash such as "#/settings/pools". Output: a route. */
+ * goes to the first one; Sign in again keeps its account only on Accounts and only when the id
+ * has the engine's account id shape. Input: a location hash such as "#/settings/pools".
+ * Output: a route. */
 export function parseRoute(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
   const parts = path.split("/").filter(Boolean);
@@ -36,7 +39,9 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === "settings" && parts.length <= 2) {
     const tab = pick(SETTINGS_TABS, parts[1], "accounts");
     const action = SETTINGS_ACTIONS.find((choice) => choice === params.get("action"));
-    return action ? { name: "settings", tab, action } : { name: "settings", tab };
+    if (action !== "sign_in") return action ? { name: "settings", tab, action } : { name: "settings", tab };
+    const account = params.get("account") ?? "";
+    return tab === "accounts" && ACCOUNT_ID.test(account) ? { name: "settings", tab, action, account } : { name: "settings", tab };
   }
   if (parts[0] === "projects" && parts[1] === "new" && parts.length === 2) {
     return { name: "new-project", step: pick(NEW_PROJECT_STEPS, params.get("step"), "basics") };
@@ -65,7 +70,10 @@ export function formatRoute(route: Route): string {
     case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}`;
     case "add-project": return `#/projects/add/${route.way}`;
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
-    case "settings": return `#/settings/${route.tab}${route.action ? `?action=${route.action}` : ""}`;
+    case "settings": {
+      const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
+      return `#/settings/${route.tab}${route.action ? `?action=${route.action}${account}` : ""}`;
+    }
   }
 }
 

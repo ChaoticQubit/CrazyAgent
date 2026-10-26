@@ -198,11 +198,21 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
   </div>;
 }
 
+/** What a Sign in again link opens: the linked account with its sign-in when it still offers
+ * one, or its details when it no longer needs one; nothing while the list loads or when the
+ * account is gone. Inputs: the accounts read and the linked account id. Output: the drawer. */
+export function linkedSignIn(accounts: Loaded<AccountView[]>, id: string): { account: AccountView; signIn: boolean } | undefined {
+  if (accounts.kind !== "ok") return undefined;
+  const account = accounts.value.find((entry) => entry.id === id);
+  return account && { account, signIn: accountActions(account).includes("sign_in") };
+}
+
 /** Settings, Accounts: the account list with row and selection actions, the Delete
  * confirmation, the Add account dialog and the account drawer. While an account shows a
  * sign-in in progress the list is read again every few seconds.
- * Input: whether the Add account dialog opens on arrival. */
-export function Accounts({ adding }: { adding: boolean }) {
+ * Inputs: whether the Add account dialog opens on arrival, and the account a Sign in again
+ * link opens. */
+export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: string }) {
   const session = useAppSession();
   const [accounts, reload] = useLoad(listAccounts);
   const [pools, reloadPools] = useLoad(poolSummaries);
@@ -212,6 +222,12 @@ export function Accounts({ adding }: { adding: boolean }) {
   const [working, setWorking] = useState(false);
   const [problem, setProblem] = useState<string>();
   useEffect(() => { if (adding) setAdd(true); }, [adding]);
+  useEffect(() => {
+    if (!signingIn || accounts.kind === "loading") return;
+    const linked = linkedSignIn(accounts, signingIn);
+    if (linked) setOpened(linked);
+    navigate({ name: "settings", tab: "accounts" }, true);
+  }, [signingIn, accounts]);
   const list = accounts.kind === "ok" ? accounts.value : [];
   const known = pools.kind === "ok" ? pools.value : undefined;
   const current = opened && (list.find((account) => account.id === opened.account.id) ?? opened.account);
