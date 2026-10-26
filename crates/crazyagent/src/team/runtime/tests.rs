@@ -1219,4 +1219,9 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         panic!("a master was prepared with a delegate engine it can write");
     };
     assert!(refused.contains("team_delegate_writable"), "{refused}");
+    assert!(
+        runtime
+            .prepare(&fixture.setup, 3, AgentRole::Sub, "codex", true, &account)
+            .is_ok()
+    );
 }

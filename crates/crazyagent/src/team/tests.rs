@@ -1287,7 +1287,8 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
     let engine_folder = base.join("engine-bin");
     std::fs::create_dir(&engine_folder).unwrap();
     let engine = engine_folder.join("crazyagent");
-    std::fs::write(&engine, b"").unwrap();
+    std::fs::write(&engine, b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
     let source = pool.clone();
     assert_eq!(
         runtime::TeamRuntime::open(
