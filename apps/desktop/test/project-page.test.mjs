@@ -250,6 +250,11 @@ test("a stopped or failed master turn offers its own message to send again", () 
   assert.equal(research.resendText([turn(1, "failed")], {}), null);
   assert.equal(research.resendText([turn(1, "failed")], { 1: "guessed from the ordinal" }), null);
   assert.equal(research.resendText([], {}), null);
+  const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
+  assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
+  assert.equal(research.turnLine(crashed), "The master stopped: capture incomplete.", "the line names what happened");
+  assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
+  assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
 
 test("a failed send says Couldn't send and keeps specific engine copy", () => {
