@@ -5,7 +5,7 @@ use crate::adapters::{NativeAction, NativeHarness};
 use crate::engine::claude_host::ClaudeHost;
 use crate::protocol::SessionId;
 use crate::routing::ResourceBudget;
-use crate::team::runtime::managed_agent::SignedInClaude;
+use crate::team::runtime::managed_agent::SignedIn;
 use std::os::unix::fs::PermissionsExt;
 
 fn private_directory(path: &Path) {
@@ -16,7 +16,7 @@ fn private_directory(path: &Path) {
 #[tokio::test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
-    let mut signed_in = SignedInClaude::open();
+    let mut signed_in = SignedIn::claude();
     let connection = signed_in.connection.clone();
     let turn = RequestId::new("claude-live-master-turn").unwrap();
     let profile = signed_in.acquire(turn.as_str());

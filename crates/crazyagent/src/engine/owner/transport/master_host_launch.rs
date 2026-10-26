@@ -930,6 +930,7 @@ mod tests {
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
         expected.extend(crate::sandbox::AGENT_GIT_ENV);
+        expected.extend(crate::sandbox::AGENT_TLS_ENV);
         assert_eq!(environment, expected);
 
         let claude = crate::engine::claude_host::launch_command(
@@ -970,6 +971,7 @@ mod tests {
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
         expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
+        expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
         assert_eq!(claude_environment, expected_claude);
 
         let run = |target: &Path| {
@@ -1152,6 +1154,9 @@ mod dec_090_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/live_claude_tests.rs"]
 mod live_claude_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/live_codex_tests.rs"]
+mod live_codex_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/claude_turn_tests.rs"]

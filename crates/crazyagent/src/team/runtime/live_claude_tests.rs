@@ -1,11 +1,11 @@
 use super::TurnEnd;
-use super::managed_agent::{ManagedAgent, SignedInClaude, claude};
+use super::managed_agent::{ManagedAgent, SignedIn, claude};
 use std::time::Duration;
 
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_team_agent_turn_is_signed_in_inside_the_agent_sandbox() {
-    let mut signed_in = SignedInClaude::open();
+    let mut signed_in = SignedIn::claude();
     let agent = ManagedAgent::new("claude-code", &claude());
     let profile = signed_in.acquire("claude-live-team-turn");
     let managed = profile.profile_path().unwrap();

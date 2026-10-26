@@ -1,5 +1,5 @@
 use super::*;
-use crate::team::runtime::managed_agent::{ManagedAgent, SignedInClaude, claude};
+use crate::team::runtime::managed_agent::{ManagedAgent, SignedIn, claude};
 use std::os::unix::fs::PermissionsExt;
 
 const PROJECT: &str = "dec-090";
@@ -8,7 +8,7 @@ const BRIEF: &str = "A launch check of the research agent. The whole report is t
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_research_run_is_signed_in_inside_the_research_sandbox() {
-    let mut signed_in = SignedInClaude::open();
+    let mut signed_in = SignedIn::claude();
     let engine = ManagedAgent::new("claude-code", &claude());
     let root = engine.project.clone();
     let context = crate::projects_home::state_folder(&root).join("context");

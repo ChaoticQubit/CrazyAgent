@@ -129,7 +129,10 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         ("TMPDIR".into(), home_text),
     ]);
     expected.extend(
-        crazyagent::sandbox::AGENT_GIT_ENV.map(|(name, value)| (name.to_owned(), value.to_owned())),
+        crazyagent::sandbox::AGENT_GIT_ENV
+            .into_iter()
+            .chain(crazyagent::sandbox::AGENT_TLS_ENV)
+            .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     assert_eq!(environment(&built), expected);
     assert_eq!(built.get_current_dir(), Some(work.path()));
