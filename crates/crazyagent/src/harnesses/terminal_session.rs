@@ -151,9 +151,9 @@ impl TerminalSession {
             }));
         }
         let since = SystemTime::now();
+        let reader = TranscriptReader::new(command.transcript.clone(), &command.cwd, since);
         let pane = host.spawn(&agent, &command).map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
-        let reader = TranscriptReader::new(command.transcript.clone(), &command.cwd, since);
         let ready = LaunchEvent::Ready {
             native_session: claude.then_some(session_id),
         };

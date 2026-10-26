@@ -403,7 +403,7 @@ fn downloads_come_from_a_real_local_server_and_stop_at_the_size_cap() {
     let mut received = Vec::new();
     assert_eq!(
         code(download(&url, &mut received, 4096, timeout)),
-        "update_download_failed"
+        "update_download_missing"
     );
     assert!(received.is_empty());
     server.join().unwrap();
@@ -420,12 +420,169 @@ fn a_slow_server_is_cut_off_at_the_timeout() {
     );
     let started = Instant::now();
     let mut received = Vec::new();
+    let error = download(&url, &mut received, 4096, Duration::from_secs(1)).unwrap_err();
     assert_eq!(
-        code(download(&url, &mut received, 4096, Duration::from_secs(1))),
-        "update_download_failed"
+        (error.code, error.message.as_str()),
+        (
+            "update_download_failed",
+            "The update server didn't answer in time. Check your connection and try again."
+        )
     );
     assert!(started.elapsed() < Duration::from_secs(4));
     server.join().unwrap();
+}
+
+fn said(error: UpdateError) -> (&'static str, String) {
+    (error.code, error.message)
+}
+
+#[test]
+fn a_channel_with_no_release_says_so_in_one_plain_sentence() {
+    let missing = || {
+        response(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\n",
+            b"Not Found",
+        )
+    };
+    let (url, server) = serve(vec![missing(), missing()], Duration::ZERO);
+    assert_eq!(
+        said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
+        (
+            "update_stable_not_published",
+            "No stable release is published yet.".to_owned()
+        )
+    );
+    assert_eq!(
+        said(fetch_manifest(Channel::Dev, &url).unwrap_err()),
+        (
+            "update_dev_not_published",
+            "No dev release is published yet.".to_owned()
+        )
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn download_and_manifest_failures_never_quote_curl_or_the_server() {
+    let answered = |head: &str, body: &[u8]| {
+        response(
+            &format!(
+                "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            body,
+        )
+    };
+    let unreadable = (
+        "update_manifest_invalid",
+        "The release information from the update server can't be read. Try again later.".to_owned(),
+    );
+    let (url, server) = serve(
+        vec![
+            answered("500 Internal Server Error", b"curl: (22) oops"),
+            answered("200 OK", b"<html>no</html>"),
+            answered("200 OK", b"{\"version\":\"\\u001b[31m9\",\"platforms\":{}}"),
+        ],
+        Duration::ZERO,
+    );
+    assert_eq!(
+        said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
+        (
+            "update_download_failed",
+            "The update server answered with an error. Try again later.".to_owned()
+        )
+    );
+    assert_eq!(
+        said(fetch_manifest(Channel::Stable, &url).unwrap_err()),
+        unreadable
+    );
+    assert_eq!(
+        said(fetch_manifest(Channel::Dev, &url).unwrap_err()),
+        unreadable
+    );
+    server.join().unwrap();
+
+    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+    let mut received = Vec::new();
+    assert_eq!(
+        said(
+            download(
+                &format!("http://{address}/release"),
+                &mut received,
+                4096,
+                Duration::from_secs(10)
+            )
+            .unwrap_err()
+        ),
+        (
+            "update_download_failed",
+            "Couldn't reach the update server. Check your connection and try again.".to_owned()
+        )
+    );
+}
+
+#[test]
+fn an_http_error_is_read_from_curl_whatever_its_exit_code() {
+    assert_eq!(
+        said(download_failure(
+            Some(56),
+            b"curl: (56) The requested URL returned error: 404\n"
+        )),
+        (
+            "update_download_missing",
+            "The update server doesn't have this download. Try again later.".to_owned()
+        )
+    );
+    assert_eq!(
+        said(download_failure(
+            Some(56),
+            b"curl: (56) The requested URL returned error: 502\n"
+        )),
+        (
+            "update_download_failed",
+            "The update server answered with an error. Try again later.".to_owned()
+        )
+    );
+    assert_eq!(
+        said(download_failure(
+            Some(6),
+            b"curl: (6) Could not resolve host: github.com\n"
+        )),
+        (
+            "update_download_failed",
+            "Couldn't reach the update server. Check your connection and try again.".to_owned()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_service_step_reads_as_one_plain_sentence_without_its_usage_text() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let executable = folder.path().join("crazyagent");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\necho 'Usage: crazyagent service <install|start|stop>'\necho 'error: unrecognized subcommand' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        said(service_command(&executable, "stop").unwrap_err()),
+        (
+            "update_service_failed",
+            "Couldn't stop the engine for the update, so nothing changed.".to_owned()
+        )
+    );
+    assert_eq!(
+        said(service_command(&executable, "start").unwrap_err()),
+        (
+            "update_service_failed",
+            "The engine didn't start. Start it with: crazyagent service start".to_owned()
+        )
+    );
 }
 
 #[test]

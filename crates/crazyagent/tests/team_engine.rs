@@ -178,23 +178,16 @@ fn require_model() {
     );
 }
 
+/// A fresh private runtime folder `ca-team-<random>` under the real temporary root,
+/// short enough for the engine's sockets from any checkout, holding the local model
+/// catalog as the global settings. It is kept after the test, so a failed run keeps its
+/// evidence.
 fn runtime() -> PathBuf {
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    assert!(
-        checkout.join("Cargo.lock").is_file(),
-        "{}",
-        checkout.display()
-    );
-    let base = checkout.join(".local-state");
-    fs::create_dir_all(&base).unwrap();
-    let runtime = base.join(format!("t-team-{}", std::process::id()));
-    if runtime.exists() {
-        fs::remove_dir_all(&runtime).unwrap();
-    }
-    fs::create_dir(&runtime).unwrap();
+    let runtime = tempfile::Builder::new()
+        .prefix("ca-team-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap()
+        .keep();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     for (name, text) in [("global.toml", CATALOG), ("project.toml", "")] {
         fs::write(runtime.join(name), text).unwrap();

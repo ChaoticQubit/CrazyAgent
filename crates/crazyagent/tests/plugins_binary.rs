@@ -118,7 +118,8 @@ async fn wiring_skills_and_approved_servers_survive_a_real_engine_binary_restart
         "---\nname: release-notes\ndescription: Writes release notes.\n---\n",
     )
     .unwrap();
-    let server_path = path.join("mcp_fixture.py");
+    let server_path = path.join("servers").join("mcp_fixture.py");
+    std::fs::create_dir_all(path.join("servers")).unwrap();
     std::fs::write(&server_path, FIXTURE).unwrap();
     std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let spec = ServerSpec::Stdio {

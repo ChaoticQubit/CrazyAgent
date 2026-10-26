@@ -217,12 +217,12 @@ Highest-payoff element. Build when concept has parameters/state prose can't conv
 </div>
 <script>
   const state={s:3,spaced:false};
-  function render(){/* clear stage, draw from state, update readout */}
+  function render(){}
   document.getElementById('s').oninput=e=>{state.s=+e.target.value;render()};
   render();
 </script>
 ```
-Principles: single `state` object + single `render()`; instant feedback; readout names *what changed*. Under ~120 lines — intuition pump, not product.
+Principles: single `state` object + single `render()`, which clears the stage, draws from `state` and updates the readout; instant feedback; readout names *what changed*. Under ~120 lines - intuition pump, not product.
 
 Two additions that turn watching into learning:
 - **Analogy line above controls** mapping knobs to life: "the strength slider is the 'how well you studied' knob."

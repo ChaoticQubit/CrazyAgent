@@ -374,3 +374,48 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
     );
     drop(installed);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn service_status_for_another_data_root_names_its_own_label_not_the_default() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let root = temp.path().join("engine");
+    let output = crazyagent::spawn_gate::output(
+        Command::new(BIN)
+            .args(["service", "status"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("CRAZYAGENT_HOME", &root)
+            .env("PATH", BARE_PATH)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let label = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("service: "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let hash = label
+        .strip_prefix("dev.crazyagent.engine.")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert_eq!(hash.len(), 12, "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "definition: {} (not installed)",
+            home.join("Library/LaunchAgents")
+                .join(format!("{label}.plist"))
+                .display()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("running: no"), "{stdout}");
+}

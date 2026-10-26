@@ -155,7 +155,8 @@ impl TerminalSession {
         if !host.alive().map_err(host_failure)?.contains(&agent) {
             return Err(failure("launch_closed"));
         }
-        let mut reader = TranscriptReader::new(record.transcript(), &record.cwd, record.since());
+        let mut reader =
+            TranscriptReader::adopted(record.transcript(), &record.cwd, record.since());
         if replay(&mut reader, &limits)? == Some(true) {
             host.input(&agent, ESCAPE).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;

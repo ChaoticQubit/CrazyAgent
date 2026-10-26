@@ -240,13 +240,14 @@ fn version(text: &str) -> Result<semver::Version, UpdateError> {
 /// Parses a release manifest. Input: its bytes. Output: the manifest, or
 /// `update_manifest_invalid` when it is not JSON of that shape or its version is not semver.
 pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, UpdateError> {
-    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| {
+    let unreadable = || {
         fail(
             "update_manifest_invalid",
-            format!("The release manifest is not valid: {error}"),
+            "The release information from the update server can't be read. Try again later.",
         )
-    })?;
-    version(&manifest.version)?;
+    };
+    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| unreadable())?;
+    version(&manifest.version).map_err(|_| unreadable())?;
     Ok(manifest)
 }
 
@@ -291,7 +292,7 @@ fn allowed_url(text: &str) -> Result<url::Url, UpdateError> {
     let refused = || {
         fail(
             "update_url_refused",
-            format!("CrazyAgent downloads updates only over https: {text}"),
+            "CrazyAgent downloads updates only over https, so this download was refused.",
         )
     };
     let url = url::Url::parse(text).map_err(|_| refused())?;
@@ -324,15 +325,6 @@ fn system_tool(name: &str) -> PathBuf {
     } else {
         PathBuf::from(name)
     }
-}
-
-fn last_line(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
@@ -411,11 +403,39 @@ fn copy_bounded(
     }
 }
 
+fn http_error(stderr: &[u8]) -> Option<u16> {
+    let text = String::from_utf8_lossy(stderr);
+    let (_, after) = text.rsplit_once("returned error: ")?;
+    after.get(..3)?.parse().ok()
+}
+
+fn download_failure(exit: Option<i32>, stderr: &[u8]) -> UpdateError {
+    match (exit, http_error(stderr)) {
+        (Some(28), _) => fail(
+            "update_download_failed",
+            "The update server didn't answer in time. Check your connection and try again.",
+        ),
+        (_, Some(404)) => fail(
+            "update_download_missing",
+            "The update server doesn't have this download. Try again later.",
+        ),
+        (_, Some(_)) => fail(
+            "update_download_failed",
+            "The update server answered with an error. Try again later.",
+        ),
+        _ => fail(
+            "update_download_failed",
+            "Couldn't reach the update server. Check your connection and try again.",
+        ),
+    }
+}
+
 /// Downloads one URL with the system curl, which honors the system proxy and trust store.
 /// Only https, or http to this computer's loopback address, is fetched; redirects stay on
 /// https. Inputs: the URL, where the bytes go, the byte cap and the time limit.
 /// Output: the byte count, `update_url_refused`, `update_too_large` (nothing past the cap
-/// is written) or `update_download_failed` with curl's reason.
+/// is written), `update_download_missing` on a 404 or `update_download_failed`, each with
+/// one plain sentence that never quotes curl.
 pub fn download(
     url: &str,
     out: &mut impl Write,
@@ -467,15 +487,7 @@ pub fn download(
         return Err(too_large(limit));
     }
     if !status.success() {
-        let reason = last_line(&stderr);
-        return Err(fail(
-            "update_download_failed",
-            if reason.is_empty() {
-                format!("The download failed: curl exited with {status}.")
-            } else {
-                format!("The download failed: {reason}")
-            },
-        ));
+        return Err(download_failure(status.code(), &stderr));
     }
     Ok(total)
 }
@@ -659,6 +671,12 @@ fn run_bounded(
 /// Output: the folder holding `crazyagent`, at the archive root or in its one top folder,
 /// or `update_archive_invalid`.
 pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
+    let unpackable = || {
+        fail(
+            "update_archive_invalid",
+            "The release archive can't be unpacked, so nothing was installed.",
+        )
+    };
     std::fs::create_dir(into).map_err(|error| io_failure("Can't unpack the download", error))?;
     let output = run_bounded(
         Command::new(system_tool("tar"))
@@ -669,15 +687,10 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
             .arg(into),
         UNPACK_TIMEOUT,
         "update_archive_invalid",
-    )?;
+    )
+    .map_err(|_| unpackable())?;
     if !output.status.success() {
-        return Err(fail(
-            "update_archive_invalid",
-            format!(
-                "The release archive can't be unpacked: {}",
-                last_line(&output.stderr)
-            ),
-        ));
+        return Err(unpackable());
     }
     let main = format!("crazyagent{EXE_SUFFIX}");
     if regular_file(&into.join(&main)) {
@@ -699,19 +712,22 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
 }
 
 fn answers_version(executable: &Path, expected: &str) -> Result<(), UpdateError> {
-    let failed = |detail: String| {
+    let failed = || {
         fail(
             "update_new_version_failed",
-            format!("The new crazyagent did not answer --version as {expected}: {detail}"),
+            format!(
+                "The new crazyagent didn't report version {expected}, so it was not installed."
+            ),
         )
     };
     let output = run_bounded(
         Command::new(executable).arg("--version"),
         VERSION_TIMEOUT,
         "update_new_version_failed",
-    )?;
+    )
+    .map_err(|_| failed())?;
     if !output.status.success() {
-        return Err(failed(format!("it exited with {}", output.status)));
+        return Err(failed());
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut words = text.split_whitespace();
@@ -724,7 +740,7 @@ fn answers_version(executable: &Path, expected: &str) -> Result<(), UpdateError>
     if answered == Some(version(expected)?) {
         Ok(())
     } else {
-        Err(failed(format!("it answered {}", text.trim())))
+        Err(failed())
     }
 }
 
@@ -810,29 +826,31 @@ pub fn swap(install: &Path, staged: &Path, version: &str) -> Result<(), UpdateEr
 
 /// Runs `crazyagent service <action>` with a time limit, as both `crazyagent update` and the
 /// desktop app do around an update. Inputs: the crazyagent executable and the action.
-/// Output: its trimmed stdout, or `update_service_failed` with its last error line.
+/// Output: its trimmed stdout, or `update_service_failed` with one plain sentence for the
+/// action that never quotes the command's output.
 pub fn service_command(executable: &Path, action: &str) -> Result<String, UpdateError> {
+    let failed = || {
+        fail(
+            "update_service_failed",
+            match action {
+                "stop" => "Couldn't stop the engine for the update, so nothing changed.".to_owned(),
+                "start" => {
+                    "The engine didn't start. Start it with: crazyagent service start".to_owned()
+                }
+                _ => format!("crazyagent service {action} didn't finish."),
+            },
+        )
+    };
     let output = run_bounded(
         Command::new(executable).arg("service").arg(action),
         SERVICE_TIMEOUT,
         "update_service_failed",
-    )?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if output.status.success() {
-        return Ok(stdout);
+    )
+    .map_err(|_| failed())?;
+    if !output.status.success() {
+        return Err(failed());
     }
-    let reason = last_line(&output.stderr);
-    Err(fail(
-        "update_service_failed",
-        format!(
-            "crazyagent service {action} failed: {}",
-            if reason.is_empty() {
-                last_line(stdout.as_bytes())
-            } else {
-                reason
-            }
-        ),
-    ))
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 struct Staging {
@@ -909,6 +927,33 @@ fn install_release(manifest: &Manifest, install: &Path, key: &str) -> Result<Str
     })
 }
 
+/// The failure for a channel that has no published release yet. Input: the channel.
+/// Output: `update_stable_not_published` or `update_dev_not_published` with its sentence.
+pub fn not_published(channel: Channel) -> UpdateError {
+    match channel {
+        Channel::Stable => fail(
+            "update_stable_not_published",
+            "No stable release is published yet.",
+        ),
+        Channel::Dev => fail(
+            "update_dev_not_published",
+            "No dev release is published yet.",
+        ),
+    }
+}
+
+fn fetch_manifest(channel: Channel, url: &str) -> Result<Manifest, UpdateError> {
+    let mut bytes = Vec::new();
+    download(url, &mut bytes, MANIFEST_BYTES_MAX, DOWNLOAD_TIMEOUT).map_err(|error| {
+        if error.code == "update_download_missing" {
+            not_published(channel)
+        } else {
+            error
+        }
+    })?;
+    parse_manifest(&bytes)
+}
+
 #[derive(Debug)]
 struct Options {
     check: bool,
@@ -956,14 +1001,7 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
         }
         None => read_channel(&root)?,
     };
-    let mut bytes = Vec::new();
-    download(
-        channel.cli_manifest_url(),
-        &mut bytes,
-        MANIFEST_BYTES_MAX,
-        DOWNLOAD_TIMEOUT,
-    )?;
-    let manifest = parse_manifest(&bytes)?;
+    let manifest = fetch_manifest(channel, channel.cli_manifest_url())?;
     let current = env!("CARGO_PKG_VERSION");
     if !is_newer(&manifest.version, current)? {
         return Ok(format!(

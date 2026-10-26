@@ -508,3 +508,55 @@ async fn a_turn_submitted_after_a_stopped_prepared_turn_is_admitted_on_its_own_a
         Err(failure) => panic!("second turn: {}", failure.0),
     }
 }
+
+#[tokio::test]
+async fn a_turn_left_uncertain_is_superseded_by_the_next_message_while_a_live_turn_still_holds() {
+    let (case, request, applied) = fresh_case(true, PROMPT, 0).await;
+    let (case, binding) = bind_actual(case, &request, &applied).await;
+    let (case, prepared) = prepare_actual(case).await;
+    let acquired = case.runtime(MasterRuntimeCommand::AcquireProfile {
+        host: case.started.host.clone(), project_id: case.session.project_id.clone(),
+        session_id: case.session.session_id.clone(), turn_id: case.turn.id.clone(),
+        attempt_id: prepared.attempt.request.id.clone(),
+    }).await;
+    let guard = match acquired {
+        Ok(MasterRuntimeResult::Profile(guard)) => guard,
+        _ => {
+            case.close().await;
+            panic!("actual Execution profile guard prerequisite unavailable for stop fixture");
+        }
+    };
+    let submit = |text: &'static str| MasterOwnerAction::Submit {
+        project_id: case.session.project_id.clone(), session_id: case.session.session_id.clone(), text: text.into(),
+    };
+    let (_, live) = apply_actual(&case, 0, "send-while-delivering", submit("Are you there?")).await;
+    let settled = settle(&case, &case.started.host, &binding);
+    drop(guard);
+    let (_, again) = apply_actual(&case, 0, "send-after-uncertain", submit("Are you there now?")).await;
+    let state = owner_read(&case.storage, &case.started, OwnerRead::ProjectMasterTurns {
+        project_id: case.session.project_id.clone(), session_id: case.session.session_id.clone(), cursor: None, limit: 8,
+    }).await;
+    let session = canonical_session(&case);
+    case.close().await;
+    assert_eq!(live.result, OwnerResult::Rejected { code: "master_turn_outstanding".into() });
+    let settled = settled.unwrap();
+    assert_eq!(settled.phase, MasterTurnPhase::Uncertain);
+    assert_eq!(again.result, OwnerResult::Applied, "a turn the harness left uncertain must not block the next message");
+    let OwnerData::ProjectMasterTurns { page } = state.data else { panic!("actual turn page required") };
+    assert_eq!(page.turns.len(), 2);
+    let (old, new) = (&page.turns[0], &page.turns[1]);
+    assert_eq!(old.id, settled.id);
+    assert_eq!(old.phase, MasterTurnPhase::Cancelled);
+    assert_eq!(old.reason, Some(MasterReason::Cancelled));
+    assert_eq!(old.attempt.as_ref().map(|attempt| &attempt.request), settled.attempt.as_ref().map(|attempt| &attempt.request));
+    assert_eq!(old.attempt.as_ref().and_then(|attempt| attempt.completion.as_ref()).map(|completion| completion.effects.clone()), Some(Effects::Uncertain));
+    assert_eq!(new.id.as_str(), "send-after-uncertain");
+    assert_eq!((new.ordinal, new.phase), (2, MasterTurnPhase::Queued));
+    assert_eq!(session.current_turn.as_ref(), Some(&new.id));
+}
+
+fn canonical_session(case: &Fixture) -> MasterSessionView {
+    let mut db = case.db();
+    let tx = db.transaction().unwrap();
+    load_session(&tx, &case.session.session_id, owner_revision(&tx).unwrap()).unwrap().unwrap()
+}

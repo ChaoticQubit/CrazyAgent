@@ -609,7 +609,7 @@ impl State {
                     .into(),
             );
         }
-        if session.current_turn.is_some() {
+        if turn_holds(session.current_turn.as_ref(), &view.turns) {
             return Err(
                 "A master turn is outstanding; F3 cancels that exact turn; draft retained".into(),
             );
@@ -1609,6 +1609,18 @@ impl Catalog {
     }
 }
 
+/// Tells whether the session's current turn still holds it, so a new message must wait.
+/// Inputs: the current turn id and the turns read with it. Output: false with no current
+/// turn or when it ended uncertain, which the engine lets the next message supersede.
+pub(crate) fn turn_holds(current: Option<&RequestId>, turns: &[MasterTurnView]) -> bool {
+    current.is_some_and(|id| {
+        turns
+            .iter()
+            .find(|turn| &turn.id == id)
+            .is_none_or(|turn| turn.phase != MasterTurnPhase::Uncertain)
+    })
+}
+
 fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
     let phase = match turn.phase {
         MasterTurnPhase::Queued => "Queued",
@@ -2510,9 +2522,52 @@ fn reason_text(reason: &MasterReason) -> &'static str {
 
 #[cfg(test)]
 mod turn_line_tests {
-    use super::turn_lines;
+    use super::{turn_holds, turn_lines};
     use crate::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
     use crate::protocol::{Cursor, RequestId, SessionId};
+
+    #[test]
+    fn only_a_live_current_turn_holds_the_conversation() {
+        let turn = |id: &str, phase| MasterTurnView {
+            id: RequestId::new(id).unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase,
+            reason: None,
+            attempt: None,
+            runtime: None,
+            reply: None,
+        };
+        let current = RequestId::new("turn-1").unwrap();
+        assert!(!turn_holds(None, &[]));
+        assert!(
+            !turn_holds(
+                Some(&current),
+                &[turn("turn-1", MasterTurnPhase::Uncertain)]
+            ),
+            "a turn the harness left uncertain does not hold the next message (LB-19)"
+        );
+        for phase in [
+            MasterTurnPhase::Queued,
+            MasterTurnPhase::Prepared,
+            MasterTurnPhase::Delivering,
+            MasterTurnPhase::Running,
+            MasterTurnPhase::WaitingApproval,
+        ] {
+            assert!(
+                turn_holds(Some(&current), &[turn("turn-1", phase)]),
+                "{phase:?}"
+            );
+        }
+        assert!(
+            turn_holds(
+                Some(&current),
+                &[turn("turn-0", MasterTurnPhase::Uncertain)]
+            ),
+            "a current turn missing from the page is treated as live"
+        );
+    }
 
     #[test]
     fn a_blocked_turn_without_a_sign_in_tells_the_owner_what_to_do() {

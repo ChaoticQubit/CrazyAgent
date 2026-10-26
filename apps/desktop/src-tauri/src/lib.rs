@@ -10,7 +10,7 @@ use bridge::picker::Pick;
 use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::terminal::Terminals;
 use bridge::{
-    AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError,
+    AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
     ProjectPage,
@@ -41,10 +41,10 @@ use crazyagent::terminal::TerminalRequest;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::MutexGuard;
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
-pub struct NativeState(Arc<Mutex<NativeBridge>>);
+pub struct NativeState(BridgeQueue);
 
 pub struct TerminalState(Arc<Terminals>);
 
@@ -57,8 +57,8 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     Ok(())
 }
 
-fn lock(state: &NativeState) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
-    state.0.try_lock().map_err(|_| BridgeError { code: "busy" })
+async fn lock(state: &NativeState) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
+    state.0.enter().await
 }
 
 const SOCKET_OVERRIDE: &str = "CRAZYAGENT_DESKTOP_SOCKET";
@@ -166,7 +166,7 @@ async fn desktop_connect(
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
-    let mut bridge = lock(&state)?;
+    let mut bridge = lock(&state).await?;
     ensure_default_engine().await?;
     bridge.connect().await
 }
@@ -214,7 +214,7 @@ async fn desktop_restart_engine(
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
         return Err(engine_failure("engine_restart_unavailable"));
     }
-    let mut bridge = lock(&state)?;
+    let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
@@ -222,12 +222,12 @@ async fn desktop_restart_engine(
 }
 
 #[tauri::command]
-fn desktop_status(
+async fn desktop_status(
     window: WebviewWindow,
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
-    Ok(lock(&state)?.status())
+    Ok(lock(&state).await?.status())
 }
 
 #[tauri::command]
@@ -236,7 +236,7 @@ async fn desktop_harness_catalog(
     state: State<'_, NativeState>,
 ) -> Result<Vec<HarnessEntry>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.harness_catalog().await
+    lock(&state).await?.harness_catalog().await
 }
 
 #[tauri::command]
@@ -246,7 +246,7 @@ async fn desktop_baselines(
     next: bool,
 ) -> Result<BaselinePage, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.baselines(next).await
+    lock(&state).await?.baselines(next).await
 }
 
 #[tauri::command]
@@ -256,7 +256,7 @@ async fn desktop_inspect_baseline(
     id: String,
 ) -> Result<BaselineDetail, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.inspect(&id).await
+    lock(&state).await?.inspect(&id).await
 }
 
 #[tauri::command]
@@ -266,7 +266,7 @@ async fn desktop_approve_baseline(
     ticket: String,
 ) -> Result<ActionReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.approve(&ticket).await
+    lock(&state).await?.approve(&ticket).await
 }
 
 #[tauri::command]
@@ -276,7 +276,7 @@ async fn desktop_revoke_baseline(
     ticket: String,
 ) -> Result<ActionReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.revoke(&ticket).await
+    lock(&state).await?.revoke(&ticket).await
 }
 
 #[tauri::command]
@@ -285,7 +285,7 @@ async fn desktop_reconcile(
     state: State<'_, NativeState>,
 ) -> Result<ActionReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.reconcile().await
+    lock(&state).await?.reconcile().await
 }
 
 #[tauri::command]
@@ -294,7 +294,7 @@ async fn desktop_retry(
     state: State<'_, NativeState>,
 ) -> Result<ActionReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.retry().await
+    lock(&state).await?.retry().await
 }
 
 #[tauri::command]
@@ -304,7 +304,7 @@ async fn desktop_projects(
     next: bool,
 ) -> Result<ProjectPage, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.projects(next).await
+    lock(&state).await?.projects(next).await
 }
 
 #[tauri::command]
@@ -315,7 +315,7 @@ async fn desktop_create_project(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.create_project(spec, generation).await
+    lock(&state).await?.create_project(spec, generation).await
 }
 
 #[tauri::command]
@@ -326,7 +326,7 @@ async fn desktop_project_catalog(
     research: Vec<ResearchKind>,
 ) -> Result<ProjectCatalog, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.project_catalog(pool, research).await
+    lock(&state).await?.project_catalog(pool, research).await
 }
 
 #[tauri::command]
@@ -338,7 +338,10 @@ async fn desktop_setup_project(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.setup_project(spec, setup, generation).await
+    lock(&state)
+        .await?
+        .setup_project(spec, setup, generation)
+        .await
 }
 
 #[tauri::command]
@@ -348,7 +351,7 @@ async fn desktop_project_setup(
     id: String,
 ) -> Result<Option<StoredSetup>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.project_setup(&id).await
+    lock(&state).await?.project_setup(&id).await
 }
 
 #[tauri::command]
@@ -358,7 +361,7 @@ async fn desktop_research_jobs(
     id: String,
 ) -> Result<bridge::project_setup::ResearchJobs, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.research_jobs(&id).await
+    lock(&state).await?.research_jobs(&id).await
 }
 
 #[tauri::command]
@@ -368,7 +371,7 @@ async fn desktop_project_context(
     id: String,
 ) -> Result<ProjectContext, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.project_context(&id).await
+    lock(&state).await?.project_context(&id).await
 }
 
 #[tauri::command]
@@ -380,7 +383,10 @@ async fn desktop_project_context_item(
     offset: u64,
 ) -> Result<ContextChunk, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.project_context_item(&id, path, offset).await
+    lock(&state)
+        .await?
+        .project_context_item(&id, path, offset)
+        .await
 }
 
 #[tauri::command]
@@ -393,7 +399,8 @@ async fn desktop_save_research_to_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .save_research_to_memory(&id, research, section, generation)
         .await
 }
@@ -407,7 +414,8 @@ async fn desktop_add_project_documents(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .add_project_documents(&id, documents, generation)
         .await
 }
@@ -420,7 +428,10 @@ async fn desktop_project_memories(
     after: Option<String>,
 ) -> Result<Vec<MemoryItem>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.project_memories(&id, after.as_deref()).await
+    lock(&state)
+        .await?
+        .project_memories(&id, after.as_deref())
+        .await
 }
 
 #[tauri::command]
@@ -434,7 +445,8 @@ async fn desktop_review_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .review_memory(&id, &memory, version, decision, generation)
         .await
 }
@@ -448,7 +460,8 @@ async fn desktop_memories(
     before: Option<u64>,
 ) -> Result<MemoryList, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .memories(project.as_deref(), search.as_deref(), before)
         .await
 }
@@ -460,7 +473,7 @@ async fn desktop_memory(
     id: String,
 ) -> Result<Option<MemoryNote>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.memory(&id).await
+    lock(&state).await?.memory(&id).await
 }
 
 #[tauri::command]
@@ -470,7 +483,7 @@ async fn desktop_approved_memories(
     project: String,
 ) -> Result<ApprovedMemories, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.approved_memories(&project).await
+    lock(&state).await?.approved_memories(&project).await
 }
 
 #[tauri::command]
@@ -482,7 +495,8 @@ async fn desktop_add_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .add_memory(project.as_deref(), text, generation)
         .await
 }
@@ -497,7 +511,8 @@ async fn desktop_promote_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .promote_memory(&project, &memory, version, generation)
         .await
 }
@@ -510,7 +525,7 @@ async fn desktop_delete_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.delete_memory(&id, generation).await
+    lock(&state).await?.delete_memory(&id, generation).await
 }
 
 #[tauri::command]
@@ -522,7 +537,8 @@ async fn desktop_forget_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .forget_memory(&project, &memory, generation)
         .await
 }
@@ -537,7 +553,8 @@ async fn desktop_save_selection_to_memory(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .save_selection_to_memory(&id, path, text, generation)
         .await
 }
@@ -552,7 +569,8 @@ async fn desktop_remember_research(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .remember_research(&project, research, section, generation)
         .await
 }
@@ -566,7 +584,8 @@ async fn desktop_delete_project_context(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .delete_project_context(&id, path, generation)
         .await
 }
@@ -578,7 +597,7 @@ async fn desktop_team_status(
     id: String,
 ) -> Result<TeamStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.team_status(&id).await
+    lock(&state).await?.team_status(&id).await
 }
 
 #[tauri::command]
@@ -590,7 +609,10 @@ async fn desktop_team_message(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.team_message(&id, text, generation).await
+    lock(&state)
+        .await?
+        .team_message(&id, text, generation)
+        .await
 }
 
 #[tauri::command]
@@ -603,7 +625,8 @@ async fn desktop_team_delegate(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .team_delegate(&id, harness, prompt, generation)
         .await
 }
@@ -617,7 +640,7 @@ async fn desktop_team_cancel(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.team_cancel(&id, task, generation).await
+    lock(&state).await?.team_cancel(&id, task, generation).await
 }
 
 #[tauri::command]
@@ -629,7 +652,10 @@ async fn desktop_team_keep_warm(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.team_keep_warm(&id, on, generation).await
+    lock(&state)
+        .await?
+        .team_keep_warm(&id, on, generation)
+        .await
 }
 
 #[tauri::command]
@@ -641,7 +667,10 @@ async fn desktop_team_pause(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.team_pause(&id, paused, generation).await
+    lock(&state)
+        .await?
+        .team_pause(&id, paused, generation)
+        .await
 }
 
 #[tauri::command]
@@ -654,7 +683,8 @@ async fn desktop_team_hand_off(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .team_hand_off(&id, reply, step, generation)
         .await
 }
@@ -666,7 +696,7 @@ async fn desktop_team_graph(
     id: String,
 ) -> Result<TeamGraph, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.team_graph(&id).await
+    lock(&state).await?.team_graph(&id).await
 }
 
 #[tauri::command]
@@ -679,9 +709,9 @@ async fn desktop_terminal_attach(
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
-    terminals.0.room(&agent)?;
-    let session = lock(&state)?.open_terminal(agent.clone()).await?;
-    terminals.0.attach(agent, session, output)
+    let room = terminals.0.room(&agent)?;
+    let session = lock(&state).await?.open_terminal(agent).await?;
+    room.attach(session, output)
 }
 
 #[tauri::command]
@@ -752,7 +782,8 @@ async fn desktop_update_project_setup(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .update_project_setup(&id, setup, name, revision, generation)
         .await
 }
@@ -765,7 +796,7 @@ async fn desktop_remove_project(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_project(&id, generation).await
+    lock(&state).await?.remove_project(&id, generation).await
 }
 
 #[tauri::command]
@@ -777,7 +808,10 @@ async fn desktop_cancel_research(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.cancel_research(&id, job, generation).await
+    lock(&state)
+        .await?
+        .cancel_research(&id, job, generation)
+        .await
 }
 
 #[tauri::command]
@@ -789,7 +823,10 @@ async fn desktop_retry_research(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.retry_research(&id, job, generation).await
+    lock(&state)
+        .await?
+        .retry_research(&id, job, generation)
+        .await
 }
 
 #[tauri::command]
@@ -800,7 +837,7 @@ async fn desktop_research_log(
     job: i64,
 ) -> Result<ResearchLog, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.research_log(&id, job).await
+    lock(&state).await?.research_log(&id, job).await
 }
 
 #[tauri::command]
@@ -809,7 +846,7 @@ async fn desktop_projects_home(
     state: State<'_, NativeState>,
 ) -> Result<ProjectsHome, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.projects_home().await
+    lock(&state).await?.projects_home().await
 }
 
 #[tauri::command]
@@ -820,7 +857,10 @@ async fn desktop_set_projects_home(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.set_projects_home(path, generation).await
+    lock(&state)
+        .await?
+        .set_projects_home(path, generation)
+        .await
 }
 
 #[tauri::command]
@@ -831,7 +871,10 @@ async fn desktop_move_projects_home(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.move_projects_home(path, generation).await
+    lock(&state)
+        .await?
+        .move_projects_home(path, generation)
+        .await
 }
 
 #[tauri::command]
@@ -840,7 +883,7 @@ async fn desktop_found_projects(
     state: State<'_, NativeState>,
 ) -> Result<Vec<FoundProject>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.found_projects().await
+    lock(&state).await?.found_projects().await
 }
 
 #[tauri::command]
@@ -850,7 +893,7 @@ async fn desktop_folder_size(
     path: String,
 ) -> Result<FolderSize, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.folder_size(path).await
+    lock(&state).await?.folder_size(path).await
 }
 
 #[tauri::command]
@@ -862,7 +905,8 @@ async fn desktop_add_existing_folder(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .add_existing_folder(source, mode, generation)
         .await
 }
@@ -876,7 +920,10 @@ async fn desktop_start_onboarding(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.start_onboarding(path, pool, generation).await
+    lock(&state)
+        .await?
+        .start_onboarding(path, pool, generation)
+        .await
 }
 
 #[tauri::command]
@@ -886,7 +933,7 @@ async fn desktop_onboarding(
     id: String,
 ) -> Result<OnboardingView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.onboarding(&id).await
+    lock(&state).await?.onboarding(&id).await
 }
 
 #[tauri::command]
@@ -895,7 +942,7 @@ async fn desktop_github_status(
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.github_status()?;
+    let call = lock(&state).await?.github_status()?;
     call.await
 }
 
@@ -905,7 +952,7 @@ async fn desktop_github_sign_in(
     state: State<'_, NativeState>,
 ) -> Result<GitHubDeviceCode, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.github_sign_in()?;
+    let call = lock(&state).await?.github_sign_in()?;
     call.await
 }
 
@@ -916,7 +963,7 @@ async fn desktop_github_token(
     token: String,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.github_token(token)?;
+    let call = lock(&state).await?.github_token(token)?;
     call.await
 }
 
@@ -926,7 +973,7 @@ async fn desktop_github_use_cli(
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.github_use_cli()?;
+    let call = lock(&state).await?.github_use_cli()?;
     call.await
 }
 
@@ -936,7 +983,7 @@ async fn desktop_github_sign_out(
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.github_sign_out()?;
+    let call = lock(&state).await?.github_sign_out()?;
     call.await
 }
 
@@ -947,7 +994,7 @@ async fn desktop_github_repos(
     page: u32,
 ) -> Result<GitHubRepoPage, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.github_repos(page)?;
+    let call = lock(&state).await?.github_repos(page)?;
     call.await
 }
 
@@ -958,7 +1005,7 @@ async fn desktop_clone_repo(
     full_name: String,
 ) -> Result<CloneReceipt, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.clone_repo(full_name)?;
+    let call = lock(&state).await?.clone_repo(full_name)?;
     call.await
 }
 
@@ -968,7 +1015,7 @@ async fn desktop_setup_status(
     state: State<'_, NativeState>,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.setup_status().await
+    lock(&state).await?.setup_status().await
 }
 
 #[tauri::command]
@@ -979,7 +1026,7 @@ async fn desktop_run_setup(
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.run_setup(pack, generation).await
+    lock(&state).await?.run_setup(pack, generation).await
 }
 
 #[tauri::command]
@@ -991,7 +1038,7 @@ async fn desktop_set_pack_entry(
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.set_pack_entry(id, on, generation).await
+    lock(&state).await?.set_pack_entry(id, on, generation).await
 }
 
 #[tauri::command]
@@ -1002,7 +1049,7 @@ async fn desktop_remove_pack_entry(
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_pack_entry(id, generation).await
+    lock(&state).await?.remove_pack_entry(id, generation).await
 }
 
 #[tauri::command]
@@ -1012,7 +1059,7 @@ async fn desktop_open_project(
     id: String,
 ) -> Result<ProjectDetail, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.open_project(&id).await
+    lock(&state).await?.open_project(&id).await
 }
 
 #[tauri::command]
@@ -1022,7 +1069,7 @@ async fn desktop_history(
     next: bool,
 ) -> Result<HistoryPage, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.history(next).await
+    lock(&state).await?.history(next).await
 }
 
 #[tauri::command]
@@ -1034,7 +1081,10 @@ async fn desktop_send_message(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.send_message(&ticket, &text, generation).await
+    lock(&state)
+        .await?
+        .send_message(&ticket, &text, generation)
+        .await
 }
 
 #[tauri::command]
@@ -1044,7 +1094,7 @@ async fn desktop_master_state(
     ticket: String,
 ) -> Result<bridge::master::MasterState, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.master_state(&ticket).await
+    lock(&state).await?.master_state(&ticket).await
 }
 
 #[tauri::command]
@@ -1056,7 +1106,8 @@ async fn desktop_master_turns(
     cursor: Option<crazyagent::master_session::MasterCursor>,
 ) -> Result<bridge::master::MasterTurns, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .master_turns(&ticket, &session_id, cursor)
         .await
 }
@@ -1069,7 +1120,10 @@ async fn desktop_open_master(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.open_default_master(&ticket, generation).await
+    lock(&state)
+        .await?
+        .open_default_master(&ticket, generation)
+        .await
 }
 
 #[tauri::command]
@@ -1081,7 +1135,8 @@ async fn desktop_close_master(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .close_master(&ticket, &session_id, generation)
         .await
 }
@@ -1096,7 +1151,8 @@ async fn desktop_cancel_master_turn(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .cancel_master_turn(&ticket, &session, &turn, generation)
         .await
 }
@@ -1111,7 +1167,8 @@ async fn desktop_submit_master(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .submit_master(&ticket, &session_id, &text, generation)
         .await
 }
@@ -1125,18 +1182,19 @@ async fn desktop_replace_brief(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .replace_brief(&ticket, &text, generation)
         .await
 }
 
 #[tauri::command]
-fn desktop_pending_intent(
+async fn desktop_pending_intent(
     window: WebviewWindow,
     state: State<'_, NativeState>,
 ) -> Result<Option<PendingIntent>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.pending_intent()
+    lock(&state).await?.pending_intent()
 }
 
 #[tauri::command]
@@ -1145,7 +1203,7 @@ async fn desktop_reconcile_intent(
     state: State<'_, NativeState>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.reconcile_intent().await
+    lock(&state).await?.reconcile_intent().await
 }
 
 #[tauri::command]
@@ -1154,7 +1212,7 @@ async fn desktop_retry_intent(
     state: State<'_, NativeState>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.retry_intent().await
+    lock(&state).await?.retry_intent().await
 }
 
 #[tauri::command]
@@ -1165,7 +1223,8 @@ async fn desktop_prepare_managed_account(
     label: String,
 ) -> Result<ManagedAccountPlan, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .prepare_managed_account(&provider, &label)
         .await
 }
@@ -1180,7 +1239,8 @@ async fn desktop_prepare_configured_account(
     model: String,
 ) -> Result<ConfiguredAccountPlan, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .prepare_configured_account(&provider, &label, &endpoint, &model)
         .await
 }
@@ -1192,7 +1252,7 @@ async fn desktop_account_auth_capabilities(
     ticket: String,
 ) -> Result<AccountAuthCapabilitiesReply, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.account_auth_capabilities(&ticket).await
+    lock(&state).await?.account_auth_capabilities(&ticket).await
 }
 
 #[tauri::command]
@@ -1210,9 +1270,7 @@ async fn desktop_configure_account_profile(
         .map_err(|_| BridgeError {
             code: "account_secret_invalid",
         })?;
-    let mut bridge = Arc::clone(&state.0)
-        .try_lock_owned()
-        .map_err(|_| BridgeError { code: "busy" })?;
+    let mut bridge = state.0.enter_owned().await?;
     tauri::async_runtime::spawn(async move {
         bridge
             .configure_account_profile(&ticket, secret, generation)
@@ -1230,7 +1288,7 @@ async fn desktop_read_account_profile(
     state: State<'_, NativeState>,
 ) -> Result<AccountProfileView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.read_account_profile().await
+    lock(&state).await?.read_account_profile().await
 }
 
 #[tauri::command]
@@ -1239,7 +1297,7 @@ async fn desktop_owner_profile(
     state: State<'_, NativeState>,
 ) -> Result<Option<OwnerProfile>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.owner_profile().await
+    lock(&state).await?.owner_profile().await
 }
 
 #[tauri::command]
@@ -1250,7 +1308,10 @@ async fn desktop_save_owner_profile(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.save_owner_profile(profile, generation).await
+    lock(&state)
+        .await?
+        .save_owner_profile(profile, generation)
+        .await
 }
 
 #[tauri::command]
@@ -1259,7 +1320,7 @@ async fn desktop_pool_summaries(
     state: State<'_, NativeState>,
 ) -> Result<Vec<PoolSummary>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.pool_summaries().await
+    lock(&state).await?.pool_summaries().await
 }
 
 #[tauri::command]
@@ -1268,7 +1329,7 @@ async fn desktop_account_catalog(
     state: State<'_, NativeState>,
 ) -> Result<Vec<ProviderEntry>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.account_catalog().await
+    lock(&state).await?.account_catalog().await
 }
 
 #[tauri::command]
@@ -1279,7 +1340,7 @@ async fn desktop_list_accounts(
     limit: u16,
 ) -> Result<AccountPage, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.list_accounts(after, limit).await
+    lock(&state).await?.list_accounts(after, limit).await
 }
 
 #[tauri::command]
@@ -1290,7 +1351,7 @@ async fn desktop_add_account(
     key: Option<String>,
 ) -> Result<AccountView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.add_account(draft, key).await
+    lock(&state).await?.add_account(draft, key).await
 }
 
 #[tauri::command]
@@ -1301,7 +1362,7 @@ async fn desktop_rename_account(
     name: String,
 ) -> Result<AccountView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.rename_account(&id, name).await
+    lock(&state).await?.rename_account(&id, name).await
 }
 
 #[tauri::command]
@@ -1311,7 +1372,7 @@ async fn desktop_remove_account(
     id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_account(&id).await
+    lock(&state).await?.remove_account(&id).await
 }
 
 #[tauri::command]
@@ -1321,7 +1382,7 @@ async fn desktop_check_account(
     id: String,
 ) -> Result<AccountCheck, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.check_account(&id).await
+    lock(&state).await?.check_account(&id).await
 }
 
 #[tauri::command]
@@ -1331,7 +1392,7 @@ async fn desktop_local_models(
     url: String,
 ) -> Result<Vec<String>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.local_models(url).await
+    lock(&state).await?.local_models(url).await
 }
 
 #[tauri::command]
@@ -1341,7 +1402,7 @@ async fn desktop_plugin_skills(
     project_id: Option<String>,
 ) -> Result<Vec<SkillView>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.plugin_skills(project_id).await
+    lock(&state).await?.plugin_skills(project_id).await
 }
 
 #[tauri::command]
@@ -1351,7 +1412,7 @@ async fn desktop_plugin_servers(
     project_id: Option<String>,
 ) -> Result<Vec<ServerView>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.plugin_servers(project_id).await
+    lock(&state).await?.plugin_servers(project_id).await
 }
 
 #[tauri::command]
@@ -1362,7 +1423,7 @@ async fn desktop_add_skill(
     folder: String,
 ) -> Result<SkillView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.add_skill(scope, folder).await
+    lock(&state).await?.add_skill(scope, folder).await
 }
 
 #[tauri::command]
@@ -1373,7 +1434,7 @@ async fn desktop_set_skill_enabled(
     enabled: bool,
 ) -> Result<SkillView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.set_skill_enabled(id, enabled).await
+    lock(&state).await?.set_skill_enabled(id, enabled).await
 }
 
 #[tauri::command]
@@ -1383,7 +1444,7 @@ async fn desktop_remove_skill(
     id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_skill(id).await
+    lock(&state).await?.remove_skill(id).await
 }
 
 #[tauri::command]
@@ -1396,7 +1457,8 @@ async fn desktop_add_mcp_server(
     secrets: Vec<(String, String)>,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .add_mcp_server(scope, name, spec, secrets)
         .await
 }
@@ -1409,7 +1471,7 @@ async fn desktop_update_mcp_server(
     spec: ServerSpec,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.update_mcp_server(id, spec).await
+    lock(&state).await?.update_mcp_server(id, spec).await
 }
 
 #[tauri::command]
@@ -1420,7 +1482,7 @@ async fn desktop_approve_mcp_server(
     spec: ServerSpec,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.approve_mcp_server(id, spec).await
+    lock(&state).await?.approve_mcp_server(id, spec).await
 }
 
 #[tauri::command]
@@ -1431,7 +1493,10 @@ async fn desktop_set_mcp_server_enabled(
     enabled: bool,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.set_mcp_server_enabled(id, enabled).await
+    lock(&state)
+        .await?
+        .set_mcp_server_enabled(id, enabled)
+        .await
 }
 
 #[tauri::command]
@@ -1441,7 +1506,7 @@ async fn desktop_remove_mcp_server(
     id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_mcp_server(id).await
+    lock(&state).await?.remove_mcp_server(id).await
 }
 
 #[tauri::command]
@@ -1453,7 +1518,7 @@ async fn desktop_switch_plugin(
     on: bool,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.switch_plugin(project_id, id, on).await
+    lock(&state).await?.switch_plugin(project_id, id, on).await
 }
 
 #[tauri::command]
@@ -1465,7 +1530,7 @@ async fn desktop_set_mcp_secret(
     value: String,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.set_mcp_secret(id, name, value).await
+    lock(&state).await?.set_mcp_secret(id, name, value).await
 }
 
 #[tauri::command]
@@ -1476,7 +1541,7 @@ async fn desktop_remove_mcp_secret(
     name: String,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.remove_mcp_secret(id, name).await
+    lock(&state).await?.remove_mcp_secret(id, name).await
 }
 
 #[tauri::command]
@@ -1486,7 +1551,7 @@ async fn desktop_check_mcp_server(
     id: String,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.check_mcp_server(id)?;
+    let call = lock(&state).await?.check_mcp_server(id)?;
     call.await
 }
 
@@ -1497,7 +1562,7 @@ async fn desktop_project_plugins(
     project_id: String,
 ) -> Result<EffectivePlugins, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.project_plugins(project_id).await
+    lock(&state).await?.project_plugins(project_id).await
 }
 
 #[tauri::command]
@@ -1507,7 +1572,7 @@ async fn desktop_agents(
     project_id: Option<String>,
 ) -> Result<Vec<AgentView>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.agents(project_id).await
+    lock(&state).await?.agents(project_id).await
 }
 
 #[tauri::command]
@@ -1517,7 +1582,7 @@ async fn desktop_stop_agent(
     id: String,
 ) -> Result<AgentView, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.stop_agent(id)?;
+    let call = lock(&state).await?.stop_agent(id)?;
     call.await
 }
 
@@ -1528,7 +1593,7 @@ async fn desktop_interrupt_agent(
     id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.interrupt_agent(id)?;
+    let call = lock(&state).await?.interrupt_agent(id)?;
     call.await
 }
 
@@ -1539,7 +1604,7 @@ async fn desktop_restart_agent(
     id: String,
 ) -> Result<AgentView, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.restart_agent(id)?;
+    let call = lock(&state).await?.restart_agent(id)?;
     call.await
 }
 
@@ -1581,7 +1646,7 @@ async fn desktop_reveal_project_folder(
     id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.reveal_project_folder(&id).await
+    lock(&state).await?.reveal_project_folder(&id).await
 }
 
 #[tauri::command]
@@ -1592,7 +1657,7 @@ async fn desktop_open_context_item(
     path: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state)?.open_context_item(&id, &path).await
+    lock(&state).await?.open_context_item(&id, &path).await
 }
 
 #[tauri::command]
@@ -1603,7 +1668,10 @@ async fn desktop_model_access_page(
     next: bool,
 ) -> Result<ModelAccessPage, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.model_access_page(collection, next).await
+    lock(&state)
+        .await?
+        .model_access_page(collection, next)
+        .await
 }
 
 #[tauri::command]
@@ -1614,7 +1682,10 @@ async fn desktop_inspect_model_access(
     id: String,
 ) -> Result<ModelAccessDetail, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.inspect_model_access(collection, &id).await
+    lock(&state)
+        .await?
+        .inspect_model_access(collection, &id)
+        .await
 }
 
 #[tauri::command]
@@ -1626,7 +1697,8 @@ async fn desktop_edit_model_access(
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state)?
+    lock(&state)
+        .await?
         .edit_model_access(&ticket, edit, generation)
         .await
 }
@@ -1639,7 +1711,7 @@ async fn desktop_start_native_auth(
     method: NativeAuthMethod,
 ) -> Result<NativeAuthView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.start_native_auth(&ticket, method).await
+    lock(&state).await?.start_native_auth(&ticket, method).await
 }
 
 #[tauri::command]
@@ -1649,7 +1721,7 @@ async fn desktop_read_native_auth(
     ticket: String,
 ) -> Result<NativeAuthView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.read_native_auth(&ticket).await
+    lock(&state).await?.read_native_auth(&ticket).await
 }
 
 #[tauri::command]
@@ -1659,7 +1731,7 @@ async fn desktop_cancel_native_auth(
     ticket: String,
 ) -> Result<NativeAuthView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.cancel_native_auth(&ticket).await
+    lock(&state).await?.cancel_native_auth(&ticket).await
 }
 
 #[tauri::command]
@@ -1671,9 +1743,7 @@ async fn desktop_submit_claude_auth_code(
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let secret = NativeBridge::claude_auth_secret(code)?;
-    let mut bridge = Arc::clone(&state.0)
-        .try_lock_owned()
-        .map_err(|_| BridgeError { code: "busy" })?;
+    let mut bridge = state.0.enter_owned().await?;
     tauri::async_runtime::spawn(
         async move { bridge.submit_claude_auth_code(&ticket, secret).await },
     )
@@ -1690,7 +1760,7 @@ async fn desktop_logout_native_auth(
     ticket: String,
 ) -> Result<NativeAuthView, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.logout_native_auth(&ticket).await
+    lock(&state).await?.logout_native_auth(&ticket).await
 }
 
 /// The engine socket the desktop connects to: `CRAZYAGENT_DESKTOP_SOCKET` when set, else
@@ -1768,7 +1838,7 @@ pub fn run() {
         &crazyagent::paths::RootEnvironment::current(),
     );
     let builder = tauri::Builder::default()
-        .manage(NativeState(Arc::new(Mutex::new(NativeBridge::new(socket)))))
+        .manage(NativeState(BridgeQueue::new(NativeBridge::new(socket))))
         .manage(TerminalState(Arc::new(Terminals::default())))
         .manage(UpdateState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())

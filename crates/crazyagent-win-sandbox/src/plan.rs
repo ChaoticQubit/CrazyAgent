@@ -10,15 +10,21 @@ pub const MODIFY: u32 = 0x0013_01bf;
 pub const DENY_WRITE: u32 = 0x000d_0156;
 /// Every file right (`FILE_ALL_ACCESS`), denied on a hidden path.
 pub const DENY_ALL: u32 = 0x001f_01ff;
+/// File rights a folder on the way to a read-only path denies on itself only: adding files or
+/// folders, deleting children, deleting or renaming the folder, and changing its access list or
+/// owner, so no agent can vacate, replace or newly create the read-only path inside it.
+pub const KEEP_ENTRIES: u32 = 0x000d_0046;
 
 /// One access entry the boundary puts on a path for the agent's container: read and run, or
-/// modify, on a granted root; deny writes, or deny everything, on a protected path.
+/// modify, on a granted root; deny writes, or deny everything, on a protected path; keep the
+/// entries of a folder that holds a read-only path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     ReadExecute,
     Modify,
     DenyWrite,
     DenyAll,
+    KeepEntries,
 }
 
 impl Access {
@@ -29,12 +35,19 @@ impl Access {
             Self::Modify => MODIFY,
             Self::DenyWrite => DENY_WRITE,
             Self::DenyAll => DENY_ALL,
+            Self::KeepEntries => KEEP_ENTRIES,
         }
     }
 
     /// Whether this entry denies rights instead of granting them.
     pub fn denies(self) -> bool {
-        matches!(self, Self::DenyWrite | Self::DenyAll)
+        matches!(self, Self::DenyWrite | Self::DenyAll | Self::KeepEntries)
+    }
+
+    /// Whether files and folders below a folder inherit this entry; a kept folder's entry holds
+    /// for the folder itself only, so work inside it goes on.
+    pub fn inherits(self) -> bool {
+        self != Self::KeepEntries
     }
 }
 
@@ -60,12 +73,22 @@ pub fn within(child: &str, parent: &str) -> bool {
 /// Turns a profile into the access entries the boundary applies, grants first: modify on each
 /// writable root and read and run on each read root, skipping a root another grant already
 /// covers; then deny writes on each read-only path inside a writable root and deny everything
-/// on each hidden path inside any granted root. A protected path outside every grant needs no
+/// on each hidden path inside any granted root; then keep the entries of every folder from that
+/// writable root down to each read-only path, so the path is neither vacated by renaming a
+/// folder above it nor created while missing. A protected path outside every grant needs no
 /// entry, since the container reaches nothing it was not granted. Input: the profile. Output:
-/// the entries, or a refusal when a writable root sits in a protected path or a read root sits
-/// in a hidden one.
+/// the entries, or a refusal when a writable root sits in a protected path, a read root sits
+/// in a hidden one, or the grants folder sits in a writable root, where the agent could
+/// rewrite the record of its own grants.
 pub fn plan(profile: &BoundaryProfile) -> Result<Vec<Ace>, &'static str> {
     profile.validate().map_err(|error| error.reason)?;
+    if profile
+        .write_roots
+        .iter()
+        .any(|root| within(&profile.grants, root))
+    {
+        return Err("the grants folder sits in a writable root");
+    }
     for item in &profile.guarded {
         if profile
             .write_roots
@@ -119,10 +142,39 @@ pub fn plan(profile: &BoundaryProfile) -> Result<Vec<Ace>, &'static str> {
             aces.push(ace);
         }
     }
+    let denies = aces.len();
+    for item in profile
+        .guarded
+        .iter()
+        .filter(|item| item.guard == Guard::ReadOnly)
+    {
+        let Some(root) = writes.iter().find(|root| within(&item.path, root)) else {
+            continue;
+        };
+        let parts: Vec<&str> = item.path.split('\\').collect();
+        for end in root.split('\\').count()..parts.len() {
+            let ace = Ace {
+                path: parts[..end].join("\\"),
+                access: Access::KeepEntries,
+            };
+            if !aces.contains(&ace) {
+                aces.push(ace);
+            }
+        }
+    }
     assert!(aces[..grants].iter().all(|ace| !ace.access.denies()));
     assert!(aces[grants..].iter().all(|ace| ace.access.denies()));
+    assert!(aces[denies..].iter().all(|ace| {
+        ace.access == Access::KeepEntries && writes.iter().any(|root| within(&ace.path, root))
+    }));
+    let parts: usize = profile
+        .guarded
+        .iter()
+        .map(|item| item.path.split('\\').count())
+        .sum();
     assert!(
-        aces.len() <= profile.write_roots.len() + profile.read_roots.len() + profile.guarded.len()
+        aces.len()
+            <= profile.write_roots.len() + profile.read_roots.len() + profile.guarded.len() + parts
     );
     Ok(aces)
 }
@@ -162,6 +214,7 @@ mod tests {
                 })
                 .collect(),
             active_processes: 64,
+            grants: r"C:\Users\mira\AppData\Local\CrazyAgent\engine\boundary-grants".into(),
         }
     }
 
@@ -194,8 +247,19 @@ mod tests {
             "modify never changes access lists or deletes children"
         );
         assert_eq!(DENY_ALL, 0x001f_01ff);
+        assert_eq!(
+            KEEP_ENTRIES,
+            0x2 | 0x4 | 0x40 | delete | 0x0004_0000 | 0x0008_0000
+        );
+        assert_eq!(
+            KEEP_ENTRIES & 0x0012_00a9,
+            0,
+            "a kept folder stays readable"
+        );
         assert!(Access::DenyAll.denies() && Access::DenyWrite.denies());
+        assert!(Access::KeepEntries.denies() && !Access::KeepEntries.inherits());
         assert!(!Access::Modify.denies() && !Access::ReadExecute.denies());
+        assert!(Access::Modify.inherits() && Access::DenyWrite.inherits());
     }
 
     #[test]
@@ -222,6 +286,8 @@ mod tests {
                 ace(r"C:\Program Files\nodejs", Access::ReadExecute),
                 ace(context, Access::DenyWrite),
                 ace(hooks, Access::DenyWrite),
+                ace(PROJECT, Access::KeepEntries),
+                ace(r"C:\Users\mira\Projects\shop\.git", Access::KeepEntries),
             ]
         );
         assert!(
@@ -313,6 +379,76 @@ mod tests {
     }
 
     #[test]
+    fn a_grants_folder_an_agent_could_write_is_refused() {
+        let mut inside = profile(&[], &[PROJECT, HOME, TMP], &[]);
+        for grants in [
+            HOME.to_owned(),
+            format!(r"{HOME}\grants"),
+            PROJECT.to_lowercase(),
+        ] {
+            inside.grants = grants;
+            assert_eq!(
+                plan(&inside),
+                Err("the grants folder sits in a writable root"),
+                "{}",
+                inside.grants
+            );
+        }
+        let read = r"C:\Users\mira\AppData\Local\CrazyAgent\engine";
+        let mut readable = profile(&[read], &[PROJECT, HOME, TMP], &[]);
+        readable.grants = format!(r"{read}\boundary-grants");
+        assert!(plan(&readable).is_ok(), "an agent may read its own record");
+    }
+
+    #[test]
+    fn folders_holding_a_read_only_path_keep_their_entries_so_the_path_cannot_be_vacated() {
+        let git = r"C:\Users\mira\Projects\shop\.git";
+        let state = r"C:\Users\mira\Projects\shop\.crazyagent";
+        let protected = [
+            r"C:\Users\mira\Projects\shop\context",
+            r"C:\Users\mira\Projects\shop\.crazyagent\context",
+            r"C:\Users\mira\Projects\shop\.git\hooks",
+            r"C:\Users\mira\Projects\shop\.git\config",
+            r"C:\Users\mira\Projects\shop\.git\config.lock",
+        ];
+        let guarded: Vec<(&str, Guard)> = protected
+            .iter()
+            .map(|path| (*path, Guard::ReadOnly))
+            .chain([(r"C:\Users\mira\Projects\shop\.git\secret", Guard::Hidden)])
+            .collect();
+        let planned = plan(&profile(&[], &[PROJECT, HOME, TMP], &guarded)).unwrap();
+        let kept: Vec<&str> = planned
+            .iter()
+            .filter(|item| item.access == Access::KeepEntries)
+            .map(|item| item.path.as_str())
+            .collect();
+        assert_eq!(
+            kept,
+            [PROJECT, state, git],
+            "no agent may rename, delete or add an entry in a folder on the way to a read-only path"
+        );
+        for path in protected {
+            assert!(planned.contains(&ace(path, Access::DenyWrite)));
+        }
+
+        let confined = plan(&profile(
+            &[],
+            &[
+                r"C:\Users\mira\Projects\shop\.crazyagent\worktrees\agent-1",
+                r"C:\Users\mira\Projects\shop\.git\worktrees\agent-1",
+                r"C:\Users\mira\Projects\shop\.git\objects",
+                HOME,
+            ],
+            &guarded,
+        ))
+        .unwrap();
+        assert!(
+            confined.iter().all(|item| !item.access.denies()),
+            "read-only paths outside every writable root need no entry"
+        );
+    }
+
+    #[test]
     fn a_path_both_read_only_and_hidden_gets_both_denies_once() {
         let keys = r"C:\Users\mira\Projects\shop\keys";
         let planned = plan(&profile(
@@ -330,7 +466,8 @@ mod tests {
             [
                 ace(PROJECT, Access::Modify),
                 ace(keys, Access::DenyWrite),
-                ace(keys, Access::DenyAll)
+                ace(keys, Access::DenyAll),
+                ace(PROJECT, Access::KeepEntries)
             ]
         );
     }

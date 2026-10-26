@@ -530,6 +530,26 @@ mod tests {
         assert!(!deep.exists());
     }
 
+    /// The default macOS data root leaves room for the engine's owner socket for account
+    /// names up to 29 bytes; a longer home is refused with the clear error that names
+    /// CRAZYAGENT_HOME as the fix, never a truncated socket path.
+    #[test]
+    fn the_default_macos_root_fits_the_owner_socket_for_account_names_up_to_29_bytes() {
+        let layout = |name: String| {
+            let home = format!("/Users/{name}");
+            Layout::new(data_root(Platform::MacOs, &env(None, Some(&home), None, None)).unwrap())
+                .unwrap()
+        };
+        layout("u".repeat(29))
+            .check_socket_length(Platform::MacOs)
+            .unwrap();
+        let error = layout("u".repeat(30))
+            .check_socket_length(Platform::MacOs)
+            .unwrap_err();
+        assert!(error.0.contains("104 bytes, the limit is 103"), "{error}");
+        assert!(error.0.contains(HOME_ENV), "{error}");
+    }
+
     #[test]
     fn socket_length_is_measured_on_the_resolved_path() {
         let temp = tempfile::tempdir().unwrap();

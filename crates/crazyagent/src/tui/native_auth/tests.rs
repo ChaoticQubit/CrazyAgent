@@ -1165,12 +1165,12 @@ async fn unit_transport_error_is_fixed_safe_text_and_keeps_unresolved_operation(
 fn unit_codex_challenge_rendering_preserves_exact_safe_url_and_code_without_login_id() {
     let challenge = codex::owner_login_challenge(
         "unit-secret-login-id",
-        "https://auth.example.invalid/device?state=unit%2Bstate",
+        "https://auth.openai.com/device?state=unit%2Bstate",
         Some("UNIT-CODE"),
     )
     .unwrap();
     let rendered = render_challenge(&challenge);
-    assert!(rendered.contains("https://auth.example.invalid/device?state=unit%2Bstate"));
+    assert!(rendered.contains("https://auth.openai.com/device?state=unit%2Bstate"));
     assert!(rendered.contains("UNIT-CODE"));
     assert!(!rendered.contains("unit-secret-login-id"));
     assert!(rendered.len() <= 65536);
@@ -1178,11 +1178,11 @@ fn unit_codex_challenge_rendering_preserves_exact_safe_url_and_code_without_logi
 
 #[test]
 fn unit_unsafe_challenge_is_not_silently_rewritten_into_an_exact_action_url() {
-    let url = "https://auth.example.invalid/\u{202e}unit-reversed";
+    let url = "https://auth.openai.com/\u{202e}unit-reversed";
     let challenge = codex::owner_login_challenge("unit-login", url, None).unwrap();
     let rendered = render_challenge(&challenge);
     assert!(!rendered.contains(url));
-    assert!(!rendered.contains("auth.example.invalid"));
+    assert!(!rendered.contains("auth.openai.com"));
     assert!(rendered.contains("cannot display safely"));
     assert!(!rendered.contains('\u{202e}'));
 }

@@ -353,6 +353,18 @@ export function sendFailureLine(code: string): string {
   return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
 }
 
+/** The muted line shown when a send found its conversation older than the settings and a new
+ * conversation took the message instead. */
+export const NEW_CONVERSATION_NOTE = "Settings changed, so a new conversation started.";
+
+/** Whether a send refused because the settings changed after the conversation started should
+ * end that conversation, start a new one and send the same message there.
+ * Input: the send receipt. Output: true only for that confirmed refusal. */
+export function restartForSettings(receipt: IntentReceipt): boolean {
+  const state = receiptState(receipt);
+  return state.kind === "rejected" && state.code === "master_source_conflict";
+}
+
 /** The most bytes one message to the master may hold; the bridge refuses more. */
 export const MESSAGE_BYTES_MAX = 8192;
 
