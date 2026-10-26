@@ -19,6 +19,8 @@ pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
 pub const SOCKET_PATH_BYTES_MAX: usize = 100;
 const HOLDER: &str = "_crazyagent";
+const HOLDER_COMMAND: &str =
+    "while [ -S \"${TMUX%,*,*}\" ]; do sleep 2; done; p=${TMUX%,*}; kill \"${p##*,}\"";
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 const TERMINAL_TYPE: &str = "xterm-256color";
@@ -43,6 +45,8 @@ type Answer = Result<Lines, HostError>;
 /// The engine's terminal host on macOS and Linux: one private tmux server driven in control mode.
 /// The server's socket lives in the engine's own private folder and never the owner's tmux.
 /// Agents keep running when the engine stops; a later host on the same folder finds them again.
+/// The server ends itself, with its agents, once its socket is gone, such as when the engine
+/// home is deleted, so no server outlives the folder that reaches it.
 pub struct Tmux {
     executable: Option<PathBuf>,
     folder: PathBuf,
@@ -194,7 +198,7 @@ impl Tmux {
                     SESSION,
                     "-n",
                     HOLDER,
-                    "cat",
+                    HOLDER_COMMAND,
                 ])
                 .env_clear()
                 .env("PATH", SERVER_PATH)

@@ -5,7 +5,7 @@ use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, SOCKET_PATH_BYTES_MAX, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
-    VIEWER_BUFFER_BYTES_MAX, plain_reason,
+    VIEWER_BUFFER_BYTES_MAX, plain_reason, quit,
 };
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -573,6 +573,152 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
         !unused.exists(),
         "listing or closing a host that never started starts nothing"
     );
+}
+
+struct Orphan {
+    pid: u32,
+    socket: PathBuf,
+}
+
+impl Drop for Orphan {
+    fn drop(&mut self) {
+        let named = crazyagent::spawn_gate::output(
+            Command::new("/bin/ps")
+                .args(["-o", "command=", "-p", &self.pid.to_string()])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout).contains(&*self.socket.to_string_lossy())
+        });
+        if named {
+            let _ = crazyagent::spawn_gate::status(
+                Command::new("/bin/kill")
+                    .args(["-s", "TERM", &self.pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
+        }
+    }
+}
+
+fn process_running(pid: u32) -> bool {
+    crazyagent::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|output| {
+        output.status.success()
+            && !String::from_utf8_lossy(&output.stdout)
+                .trim_start()
+                .starts_with('Z')
+    })
+}
+
+fn ends(pids: &[u32]) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pids.iter().any(|pid| process_running(*pid)) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+fn server_pid(tmux: &Path, socket: &Path) -> u32 {
+    tmux_reply(tmux, socket, &["display-message", "-p", "#{pid}"])
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn a_server_whose_engine_home_is_deleted_ends_with_its_agents() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let home = root.path().join("home");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let folder = home.join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let agent = AgentId::team(1).unwrap();
+    let pane = host
+        .spawn(&agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    let server = server_pid(&tmux, &socket);
+    let _orphan = Orphan {
+        pid: server,
+        socket: socket.clone(),
+    };
+    drop(host);
+    assert!(
+        process_running(server) && process_running(pane.pid),
+        "an engine that stops without quitting leaves its agents for the next engine"
+    );
+
+    std::fs::remove_dir_all(&home).unwrap();
+    assert!(
+        ends(&[server, pane.pid]),
+        "a server no engine can reach ends by itself once its engine home is gone, and its agents with it"
+    );
+}
+
+#[test]
+fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let team = AgentId::team(1).unwrap();
+    let research = AgentId::new("research-7-1").unwrap();
+    let mut panes = Vec::new();
+    for agent in [&team, &research] {
+        let pane = host
+            .spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+            .unwrap();
+        panes.push(pane.pid);
+    }
+    quit(&host).unwrap();
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&team),
+        "a team agent lives on for the next engine to take over; every other terminal ends"
+    );
+    assert!(ends(&panes[1..]), "the research agent's process ended");
+    drop(host);
+
+    let next = Tmux::open(Some(tmux.clone()), &folder);
+    assert_eq!(
+        next.alive().unwrap(),
+        std::slice::from_ref(&team),
+        "the next engine finds the team agent"
+    );
+    let server = server_pid(&tmux, &socket);
+    next.kill(&team).unwrap();
+    quit(&next).unwrap();
+    assert!(
+        !socket.exists(),
+        "with no team agent left the stop ends the server and removes its socket"
+    );
+    assert!(ends(&[server, panes[0]]), "the server process is gone");
+    assert!(next.alive().unwrap().is_empty());
+    assert!(!socket.exists(), "listing after the stop starts no server");
 }
 
 fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {

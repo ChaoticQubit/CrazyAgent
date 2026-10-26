@@ -169,13 +169,18 @@ function recordedCode(database, operationId) {
   }
 }
 
-/** Ends the private tmux server the engine kept for its agent terminals, which outlives the
- * engine by design so live agents can be reattached. Input: the engine's tmux socket path.
- * Output: none; a missing socket or tmux means nothing was left running. */
-function stopTerminals(socket) {
-  if (!existsSync(socket)) return;
+/** Reads what the engine's private tmux server still runs after the engine stopped, then ends
+ * it so the smoke leaves nothing behind. A stopped engine keeps the server only for team
+ * agents that live on. Input: the engine's tmux socket path. Output: null when no server is
+ * left, or the names of the terminals it still ran. */
+function leftTerminals(socket) {
+  if (!existsSync(socket)) return null;
   const tmux = TMUX_SEARCH.map((folder) => join(folder, "tmux")).find((path) => existsSync(path));
-  if (tmux) spawnSync(tmux, ["-S", socket, "kill-server"], { stdio: "ignore", env: { PATH: "/usr/bin:/bin" } });
+  if (!tmux) return [];
+  const env = { PATH: "/usr/bin:/bin" };
+  const listed = spawnSync(tmux, ["-S", socket, "list-windows", "-a", "-F", "#{window_name}"], { encoding: "utf8", env });
+  spawnSync(tmux, ["-S", socket, "kill-server"], { stdio: "ignore", env });
+  return (listed.stdout ?? "").split("\n").filter((name) => name && name !== "_crazyagent");
 }
 
 /** Thrown when a bridge call or receipt stops a step; carries the engine code. */
@@ -622,7 +627,12 @@ async function main() {
     await stop(bridgeProcess);
     await stop(engine);
     await pause(POLL_MS);
-    stopTerminals(join(crazyHome, "terminal", "tmux.sock"));
+    const left = leftTerminals(join(crazyHome, "terminal", "tmux.sock"));
+    const kept = left?.filter((name) => name.startsWith("team-")) ?? [];
+    const row = { id: "7", title: "The engine stop leaves no tmux server without a live team agent", causes: "-" };
+    if (left === null) results.push({ ...row, result: "PASS", code: "no_server" });
+    else if (kept.length) results.push({ ...row, result: "PASS", code: `kept_for_${kept.join(",")}` });
+    else results.push({ ...row, result: "FAIL", code: "tmux_server_left", causes: left.join(",") || "-" });
   }
   const shutdown = [...new Set(errText().slice(shutdownMark).match(/cause=[^\n]*/g) ?? [])].join("; ") || "-";
   console.log("\nstep | result | engine code | engine stderr | what");
