@@ -71,6 +71,10 @@ pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
 /// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
 /// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
 pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+/// Turns off Claude Code's background Bash commands and background agents for a tools-on
+/// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
+/// the turn's result, which the engine would read as the next task's reply.
+const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -215,6 +219,7 @@ pub enum LaunchEvent {
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
+    LateOutput { lines: u64 },
 }
 
 /// Tells whether a provider error message says the account hit a rate or usage limit.
@@ -501,6 +506,10 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
     ];
     if request.tools {
         environment.push(("SHELL", OsString::from("/bin/zsh")));
+        environment.push((
+            CLAUDE_BACKGROUND_TASKS_OFF.0,
+            OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
+        ));
     }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
         arguments.push(OsString::from("--bare"));
@@ -629,6 +638,7 @@ enum Driver {
         protocol: ClaudeProtocol,
         turns: u64,
         interrupt: Option<String>,
+        late: u64,
     },
 }
 
@@ -670,6 +680,7 @@ impl Driver {
                         protocol,
                         turns: 0,
                         interrupt: None,
+                        late: 0,
                     },
                     Vec::new(),
                 ))
@@ -744,6 +755,7 @@ impl Driver {
                 protocol,
                 turns,
                 interrupt,
+                ..
             } => {
                 if protocol.state() != ClaudeState::Active || interrupt.is_some() {
                     return Err(failure("launch_not_running"));
@@ -862,6 +874,7 @@ impl Driver {
             Self::Claude {
                 protocol,
                 interrupt,
+                late,
                 ..
             } => {
                 let value: serde_json::Value =
@@ -876,6 +889,10 @@ impl Driver {
                         }
                     }
                     Some("control_request" | "keep_alive") => {}
+                    _ if protocol.state() == ClaudeState::Idle => {
+                        *late = late.saturating_add(1);
+                        events.push(LaunchEvent::LateOutput { lines: *late });
+                    }
                     _ => {
                         let decoded = protocol
                             .receive(&framed)

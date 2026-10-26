@@ -218,8 +218,17 @@ fn team_launch(harness: &str) -> TeamLaunch {
 fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub_agent() {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
+    let background_off = |command: &std::process::Command| {
+        command.get_envs().any(|(name, value)| {
+            name == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" && value == Some("1".as_ref())
+        })
+    };
+    let mut off = team_launch("claude-code");
+    off.request.tools = false;
+    assert!(!background_off(&super::command(&off.request).unwrap()));
     let launch = team_launch("claude-code");
     let mut command = super::command(&launch.request).unwrap();
+    assert!(background_off(&command));
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -302,4 +311,84 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
     assert_eq!(state("multi_agent"), Some("false"), "{text}");
     assert_eq!(state("multi_agent_v2"), Some("false"), "{text}");
     assert_eq!(state("shell_tool"), Some("true"), "{text}");
+}
+
+const LATE_RESULT_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"step-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"FIRST"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"FIRST"}'
+printf '%s\n' '{"type":"system","subtype":"task_notification","uuid":"task-2","session_id":"native-session","task_id":"b1","run_id":"r1","tool_use_id":"tool-1","status":"completed","output_file":"","summary":"sleep 30 finished"}'
+printf '%s\n' '{"type":"assistant","uuid":"step-2","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"LATE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-2","session_id":"native-session","is_error":false,"result":"LATE"}'
+IFS= read -r turn
+printf '%s\n' '{"type":"assistant","uuid":"step-3","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-3","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"SECOND"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-3","session_id":"native-session","is_error":false,"result":"SECOND"}'
+/bin/cat > /dev/null
+"#;
+
+fn turn(session: &mut super::Session, prompt: &str) -> Vec<LaunchEvent> {
+    session.send(prompt).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut events = Vec::new();
+    while !events
+        .iter()
+        .any(|event| matches!(event, LaunchEvent::TurnFinished { .. }))
+    {
+        assert!(std::time::Instant::now() < deadline, "{events:?}");
+        if let Some(event) = session
+            .next_event(std::time::Duration::from_millis(200))
+            .unwrap()
+        {
+            events.push(event);
+        }
+    }
+    events
+}
+
+#[test]
+fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_next_turn() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut launch = team_launch("claude-code");
+    let harness = launch.work.parent().unwrap().join("late-harness");
+    std::fs::write(&harness, LATE_RESULT_HARNESS).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    let mut session = super::Session::start(launch.request).unwrap();
+    let first = turn(&mut session, "Start the background check.");
+    assert!(first.contains(&LaunchEvent::Text {
+        text: "FIRST".into()
+    }));
+    assert_eq!(
+        first.last(),
+        Some(&LaunchEvent::TurnFinished { success: true })
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut late = Vec::new();
+    while late.len() < 3 {
+        assert!(std::time::Instant::now() < deadline, "{late:?}");
+        if let Some(event) = session
+            .next_event(std::time::Duration::from_millis(200))
+            .unwrap()
+        {
+            late.push(event);
+        }
+    }
+    assert_eq!(
+        late,
+        [1, 2, 3].map(|lines| LaunchEvent::LateOutput { lines }),
+        "the lines after the result are counted and dropped, never decoded"
+    );
+    let second = turn(&mut session, "What did the check say?");
+    assert_eq!(
+        second,
+        [
+            LaunchEvent::Text {
+                text: "SECOND".into()
+            },
+            LaunchEvent::TurnFinished { success: true }
+        ]
+    );
+    session.stop();
 }
