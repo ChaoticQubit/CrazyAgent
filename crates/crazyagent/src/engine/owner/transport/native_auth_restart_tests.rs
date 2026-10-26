@@ -145,6 +145,80 @@ impl Restart {
             .unwrap();
         crate::research::accounts::managed_sign_in(&database, connection).map(|_| ())
     }
+
+    fn model(&self) -> crate::config::ModelConnection {
+        self.config()
+            .settings
+            .model_access
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|item| item.id == connection())
+            .unwrap()
+    }
+
+    fn hold(&self) {
+        let now = now_ms();
+        let config = self.config();
+        let mut database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        let tx = database.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
+             ON CONFLICT(connection) DO UPDATE SET until_ms=excluded.until_ms",
+            rusqlite::params![connection().as_str(), now + 600_000],
+        )
+        .unwrap();
+        let sequence: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(sequence),0) FROM model_gateway_observations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        crate::model_gateway::observe(
+            &tx,
+            &config,
+            &crate::model_gateway::Observation {
+                id: request(&format!("restart-rejected-{sequence}")),
+                connection: self.model(),
+                sequence: u64::try_from(sequence).unwrap() + 1,
+                observed_at_ms: u64::try_from(now).unwrap(),
+                valid_until_ms: u64::try_from(now).unwrap() + 60_000,
+                kind: crate::model_gateway::ObservationKind::InvalidAuthentication,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn held(&self) -> (bool, crate::model_gateway::Health) {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        let paused = database
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_paused_accounts WHERE connection=?1)",
+                [connection().as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let state = crate::model_gateway::connection_state(
+            &database,
+            &self.model(),
+            u64::try_from(now_ms()).unwrap(),
+        )
+        .unwrap();
+        (paused, state.health)
+    }
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
 }
 
 impl Run {
@@ -376,4 +450,36 @@ async fn a_logged_out_account_reads_as_not_signed_in_for_every_launch() {
     })
     .await
     .expect("the logout case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keeps() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        restart.hold();
+        assert_eq!(
+            restart.held(),
+            (true, crate::model_gateway::Health::InvalidAuthentication)
+        );
+        first.sign_in(&restart).await;
+        assert_eq!(
+            restart.held(),
+            (false, crate::model_gateway::Health::Unknown)
+        );
+        restart.hold();
+        first.stop().await;
+        let second = restart.start().await;
+        assert_eq!(
+            settled(&restart, &second, AccountStatus::SignedIn).await,
+            Ok(())
+        );
+        assert_eq!(
+            restart.held(),
+            (true, crate::model_gateway::Health::InvalidAuthentication)
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the sign-in hold case exceeded 60 seconds");
 }
