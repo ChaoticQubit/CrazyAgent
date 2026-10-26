@@ -2033,7 +2033,7 @@ const REMOVED_WITH_PROJECT: [&str; 8] = [
     "onboarding",
     "team_messages",
     "team_tasks",
-    "team_direct_inputs",
+    "team_owner_prompts",
     "team_settings",
     "team_paused_projects",
     "project_setups",
