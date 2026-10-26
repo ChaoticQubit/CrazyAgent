@@ -436,6 +436,7 @@ async fn genuine_blocked_and_locally_failed_turns_are_unchanged_terminal_settlem
     let MasterRuntimeResult::Turn(failed) = failed.unwrap() else { panic!("actual local capacity failure required") };
     assert_eq!(failed.phase, MasterTurnPhase::Failed);
     assert_eq!(failed.reason, Some(MasterReason::CapacityUnavailable));
+    assert_eq!(failed.cause.as_deref(), Some("master_input_too_large"));
     assert_eq!(failed.attempt.as_ref().unwrap().request, prepared.attempt.request);
     assert_eq!(failed.attempt.as_ref().unwrap().completion.as_ref().unwrap().effects, Effects::None);
     assert_eq!(settled.unwrap(), *failed);

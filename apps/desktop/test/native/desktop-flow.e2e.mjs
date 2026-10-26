@@ -321,6 +321,13 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const homed = await value(bridge, "desktop_set_projects_home", { path: projects, generation: 2 });
     assert.equal(applied(homed), "applied", `the projects home is set: ${JSON.stringify(homed)}`);
     assert.equal((await value(bridge, "desktop_projects_home")).path, projects);
+    const skillFolder = join(root, "skills", "graphify");
+    mkdirSync(skillFolder, { recursive: true });
+    writeFileSync(join(skillFolder, "SKILL.md"), "---\nname: graphify\ndescription: Answers questions about the code from the project's code graph.\n---\n\nRead graphify-out/GRAPH_REPORT.md before the source.\n");
+    const added = await value(bridge, "desktop_add_skill", { scope: { kind: "global" }, folder: skillFolder });
+    assert.equal(added.name, "graphify", `the plugin store holds a Graphify skill, where Setup installs it: ${JSON.stringify(added)}`);
+    const graphSkill = (await value(bridge, "desktop_setup_status")).pack.find((entry) => entry.id === "graphify");
+    assert.equal(graphSkill?.state.state, "on", `Setup reads the Graphify skill as installed and on (LB-3): ${JSON.stringify(graphSkill)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -368,9 +375,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.capture("setup-settled");
       const steps = settled.split("Overview")[0];
       if (graphify.state.state === "found") {
-        assert.match(steps, /Build the code graph\s*Done/, "the engine found Graphify, so the graph step is done");
+        assert.match(steps, /Build the code graph\s*Done/, "the Graphify skill is on and the engine found its command, so the graph step is done");
       } else {
-        assert.doesNotMatch(steps, /Build the code graph\s*Done/, "the engine reports Graphify missing, so the graph step cannot claim done");
+        assert.doesNotMatch(steps, /Build the code graph\s*Done/, "the engine reports the Graphify command missing, so the graph step cannot claim done");
       }
       if (/Map the project[\s\S]*Failed/.test(steps)) {
         assert.match(settled, /Retry mapping/, "a failed mapping offers Retry");
@@ -461,6 +468,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     t.diagnostic(`native-only commands the page called and this test cannot run: ${[...log.unrouted].join(", ") || "none"}`);
     assert.deepEqual(log.invalid, [], "the bridge accepted every command's arguments");
     assert.deepEqual(log.dropped, [], "the bridge answered every call");
+    const busy = log.trail.filter((entry) => entry.answer?.failure?.code === "busy").length;
+    t.diagnostic(`busy answers: ${busy} of ${log.trail.length}`);
+    assert.equal(busy, 0, `the bridge queues the page's calls instead of refusing them: ${busy} of ${log.trail.length} answers were busy`);
   } finally {
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));

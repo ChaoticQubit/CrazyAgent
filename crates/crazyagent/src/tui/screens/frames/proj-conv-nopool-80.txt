@@ -19,6 +19,6 @@
 
 
   ────────────────────────────────────────────────────────────────────────────
-  > Pick a pool first
+  > Pick a pool to start
 
  s Project settings  Shift-←→ Tabs  Esc Home                             ? Help

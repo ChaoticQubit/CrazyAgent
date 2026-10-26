@@ -356,7 +356,7 @@ fn an_entry_whose_skill_name_is_taken_installs_nothing() {
 
 fn graph_on(connection: &mut Connection) -> bool {
     let tx = connection.transaction().unwrap();
-    entry_on(&tx, GRAPH_ENTRY).unwrap()
+    entry_switch(&tx, GRAPH_ENTRY).unwrap() == Some(true)
 }
 
 #[test]

@@ -4,6 +4,7 @@ use super::{Flow, Place, Screen, SettingsSection};
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod};
 use crate::config::POOL_MEMBERS_MAX;
 use crate::engine::owner::AccountSecret;
+use crate::pools::PoolSummary;
 use crate::protocol::CredentialRef;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
@@ -109,6 +110,47 @@ pub fn pool_names(id: &CredentialRef, ctx: &Ctx) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// What deleting some accounts does to the pools: the pools they leave and, among those,
+/// the pools left with no account, which the engine deletes too.
+/// Inputs: the account ids and the context. Output: the sentence, or None when no pool
+/// holds any of them.
+pub fn pool_effect(ids: &[&CredentialRef], ctx: &Ctx) -> Option<String> {
+    let pools = ctx.store.pools.ready()?;
+    let holds = |pool: &&PoolSummary| pool.members.iter().any(|member| ids.contains(&&member.id));
+    let left: Vec<&PoolSummary> = pools.iter().filter(holds).collect();
+    if left.is_empty() {
+        return None;
+    }
+    let emptied: Vec<&str> = left
+        .iter()
+        .filter(|pool| pool.members.iter().all(|member| ids.contains(&&member.id)))
+        .map(|pool| pool.name.as_str())
+        .collect();
+    let names: Vec<&str> = left.iter().map(|pool| pool.name.as_str()).collect();
+    let mut text = format!(
+        "{} {} {}.",
+        if ids.len() == 1 {
+            "It leaves"
+        } else {
+            "They leave"
+        },
+        if left.len() == 1 { "pool" } else { "pools" },
+        names.join(", ")
+    );
+    match emptied.as_slice() {
+        [] => {}
+        [one] => text.push_str(&format!(
+            " {one} has no other account, so it is deleted too and its projects have no pool."
+        )),
+        many => text.push_str(&format!(
+            " {} have no other account, so they are deleted too and their projects have no pool.",
+            many.join(", ")
+        )),
+    }
+    assert!(emptied.len() <= left.len());
+    Some(text)
 }
 
 /// Sorts accounts the way the list shows them: needs attention first, members
@@ -337,32 +379,16 @@ impl Accounts {
         list
     }
 
-    fn delete_plan(&self, ctx: &Ctx) -> (Vec<&AccountView>, Vec<String>) {
-        let mut delete = Vec::new();
-        let mut kept = Vec::new();
-        for account in sorted(&self.accounts, ctx) {
-            if !self.marked.contains(&account.id) {
-                continue;
-            }
-            if pool_names(&account.id, ctx).is_empty() {
-                delete.push(account);
-            } else {
-                kept.push(account.name.clone());
-            }
-        }
-        (delete, kept)
+    fn delete_plan(&self, ctx: &Ctx) -> Vec<&AccountView> {
+        sorted(&self.accounts, ctx)
+            .into_iter()
+            .filter(|account| self.marked.contains(&account.id))
+            .collect()
     }
 
     fn ask_delete(&mut self, ctx: &mut Ctx) -> Flow {
         if self.marked.is_empty() {
             ctx.say(Message::warning("Select accounts with Space first.", ""));
-            return Flow::Handled;
-        }
-        if self.delete_plan(ctx).0.is_empty() {
-            ctx.say(Message::warning(
-                "Every selected account is in a pool.",
-                "Remove them from their pools first.",
-            ));
             return Flow::Handled;
         }
         self.confirm = Some(false);
@@ -380,7 +406,6 @@ impl Accounts {
                 self.confirm = None;
                 let mut left: VecDeque<(CredentialRef, String)> = self
                     .delete_plan(ctx)
-                    .0
                     .into_iter()
                     .map(|account| (account.id.clone(), account.name.clone()))
                     .collect();
@@ -649,9 +674,6 @@ impl Accounts {
 pub fn plain(code: &str) -> &'static str {
     match code {
         "account_not_found" => "This account no longer exists.",
-        "account_in_pool" | "account_in_use" => {
-            "This account is in a pool. Remove it from the pool first."
-        }
         "account_name_bounds" | "account_name_invalid" => {
             "Use a name of 1 to 96 characters, without control characters."
         }
@@ -855,26 +877,22 @@ impl Screen for Accounts {
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
         let delete_focused = self.confirm?;
-        let (delete, kept) = self.delete_plan(ctx);
+        let delete = self.delete_plan(ctx);
         let count = delete.len();
-        let mut note = String::from("They are in no pool, so no agent uses them.");
+        let ids: Vec<&CredentialRef> = delete.iter().map(|account| &account.id).collect();
+        let effect = pool_effect(&ids, ctx);
+        let action = if effect.is_some() {
+            "Remove from pools and delete"
+        } else {
+            "Delete"
+        };
+        let mut note =
+            effect.unwrap_or_else(|| "They are in no pool, so no agent uses them.".into());
         if delete
             .iter()
             .any(|account| account.method == SignInMethod::ApiKey)
         {
             note.push_str(" Saved keys are deleted too.");
-        }
-        if !kept.is_empty() {
-            let named = kept.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-            let more = kept.len().saturating_sub(3);
-            note.push_str(&format!(
-                " Kept, in a pool: {named}{}.",
-                if more > 0 {
-                    format!(" and {more} more")
-                } else {
-                    String::new()
-                }
-            ));
         }
         let mut body = vec![
             Line::raw(format!(
@@ -886,7 +904,7 @@ impl Screen for Accounts {
         body.extend(wrap(&note, 50).into_iter().map(Line::raw));
         body.push(Line::default());
         body.push(buttons(
-            &["Cancel", "Delete"],
+            &["Cancel", action],
             Some(usize::from(delete_focused)),
             &ctx.theme,
         ));
@@ -1015,21 +1033,9 @@ impl AccountDetails {
                 Flow::Handled
             }
             Action::Remove => {
-                let pools = pool_names(&self.account.id, ctx);
-                if pools.is_empty() {
-                    self.mode = DetailMode::Remove {
-                        remove_focused: false,
-                    };
-                } else {
-                    ctx.say(Message::error(
-                        &format!(
-                            "{} is in pool {}. Remove it from the pool first.",
-                            self.account.name,
-                            pools.join(", ")
-                        ),
-                        "",
-                    ));
-                }
+                self.mode = DetailMode::Remove {
+                    remove_focused: false,
+                };
                 Flow::Handled
             }
         }
@@ -1376,16 +1382,20 @@ impl Screen for AccountDetails {
             Line::raw(format!("Remove {}?", self.account.name)),
             Line::default(),
         ];
-        let note = match self.account.method {
-            SignInMethod::ApiKey => {
-                "It is in no pool, so no agent uses it. Its saved key is deleted too."
-            }
-            _ => "It is in no pool, so no agent uses it.",
+        let effect = pool_effect(&[&self.account.id], ctx);
+        let action = if effect.is_some() {
+            "Remove from pools and delete"
+        } else {
+            "Remove"
         };
-        body.extend(wrap(note, 50).into_iter().map(Line::raw));
+        let mut note = effect.unwrap_or_else(|| "It is in no pool, so no agent uses it.".into());
+        if self.account.method == SignInMethod::ApiKey {
+            note.push_str(" Its saved key is deleted too.");
+        }
+        body.extend(wrap(&note, 50).into_iter().map(Line::raw));
         body.push(Line::default());
         body.push(buttons(
-            &["Cancel", "Remove"],
+            &["Cancel", action],
             Some(usize::from(remove_focused)),
             &ctx.theme,
         ));

@@ -29,6 +29,7 @@ pub enum NativeAuthMethod {
     CodexDeviceCode,
     CodexExisting,
     ClaudeOfficial,
+    ClaudeExisting,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -104,6 +104,11 @@ pub(crate) enum Job {
         Box<NativeAuthWork>,
         oneshot::Sender<Result<NativeAuthReply, EngineError>>,
     ),
+    NativeAuthStale(
+        HostStamp,
+        Option<SessionId>,
+        oneshot::Sender<Result<Vec<NativeAuthStart>, EngineError>>,
+    ),
     PrepareNativeProfile(
         HostStamp,
         CredentialRef,
@@ -402,6 +407,20 @@ impl Storage {
                                     work,
                                 );
                             }
+                        }
+                        Job::NativeAuthStale(host, session, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::stale_sign_ins(
+                                    &mut connection,
+                                    &config,
+                                    sources.as_ref(),
+                                    &host,
+                                    session.as_ref(),
+                                )
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::NativeAuthFinish(admission, work, reply) => {
                             let result = if readonly {

@@ -10,11 +10,17 @@ export function andList(names: readonly string[]): string {
   return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
-/** Why an account can or cannot be deleted: the engine refuses one a pool uses. Input: the
- * names of the pools it is in. Output: the sentence. */
-export function removeBody(poolNames: readonly string[]): string {
-  if (poolNames.length === 0) return "It isn't in any pool.";
-  return `It is in ${andList(poolNames)}. Remove it from ${poolNames.length === 1 ? "that pool" : "those pools"} first.`;
+/** What deleting accounts does to pools: the engine takes them out of every pool and deletes a
+ * pool left with no account. Inputs: the account ids and the pools read (undefined when unknown).
+ * Output: the sentence naming those pools, or undefined when no pool holds them. */
+export function poolEffect(ids: readonly string[], pools: readonly PoolSummary[] | undefined): string | undefined {
+  const left = (pools ?? []).filter((pool) => pool.members.some((member) => ids.includes(member.id)));
+  if (left.length === 0) return undefined;
+  const emptied = left.filter((pool) => pool.members.every((member) => ids.includes(member.id))).map((pool) => pool.name);
+  const text = `${ids.length === 1 ? "It leaves" : "They leave"} ${left.length === 1 ? "pool" : "pools"} ${andList(left.map((pool) => pool.name))}.`;
+  if (emptied.length === 0) return text;
+  return emptied.length === 1 ? `${text} ${emptied[0]} has no other account, so it is deleted too and its projects have no pool.`
+    : `${text} ${andList(emptied)} have no other account, so they are deleted too and their projects have no pool.`;
 }
 
 /** The support text for one account: names and statuses only, never a key, URL secret or
@@ -106,8 +112,8 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
 
   return <>
     <Drawer open title={account.name} onClose={onClose}
-      footer={<span className="row"><Button variant="danger-text" icon="trash" disabled={memberOf.length > 0} onClick={() => onDelete(account)}>Delete account</Button>
-        {memberOf.length > 0 && <span className="small secondary">{removeBody(memberOf.map((pool) => pool.name))}</span>}</span>}>
+      footer={<span className="row"><Button variant="danger-text" icon="trash" onClick={() => onDelete(account)}>Delete account</Button>
+        {memberOf.length > 0 && <span className="small secondary">{poolEffect([account.id], pools)}</span>}</span>}>
       <div className="row"><ProviderMark provider={account.provider} name={account.provider_name} large />
         <div className="stack-small"><strong>{account.provider_name}</strong><span className="secondary">{account.method_label}</span></div></div>
       <form className="row" onSubmit={(event) => { event.preventDefault(); void rename(); }}>

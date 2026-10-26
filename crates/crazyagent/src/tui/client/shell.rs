@@ -11,12 +11,10 @@ const PROJECTS_MAX: usize = 200;
 const POOLS_MAX: usize = 64;
 const POOL_PAGE: u8 = 16;
 const POOL_PAGES_MAX: usize = POOLS_MAX / POOL_PAGE as usize + 1;
-const POOL_PROJECTS_MAX: usize = 64;
-const LEADER_ROLE: &str = "project_leader";
 
 /// Every saved pool with the settings version it was read at.
 /// Input: read page by page from the engine. Output: the pools and the
-/// expected config id and source hash for the first edit.
+/// expected config id and source hash for the edit.
 struct PoolBasis {
     pools: Vec<AccountPool>,
     config_id: ConfigId,
@@ -108,29 +106,21 @@ impl NativeOwner {
         if !basis.writable {
             return Err("model_access_read_only".into());
         }
-        let edits = pool_edits(change, &basis.pools)?;
-        for (index, edit) in edits.into_iter().enumerate() {
-            let (config_id, source_hash) = if index == 0 {
-                (basis.config_id.clone(), basis.source_hash.clone())
-            } else {
-                unchanged(controller, &edit, &basis.pools, lost).await?
-            };
-            controller
-                .begin_mutation(
-                    OwnerMutation::ModelAccess {
-                        expected_config_id: config_id,
-                        expected_source_hash: source_hash,
-                        edit,
-                    },
-                    generation,
-                )
-                .map_err(|error| bounded_problem(&error.0))?;
-            match controller.send_pending().await {
-                Ok(response) => settled(response, "pool_outcome_unknown")?,
-                Err(error) => return Err(settings::problem(&error, lost)),
-            }
+        let edit = pool_edit(change, &basis.pools)?;
+        controller
+            .begin_mutation(
+                OwnerMutation::ModelAccess {
+                    expected_config_id: basis.config_id,
+                    expected_source_hash: basis.source_hash,
+                    edit,
+                },
+                generation,
+            )
+            .map_err(|error| bounded_problem(&error.0))?;
+        match controller.send_pending().await {
+            Ok(response) => settled(response, "pool_outcome_unknown"),
+            Err(error) => Err(settings::problem(&error, lost)),
         }
-        Ok(())
     }
 
     fn ready_controller(&mut self) -> Result<&mut OwnerController, String> {
@@ -297,53 +287,16 @@ async fn pool_basis(
     Err("pool_read_failed".into())
 }
 
-/// Re-reads the pool a later edit replaces and checks it still matches the
-/// first read, so a change made elsewhere meanwhile is never overwritten.
-/// Inputs: the controller, the edit, the first read and the lost flag.
-/// Output: the config id and source hash to expect, or the problem code.
-async fn unchanged(
-    controller: &mut OwnerController,
-    edit: &ModelAccessEdit,
-    pools: &[AccountPool],
-    lost: &mut bool,
-) -> Result<(ConfigId, String), String> {
-    let ModelAccessEdit::ReplacePool { pool } = edit else {
-        return Err("pool_edit_order".into());
-    };
-    let reply = controller
-        .read(OwnerRead::ModelAccessRecord {
-            collection: ModelAccessCollection::Pools,
-            id: pool.id.clone(),
-        })
-        .await
-        .map_err(|error| settings::problem(&error, lost))?;
-    let OwnerData::ModelAccessRecord {
-        source_hash,
-        writable,
-        record: ModelAccessRecord::Pool { pool: current },
-    } = reply.data
-    else {
-        return Err("pool_not_found".into());
-    };
-    if !writable {
-        return Err("model_access_read_only".into());
-    }
-    if pools.iter().find(|before| before.id == pool.id) != Some(&current) {
-        return Err("pool_changed".into());
-    }
-    Ok((reply.config_id, source_hash))
-}
-
-/// Builds the model access edits for one pool change.
-/// Inputs: the change and every saved pool. Output: the edits in the order
-/// they apply, or the plain problem code.
-fn pool_edits(change: PoolChange, pools: &[AccountPool]) -> Result<Vec<ModelAccessEdit>, String> {
+/// Builds the model access edit for one pool change.
+/// Inputs: the change and every saved pool. Output: the edit, or the plain
+/// problem code.
+fn pool_edit(change: PoolChange, pools: &[AccountPool]) -> Result<ModelAccessEdit, String> {
     Ok(match change {
         PoolChange::Create {
             name,
             members,
             quota,
-        } => vec![ModelAccessEdit::CreatePool {
+        } => ModelAccessEdit::CreatePool {
             pool: AccountPool {
                 id: new_pool_id(&name)?,
                 name: Some(name),
@@ -353,7 +306,7 @@ fn pool_edits(change: PoolChange, pools: &[AccountPool]) -> Result<Vec<ModelAcce
                 fallback_allowed: false,
                 provider_quota_policy: quota,
             },
-        }],
+        },
         PoolChange::Update {
             id,
             name,
@@ -368,64 +321,15 @@ fn pool_edits(change: PoolChange, pools: &[AccountPool]) -> Result<Vec<ModelAcce
             pool.name = Some(name);
             pool.members = members;
             pool.provider_quota_policy = quota;
-            vec![ModelAccessEdit::ReplacePool { pool }]
+            ModelAccessEdit::ReplacePool { pool }
         }
-        PoolChange::Remove { id } => vec![ModelAccessEdit::RemovePool { id }],
-        PoolChange::Assign { pool, project } => assign_edits(pools, &pool, &project)?,
+        PoolChange::Remove { id } => ModelAccessEdit::RemovePool { id },
+        PoolChange::Assign { pool, project } => ModelAccessEdit::AssignProjectPool {
+            project: CredentialRef::new(project.as_str())
+                .map_err(|_| "project_ref_invalid".to_string())?,
+            pool,
+        },
     })
-}
-
-/// Builds the edits that give a project exactly one pool. The project leaves
-/// every other pool first, so a failed step leaves it with no pool, never two.
-/// Inputs: every saved pool, the chosen pool and the project. Output: replace
-/// edits, the chosen pool last with the project and the leader role; empty
-/// when the project already has only this pool.
-fn assign_edits(
-    pools: &[AccountPool],
-    target: &CredentialRef,
-    project: &ProjectId,
-) -> Result<Vec<ModelAccessEdit>, String> {
-    let project =
-        CredentialRef::new(project.as_str()).map_err(|_| "project_ref_invalid".to_string())?;
-    let leader = CredentialRef::new(LEADER_ROLE).expect("the leader role is a valid reference");
-    let mut chosen = pools
-        .iter()
-        .find(|pool| &pool.id == target)
-        .cloned()
-        .ok_or_else(|| "pool_not_found".to_string())?;
-    if !chosen.projects.contains(&project) && chosen.projects.len() >= POOL_PROJECTS_MAX {
-        return Err("pool_project_limit".into());
-    }
-    let mut replaced: Vec<AccountPool> = pools
-        .iter()
-        .filter(|pool| &pool.id != target && pool.projects.contains(&project))
-        .map(|pool| {
-            let mut pool = pool.clone();
-            pool.projects.retain(|scope| scope != &project);
-            pool
-        })
-        .collect();
-    let before = chosen.clone();
-    if !chosen.projects.contains(&project) {
-        chosen.projects.push(project);
-    }
-    if !chosen.roles.contains(&leader) {
-        chosen.roles.push(leader);
-    }
-    if chosen != before {
-        replaced.push(chosen);
-    }
-    let ids: std::collections::BTreeSet<&CredentialRef> =
-        replaced.iter().map(|pool| &pool.id).collect();
-    assert_eq!(
-        ids.len(),
-        replaced.len(),
-        "each pool is replaced at most once"
-    );
-    Ok(replaced
-        .into_iter()
-        .map(|pool| ModelAccessEdit::ReplacePool { pool })
-        .collect())
 }
 
 /// Reads an owner reply to a mutation; a receipt can still carry a refusal.
@@ -612,113 +516,10 @@ pools = [
         }
     }
 
-    fn replaced(edits: &[ModelAccessEdit]) -> Vec<(String, Vec<String>, Vec<String>)> {
-        edits
-            .iter()
-            .map(|edit| {
-                let ModelAccessEdit::ReplacePool { pool } = edit else {
-                    panic!("assignment builds only replace edits");
-                };
-                (
-                    pool.id.as_str().to_owned(),
-                    pool.projects
-                        .iter()
-                        .map(|p| p.as_str().to_owned())
-                        .collect(),
-                    pool.roles.iter().map(|r| r.as_str().to_owned()).collect(),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn an_assignment_takes_the_project_out_of_other_pools_before_adding_it() {
-        let pools = vec![
-            pool("pool-a", &["demo", "other"], &["project_leader"]),
-            pool("pool-b", &[], &[]),
-            pool("pool-c", &["other"], &["project_leader"]),
-        ];
-        let project = ProjectId::new("demo").unwrap();
-        let edits = assign_edits(&pools, &reference("pool-b"), &project).unwrap();
-        assert_eq!(
-            replaced(&edits),
-            vec![
-                (
-                    "pool-a".into(),
-                    vec!["other".into()],
-                    vec!["project_leader".into()]
-                ),
-                (
-                    "pool-b".into(),
-                    vec!["demo".into()],
-                    vec!["project_leader".into()]
-                ),
-            ]
-        );
-        let again = vec![
-            pool("pool-a", &["other"], &["project_leader"]),
-            pool("pool-b", &["demo"], &["project_leader"]),
-        ];
-        assert!(
-            assign_edits(&again, &reference("pool-b"), &project)
-                .unwrap()
-                .is_empty()
-        );
-        let doubled = vec![
-            pool("pool-a", &["demo"], &["project_leader"]),
-            pool("pool-b", &["demo"], &["project_leader"]),
-        ];
-        assert_eq!(
-            replaced(&assign_edits(&doubled, &reference("pool-b"), &project).unwrap()),
-            vec![("pool-a".into(), vec![], vec!["project_leader".into()])]
-        );
-    }
-
-    #[test]
-    fn an_assignment_refuses_a_missing_pool_and_a_full_pool() {
-        let project = ProjectId::new("demo").unwrap();
-        let pools = vec![pool("pool-a", &[], &[])];
-        assert_eq!(
-            assign_edits(&pools, &reference("pool-x"), &project),
-            Err("pool_not_found".into())
-        );
-        let names: Vec<String> = (0..POOL_PROJECTS_MAX)
-            .map(|index| format!("p{index}"))
-            .collect();
-        let full: Vec<&str> = names.iter().map(String::as_str).collect();
-        let pools = vec![pool("pool-a", &full, &["project_leader"])];
-        assert_eq!(
-            assign_edits(&pools, &reference("pool-a"), &project),
-            Err("pool_project_limit".into())
-        );
-        let inside = ProjectId::new("p3").unwrap();
-        assert!(
-            assign_edits(&pools, &reference("pool-a"), &inside)
-                .unwrap()
-                .is_empty(),
-            "a project already in a full pool needs no change"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "each pool is replaced at most once")]
-    fn an_assignment_never_replaces_one_pool_twice() {
-        let pools = vec![
-            pool("pool-a", &["demo"], &[]),
-            pool("pool-a", &["demo"], &[]),
-            pool("pool-b", &[], &[]),
-        ];
-        let _ = assign_edits(
-            &pools,
-            &reference("pool-b"),
-            &ProjectId::new("demo").unwrap(),
-        );
-    }
-
     #[test]
     fn an_update_keeps_the_pool_projects_and_roles() {
         let pools = vec![pool("pool-a", &["demo"], &["project_leader"])];
-        let edits = pool_edits(
+        let edit = pool_edit(
             PoolChange::Update {
                 id: reference("pool-a"),
                 name: "Renamed".into(),
@@ -728,7 +529,7 @@ pools = [
             &pools,
         )
         .unwrap();
-        let [ModelAccessEdit::ReplacePool { pool }] = edits.as_slice() else {
+        let ModelAccessEdit::ReplacePool { pool } = edit else {
             panic!("an update builds one replace edit");
         };
         assert_eq!(pool.name.as_deref(), Some("Renamed"));
@@ -737,7 +538,7 @@ pools = [
         assert_eq!(pool.roles, vec![reference("project_leader")]);
         assert_eq!(pool.provider_quota_policy, ProviderQuotaPolicy::Strict);
         assert_eq!(
-            pool_edits(
+            pool_edit(
                 PoolChange::Update {
                     id: reference("pool-x"),
                     name: "Gone".into(),
@@ -852,7 +653,7 @@ pools = [
             vec![scope("pool-a", &[]), scope("pool-b", &[])]
         );
         let assign = |pool: &str| PoolChange::Assign {
-            pool: reference(pool),
+            pool: Some(reference(pool)),
             project: project.clone(),
         };
         assert_eq!(live.edit(assign("pool-a")).await, Ok(()));
@@ -879,21 +680,35 @@ pools = [
             "the same pool again changes nothing"
         );
         assert_eq!(
-            live.edit(PoolChange::Remove {
-                id: reference("pool-b")
-            })
-            .await,
-            Err("pool_in_use".into()),
-            "a refusal inside an owner receipt is not a success"
-        );
-        assert_eq!(
             live.edit(assign("pool-x")).await,
-            Err("pool_not_found".into())
+            Err("pool_not_found".into()),
+            "a refusal inside an owner receipt is not a success"
         );
         assert_eq!(
             live.scopes().await,
             vec![scope("pool-a", &[]), scope("pool-b", &["assign-demo"])]
         );
+        assert_eq!(
+            live.edit(PoolChange::Assign {
+                pool: None,
+                project: project.clone(),
+            })
+            .await,
+            Ok(())
+        );
+        assert_eq!(
+            live.scopes().await,
+            vec![scope("pool-a", &[]), scope("pool-b", &[])]
+        );
+        assert_eq!(live.edit(assign("pool-b")).await, Ok(()));
+        assert_eq!(
+            live.edit(PoolChange::Remove {
+                id: reference("pool-b"),
+            })
+            .await,
+            Ok(())
+        );
+        assert_eq!(live.scopes().await, vec![scope("pool-a", &[])]);
         live.close().await;
     }
 }

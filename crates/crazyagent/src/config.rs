@@ -60,16 +60,40 @@ pub const SETTINGS_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelAccessEdit {
-    AddAccount { account_ref: CredentialRef },
-    RemoveAccount { account_ref: CredentialRef },
-    CreateConnection { connection: ModelConnection },
-    ReplaceConnection { connection: ModelConnection },
-    RemoveConnection { id: CredentialRef },
-    CreatePool { pool: AccountPool },
-    ReplacePool { pool: AccountPool },
-    RemovePool { id: CredentialRef },
-    AddConnectedAccount { connection: ModelConnection },
-    RemoveConnectedAccount { id: CredentialRef },
+    AddAccount {
+        account_ref: CredentialRef,
+    },
+    RemoveAccount {
+        account_ref: CredentialRef,
+    },
+    CreateConnection {
+        connection: ModelConnection,
+    },
+    ReplaceConnection {
+        connection: ModelConnection,
+    },
+    RemoveConnection {
+        id: CredentialRef,
+    },
+    CreatePool {
+        pool: AccountPool,
+    },
+    ReplacePool {
+        pool: AccountPool,
+    },
+    RemovePool {
+        id: CredentialRef,
+    },
+    AddConnectedAccount {
+        connection: ModelConnection,
+    },
+    RemoveConnectedAccount {
+        id: CredentialRef,
+    },
+    AssignProjectPool {
+        project: CredentialRef,
+        pool: Option<CredentialRef>,
+    },
 }
 
 impl ModelAccessEdit {
@@ -572,10 +596,10 @@ pub(crate) fn edit_model_access(
                 .iter()
                 .position(|p| p.id == *id)
                 .ok_or_else(|| ConfigError("pool_not_found".into()))?;
-            if !catalog.pools[index].projects.is_empty() {
-                return Err(ConfigError("pool_in_use".into()));
-            }
             catalog.pools.remove(index);
+        }
+        ModelAccessEdit::AssignProjectPool { project, pool } => {
+            assign_project_pool(&mut catalog.pools, project, pool.as_ref())?;
         }
         ModelAccessEdit::AddConnectedAccount { connection } => {
             if catalog.accounts.contains(&connection.account_ref) {
@@ -593,9 +617,7 @@ pub(crate) fn edit_model_access(
                 .iter()
                 .position(|c| c.id == *id)
                 .ok_or_else(|| ConfigError("account_not_found".into()))?;
-            if catalog.pools.iter().any(|pool| pool.members.contains(id)) {
-                return Err(ConfigError("account_in_pool".into()));
-            }
+            leave_pools(&mut catalog.pools, id);
             let removed = catalog.connections.remove(index);
             if !catalog
                 .connections
@@ -624,6 +646,70 @@ pub(crate) fn edit_model_access(
 
 /// The most accounts one pool may hold when it is created or changed.
 pub const POOL_MEMBERS_MAX: usize = 15;
+/// The most projects one pool may serve.
+pub const POOL_PROJECTS_MAX: usize = 64;
+/// The role a project's own pool carries so the project's master can use it.
+pub const LEADER_ROLE: &str = "project_leader";
+
+/// Gives one project exactly one pool, or none: the project leaves every other pool and
+/// joins the chosen one with the leader role. Inputs: the pools, the project and the chosen
+/// pool, None for no pool. Output: Ok, `pool_not_found`, or `pool_project_limit` when the
+/// chosen pool already serves the most projects.
+fn assign_project_pool(
+    pools: &mut [AccountPool],
+    project: &CredentialRef,
+    chosen: Option<&CredentialRef>,
+) -> Result<(), ConfigError> {
+    let target = match chosen {
+        Some(id) => Some(
+            pools
+                .iter()
+                .position(|pool| pool.id == *id)
+                .ok_or_else(|| ConfigError("pool_not_found".into()))?,
+        ),
+        None => None,
+    };
+    if let Some(index) = target
+        && !pools[index].projects.contains(project)
+        && pools[index].projects.len() >= POOL_PROJECTS_MAX
+    {
+        return Err(ConfigError("pool_project_limit".into()));
+    }
+    for (index, pool) in pools.iter_mut().enumerate() {
+        if Some(index) != target {
+            pool.projects.retain(|held| held != project);
+        }
+    }
+    if let Some(index) = target {
+        let leader = CredentialRef::new(LEADER_ROLE).expect("the leader role is a valid reference");
+        let pool = &mut pools[index];
+        if !pool.projects.contains(project) {
+            pool.projects.push(project.clone());
+        }
+        if !pool.roles.contains(&leader) {
+            pool.roles.push(leader);
+        }
+    }
+    assert!(
+        pools
+            .iter()
+            .filter(|pool| pool.projects.contains(project))
+            .count()
+            == usize::from(chosen.is_some())
+    );
+    Ok(())
+}
+
+/// Takes one account out of every pool. A pool left with no account is removed with it,
+/// so the projects it served have no pool. Inputs: the pools and the account's connection
+/// id. Output: the pools without that account.
+fn leave_pools(pools: &mut Vec<AccountPool>, id: &CredentialRef) {
+    for pool in pools.iter_mut() {
+        pool.members.retain(|member| member != id);
+    }
+    pools.retain(|pool| !pool.members.is_empty());
+    assert!(pools.iter().all(|pool| !pool.members.contains(id)));
+}
 /// The most characters of a pool display name.
 pub const POOL_NAME_CHARS_MAX: usize = 64;
 
@@ -633,6 +719,9 @@ pub const POOL_NAME_CHARS_MAX: usize = 64;
 fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
     if pool.members.len() > POOL_MEMBERS_MAX {
         return Err(ConfigError("pool_member_limit".into()));
+    }
+    if pool.members.is_empty() {
+        return Err(ConfigError("pool_needs_account".into()));
     }
     if let Some(name) = &pool.name
         && (name.trim().is_empty()
@@ -651,7 +740,12 @@ fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
 pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
         "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
-        "pool_in_use" => Some("This pool is used by a project. Remove it from the project first."),
+        "pool_needs_account" => Some(
+            "A pool needs at least one account. Add another account first, or delete the pool.",
+        ),
+        "pool_project_limit" => {
+            Some("A pool can serve up to 64 projects. Pick another pool for this project.")
+        }
         "pool_name_bounds" => {
             Some("Use a pool name of 1 to 64 characters, without control characters.")
         }
@@ -1413,8 +1507,153 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         );
     }
 
+    fn pools_of(config: &EffectiveConfig) -> Vec<AccountPool> {
+        config.settings.model_access.clone().unwrap().pools
+    }
+
+    fn projects_of(pools: &[AccountPool], id: &str) -> Vec<String> {
+        pools
+            .iter()
+            .find(|pool| pool.id.as_str() == id)
+            .unwrap()
+            .projects
+            .iter()
+            .map(|project| project.as_str().to_owned())
+            .collect()
+    }
+
     #[test]
-    fn a_pool_used_by_a_project_cannot_be_deleted() {
+    fn a_project_moves_to_another_pool_or_to_none_in_one_edit() {
+        let global = many_connections_global(2);
+        let (bytes, _) = edit_model_access(
+            &global,
+            "",
+            &ModelAccessEdit::CreatePool {
+                pool: sized_pool("first", 1, &["demo", "other"]),
+            },
+            &[],
+        )
+        .unwrap();
+        let mut second = sized_pool("second", 2, &[]);
+        second.roles.clear();
+        let (bytes, _) = edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::CreatePool { pool: second },
+            &[],
+        )
+        .unwrap();
+        let assign = |pool: Option<&str>| ModelAccessEdit::AssignProjectPool {
+            project: CredentialRef::new("demo").unwrap(),
+            pool: pool.map(|id| CredentialRef::new(id).unwrap()),
+        };
+        let (bytes, config) = edit_model_access(&bytes, "", &assign(Some("second")), &[]).unwrap();
+        let pools = pools_of(&config);
+        assert_eq!(projects_of(&pools, "first"), ["other"]);
+        assert_eq!(projects_of(&pools, "second"), ["demo"]);
+        assert!(
+            pools[1]
+                .roles
+                .contains(&CredentialRef::new(LEADER_ROLE).unwrap())
+        );
+        let (bytes, config) = edit_model_access(&bytes, "", &assign(None), &[]).unwrap();
+        let pools = pools_of(&config);
+        assert_eq!(projects_of(&pools, "first"), ["other"]);
+        assert!(projects_of(&pools, "second").is_empty());
+        assert_eq!(pools.len(), 2);
+        assert_eq!(
+            edit_model_access(&bytes, "", &assign(Some("missing")), &[])
+                .unwrap_err()
+                .0,
+            "pool_not_found"
+        );
+        let full: Vec<String> = (0..POOL_PROJECTS_MAX).map(|i| format!("p{i}")).collect();
+        let full: Vec<&str> = full.iter().map(String::as_str).collect();
+        let (bytes, _) = edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::ReplacePool {
+                pool: sized_pool("second", 2, &full),
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            edit_model_access(&bytes, "", &assign(Some("second")), &[])
+                .unwrap_err()
+                .0,
+            "pool_project_limit"
+        );
+        assert_eq!(
+            plain_problem("pool_project_limit"),
+            Some("A pool can serve up to 64 projects. Pick another pool for this project.")
+        );
+    }
+
+    #[test]
+    fn deleting_a_pool_takes_it_off_every_project_that_uses_it() {
+        let global = many_connections_global(1);
+        let (bytes, _) = edit_model_access(
+            &global,
+            "",
+            &ModelAccessEdit::CreatePool {
+                pool: sized_pool("work", 1, &["demo", "other"]),
+            },
+            &[],
+        )
+        .unwrap();
+        let remove = ModelAccessEdit::RemovePool {
+            id: CredentialRef::new("work").unwrap(),
+        };
+        let (_, config) = edit_model_access(&bytes, "", &remove, &[]).unwrap();
+        assert!(pools_of(&config).is_empty());
+        assert_eq!(config.settings.model_access.unwrap().connections.len(), 1);
+        assert_eq!(
+            edit_model_access(&global, "", &remove, &[]).unwrap_err().0,
+            "pool_not_found"
+        );
+    }
+
+    #[test]
+    fn deleting_an_account_takes_it_out_of_its_pools_and_deletes_pools_it_leaves_empty() {
+        let global = many_connections_global(2).replace(
+            "connections = [{ id = \"c0\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"local-account\"",
+            "connections = [{ id = \"c0\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"solo-account\"",
+        ).replace("accounts = [\"local-account\"]", "accounts = [\"local-account\", \"solo-account\"]");
+        let mut bytes = global;
+        for pool in [
+            sized_pool("both", 2, &["demo"]),
+            sized_pool("only", 1, &["other"]),
+        ] {
+            bytes = edit_model_access(&bytes, "", &ModelAccessEdit::CreatePool { pool }, &[])
+                .unwrap()
+                .0;
+        }
+        let c0 = CredentialRef::new("c0").unwrap();
+        let (_, config) = edit_model_access(
+            &bytes,
+            "",
+            &ModelAccessEdit::RemoveConnectedAccount { id: c0.clone() },
+            &[],
+        )
+        .unwrap();
+        let catalog = config.settings.model_access.unwrap();
+        assert_eq!(catalog.pools.len(), 1);
+        assert_eq!(catalog.pools[0].id.as_str(), "both");
+        assert_eq!(
+            catalog.pools[0].members,
+            [CredentialRef::new("c1").unwrap()]
+        );
+        assert_eq!(projects_of(&catalog.pools, "both"), ["demo"]);
+        assert!(catalog.connections.iter().all(|c| c.id != c0));
+        assert_eq!(
+            catalog.accounts,
+            [CredentialRef::new("local-account").unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_pool_needs_at_least_one_account() {
         let global = many_connections_global(1);
         let (bytes, _) = edit_model_access(
             &global,
@@ -1425,28 +1664,25 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
             &[],
         )
         .unwrap();
-        let remove = ModelAccessEdit::RemovePool {
-            id: CredentialRef::new("work").unwrap(),
-        };
-        assert_eq!(
-            edit_model_access(&bytes, "", &remove, &[]).unwrap_err().0,
-            "pool_in_use"
-        );
-        assert_eq!(
-            plain_problem("pool_in_use"),
-            Some("This pool is used by a project. Remove it from the project first.")
-        );
-        let (bytes, _) = edit_model_access(
-            &bytes,
-            "",
-            &ModelAccessEdit::ReplacePool {
-                pool: sized_pool("work", 1, &[]),
+        for edit in [
+            ModelAccessEdit::ReplacePool {
+                pool: sized_pool("work", 0, &["demo"]),
             },
-            &[],
-        )
-        .unwrap();
-        let (_, config) = edit_model_access(&bytes, "", &remove, &[]).unwrap();
-        assert!(config.settings.model_access.unwrap().pools.is_empty());
+            ModelAccessEdit::CreatePool {
+                pool: sized_pool("empty", 0, &[]),
+            },
+        ] {
+            assert_eq!(
+                edit_model_access(&bytes, "", &edit, &[]).unwrap_err().0,
+                "pool_needs_account"
+            );
+        }
+        assert_eq!(
+            plain_problem("pool_needs_account"),
+            Some(
+                "A pool needs at least one account. Add another account first, or delete the pool."
+            )
+        );
     }
 
     #[test]
