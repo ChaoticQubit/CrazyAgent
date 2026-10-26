@@ -2612,6 +2612,7 @@ mod turn_line_tests {
             runtime: None,
             reply: None,
             accounts: Vec::new(),
+            tasks: Vec::new(),
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -2658,6 +2659,7 @@ mod turn_line_tests {
             runtime: None,
             reply: None,
             accounts: Vec::new(),
+            tasks: Vec::new(),
         };
         for (reason, cause, expected) in [
             (
@@ -2690,6 +2692,7 @@ mod turn_line_tests {
             runtime: None,
             reply: None,
             accounts: Vec::new(),
+            tasks: Vec::new(),
             detail: None,
             cause: None,
         };
@@ -2765,6 +2768,7 @@ mod turn_line_tests {
             runtime: None,
             reply: None,
             accounts: Vec::new(),
+            tasks: Vec::new(),
             detail: None,
             cause: None,
         };

@@ -1957,6 +1957,8 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
     .collect::<Vec<_>>()
     .join("\n");
     let pool = access("conversation-team", &["codex-signed-in"]);
+    let session = SessionId::new("conversation-session").unwrap();
+    let turn = RequestId::new("conversation-turn").unwrap();
     let mut admitted = Vec::new();
     for project in teams.iter().chain([&unplanned]) {
         tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
@@ -1964,7 +1966,9 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         assert_eq!(proposed.len(), 2);
         assert!(!drop.exists());
         let tx = connection.transaction().unwrap();
-        admitted.push(admit_conversation(&tx, &pool, project, &proposed, 1_000).unwrap());
+        admitted.push(
+            admit_conversation(&tx, &pool, project, (&session, &turn), &proposed, 1_000).unwrap(),
+        );
         tx.commit().unwrap();
     }
     assert_eq!(admitted[0].len(), 1);

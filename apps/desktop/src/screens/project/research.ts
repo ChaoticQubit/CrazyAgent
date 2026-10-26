@@ -358,6 +358,18 @@ const accountReasons: Record<string, string> = {
   connection_changed: "settings changed",
 };
 
+/** The lines for the tasks a master turn handed to the team: the engine's note on each one
+ * that ended, otherwise that it is still with a sub-agent. Input: the turn. Output: the lines. */
+export function taskLines(turn: MasterTurn): string[] {
+  return (turn.tasks ?? []).map((task) => task.note ?? `Task ${task.task} is still with a sub-agent.`);
+}
+
+/** Tells whether a task some turn handed to the team has not ended yet, so the conversation
+ * keeps reading until its note arrives. Input: the turns. Output: true while one is open. */
+export function delegating(turns: MasterTurn[]): boolean {
+  return turns.some((turn) => (turn.tasks ?? []).some((task) => task.note === null));
+}
+
 /** The account a master turn runs on or, for a turn no account could run, each account
  * of the pool with why, and other harnesses that are ready. Input: the turn. Output: the
  * lines, empty when the turn has not reached an account yet. */

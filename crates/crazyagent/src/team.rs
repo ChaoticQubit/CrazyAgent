@@ -1,7 +1,7 @@
 use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
-use crate::protocol::{CredentialRef, Outcome, ProjectId};
+use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -17,6 +17,8 @@ pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
 pub const RESULT_BYTES_MAX: usize = 16 * 1024;
 pub const DELEGATIONS_PER_REPLY_MAX: usize = 8;
+pub const NOTE_BYTES_MAX: usize = 800;
+pub const CONVERSATION_TASKS_MAX: i64 = 1024;
 pub const TASKS_ACTIVE_MAX: i64 = 32;
 pub const TASKS_PER_PROJECT_MAX: i64 = 1000;
 pub const MESSAGES_PER_PROJECT_MAX: i64 = 2000;
@@ -645,6 +647,15 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 finished_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
+            CREATE TABLE IF NOT EXISTS team_conversation_tasks (
+                task INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                session TEXT NOT NULL,
+                turn TEXT NOT NULL,
+                note TEXT,
+                noted_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS team_conversation_tasks_turn ON team_conversation_tasks(session, turn);
             CREATE TABLE IF NOT EXISTS team_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -793,12 +804,15 @@ pub fn admit(
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
 /// project's team (DEC-093) as the owner's own tasks: each passes `admit` against the team
 /// plan and pool, and the refused ones are listed in one engine note in the Team view, never
-/// dropped silently. Takes the transaction, live model access, the project, at most
-/// `DELEGATIONS_PER_REPLY_MAX` proposals and the time. Returns the admitted task ids.
+/// dropped silently. Each admitted task is tied to the conversation turn that proposed it,
+/// so the engine's note on how it ended comes back to that conversation.
+/// Takes the transaction, live model access, the project, the conversation session and
+/// turn, at most `DELEGATIONS_PER_REPLY_MAX` proposals and the time. Returns the task ids.
 pub fn admit_conversation(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     project: &ProjectId,
+    origin: (&SessionId, &RequestId),
     proposed: &[Delegation],
     now: i64,
 ) -> Result<Vec<i64>, EngineError> {
@@ -821,7 +835,14 @@ pub fn admit_conversation(
             None => Err("team_plan_missing"),
         };
         match outcome {
-            Ok(id) => admitted.push(id),
+            Ok(id) => {
+                tx.execute(
+                    "INSERT INTO team_conversation_tasks(task,project,session,turn) VALUES (?1,?2,?3,?4)",
+                    params![id, project.as_str(), origin.0.as_str(), origin.1.as_str()],
+                )
+                .map_err(error)?;
+                admitted.push(id);
+            }
             Err(code) => refused.push(format!(
                 "- {}: {}",
                 bound_text(&delegation.prompt, 200),
@@ -841,6 +862,15 @@ pub fn admit_conversation(
             MessageState::Note,
             now,
         )?;
+    }
+    if !admitted.is_empty() {
+        tx.execute(
+            "DELETE FROM team_conversation_tasks WHERE project=?1
+             AND task NOT IN (SELECT task FROM team_conversation_tasks WHERE project=?1 ORDER BY task DESC LIMIT ?2)
+             AND (note IS NOT NULL OR task NOT IN (SELECT id FROM team_tasks))",
+            params![project.as_str(), CONVERSATION_TASKS_MAX],
+        )
+        .map_err(error)?;
     }
     assert_eq!(admitted.len() + refused.len(), proposed.len());
     Ok(admitted)

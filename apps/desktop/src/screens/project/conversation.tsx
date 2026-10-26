@@ -7,7 +7,7 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, delegating, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
@@ -63,6 +63,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const active = session?.phase === "configured";
   const waiting = turns.some((turn) => !turnSettled(turn));
   const unseen = Object.keys(sent).some((id) => !turns.some((turn) => turn.id === id));
+  const handedOff = delegating(turns);
   const noPool = needsPool || (data.pools?.kind === "ok" && data.assigned === null);
   const status = noPool ? "Needs a pool" : masterStatus(session, turns);
 
@@ -118,13 +119,13 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   }, [data.id]);
 
   useEffect(() => {
-    if (!waiting && !unseen) return;
+    if (!waiting && !unseen && !handedOff) return;
     const timer = window.setInterval(() => {
       setNow(Date.now());
       void refresh().catch((failure) => report(failure));
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [waiting, unseen, ticket, session?.session_id]);
+  }, [waiting, unseen, handedOff, ticket, session?.session_id]);
 
   useEffect(() => {
     const element = thread.current;
@@ -210,6 +211,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
         {turn.reply ? <div className="pj-msg-master"><ProjectMark />
           <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}
+        {taskLines(turn).map((line, index) => <p key={`task-${index}`} className="pj-small pj-muted" data-testid="master-task">{displayText(line)}</p>)}
         {accountLines(turn).map((line) => <p key={line} className="pj-small pj-muted" data-testid="master-account">{displayText(line)}</p>)}
         {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}

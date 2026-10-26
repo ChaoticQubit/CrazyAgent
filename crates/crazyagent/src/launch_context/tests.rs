@@ -423,6 +423,8 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
 
     assert!(text.contains("Your tools are on in this conversation"));
     assert!(text.contains("`delegate` tool of the `crazyagent-team` MCP server"));
+    assert!(text.contains("a short note on how it went comes back to this conversation"));
+    assert!(!text.contains("not in this conversation"));
     assert!(text.contains("- codex: up to 2 agents, tools on\n"));
     assert!(text.contains("- claude-code: up to 1 agents, tools off\n"));
     assert!(!text.contains("tools are off"));

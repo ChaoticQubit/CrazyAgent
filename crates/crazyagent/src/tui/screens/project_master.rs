@@ -16,7 +16,8 @@ pub(in crate::tui) struct MasterRead<'a> {
 
 /// Builds the Conversation transcript from the engine's master turns.
 /// Takes the read, the master harness name, the account label, whether tools are on and the UTC offset.
-/// Returns the transcript: the owner's messages, the master's real replies and a plain notice for a stopped turn.
+/// Returns the transcript: the owner's messages, the master's real replies, a notice per task a reply
+/// handed to the team and a plain notice for a stopped turn.
 pub(in crate::tui) fn transcript_from(
     read: &MasterRead<'_>,
     harness: &str,
@@ -55,6 +56,14 @@ pub(in crate::tui) fn transcript_from(
                 error: false,
             });
         }
+        for task in &turn.tasks {
+            messages.push(Message {
+                speaker: Speaker::Notice,
+                time: None,
+                text: task.line(),
+                error: false,
+            });
+        }
         if let Some(text) = notice(turn, harness, latest) {
             messages.push(Message {
                 speaker: Speaker::Notice,
@@ -64,7 +73,7 @@ pub(in crate::tui) fn transcript_from(
             });
         }
     }
-    assert!(messages.len() <= turns.len() * 3);
+    assert!(messages.len() <= turns.len() * 3 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
     let status = match (read.session, turns.last()) {
         (None, _) => MasterStatus::NotReady,
         (Some(MasterSessionPhase::Closing | MasterSessionPhase::Closed), _) => {
@@ -266,6 +275,7 @@ mod tests {
             runtime: None,
             reply: None,
             accounts: Vec::new(),
+            tasks: Vec::new(),
             detail: None,
             cause: None,
         }
@@ -638,6 +648,43 @@ mod tests {
                 .messages
                 .iter()
                 .all(|m| m.speaker == Speaker::You)
+        );
+    }
+
+    #[test]
+    fn the_tasks_a_reply_handed_off_show_under_it_with_their_outcome_or_as_still_running() {
+        use crate::master_session::{MasterReply, MasterReplyProvenance, MasterTask};
+        let inputs = [entry(3, "Plan the page.")];
+        let mut replied = turn(1, 3, MasterTurnPhase::Succeeded, None);
+        replied.reply = Some(MasterReply {
+            text: "I handed it to a sub-agent.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-1").unwrap(),
+                runtime_ref: RequestId::new("runtime-1").unwrap(),
+                capture_ref: RequestId::new("capture-1").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        let done = "Task 7 \"Write the README\" (codex, sub-agent 3) is done. Full result in the Team view.";
+        replied.tasks = vec![
+            MasterTask {
+                task: 7,
+                note: Some(done.into()),
+            },
+            MasterTask {
+                task: 8,
+                note: None,
+            },
+        ];
+        let transcript = build(Some(MasterSessionPhase::Configured), &[replied], &inputs);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Plan the page.", false),
+                (Speaker::Master, "I handed it to a sub-agent.", false),
+                (Speaker::Notice, done, false),
+                (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+            ]
         );
     }
 }

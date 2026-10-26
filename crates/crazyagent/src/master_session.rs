@@ -384,6 +384,29 @@ pub struct MasterTurnView {
     pub cause: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<MasterAccountState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<MasterTask>,
+}
+
+/// One task a master turn handed to the project's team, with the engine's note on how it
+/// ended once it has. Fields: the team task id and the note, none while the task is
+/// still waiting or running. Filled when turns are read; never stored with the turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterTask {
+    pub task: u64,
+    pub note: Option<String>,
+}
+
+impl MasterTask {
+    /// Words this task for the conversation: the engine's note once it ended, otherwise
+    /// that it is still with a sub-agent. Input: none. Output: one line.
+    pub fn line(&self) -> String {
+        match &self.note {
+            Some(note) => note.clone(),
+            None => format!("Task {} is still with a sub-agent.", self.task),
+        }
+    }
 }
 
 /// One pool account named on a master turn that no account of its harness could run.

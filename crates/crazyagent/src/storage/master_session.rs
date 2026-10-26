@@ -2018,7 +2018,8 @@ const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
 
 /// Reads the earlier turns of this conversation that reached a model, oldest first, as
 /// the entries the next prompt carries. Inputs: the transaction, session and current
-/// turn. Output: one "Owner:" entry per turn with its reply or a no-reply line.
+/// turn. Output: one "Owner:" entry per turn with its reply or a no-reply line, then one
+/// "Engine:" line per task that turn handed to the team.
 fn prior_turns(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -2049,10 +2050,15 @@ fn prior_turns(
             continue;
         }
         let message = turn_message(tx, session, &earlier)?;
-        entries.push(match &earlier.reply {
+        let mut entry = match &earlier.reply {
             Some(reply) => format!("Owner: {message}\nYou: {}", reply.text),
             None => format!("Owner: {message}\n(No reply was received.)"),
-        });
+        };
+        for task in turn_tasks(tx, &session.session_id, &earlier.id)? {
+            entry.push_str("\nEngine: ");
+            entry.push_str(&task.line());
+        }
+        entries.push(entry);
     }
     assert!(entries.len() < usize::try_from(turn.ordinal).map_err(error)?);
     Ok(entries)
@@ -2080,6 +2086,51 @@ fn with_history(context: Option<&str>, entries: &[String], start: usize) -> Opti
         text.push_str(entry);
     }
     Some(text)
+}
+
+/// Lists the tasks one master turn handed to the project's team, oldest first, with the
+/// engine's note once each ended. Inputs: the transaction, the session and the turn.
+/// Output: at most `DELEGATIONS_PER_REPLY_MAX` tasks; a task whose record went before it
+/// ended is left out, since no note can come.
+fn turn_tasks(
+    tx: &Transaction<'_>,
+    session: &SessionId,
+    turn: &RequestId,
+) -> Result<Vec<crate::master_session::MasterTask>, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT c.task,c.note FROM team_conversation_tasks c WHERE c.session=?1 AND c.turn=?2
+             AND (c.note IS NOT NULL OR EXISTS (SELECT 1 FROM team_tasks t WHERE t.id=c.task))
+             ORDER BY c.task LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(
+            params![
+                session.as_str(),
+                turn.as_str(),
+                i64::try_from(crate::team::DELEGATIONS_PER_REPLY_MAX).map_err(error)?
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let mut tasks = Vec::new();
+    for (task, note) in rows {
+        if note
+            .as_ref()
+            .is_some_and(|note| note.len() > crate::team::NOTE_BYTES_MAX)
+        {
+            return Err(error("master_task_note_bounds"));
+        }
+        tasks.push(crate::master_session::MasterTask {
+            task: u64::try_from(task).map_err(error)?,
+            note,
+        });
+    }
+    assert!(tasks.len() <= crate::team::DELEGATIONS_PER_REPLY_MAX);
+    Ok(tasks)
 }
 
 fn prompt(
@@ -2488,6 +2539,7 @@ fn observe_turn(
                     tx,
                     &access,
                     &session.project_id,
+                    (&session.session_id, &turn.id),
                     &delegations,
                     now,
                 )?;
@@ -3755,6 +3807,7 @@ fn execute(
                 runtime: None,
                 reply: None,
                 accounts: Vec::new(),
+                tasks: Vec::new(),
                 detail: None,
                 cause: None,
             };
@@ -3979,10 +4032,11 @@ fn page(
         ])
         .map_err(error)?;
     while let Some(row) = rows.next().map_err(error)? {
-        let turn = decode_turn(tx, session, row, revision)?;
+        let mut turn = decode_turn(tx, session, row, revision)?;
         if page.turns.len() == usize::from(limit) {
             return Ok(page);
         }
+        turn.tasks = turn_tasks(tx, &session.session_id, &turn.id)?;
         if turn.ordinal
             != page
                 .turns
@@ -5217,93 +5271,128 @@ fallback_allowed = false
         case.close().await;
     }
 
+    impl Fixture {
+        /// Stores a team plan for the fixture's project: a tools-on Claude Code master and
+        /// one tools-on Codex sub-agent. Output: the stored setup.
+        fn team_plan(&self) -> crate::project_setup::StoredSetup {
+            let setup = crate::project_setup::StoredSetup {
+                project_id: self.session.project_id.clone(),
+                name: "Tools".into(),
+                about: String::new(),
+                tech_stack: vec![],
+                platforms: vec![],
+                research: vec![],
+                pool: None,
+                team: crate::project_setup::TeamPlan {
+                    master: "claude-code".into(),
+                    master_tools: true,
+                    sub_harnesses: vec![crate::project_setup::HarnessSlot {
+                        harness: "codex".into(),
+                        agents: 1,
+                        tools: true,
+                    }],
+                    min_agents: 1,
+                    max_agents: 2,
+                },
+                documents: vec![],
+                folder: self.repository.display().to_string(),
+                created_ms: 1,
+                revision: 1,
+            };
+            let writer = Connection::open(&self.path).unwrap();
+            writer
+                .busy_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            writer
+                .execute(
+                    "INSERT OR REPLACE INTO project_setups VALUES (?1,?2)",
+                    params![
+                        setup.project_id.as_str(),
+                        serde_json::to_string(&setup).unwrap()
+                    ],
+                )
+                .unwrap();
+            setup
+        }
+
+        /// Runs the fixture's turn to a reply that carries the given delegate calls and
+        /// reports that reply `times` times, as a host resending its observation does.
+        /// Inputs: the calls and the count. Output: the stored reply.
+        async fn reply_with(
+            &self,
+            delegations: Vec<crate::team::Delegation>,
+            times: usize,
+        ) -> MasterReply {
+            let MasterRuntimeResult::Prepared(prepared) =
+                self.runtime(self.prepare()).await.unwrap()
+            else {
+                panic!("registered local RCLI must prepare the actual turn");
+            };
+            assert!(!prepared.tools, "only a Claude Code master runs with tools");
+            let command = |observation| MasterRuntimeCommand::Observe {
+                host: self.started.host.clone(),
+                project_id: self.session.project_id.clone(),
+                session_id: self.session.session_id.clone(),
+                turn_id: self.turn.id.clone(),
+                attempt_id: prepared.attempt.request.id.clone(),
+                observation,
+            };
+            let MasterRuntimeResult::Profile(guard) = self
+                .runtime(MasterRuntimeCommand::AcquireProfile {
+                    host: self.started.host.clone(),
+                    project_id: self.session.project_id.clone(),
+                    session_id: self.session.session_id.clone(),
+                    turn_id: self.turn.id.clone(),
+                    attempt_id: prepared.attempt.request.id.clone(),
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("actual configured RCLI Execution guard missing");
+            };
+            let runtime = MasterRuntimeView {
+                runtime_ref: RequestId::new("tools-runtime").unwrap(),
+                artifact_sha256: "a".repeat(64),
+                native_session_id: Some("tools-native".into()),
+            };
+            self.runtime(command(MasterRuntimeObservation::Running {
+                runtime: runtime.clone(),
+            }))
+            .await
+            .unwrap();
+            let reply = MasterReply {
+                text: "I handed the README to a sub-agent.".into(),
+                provenance: crate::master_session::MasterReplyProvenance {
+                    attempt_id: prepared.attempt.request.id.clone(),
+                    runtime_ref: runtime.runtime_ref.clone(),
+                    capture_ref: RequestId::new("tools-capture").unwrap(),
+                    capture_sequence: 3,
+                },
+            };
+            for _ in 0..times {
+                let MasterRuntimeResult::Turn(turn) = self
+                    .runtime(command(MasterRuntimeObservation::Response {
+                        reply: reply.clone(),
+                        delegations: delegations.clone(),
+                    }))
+                    .await
+                    .unwrap()
+                else {
+                    panic!("an observed reply returns the turn");
+                };
+                assert_eq!(turn.phase, MasterTurnPhase::Succeeded);
+                assert_eq!(turn.reply.as_ref(), Some(&reply));
+            }
+            drop(guard);
+            reply
+        }
+    }
+
     #[tokio::test]
     async fn a_master_reply_hands_its_delegate_calls_to_the_team_once() {
         let case = Fixture::new(true).await;
         case.register().await;
-        let setup = crate::project_setup::StoredSetup {
-            project_id: case.session.project_id.clone(),
-            name: "Tools".into(),
-            about: String::new(),
-            tech_stack: vec![],
-            platforms: vec![],
-            research: vec![],
-            pool: None,
-            team: crate::project_setup::TeamPlan {
-                master: "claude-code".into(),
-                master_tools: true,
-                sub_harnesses: vec![crate::project_setup::HarnessSlot {
-                    harness: "codex".into(),
-                    agents: 1,
-                    tools: true,
-                }],
-                min_agents: 1,
-                max_agents: 2,
-            },
-            documents: vec![],
-            folder: case.repository.display().to_string(),
-            created_ms: 1,
-            revision: 1,
-        };
-        let writer = Connection::open(&case.path).unwrap();
-        writer
-            .busy_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
-        writer
-            .execute(
-                "INSERT OR REPLACE INTO project_setups VALUES (?1,?2)",
-                params![
-                    setup.project_id.as_str(),
-                    serde_json::to_string(&setup).unwrap()
-                ],
-            )
-            .unwrap();
-        drop(writer);
-        let MasterRuntimeResult::Prepared(prepared) = case.runtime(case.prepare()).await.unwrap()
-        else {
-            panic!("registered local RCLI must prepare the actual turn");
-        };
-        assert!(!prepared.tools, "only a Claude Code master runs with tools");
-        let command = |observation| MasterRuntimeCommand::Observe {
-            host: case.started.host.clone(),
-            project_id: case.session.project_id.clone(),
-            session_id: case.session.session_id.clone(),
-            turn_id: case.turn.id.clone(),
-            attempt_id: prepared.attempt.request.id.clone(),
-            observation,
-        };
-        let MasterRuntimeResult::Profile(guard) = case
-            .runtime(MasterRuntimeCommand::AcquireProfile {
-                host: case.started.host.clone(),
-                project_id: case.session.project_id.clone(),
-                session_id: case.session.session_id.clone(),
-                turn_id: case.turn.id.clone(),
-                attempt_id: prepared.attempt.request.id.clone(),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("actual configured RCLI Execution guard missing");
-        };
-        let runtime = MasterRuntimeView {
-            runtime_ref: RequestId::new("tools-runtime").unwrap(),
-            artifact_sha256: "a".repeat(64),
-            native_session_id: Some("tools-native".into()),
-        };
-        case.runtime(command(MasterRuntimeObservation::Running {
-            runtime: runtime.clone(),
-        }))
-        .await
-        .unwrap();
-        let reply = MasterReply {
-            text: "I handed the README to a sub-agent.".into(),
-            provenance: crate::master_session::MasterReplyProvenance {
-                attempt_id: prepared.attempt.request.id.clone(),
-                runtime_ref: runtime.runtime_ref.clone(),
-                capture_ref: RequestId::new("tools-capture").unwrap(),
-                capture_sequence: 3,
-            },
-        };
+        let setup = case.team_plan();
         let delegations = vec![
             crate::team::Delegation {
                 harness: None,
@@ -5314,21 +5403,7 @@ fallback_allowed = false
                 prompt: "Check the tests".into(),
             },
         ];
-        for _ in 0..2 {
-            let MasterRuntimeResult::Turn(turn) = case
-                .runtime(command(MasterRuntimeObservation::Response {
-                    reply: reply.clone(),
-                    delegations: delegations.clone(),
-                }))
-                .await
-                .unwrap()
-            else {
-                panic!("an observed reply returns the turn");
-            };
-            assert_eq!(turn.phase, MasterTurnPhase::Succeeded);
-            assert_eq!(turn.reply.as_ref(), Some(&reply));
-        }
-        drop(guard);
+        case.reply_with(delegations, 2).await;
         let db = case.db();
         let tasks: Vec<(String, String, String)> = db
             .prepare("SELECT source,harness,prompt FROM team_tasks WHERE project=?1 ORDER BY id")
@@ -5361,6 +5436,98 @@ fallback_allowed = false
             ]
         );
         drop(db);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_conversation_task_that_ends_comes_back_to_the_conversation_and_the_next_turn() {
+        use crate::master_session::MasterTask;
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let setup = case.team_plan();
+        case.reply_with(
+            vec![crate::team::Delegation {
+                harness: None,
+                prompt: "Write the README".into(),
+            }],
+            1,
+        )
+        .await;
+        let task: i64 = case
+            .db()
+            .query_row(
+                "SELECT id FROM team_tasks WHERE project=?1",
+                [setup.project_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let id = u64::try_from(task).unwrap();
+        let (_, turns) = case.view().await;
+        assert_eq!(
+            turns[0].tasks,
+            [MasterTask {
+                task: id,
+                note: None
+            }],
+            "the conversation shows the task it handed off while it waits"
+        );
+        let writer = Connection::open(&case.path).unwrap();
+        writer
+            .busy_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let tx = writer.unchecked_transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &crate::config::ModelAccess::default(),
+                &crate::team::TeamAction::Cancel {
+                    project_id: setup.project_id.clone(),
+                    task: Some(task),
+                },
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+        drop(writer);
+        let mut team = crate::team::runtime::TeamRuntime::open(
+            &case.path,
+            &case.root.path().join("team"),
+            BTreeMap::new(),
+            Box::new(|| None),
+            crate::team::runtime::TeamLimits::default(),
+        )
+        .unwrap();
+        team.tick().unwrap();
+        team.shutdown().unwrap();
+        let note = format!(
+            "Task {task} \"Write the README\" (codex) was stopped: Cancelled by you. Details in the Team view."
+        );
+        let (_, turns) = case.view().await;
+        assert_eq!(
+            turns[0].tasks,
+            [MasterTask {
+                task: id,
+                note: Some(note.clone())
+            }],
+            "the engine's note on the ended task shows under the turn that handed it off"
+        );
+        assert_eq!(
+            case.result(case.submit("next-turn", "What did the sub-agent do?"))
+                .await,
+            OwnerResult::Applied
+        );
+        let (_, turns) = case.view().await;
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let text = prompt(&tx, &case.session, &turns[1]).unwrap();
+        drop(tx);
+        assert!(
+            text.contains(&format!(
+                "You: I handed the README to a sub-agent.\nEngine: {note}"
+            )),
+            "the next turn's context carries the note: {text}"
+        );
         case.close().await;
     }
 }
