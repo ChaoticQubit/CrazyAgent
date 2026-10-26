@@ -5,6 +5,7 @@ use crate::protocol::{CredentialRef, RequestId};
 use sha2::{Digest, Sha256};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConfiguredRcliProfileMetadata {
@@ -64,6 +65,21 @@ impl NativeProfileUse {
     }
 }
 
+/// Matches the Unix credential copy; no lease exists here, so no copy is ever made.
+pub(crate) enum AgentCredential {}
+
+impl NativeProfileUse {
+    /// Matches the Unix handoff of a credential copy to an agent's own home. No value is
+    /// ever made here. Inputs: the agent home and turn bound, unused. Output: none.
+    pub(crate) fn hand_to_agent(
+        &self,
+        _agent_home: &Path,
+        _turn: Duration,
+    ) -> Result<AgentCredential, EngineError> {
+        match *self {}
+    }
+}
+
 impl Drop for NativeProfileUse {
     /// Matches the Unix lease, which releases its profile locks when dropped, so the
     /// callers that end a lease at a chosen point mean the same on every target.
@@ -89,6 +105,7 @@ impl NativeProfileCustody {
         match *self {}
     }
 
+    #[cfg(test)]
     pub(crate) fn profile_home(&self, _profile_ref: &CredentialRef) -> PathBuf {
         match *self {}
     }

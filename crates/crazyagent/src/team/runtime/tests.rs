@@ -736,6 +736,83 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     assert!(!fanout.with_extension("moved").exists());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(managed.join("auth.json"), "{}").unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
+        let (_, plan, mode) = runtime
+            .prepare(&fixture.setup, id, role, "codex", true, &account)
+            .unwrap();
+        let own = runtime.agent_folder(id).join("home");
+        match mode {
+            Mode::PerTurn { home } => assert_eq!(home, own),
+            Mode::Kept { .. } => panic!("a managed agent must take its account per turn"),
+        }
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let script = format!(
+            "(echo x > {planted}) 2>/dev/null && echo plant=written || echo plant=refused\n\
+             (cat {credential} > /dev/null) 2>/dev/null && echo read=done || echo read=refused\n\
+             (echo x > {mine}) 2>/dev/null && echo own=written || echo own=refused\n",
+            planted = quoted(&managed.join("AGENTS.md")),
+            credential = quoted(&managed.join("auth.json")),
+            mine = quoted(&own.join("note.txt")),
+        );
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&plan.sandbox_profile)
+                .args(["/bin/sh", "-c", &script])
+                .current_dir(&plan.working_dir)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &own)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "plant=refused\nread=refused\nown=written\n",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!managed.join("AGENTS.md").exists());
+    }
+}
+
 #[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
