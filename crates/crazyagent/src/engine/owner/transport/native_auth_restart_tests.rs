@@ -27,6 +27,9 @@ fallback_allowed = false
 const CLAUDE: &str = r#"#!/bin/sh
 case "$2" in
 login) exit 0 ;;
+logout)
+  : > "$0.logged-out"
+  exit 0 ;;
 status)
   if [ -f "$0.logged-out" ]; then
     printf '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty","configDirectory":"%s"}' "$CLAUDE_CONFIG_DIR"
@@ -213,6 +216,35 @@ impl Run {
         panic!("the real Claude sign-in never finished");
     }
 
+    async fn log_out(&self, restart: &Restart) -> NativeAuthFact {
+        let scope = self.scope(restart.config().id).await;
+        let client = self.client();
+        let started = client
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout"),
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            let read = client
+                .read_native_auth(NativeAuthQuery {
+                    request_id: request("restart-logout-read"),
+                    scope: scope.clone(),
+                    operation_id: started.fact.operation_id.clone(),
+                })
+                .await
+                .unwrap();
+            if !read.fact.phase.unfinished() {
+                assert_eq!(read.fact.action, NativeAuthAction::Logout);
+                assert_eq!(read.fact.phase, NativeAuthPhase::UnauthenticatedObserved);
+                return read.fact;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("the real Claude logout never finished");
+    }
+
     async fn status(&self) -> AccountStatus {
         let page = self.client().list_accounts(None, 50).await.unwrap();
         page.accounts
@@ -325,4 +357,23 @@ async fn an_account_that_cannot_launch_is_never_shown_signed_in() {
     })
     .await
     .expect("the status case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_logged_out_account_reads_as_not_signed_in_for_every_launch() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        run.sign_in(&restart).await;
+        assert_eq!(restart.launch(), Ok(()));
+        run.log_out(&restart).await;
+        assert_eq!(
+            restart.launch(),
+            Err("master_authentication_unknown".into())
+        );
+        assert_eq!(run.status().await, AccountStatus::NotSignedIn);
+        run.stop().await;
+    })
+    .await
+    .expect("the logout case exceeded 60 seconds");
 }

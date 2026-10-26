@@ -1399,10 +1399,14 @@ pub(crate) fn native_sign_in(
         return Err(error("native_auth_request_bounds"));
     }
     let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-    let start: NativeAuthStart = serde_json::from_slice(&request).map_err(error)?;
     if let Some(gap) = sign_in_gap(fact.phase) {
         return Err(error(gap));
     }
+    if !matches!(fact.action, NativeAuthAction::SignIn { .. }) {
+        return Err(error("master_authentication_unknown"));
+    }
+    let start: NativeAuthStart =
+        serde_json::from_slice(&request).map_err(|_| error("master_authentication_stale"))?;
     if fact.operation_id.as_str() != id
         || signed(fact.generation)? != generation
         || fact.phase.name() != phase
