@@ -484,14 +484,21 @@ async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.leader)
     );
-    assert!(fixture.lease("claude-group-busy", 2).is_err());
+    assert_eq!(
+        fixture
+            .sign_in("claude-group-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use")
+    );
     let started = std::time::Instant::now();
     let cancelled = claude.cancel().await;
     let elapsed = started.elapsed();
     assert!(cancelled.is_ok(), "{cancelled:?} after {elapsed:?}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     processes.assert_gone();
-    assert!(fixture.lease("claude-group-next", 3).is_ok());
+    assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
 #[tokio::test]
@@ -521,7 +528,7 @@ async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_
         rustix::process::test_kill_process(processes.descendant),
         Ok(())
     );
-    assert!(fixture.lease("claude-group-next", 3).is_ok());
+    assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
 #[tokio::test]
@@ -545,5 +552,5 @@ async fn closing_a_claude_master_is_not_failed_by_the_exit_its_closed_input_caus
     }
     let closed = claude.close().await;
     assert!(closed.is_ok(), "{closed:?}");
-    assert!(fixture.lease("claude-group-next", 3).is_ok());
+    assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
