@@ -246,6 +246,7 @@ pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
 /// their own git worktrees. The engine admits every task; agents only propose.
 pub struct TeamRuntime {
     connection: Connection,
+    root: PathBuf,
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
@@ -343,8 +344,13 @@ impl TeamRuntime {
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
+        let root = database
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| EngineError("team_state_not_canonical".into()))?;
         Ok(Self {
             connection,
+            root,
             state: state.to_path_buf(),
             executables,
             access,
@@ -2463,9 +2469,17 @@ impl TeamRuntime {
             turn,
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
-        let note = match crate::landing::record_turn_end(&self.connection, &workspace, &ended) {
-            Ok(None) => return Ok(()),
-            Ok(Some(_)) => format!("The edits from {what} are waiting for you in Changes."),
+        let landed = crate::landing::open(&self.root)
+            .and_then(|db| crate::landing_turns::record(&db, &workspace, &ended));
+        let note = match landed {
+            Ok(
+                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
+            ) => {
+                return Ok(());
+            }
+            Ok(crate::landing_turns::Landed::Added(_)) => {
+                format!("The edits from {what} are waiting for you in Changes.")
+            }
             Err(problem) => with_code(
                 &format!(
                     "The edits from {what} could not be kept for review and stay only in its worktree"

@@ -2367,8 +2367,40 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         .await
         .unwrap();
     let session = case.session.session_id.clone();
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: session.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: prepared.repository.clone(),
+        worktree: prepared.cwd.clone(),
+        git_dir: crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap(),
+    };
+    let end = |turn: &str| crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: turn.into(),
+        prompt_line: "Another turn".into(),
+    };
+    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn")).unwrap();
+    fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn")).unwrap();
+    drop(db);
     drop(prepared);
     case.finish().await;
+    use crate::landing_turns::Landed;
+    assert_eq!(
+        quiet,
+        Landed::Waiting(sets[0].id.clone()),
+        "a turn that added nothing"
+    );
+    assert_eq!(
+        more,
+        Landed::Added(sets[0].id.clone()),
+        "a later turn adds to the same set"
+    );
     assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
     assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
     assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
