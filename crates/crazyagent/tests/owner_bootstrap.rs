@@ -6,7 +6,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::{engine::Client, protocol::*};
 use std::io::{BufRead, BufReader, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -483,14 +483,92 @@ fn cli_preserves_unsafe_locator_objects() {
 }
 
 #[test]
-fn cli_rejects_too_long_socket_path_precisely() {
+fn cli_rejects_a_socket_name_too_long_even_for_the_short_address_precisely() {
     let parent = private_root();
     let root = parent.path().join("x".repeat(80));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut process = Process::launch(&root, "engine.sock");
+    let mut process = Process::launch(&root, &"s".repeat(100));
     process.refused("owner_socket_path_too_long");
     assert!(!root.join("engine.db").exists());
+}
+
+fn owner_only(path: &Path, owner: u32, mode: u32) {
+    let metadata = std::fs::symlink_metadata(path).unwrap();
+    assert_eq!(metadata.uid(), owner, "{}", path.display());
+    assert_eq!(metadata.mode() & 0o7777, mode, "{}", path.display());
+}
+
+async fn answers(root: &Path, id: &str) {
+    let ordinary = Client::new(root.join("engine.sock"), Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        ordinary.request(snapshot(id)).await.unwrap().outcome,
+        Outcome::Snapshot { .. }
+    ));
+    for kind in [OwnerClientKind::Tui, OwnerClientKind::Desktop] {
+        let (client, _) = OwnerClient::discover(root, kind, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(matches!(
+            client
+                .request(owner_request(
+                    id,
+                    0,
+                    OwnerOperation::Read {
+                        query: OwnerRead::Capabilities
+                    }
+                ))
+                .await
+                .unwrap()
+                .response,
+            OwnerResponse::Read { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn cli_starts_where_the_owner_socket_would_be_120_bytes_and_recovers_after_a_kill() {
+    let parent = private_root();
+    let real = std::fs::canonicalize(parent.path()).unwrap();
+    let tail = "o00000000/owner.sock";
+    let name = 120 - tail.len() - 2 - real.as_os_str().len();
+    let root = real.join("l".repeat(name));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(root.join(tail).as_os_str().len(), 120);
+    let owner = std::fs::metadata(&root).unwrap().uid();
+
+    let first = Process::launch(&root, "engine.sock");
+    first.ready();
+    answers(&root, "first").await;
+    let generation = root.join(locator(&root)["generation"].as_str().unwrap());
+    for socket in [root.join("engine.sock"), generation.join("owner.sock")] {
+        assert!(
+            std::fs::symlink_metadata(&socket)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        owner_only(&socket, owner, 0o600);
+    }
+    owner_only(&root, owner, 0o700);
+    owner_only(&generation, owner, 0o700);
+    owner_only(
+        &Path::new("/tmp").join(format!("crazyagent-{owner}")),
+        owner,
+        0o700,
+    );
+
+    drop(first);
+    assert!(root.join("engine.sock").exists(), "a kill leaves the socket");
+    let mut second = Process::launch(&root, "engine.sock");
+    second.ready();
+    assert!(
+        !generation.exists(),
+        "the second engine sweeps the generation the killed one left"
+    );
+    answers(&root, "second").await;
+    second.stop("TERM");
 }
 
 #[tokio::test]

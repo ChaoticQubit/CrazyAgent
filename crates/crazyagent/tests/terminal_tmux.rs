@@ -2,13 +2,13 @@
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::terminal::buffer::skipped_marker;
-use crazyagent::terminal::tmux::{SOCKET, SOCKET_PATH_BYTES_MAX, Tmux, installed};
+use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
     VIEWER_BUFFER_BYTES_MAX, plain_reason,
 };
 use std::collections::BTreeMap;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -281,22 +281,38 @@ fn a_host_without_tmux_reports_every_call_unavailable() {
     assert!(!folder.exists(), "nothing is created while tmux is missing");
 }
 
+struct Closing<'a>(&'a Tmux);
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.close(&[]);
+    }
+}
+
 #[test]
-fn a_socket_path_too_long_for_the_system_is_refused() {
+fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
     let root = root();
     let tmux = tmux(root.path());
-    let deep = root.path().join("d".repeat(SOCKET_PATH_BYTES_MAX));
-    let host = Tmux::open(Some(tmux), &deep);
+    let deep = root.path().join("d".repeat(110));
+    let socket = deep.join(SOCKET);
+    assert!(socket.as_os_str().len() > 120);
+    let host = Tmux::open(Some(tmux.clone()), &deep);
+    let _closing = Closing(&host);
     let agent = AgentId::team(1).unwrap();
     let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
+    host.spawn(&agent, &command).unwrap();
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
+    let metadata = std::fs::symlink_metadata(&socket).unwrap();
+    assert!(metadata.file_type().is_socket());
+    assert_eq!(metadata.mode() & 0o077, 0, "only the owner can reach the server");
+    let again = Tmux::open(Some(tmux), &deep);
     assert_eq!(
-        host.spawn(&agent, &command).unwrap_err().0,
-        "terminal_socket_path_long"
+        again.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "a new client reaches the same server"
     );
-    assert!(
-        host.alive().unwrap().is_empty(),
-        "no server runs, so no agent does"
-    );
+    host.close(&[]).unwrap();
+    assert!(!socket.exists());
 }
 
 #[test]
