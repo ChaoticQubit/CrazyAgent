@@ -7,6 +7,10 @@ use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyObservation, NativeAuthCustodyRetirement,
 };
 
+/// How many newer account checks the host never ran a restart re-proof looks past to find
+/// the sign-in an earlier run proved.
+const UNRUN_CHECKS_MAX: i64 = 16;
+
 impl Clone for Command {
     fn clone(&self) -> Self {
         match self {
@@ -1059,8 +1063,8 @@ pub(crate) fn stale_sign_ins(
     let tx = db.transaction().map_err(error)?;
     let only = match session {
         None => None,
-        Some(session) => match master_session::native_target(&tx, session)? {
-            Some(target) => Some(target),
+        Some(session) => match master_session::native_members(&tx, config, session)? {
+            Some(members) => Some(members),
             None => return Ok(Vec::new()),
         },
     };
@@ -1077,7 +1081,9 @@ pub(crate) fn stale_sign_ins(
             "codex" => NativeAuthMethod::CodexExisting,
             _ => continue,
         };
-        if only.as_ref().is_some_and(|target| target != &connection.id)
+        if only
+            .as_ref()
+            .is_some_and(|members| !members.contains(&connection.id))
             || !matches!(
                 connection.auth,
                 crate::config::ModelAuthentication::NativeManaged { .. }
@@ -1085,10 +1091,10 @@ pub(crate) fn stale_sign_ins(
         {
             continue;
         }
-        let Some(earlier) = earlier_run(&tx, connection, host)? else {
+        let Some((earlier, generation)) = earlier_run(&tx, connection, host)? else {
             continue;
         };
-        if crate::storage::native_sign_in(&tx, &earlier, connection, None).is_err() {
+        if master_session::sign_in_at(&tx, &earlier, connection, generation).is_err() {
             continue;
         }
         starts.push(NativeAuthStart {
@@ -1107,36 +1113,62 @@ pub(crate) fn stale_sign_ins(
     Ok(starts)
 }
 
-/// The earlier engine run a connection's latest sign-in was proved under, when it finished
-/// authenticated in this database under another run. Inputs: the transaction, the
-/// connection and the running host. Output: that run's host stamp, or none.
+/// The earlier engine run a connection's newest sign-in was proved under, when it finished
+/// authenticated in this database under another run, looking past newer account checks
+/// the host never ran (LB-26). Inputs: the transaction, the connection and the running
+/// host. Output: that run's host stamp and the sign-in's generation, or none.
 fn earlier_run(
     tx: &Transaction<'_>,
     connection: &crate::config::ModelConnection,
     host: &HostStamp,
-) -> Result<Option<HostStamp>, EngineError> {
-    let row: Option<Vec<u8>> = tx
-        .query_row(
-            "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-            [profile_key(connection)?],
-            |row| row.get(0),
+) -> Result<Option<(HostStamp, u64)>, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT ?2",
         )
-        .optional()
         .map_err(error)?;
-    let Some(bytes) = row else {
-        return Ok(None);
-    };
-    let fact = decode_fact(&bytes)?;
-    if fact.phase != NativeAuthPhase::AuthenticatedObserved
-        || fact.binding.database_instance != host.db_instance
-        || fact.binding.engine_epoch == host.engine_epoch
-    {
-        return Ok(None);
+    let rows = statement
+        .query_map(
+            params![profile_key(connection)?, UNRUN_CHECKS_MAX + 1],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    for bytes in rows {
+        let fact = decode_fact(&bytes)?;
+        if never_ran(&fact) {
+            continue;
+        }
+        if fact.phase != NativeAuthPhase::AuthenticatedObserved
+            || fact.binding.database_instance != host.db_instance
+            || fact.binding.engine_epoch == host.engine_epoch
+        {
+            return Ok(None);
+        }
+        return Ok(Some((
+            HostStamp {
+                db_instance: host.db_instance.clone(),
+                engine_epoch: fact.binding.engine_epoch,
+            },
+            fact.generation,
+        )));
     }
-    Ok(Some(HostStamp {
-        db_instance: host.db_instance.clone(),
-        engine_epoch: fact.binding.engine_epoch,
-    }))
+    Ok(None)
+}
+
+/// Tells whether an operation was an account check the host never ran, which says nothing
+/// about the sign-in it would have checked. Input: the operation's fact. Output: true for
+/// an existing-account check that ended unavailable because the host could not run it.
+fn never_ran(fact: &NativeAuthFact) -> bool {
+    fact.phase == NativeAuthPhase::Unavailable
+        && fact.code.as_deref() == Some("native_auth_host_unavailable")
+        && matches!(
+            fact.action,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting
+            }
+        )
 }
 
 fn profile_key(connection: &crate::config::ModelConnection) -> Result<String, EngineError> {

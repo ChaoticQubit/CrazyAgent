@@ -654,6 +654,80 @@ impl Fixture {
         assert_ne!(reply.fact.phase, NativeAuthPhase::AuthenticatedObserved);
     }
 
+    /// Moves a connection's latest sign-in to an earlier engine run, the state an engine
+    /// restart leaves it in. Input: the connection. Output: none; its fact names another run.
+    fn move_to_earlier_run(&self, connection: &str) {
+        let db = Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(1)).unwrap();
+        let mut statement = db
+            .prepare("SELECT fact FROM native_auth_operations ORDER BY generation DESC")
+            .unwrap();
+        let mut fact = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|bytes| crate::engine::owner::native_auth::decode_fact(&bytes.unwrap()).unwrap())
+            .find(|fact| fact.binding.connection.id == reference(connection))
+            .unwrap();
+        drop(statement);
+        let earlier = "b".repeat(64);
+        assert_ne!(fact.binding.engine_epoch, earlier);
+        fact.binding.engine_epoch = earlier;
+        let changed = db
+            .execute(
+                "UPDATE native_auth_operations SET fact=?1 WHERE id=?2 AND generation=?3",
+                params![
+                    crate::engine::owner::native_auth::encode_fact(&fact).unwrap(),
+                    fact.operation_id.as_str(),
+                    i64::try_from(fact.generation).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    /// Asks the engine to check a connection's existing sign-in. With no account-check host
+    /// registered the check cannot run, as when the host is busy at an engine restart.
+    /// Input: the connection. Output: none; the check ends unavailable.
+    async fn check(&self, connection: &str) {
+        let reply = self
+            .owner
+            .start_native_auth(NativeAuthStart {
+                request_id: RequestId::new(format!("routing-check-{connection}")).unwrap(),
+                scope: self.auth_scope(connection),
+                method: NativeAuthMethod::ClaudeExisting,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.fact.phase, NativeAuthPhase::Unavailable);
+        assert_eq!(
+            reply.fact.code.as_deref(),
+            Some("native_auth_host_unavailable")
+        );
+    }
+
+    /// Lists the sign-ins the engine re-proves before this conversation's next turn.
+    /// Input: the fixture. Output: their connections, sorted.
+    async fn stale(&self) -> Vec<CredentialRef> {
+        let runtime = self.runtime();
+        let session = Some(self.session.session_id.clone());
+        let mut stale: Vec<_> = runtime
+            .engine
+            .native_auth_job(|reply| {
+                crate::storage::Job::NativeAuthStale(runtime.identity(), session, reply)
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|start| start.scope.connection)
+            .collect();
+        stale.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        stale
+    }
+
     async fn submit(&self, text: &str) -> RequestId {
         let revision = Self::read_owner(&self.owner, OwnerRead::Capabilities)
             .await
@@ -1739,6 +1813,31 @@ async fn a_master_turn_moves_past_an_account_that_signed_out() {
     let prepared = case.prepared(&case.turn.id).await;
     assert_eq!(prepared.attempt.connection.id, reference("claude-b"));
     drop(prepared);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_restart_re_proves_every_account_of_the_conversation_pool_so_a_turn_can_move_past_the_first()
+ {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    case.move_to_earlier_run("claude-a");
+    case.move_to_earlier_run("claude-b");
+    assert_eq!(
+        case.stale().await,
+        vec![reference("claude-a"), reference("claude-b")]
+    );
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_sign_in_check_the_host_could_not_run_leaves_the_earlier_sign_in_to_be_re_proved() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.move_to_earlier_run("claude-a");
+    case.check("claude-a").await;
+    assert_eq!(case.stale().await, vec![reference("claude-a")]);
     case.finish().await;
 }
 
