@@ -939,6 +939,23 @@ const TEAM_CODES: [&str; 16] = [
     "team_state_not_private",
 ];
 
+/// Master conversation refusal codes the engine returns for an owner start, send, stop or
+/// end, passed to the window as they are so it can say what happened and recover.
+const MASTER_CODES: [&str; 12] = [
+    "master_source_conflict",
+    "master_session_active",
+    "master_session_capacity",
+    "master_session_missing",
+    "master_session_not_active",
+    "master_turn_outstanding",
+    "master_turn_capacity",
+    "master_input_too_large",
+    "master_scope_or_budget_denied",
+    "master_pool_missing",
+    "master_backend_account_denied",
+    "rcli_profile_identity_changed",
+];
+
 fn rejection_code(code: &str) -> &'static str {
     match code {
         "settings_source_conflict" => "settings_source_conflict",
@@ -1014,6 +1031,7 @@ fn rejection_code(code: &str) -> &'static str {
         _ => intake::intake_code(code)
             .or_else(|| crazyagent::memory::library::known_code(code))
             .or_else(|| TEAM_CODES.iter().copied().find(|known| *known == code))
+            .or_else(|| MASTER_CODES.iter().copied().find(|known| *known == code))
             .unwrap_or("owner_rejected"),
     }
 }
@@ -1127,6 +1145,34 @@ mod tests {
                 .as_str()
                 .starts_with("project-")
         );
+    }
+
+    #[test]
+    fn every_code_the_engine_refuses_an_owner_master_action_with_reaches_the_window() {
+        let engine =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../crates/crazyagent/src");
+        let storage = std::fs::read_to_string(engine.join("storage/master_session.rs")).unwrap();
+        let selection = std::fs::read_to_string(engine.join("master_session.rs")).unwrap();
+        let start = selection.find("pub(crate) fn validate_selection(").unwrap();
+        let end = start + selection[start..].find("\n}\n").unwrap();
+        let mut codes: Vec<String> = vec!["rcli_profile_identity_changed".into()];
+        for (text, mark) in [
+            (storage.as_str(), "reject(\""),
+            (storage.as_str(), "rejected(\""),
+            (&selection[start..end], "error(\""),
+        ] {
+            for (at, _) in text.match_indices(mark) {
+                let rest = &text[at + mark.len()..];
+                codes.push(rest[..rest.find('"').unwrap()].to_owned());
+            }
+        }
+        codes.sort();
+        codes.dedup();
+        assert!(codes.len() >= 13, "{codes:?}");
+        for code in &codes {
+            assert_eq!(rejection_code(code), code.as_str(), "{code}");
+        }
+        assert_eq!(rejection_code("made_up_code"), "owner_rejected");
     }
 
     #[cfg(target_os = "macos")]

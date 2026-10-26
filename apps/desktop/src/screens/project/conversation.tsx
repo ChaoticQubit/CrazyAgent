@@ -131,6 +131,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       setTurns([]);
     }
     const receipt = unwrap(await sendToMaster(ticket, live!.session_id, message, nextGeneration()));
+    if (receiptState(receipt).kind === "rejected") await refresh().catch(() => undefined);
     confirm(receipt);
     sentAtByProject.set(data.id, { ...(active ? sentAtByProject.get(data.id) : {}), [receipt.operation_id]: at });
     setSent({ ...(active ? sent : {}), [receipt.operation_id]: message });

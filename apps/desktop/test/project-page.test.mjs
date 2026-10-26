@@ -257,6 +257,14 @@ test("a failed send says Couldn't send and keeps specific engine copy", () => {
   assert.equal(research.sendFailureLine("engine_unreachable"), `Couldn't send. ${api.failureCopy("engine_unreachable")}`);
 });
 
+test("every refusal the engine gives a master send, start or end has its own plain sentence", () => {
+  const codes = ["master_source_conflict", "master_session_active", "master_session_capacity", "master_session_missing",
+    "master_session_not_active", "master_turn_outstanding", "master_turn_capacity", "master_turn_not_current",
+    "master_input_too_large", "master_scope_or_budget_denied", "master_pool_missing", "master_backend_account_denied",
+    "rcli_profile_identity_changed"];
+  for (const code of codes) assert.notEqual(research.sendFailureLine(code), "Couldn't send. Try again.", code);
+});
+
 test("a log follows new lines only while the owner is near its bottom", () => {
   assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 760, clientHeight: 240 }), true);
   assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 240 }), true);
