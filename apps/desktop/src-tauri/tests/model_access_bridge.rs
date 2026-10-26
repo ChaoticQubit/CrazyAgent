@@ -209,7 +209,7 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
             .await?;
         if rejected.outcome != ActionOutcome::Rejected
             || rejected.pending
-            || rejected.rejection != Some("invalid_model_access")
+            || rejected.rejection.as_deref() != Some("invalid_model_access")
         {
             return Err(format!("real dependency rejection required: {rejected:?}").into());
         }
@@ -221,7 +221,9 @@ async fn desktop_all_eight_edits_preserve_real_metadata_and_enforce_dependencies
                 6,
             )
             .await?;
-        if in_use.outcome != ActionOutcome::Rejected || in_use.rejection != Some("pool_in_use") {
+        if in_use.outcome != ActionOutcome::Rejected
+            || in_use.rejection.as_deref() != Some("pool_in_use")
+        {
             return Err(format!("an assigned pool must not be removed: {in_use:?}").into());
         }
         let mut pool = pool;
@@ -412,7 +414,7 @@ async fn desktop_reports_actual_source_conflict_without_losing_the_engine_reason
             .await?;
         if receipt.outcome != ActionOutcome::Rejected
             || receipt.pending
-            || receipt.rejection != Some("settings_source_conflict")
+            || receipt.rejection.as_deref() != Some("settings_source_conflict")
         {
             return Err(format!("actual source-conflict reason required: {receipt:?}").into());
         }
