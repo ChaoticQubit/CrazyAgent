@@ -468,6 +468,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     t.diagnostic(`native-only commands the page called and this test cannot run: ${[...log.unrouted].join(", ") || "none"}`);
     assert.deepEqual(log.invalid, [], "the bridge accepted every command's arguments");
     assert.deepEqual(log.dropped, [], "the bridge answered every call");
+    const busy = log.trail.filter((entry) => entry.answer?.failure?.code === "busy").length;
+    t.diagnostic(`busy answers: ${busy} of ${log.trail.length}`);
+    assert.equal(busy, 0, `the bridge queues the page's calls instead of refusing them: ${busy} of ${log.trail.length} answers were busy`);
   } finally {
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
