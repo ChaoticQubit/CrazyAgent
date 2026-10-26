@@ -241,6 +241,57 @@ pub fn observe(
     persistence::insert_observation(tx, observation)
 }
 
+/// Tells whether the provider's latest word on a connection is a rejected sign-in, however
+/// old, so an account whose sign-in was refused waits for a fresh sign-in, not a timer.
+/// Inputs: the database and the connection. Output: true while that rejection is the
+/// connection's newest observation.
+pub(crate) fn sign_in_rejected(
+    connection: &Connection,
+    model: &ModelConnection,
+) -> Result<bool, EngineError> {
+    let revision = connection_revision(model)?;
+    Ok(persistence::latest_observation(connection, &revision)?
+        .is_some_and(|observation| observation.kind == ObservationKind::InvalidAuthentication))
+}
+
+/// Supersedes a rejected sign-in once the account signed in afresh, so its next turn may
+/// run at once instead of waiting out the failure hold. Inputs: the transaction, the
+/// connection and the time. Output: an unknown-health observation when the newest one
+/// was a rejection; nothing otherwise.
+pub(crate) fn sign_in_renewed(
+    tx: &Transaction<'_>,
+    model: &ModelConnection,
+    now_ms: u64,
+) -> Result<(), EngineError> {
+    let revision = connection_revision(model)?;
+    let Some(latest) = persistence::latest_observation(tx, &revision)? else {
+        return Ok(());
+    };
+    if latest.kind != ObservationKind::InvalidAuthentication {
+        return Ok(());
+    }
+    let observed_at_ms = now_ms.max(latest.observed_at_ms);
+    let observation = Observation {
+        id: RequestId::new(format!(
+            "sign-in:{}",
+            crate::memory::hash(format!("{revision}\n{}", latest.sequence).as_bytes())
+        ))
+        .map_err(error)?,
+        connection: model.clone(),
+        sequence: latest
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| error("gateway_observation_bounds"))?,
+        observed_at_ms,
+        valid_until_ms: observed_at_ms
+            .checked_add(FAILURE_HOLD_MS)
+            .ok_or_else(|| error("gateway_observation_bounds"))?,
+        kind: ObservationKind::Unknown,
+    };
+    validate_observation(&observation)?;
+    persistence::insert_observation(tx, &observation)
+}
+
 pub fn connection_state(
     connection: &Connection,
     model: &ModelConnection,
