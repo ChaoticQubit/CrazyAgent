@@ -356,6 +356,15 @@ fn a_setup_folder_swapped_for_a_link_mid_save_is_never_written_through() {
 }
 
 #[test]
+fn only_linux_refuses_the_graph_build_with_a_plain_line() {
+    assert_eq!(
+        graph::unavailable("linux"),
+        Some("Graph build is not available on Linux in this version.")
+    );
+    assert_eq!(graph::unavailable("macos"), None);
+}
+
+#[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     let system = service::installed_graphify()
         .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
@@ -372,6 +381,7 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     assert_eq!(found.canonicalize().unwrap(), system);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_graph_leaves_out_the_engine_files_in_the_project() {
     let graphify = service::installed_graphify()
