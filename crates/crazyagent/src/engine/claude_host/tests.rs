@@ -575,6 +575,7 @@ async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_lease() {
     use crate::engine::master_host_fixture::{
@@ -603,6 +604,60 @@ async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_
         Ok(())
     );
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_claude_master_process_that_left_its_group_is_stopped_with_the_master() {
+    use crate::engine::master_host_fixture::{
+        GROUP_LEAVING_HARNESS, HarnessProcesses, MasterFixture,
+    };
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, GROUP_LEAVING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    assert_eq!(
+        rustix::process::getpgid(Some(processes.descendant)),
+        Ok(processes.descendant)
+    );
+    let started = std::time::Instant::now();
+    let cancelled = claude.cancel().await;
+    let elapsed = started.elapsed();
+    assert!(cancelled.is_ok(), "{cancelled:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
+    assert!(fixture.sign_in("claude-group-next", 3).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn cancelling_a_claude_master_stops_what_its_shells_detached() {
+    use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
+
+    let mut fixture = MasterFixture::new("claude");
+    let body = format!("{DETACHING_HARNESS}exec /bin/sleep 30\n");
+    let mut claude = stand_in_master(&mut fixture, &body).await;
+    let processes = DetachedProcesses::wait(&fixture.project);
+    let started = std::time::Instant::now();
+    let cancelled = claude.cancel().await;
+    let elapsed = started.elapsed();
+    assert!(cancelled.is_ok(), "{cancelled:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_claude_master_that_ends_on_its_own_leaves_nothing_its_shells_detached() {
+    use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
+
+    let mut fixture = MasterFixture::new("claude");
+    let body = format!("{DETACHING_HARNESS}/bin/cat > /dev/null\nexit 0\n");
+    let mut claude = stand_in_master(&mut fixture, &body).await;
+    let processes = DetachedProcesses::wait(&fixture.project);
+    let closed = claude.close().await;
+    assert!(closed.is_ok(), "{closed:?}");
+    processes.assert_gone();
 }
 
 #[tokio::test]

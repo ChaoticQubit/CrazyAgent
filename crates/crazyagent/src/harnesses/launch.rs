@@ -908,9 +908,11 @@ impl Driver {
 }
 
 /// A running harness process driven through its headless interface.
-/// The process leads its own process group so stop reaches every descendant.
+/// The process leads its own process group, and a harness on pipes has a warden in its
+/// sandbox, so stop reaches every descendant, those in their own sessions included.
 pub struct Session {
     child: Child,
+    warden: Option<crate::sandbox::warden::Warden>,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -982,6 +984,7 @@ impl Session {
         let output_bytes = request.limits.output_bytes;
         let (sender, lines) = channel();
         let mut child;
+        let mut warden = None;
         let stdin;
         match durable {
             Some(io) => {
@@ -1000,7 +1003,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
-                child = crate::spawn_gate::spawn(&mut command)
+                (child, warden) = crate::sandbox::warden::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 stdin = child.stdin.take().map(stdin_file);
                 let stdout = child
@@ -1027,6 +1030,7 @@ impl Session {
         }
         let mut session = Self {
             child,
+            warden,
             stdin,
             lines,
             driver,
@@ -1123,7 +1127,8 @@ impl Session {
         }
     }
 
-    /// Stops the whole process group: TERM, a bounded grace wait, then KILL.
+    /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
+    /// run's warden, when it has one, stop every process left in its sandbox.
     /// Output: the leader's exit code when it exited normally.
     pub fn stop(mut self) -> Option<i32> {
         self.stop_group()
@@ -1188,7 +1193,13 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
+        if let Some(warden) = self.warden.take()
+            && let Err(code) = warden.fire(crate::sandbox::warden::FIRE_TIME)
+        {
+            eprintln!("harness_warden_unconfirmed cause={code}");
+        }
         assert!(self.stdin.is_none());
+        assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))
     }
 }

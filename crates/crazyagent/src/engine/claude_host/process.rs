@@ -4,6 +4,7 @@ use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::sandbox::InstalledSandbox;
+use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
@@ -43,6 +44,7 @@ struct PendingInput {
 
 struct Process {
     child: Child,
+    warden: Option<Warden>,
     group: Pid,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
@@ -134,8 +136,8 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
-    let child = match crate::spawn_gate::spawn(&mut command) {
-        Ok(child) => child,
+    let (child, warden) = match warden::spawn(&mut command) {
+        Ok(started) => started,
         Err(_) => {
             report.send_replace(Status {
                 phase: Phase::Retired,
@@ -150,6 +152,7 @@ pub(super) fn run(
         group: Pid::from_child(&child),
         group_absent: false,
         child,
+        warden,
         profile: Some(profile),
         stdin: None,
         stdout: None,
@@ -506,6 +509,17 @@ impl Process {
         sent
     }
 
+    /// Has the run's warden stop every process left in the harness sandbox, those that left
+    /// the harness group included, once the harness is reaped and its group is empty.
+    /// Takes nothing; records an uncertain cleanup when the warden does not confirm it.
+    fn fire_warden(&mut self) {
+        if let Some(warden) = self.warden.take()
+            && warden.fire(warden::FIRE_TIME).is_err()
+        {
+            self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+        }
+    }
+
     fn cleanup(&mut self) {
         self.report.send_replace(Status {
             phase: Phase::Closing,
@@ -539,6 +553,8 @@ impl Process {
             if let Some(status) = self.status
                 && self.group_absent
             {
+                self.fire_warden();
+                let now = Instant::now();
                 let gone = *group_gone_at.get_or_insert(now);
                 let open = self.stdout.is_some() || self.stderr.is_some();
                 if !open || now >= gone + GRACE {

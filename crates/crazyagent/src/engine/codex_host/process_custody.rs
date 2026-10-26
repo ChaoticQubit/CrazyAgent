@@ -3,6 +3,7 @@ use super::process::{
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 #[cfg(unix)]
@@ -34,6 +35,7 @@ struct PendingWrite {
 
 struct OwnedChild {
     child: Child,
+    warden: Option<Warden>,
     profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
@@ -108,7 +110,7 @@ fn start(
         return Err("codex_host_start_cancelled");
     }
     let mut command = selected_command(command);
-    let child = crate::spawn_gate::spawn(
+    let (child, warden) = warden::spawn(
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -117,6 +119,7 @@ fn start(
     .map_err(|_| "codex_host_spawn_failed")?;
     let mut custody = Custody(Some(OwnedChild {
         child,
+        warden,
         profile,
         stdin: None,
         stdout: None,
@@ -328,6 +331,18 @@ impl OwnedChild {
             }
         }
         self.group_absent = true;
+        self.fire_warden();
+    }
+
+    /// Has the run's warden stop every process left in the harness sandbox, those that left
+    /// the harness group included, once the harness is reaped and its group is empty.
+    /// Takes nothing; records an uncertain cleanup when the warden does not confirm it.
+    fn fire_warden(&mut self) {
+        if let Some(warden) = self.warden.take()
+            && warden.fire(warden::FIRE_TIME).is_err()
+        {
+            self.cleanup_uncertain("codex_host_cleanup_uncertain");
+        }
     }
 
     /// Gives up the pipes once the harness is reaped, its group has been empty for

@@ -172,7 +172,7 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
     assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lease() {
     use crate::engine::master_host_fixture::{
@@ -201,6 +201,46 @@ async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lea
         Ok(())
     );
     assert!(fixture.sign_in("codex-group-next", 3).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_codex_host_process_that_left_its_group_is_stopped_with_the_host() {
+    use crate::engine::master_host_fixture::{
+        GROUP_LEAVING_HARNESS, HarnessProcesses, MasterFixture,
+    };
+
+    let mut fixture = MasterFixture::new("codex");
+    let mut process = stand_in_host(&mut fixture, GROUP_LEAVING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    assert_eq!(
+        rustix::process::getpgid(Some(processes.descendant)),
+        Ok(processes.descendant)
+    );
+    let started = Instant::now();
+    let closed = process.close().await;
+    let elapsed = started.elapsed();
+    assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
+    assert!(fixture.sign_in("codex-group-next", 3).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closing_a_codex_host_stops_what_its_commands_detached() {
+    use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
+
+    let mut fixture = MasterFixture::new("codex");
+    let body = format!("{DETACHING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host(&mut fixture, &body).await;
+    let processes = DetachedProcesses::wait(&fixture.project);
+    let started = Instant::now();
+    let closed = process.close().await;
+    let elapsed = started.elapsed();
+    assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    processes.assert_gone();
 }
 
 #[cfg(unix)]
