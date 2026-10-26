@@ -129,20 +129,27 @@ struct Shared {
     token: String,
     scratch: PathBuf,
     open: Mutex<Vec<Open>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
     stop: AtomicBool,
 }
 
 /// One harness connection the relay is serving: its accept number, a handle to shut it
-/// down, and whether its request carried the token.
+/// down, whether its request carried the token, and the curl child carrying its provider
+/// request while one runs.
 struct Open {
     id: u64,
     stream: TcpStream,
     authorized: bool,
+    upstream: Option<Child>,
 }
 
 impl Shared {
     fn open(&self) -> MutexGuard<'_, Vec<Open>> {
         self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn workers(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
+        self.workers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Takes a slot for a new connection. When all 16 are taken, the oldest connection
@@ -168,8 +175,44 @@ impl Shared {
         }
     }
 
+    /// Records the curl child of a connection's provider request so stopping the relay can
+    /// kill it. Inputs: the connection number and the child. Output: the child back when
+    /// the relay is stopping or the connection is gone, for the caller to stop.
+    fn attach(&self, id: u64, child: Child) -> Result<(), Child> {
+        let mut connections = self.open();
+        if self.stop.load(Ordering::Acquire) {
+            return Err(child);
+        }
+        match connections.iter_mut().find(|open| open.id == id) {
+            Some(open) => {
+                assert!(open.authorized && open.upstream.is_none());
+                open.upstream = Some(child);
+                Ok(())
+            }
+            None => Err(child),
+        }
+    }
+
+    fn detach(&self, id: u64) -> Option<Child> {
+        self.open()
+            .iter_mut()
+            .find(|open| open.id == id)
+            .and_then(|open| open.upstream.take())
+    }
+
     fn release(&self, id: u64) {
-        self.open().retain(|open| open.id != id);
+        let left = {
+            let mut connections = self.open();
+            let left = connections
+                .iter_mut()
+                .find(|open| open.id == id)
+                .and_then(|open| open.upstream.take());
+            connections.retain(|open| open.id != id);
+            left
+        };
+        if let Some(mut child) = left {
+            stop(&mut child);
+        }
     }
 }
 
@@ -177,7 +220,8 @@ impl Shared {
 /// gets the relay's address and a random placeholder token instead of the provider key;
 /// the relay checks the token, swaps in the real key from engine memory and forwards the
 /// request to the provider through the system curl, streaming the reply back. The key
-/// never reaches the agent's environment, arguments or files. Dropping the relay stops it.
+/// never reaches the agent's environment, arguments or files. Dropping the relay stops it:
+/// provider requests still in flight are killed and their threads joined before it returns.
 pub struct Relay {
     port: u16,
     shared: Arc<Shared>,
@@ -209,6 +253,7 @@ impl Relay {
             token,
             scratch,
             open: Mutex::new(Vec::new()),
+            workers: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
         });
         let accepting = Arc::clone(&shared);
@@ -253,9 +298,23 @@ impl Drop for Relay {
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
-        for open in self.shared.open().drain(..) {
-            let _ = open.stream.shutdown(Shutdown::Both);
+        let upstreams: Vec<Child> = self
+            .shared
+            .open()
+            .iter_mut()
+            .filter_map(|open| {
+                let _ = open.stream.shutdown(Shutdown::Both);
+                open.upstream.take()
+            })
+            .collect();
+        for mut child in upstreams {
+            stop(&mut child);
         }
+        let workers = std::mem::take(&mut *self.shared.workers());
+        for worker in workers {
+            let _ = worker.join();
+        }
+        assert!(self.shared.open().is_empty());
         let _ = std::fs::remove_dir_all(&self.shared.scratch);
     }
 }
@@ -292,6 +351,7 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
             id,
             stream: handle,
             authorized: false,
+            upstream: None,
         };
         if !shared.admit(open) {
             let mut stream = stream;
@@ -305,8 +365,13 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
                 let _slot = Slot(&serving, id);
                 serve(stream, &serving, id);
             });
-        if spawned.is_err() {
-            shared.release(id);
+        match spawned {
+            Ok(worker) => {
+                let mut workers = shared.workers();
+                workers.retain(|worker| !worker.is_finished());
+                workers.push(worker);
+            }
+            Err(_) => shared.release(id),
         }
     }
 }
@@ -376,18 +441,22 @@ fn exchange(
     .map_err(|_| 400_u16)?;
     let mut child =
         crate::spawn_gate::spawn(&mut upstream_command(&shared.upstream)).map_err(|_| 502_u16)?;
-    let written = child.stdin.take().map(|mut input| input.write_all(&config));
-    config.fill(0);
-    if !matches!(written, Some(Ok(()))) {
+    let input = child.stdin.take();
+    let output = child.stdout.take();
+    if let Err(mut child) = shared.attach(id, child) {
+        config.fill(0);
         stop(&mut child);
         return Err(502);
     }
-    let Some(output) = child.stdout.take() else {
-        stop(&mut child);
-        return Err(502);
+    let written = input.map(|mut input| input.write_all(&config));
+    config.fill(0);
+    let relayed = match (written, output) {
+        (Some(Ok(())), Some(output)) => relay_reply(&mut BufReader::new(output), stream),
+        _ => Err(502),
     };
-    let relayed = relay_reply(&mut BufReader::new(output), stream);
-    stop(&mut child);
+    if let Some(mut child) = shared.detach(id) {
+        stop(&mut child);
+    }
     drop(body_file);
     relayed
 }

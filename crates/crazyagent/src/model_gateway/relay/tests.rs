@@ -558,3 +558,58 @@ fn dropping_the_relay_stops_it_and_removes_its_scratch() {
     drop(relay);
     assert!(!scratch.exists());
 }
+
+#[test]
+fn dropping_the_relay_aborts_a_provider_request_still_in_flight() {
+    let (reached, arrived) = mpsc::channel::<()>();
+    let (ended, fate) = mpsc::channel::<(bool, Instant)>();
+    let provider = Provider::start(move |_, stream| {
+        reached.send(()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        let closed = match stream.read(&mut byte) {
+            Ok(read) => read == 0,
+            Err(error) => !matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+        };
+        ended.send((closed, Instant::now())).unwrap();
+    });
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let shared = Arc::clone(&relay.shared);
+    let mut harness = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+    harness.set_read_timeout(Some(WAIT)).unwrap();
+    harness
+        .write_all(&post(
+            "/v1/messages",
+            &format!("x-api-key: {}", relay.token()),
+            r#"{"stream":true}"#,
+        ))
+        .unwrap();
+    arrived
+        .recv_timeout(WAIT)
+        .expect("the provider never saw the relayed request");
+    let cancelled = Instant::now();
+    drop(relay);
+    let stopped = Instant::now();
+    assert!(stopped - cancelled < WAIT, "stopping the relay hung");
+    let (closed, at) = fate.recv_timeout(WAIT).unwrap();
+    assert!(
+        closed,
+        "the provider request outlived the stopped relay and still holds the key"
+    );
+    assert!(at <= stopped + Duration::from_millis(500));
+    assert_eq!(
+        Arc::strong_count(&shared),
+        1,
+        "a relay request thread outlived the stopped relay"
+    );
+    assert!(shared.open().is_empty());
+    let mut rest = Vec::new();
+    let _ = harness.read_to_end(&mut rest);
+    assert!(!String::from_utf8_lossy(&rest).contains("200"));
+    drop(provider);
+}
