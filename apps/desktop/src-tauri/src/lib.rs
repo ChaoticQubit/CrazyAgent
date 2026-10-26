@@ -16,7 +16,7 @@ use bridge::{
     ProjectPage,
 };
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
-use crazyagent::agents::AgentView;
+use crazyagent::agents::{AccountUse, AgentView};
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
@@ -1587,24 +1587,30 @@ async fn desktop_stop_agent(
 }
 
 #[tauri::command]
-async fn desktop_agents_using(
+async fn desktop_account_use(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     account_id: String,
-) -> Result<Vec<AgentView>, BridgeError> {
+) -> Result<AccountUse, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.agents_using(account_id).await
+    lock(&state).await?.account_use(account_id).await
 }
 
 #[tauri::command]
-async fn desktop_stop_agents_using(
+async fn desktop_release_account(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     account_id: String,
-) -> Result<Vec<AgentView>, BridgeError> {
+    generation: u64,
+) -> Result<AccountUse, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.stop_agents_using(account_id)?;
-    call.await
+    let stop = lock(&state)
+        .await?
+        .stop_account_agents(account_id.clone())?;
+    let holders = stop.await?;
+    lock(&state).await?.end_holders(holders, generation).await?;
+    let wait = lock(&state).await?.await_account_free(account_id)?;
+    wait.await
 }
 
 #[tauri::command]
@@ -1985,8 +1991,8 @@ pub fn run() {
             desktop_project_plugins,
             desktop_agents,
             desktop_stop_agent,
-            desktop_agents_using,
-            desktop_stop_agents_using,
+            desktop_account_use,
+            desktop_release_account,
             desktop_interrupt_agent,
             desktop_restart_agent,
             desktop_pick_folder,

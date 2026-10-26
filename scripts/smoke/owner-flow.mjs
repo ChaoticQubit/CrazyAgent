@@ -651,10 +651,10 @@ async function main() {
       }
       const refused = await call("desktop_logout_native_auth", { ticket: (await connection(used.id)).ticket });
       if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
-      const using = await value("desktop_agents_using", { accountId: used.id });
+      const using = (await value("desktop_account_use", { accountId: used.id })).agents;
       if (!using.some((view) => view.label === `Team sub-agent ${agent.id}` && view.project === project)) throw new Refused("in_use_without_the_agent", using.map((view) => `${view.label}@${view.project}`).join(",") || "none");
-      const left = await value("desktop_stop_agents_using", { accountId: used.id });
-      if (left.length) throw new Refused("agents_using_still_running", left.map((view) => `${view.label} ${view.status}`).join(","));
+      const left = await value("desktop_release_account", { accountId: used.id, generation: generation() });
+      if (left.agents.length || left.holders.length) throw new Refused("account_still_in_use", [...left.agents.map((view) => `${view.label} ${view.status}`), ...left.holders.map((holder) => holder.kind)].join(","));
       await value("desktop_logout_native_auth", { ticket: (await connection(used.id)).ticket });
       await settleAuth(used.id, "logout", "unauthenticated_observed");
       const next = await delegate("Summarize the README of this repository.");
@@ -662,6 +662,40 @@ async function main() {
       team.agents.push(next.agent.id);
       if (next.agent.account !== other.id) throw new Refused("team_agent_on_signed_out_account", next.agent.account ?? "no account");
       return `refusal named ${using.map((view) => view.label).join(", ")}; stopped and signed out; next agent on the other member, ${launched(next.agent, next.task)}`;
+    });
+    await step("6e3", "sign out the account a master turn is using: the refusal names the master conversation and its project, End conversation and sign out ends it and signs out", async () => {
+      const project = needs(state.project, "1");
+      const opened = await value("desktop_open_project", { id: project });
+      let master = await value("desktop_master_state", { ticket: opened.ticket });
+      if (!master.session || master.session.phase !== "configured") {
+        applied("open_master", await value("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
+        master = await value("desktop_master_state", { ticket: opened.ticket });
+        if (!master.session) throw new Refused("master_session_missing");
+      }
+      const sessionId = master.session.session_id;
+      const receipt = await value("desktop_submit_master", { ticket: opened.ticket, sessionId, text: "List every file in this repository with a one-paragraph summary of each, reading each file first.", generation: generation() });
+      applied("submit_master", receipt);
+      let turn;
+      for (const deadline = Date.now() + TURN_MS; ; await pause(POLL_MS)) {
+        turn = (await value("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null })).page.turns.find((item) => item.id === receipt.operation_id);
+        if (!turn) throw new Refused("master_turn_missing");
+        if (turn.phase === "running") break;
+        if (!ACTIVE_TURN.has(turn.phase)) throw new Refused(`master_turn_ended_before_sign_out_${turn.phase}`, turn.reason ?? "-");
+        if (Date.now() > deadline) throw new Refused(`master_turn_still_${turn.phase}`);
+      }
+      const accountId = turn.attempt?.connection?.id;
+      if (!accountId) throw new Refused("master_turn_without_account");
+      const refused = await call("desktop_logout_native_auth", { ticket: (await connection(accountId)).ticket });
+      if (failureCode("desktop_logout_native_auth", refused) !== "native_profile_in_use") throw new Refused("sign_out_not_refused_while_in_use", JSON.stringify(refused));
+      const holders = (await value("desktop_account_use", { accountId })).holders;
+      if (!holders.some((holder) => holder.kind === "master" && holder.project === project && holder.session === sessionId)) throw new Refused("in_use_without_the_master", JSON.stringify(holders));
+      const left = await value("desktop_release_account", { accountId, generation: generation() });
+      if (left.agents.length || left.holders.length) throw new Refused("account_still_in_use", JSON.stringify(left));
+      const ended = (await value("desktop_master_state", { ticket: (await value("desktop_open_project", { id: project })).ticket })).session;
+      if (ended?.session_id === sessionId && ended.phase === "configured") throw new Refused("master_conversation_not_ended");
+      await value("desktop_logout_native_auth", { ticket: (await connection(accountId)).ticket });
+      await settleAuth(accountId, "logout", "unauthenticated_observed");
+      return `refusal named the master conversation in the project; conversation ended and ${accountId} signed out`;
     });
     await step("6f", "End conversation and Remove project clean up the team's agents", async () => {
       const project = needs(state.project, "1");

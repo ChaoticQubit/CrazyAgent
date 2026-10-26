@@ -1,11 +1,10 @@
 use super::*;
 use crate::agents::{AccountUse, AgentView, Holder, LIST_MAX};
-use crate::engine::owner::{AGENTS_PAGE, AgentPage};
+use crate::engine::owner::{AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 use crate::master_session::MasterOwnerAction;
 use crate::protocol::{CredentialRef, ProjectId};
 
 const PAGES_MAX: usize = LIST_MAX.div_ceil(AGENTS_PAGE);
-const RELEASE_WAIT: Duration = Duration::from_secs(20);
 
 impl OwnerController {
     fn agents_client(&self) -> Result<&OwnerClient, EngineError> {

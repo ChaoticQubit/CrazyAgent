@@ -1051,18 +1051,26 @@ impl Agents {
     /// Registers one holder of an account's profile until the returned hold is dropped.
     /// Inputs: the account and the holder. Output: the hold to keep beside the lease.
     pub fn hold(&self, account: CredentialRef, holder: Holder) -> Hold {
-        let _ = (account, holder);
+        let key = self.next_hold.fetch_add(1, Ordering::Relaxed);
+        let mut holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds.insert(key, (account, holder));
         Hold {
             holds: self.holds.clone(),
-            key: self.next_hold.fetch_add(1, Ordering::Relaxed),
+            key,
         }
     }
 
     /// The holders of one account's profile other than hosted agents, newest first, at
     /// most `LIST_MAX`. Input: the account. Output: the holders.
     pub fn holders(&self, account: &CredentialRef) -> Vec<Holder> {
-        let _ = account;
-        Vec::new()
+        let holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
+        holds
+            .values()
+            .rev()
+            .filter(|(held, _)| held == account)
+            .map(|(_, holder)| holder.clone())
+            .take(LIST_MAX)
+            .collect()
     }
 
     fn hosted_using(

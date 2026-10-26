@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { agentsUsing, checkAccount, plainError, renameAccount, stopAgentsUsing, type AccountView, type AgentView, type PoolSummary } from "../../api";
+import { accountUse, checkAccount, plainError, releaseAccount, renameAccount, type AccountUse, type AccountView, type PoolSummary } from "../../api";
 import { useAppSession, type ProjectRow } from "../../state";
 import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
 import { displayText } from "../conversation";
@@ -38,29 +38,46 @@ export function canSignOut(account: AccountView): boolean {
     && account.status === "signed_in";
 }
 
-/** Names the agents that keep an account from signing out, grouped by project: "Team
- * sub-agent 3 in Alpha is using this account." Inputs: the agents and the known projects.
- * Output: the sentence. */
-export function inUseLine(agents: readonly AgentView[], projects: readonly ProjectRow[] | undefined): string {
+/** Names what keeps an account from signing out, grouped by project: "Team sub-agent 3 and
+ * the master conversation in Alpha are using this account." Inputs: the account's use and
+ * the known projects. Output: the sentence. */
+export function inUseLine(used: AccountUse, projects: readonly ProjectRow[] | undefined): string {
+  const named = [
+    ...used.agents.map((agent) => ({ project: agent.project, name: displayText(agent.label) })),
+    ...used.holders.map((holder) => ({ project: holder.project, name: holder.kind === "master" ? "the master conversation" : displayText(holder.title) })),
+  ];
   const groups = new Map<string, string[]>();
-  for (const agent of agents) groups.set(agent.project, [...groups.get(agent.project) ?? [], displayText(agent.label)]);
-  const parts = [...groups].map(([project, labels]) =>
-    `${andList(labels)} in ${displayText(projects?.find((row) => row.id === project)?.name ?? "another project")}`);
-  return `${andList(parts)} ${agents.length === 1 ? "is" : "are"} using this account.`;
+  for (const { project, name } of named) groups.set(project, [...groups.get(project) ?? [], name]);
+  const parts = [...groups].map(([project, names]) =>
+    `${andList(names)} in ${displayText(projects?.find((row) => row.id === project)?.name ?? "another project")}`);
+  const line = `${andList(parts)} ${named.length === 1 ? "is" : "are"} using this account.`;
+  return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
-/** Says why an account could not be signed out. When the engine named the agents using it,
- * offers one action that stops them and signs out. Inputs: those agents, the known
+/** Names the one action that ends what uses an account and signs it out: agents and
+ * research jobs stop, master conversations end. Input: the account's use. Output: the
+ * action's label and its label while it runs. */
+export function releaseLabels(used: AccountUse): { label: string; pending: string } {
+  const master = used.holders.some((holder) => holder.kind === "master");
+  const others = used.agents.length > 0 || used.holders.some((holder) => holder.kind === "research");
+  if (master && others) return { label: "Stop agents, end conversation and sign out", pending: "Ending..." };
+  if (master) return { label: "End conversation and sign out", pending: "Ending conversation..." };
+  return { label: "Stop agents and sign out", pending: "Stopping agents..." };
+}
+
+/** Says why an account could not be signed out. When the engine named what uses it, offers
+ * one action that ends it all and signs out. Inputs: the account's use, the known
  * projects, whether that action runs, and its handler. */
-export function InUseNotice({ agents, projects, pending, onStop }: {
-  agents: readonly AgentView[];
+export function InUseNotice({ used, projects, pending, onStop }: {
+  used: AccountUse;
   projects: readonly ProjectRow[] | undefined;
   pending: boolean;
   onStop: () => void;
 }) {
-  if (agents.length === 0) return <Notice tone="warn" alert>{plainError("native_profile_in_use")}</Notice>;
-  return <Notice tone="warn" alert><span className="stack-small"><span>{inUseLine(agents, projects)}</span>
-    <span><Button variant="danger-text" icon="log-out" pending={pending} pendingLabel="Stopping agents..." onClick={onStop}>Stop agents and sign out</Button></span>
+  if (used.agents.length === 0 && used.holders.length === 0) return <Notice tone="warn" alert>{plainError("native_profile_in_use")}</Notice>;
+  const labels = releaseLabels(used);
+  return <Notice tone="warn" alert><span className="stack-small"><span>{inUseLine(used, projects)}</span>
+    <span><Button variant="danger-text" icon="log-out" pending={pending} pendingLabel={labels.pending} onClick={onStop}>{labels.label}</Button></span>
   </span></Notice>;
 }
 
@@ -101,7 +118,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
   const [checkLine, setCheckLine] = useState<string>();
   const [cancelling, setCancelling] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
-  const [inUse, setInUse] = useState<AgentView[]>();
+  const [inUse, setInUse] = useState<AccountUse>();
   const [error, setError] = useState<string>();
   const accountId = account?.id;
   useEffect(() => {
@@ -151,14 +168,14 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
     setSigningOut(true);
     setError(undefined);
     if (stopFirst) {
-      const stopped = session.noteResult(await stopAgentsUsing(account.id));
-      if (stopped.kind !== "ok") {
+      const released = session.noteResult(await releaseAccount(account.id));
+      if (released.kind !== "ok") {
         setSigningOut(false);
-        return setError(stopped.kind === "not_ready" ? "Stopping agents isn't ready yet in this build." : stopped.message);
+        return setError(released.kind === "not_ready" ? "Stopping what uses this account isn't ready yet in this build." : released.message);
       }
-      if (stopped.value.length > 0) {
+      if (released.value.agents.length > 0 || released.value.holders.length > 0) {
         setSigningOut(false);
-        return setInUse(stopped.value);
+        return setInUse(released.value);
       }
     }
     const result = session.noteResult(await signOut(account.id));
@@ -169,9 +186,9 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
       return onChanged();
     }
     if (result.kind === "error" && result.code === "native_profile_in_use") {
-      const using = await agentsUsing(account.id);
+      const used = await accountUse(account.id);
       setSigningOut(false);
-      return setInUse(using.kind === "ok" ? using.value : []);
+      return setInUse(used.kind === "ok" ? used.value : { agents: [], holders: [] });
     }
     setSigningOut(false);
     setError(result.kind === "not_ready" ? "Signing out isn't ready yet in this build." : result.message);
@@ -201,7 +218,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
         <span><Button variant="primary" icon="log-in" onClick={() => setSigningIn(true)}>Sign in again</Button></span>}
       {canSignOut(account) && !signingIn && inUse === undefined &&
         <span><Button icon="log-out" pending={signingOut} pendingLabel="Signing out..." onClick={() => void signOutAccount(false)}>Sign out</Button></span>}
-      {inUse !== undefined && <InUseNotice agents={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
+      {inUse !== undefined && <InUseNotice used={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
         pending={signingOut} onStop={() => void signOutAccount(true)} />}
       {subscription && signingIn && <SignInAgain account={account} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
       {account.method === "url" && <div className="stack-small">

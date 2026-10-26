@@ -1339,7 +1339,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.stop_agent(id)?; call.await }.await;
             routed(result)
         }
-        "desktop_agents_using" => {
+        "desktop_account_use" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
@@ -1349,20 +1349,28 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state)?.agents_using(account_id).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state).await?.account_use(account_id).await }.await;
             routed(result)
         }
-        "desktop_stop_agents_using" => {
+        "desktop_release_account" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
                 account_id: String,
+                generation: u64,
             }
-            let Args { account_id } = match parse(args) {
+            let Args { account_id, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state)?.stop_agents_using(account_id)?; call.await }.await;
+            let result: Result<_, BridgeError> = async {
+                let stop = lock(state).await?.stop_account_agents(account_id.clone())?;
+                let holders = stop.await?;
+                lock(state).await?.end_holders(holders, generation).await?;
+                let wait = lock(state).await?.await_account_free(account_id)?;
+                wait.await
+            }
+            .await;
             routed(result)
         }
         "desktop_interrupt_agent" => {

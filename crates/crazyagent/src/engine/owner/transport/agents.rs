@@ -9,6 +9,7 @@ pub(super) const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const AGENTS_PAGE: usize = 8;
 const USING_PAGES_MAX: usize = LIST_MAX.div_ceil(AGENTS_PAGE);
 pub const HOLDERS_MAX: usize = 64;
+pub const RELEASE_WAIT: Duration = Duration::from_secs(20);
 const FREE_POLL: Duration = Duration::from_millis(100);
 
 /// Every code an agent control can answer an owner client with: the agent register's
