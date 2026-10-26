@@ -285,12 +285,19 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   run_setup: "running project setup",
   pack_set: "changing the default pack",
   pack_remove: "removing a pack",
+  team: "changing the team",
+  project_setup_update: "updating the project setup",
+  project_remove: "removing the project",
+  research_cancel: "cancelling the research",
+  research_retry: "retrying the research",
 };
 
-/** Names a kept change in plain words. Input: the change. Output: a lower-case phrase. */
+/** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the
+ * broader phrase for an access edit the window has no name for, and "your change" for a kind
+ * it does not know, so the banner never fails to render. */
 export function changeLabel(intent: PendingIntent): string {
-  if (intent.kind === "model_access" && intent.model_access) return MODEL_ACCESS_CHANGE[intent.model_access.kind];
-  return CHANGE[intent.kind];
+  const access = intent.kind === "model_access" && intent.model_access ? MODEL_ACCESS_CHANGE[intent.model_access.kind] : undefined;
+  return access ?? CHANGE[intent.kind] ?? "your change";
 }
 
 function capital(text: string): string {

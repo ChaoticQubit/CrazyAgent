@@ -58,9 +58,10 @@ fn load_pack(tx: &Transaction<'_>, id: &str) -> Result<Option<PackRecord>, Engin
 }
 
 /// An entry the plugin store already holds with no pack row: a global skill or MCP server
-/// named like the entry, as when the owner added it before setup ran. Inputs: the
-/// transaction and the entry. Output: the row that adopts that item, on or off as the item
-/// is, or none.
+/// named like the entry, as when the owner added it before setup ran. The row keeps source
+/// `present`, so the item stays the owner's: a setup run never replaces or removes it.
+/// Inputs: the transaction and the entry. Output: the row that adopts that item, on or off
+/// as the item is, or none.
 fn present(
     tx: &Transaction<'_>,
     entry: &PackManifestEntry,
@@ -207,6 +208,10 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
     }
 }
 
+/// Installs one entry's pinned skills and server, replacing an older pin the pack itself
+/// installed. An item the owner holds under the entry's name is adopted as present and
+/// never replaced or removed. Inputs: the transaction, engine root, new row, skill folders
+/// and server, plus the lists of added and moved-aside folders. Output: any failure.
 #[cfg(unix)]
 fn install(
     tx: &Transaction<'_>,
@@ -221,14 +226,16 @@ fn install(
         if old.source == record.source {
             return Ok(());
         }
-        remove_items(tx, root, &old, moved)?;
-    } else if let Some(entry) = manifest()?
+        if old.source != PRESENT {
+            remove_items(tx, root, &old, moved)?;
+        }
+    }
+    if let Some(entry) = manifest()?
         .entries
         .iter()
         .find(|entry| entry.id == record.id)
-        && let Some(mut owned) = present(tx, entry)?
+        && let Some(owned) = present(tx, entry)?
     {
-        owned.source = record.source;
         return save_pack(tx, &owned);
     }
     let mut record = record;
@@ -503,7 +510,7 @@ pub(crate) fn execute(
     else {
         return sweep(connection, root);
     };
-    if source.is_empty() || (skills.is_empty() && server.is_none()) {
+    if source.is_empty() || source == PRESENT || (skills.is_empty() && server.is_none()) {
         return Err(error("pack_unknown"));
     }
     let record = PackRecord {
