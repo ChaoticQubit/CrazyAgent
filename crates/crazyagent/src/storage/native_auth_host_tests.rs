@@ -499,7 +499,7 @@ fn compatible_alias_start_and_logout_share_the_physical_fence() {
 }
 
 #[test]
-fn capacity_precedes_new_preparation_and_preserves_known_replay() {
+fn a_busy_host_at_capacity_refuses_before_preparation_and_preserves_known_replay() {
     let mut case = HostCase::new();
     let mut first = None;
     for index in 0..1023 {
@@ -537,11 +537,11 @@ fn capacity_precedes_new_preparation_and_preserves_known_replay() {
     );
     assert_code(
         case.begin(case.start("over-capacity", "connection-z")),
-        "native_auth_operation_capacity",
+        "native_auth_host_busy",
     );
     assert_code(
         case.begin(case.logout("over-capacity-logout", "connection-z")),
-        "native_auth_operation_capacity",
+        "native_auth_host_busy",
     );
     assert!(!case.profile("profile-z").exists());
     assert_eq!(case.snapshot(), before);

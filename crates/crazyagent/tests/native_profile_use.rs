@@ -1136,7 +1136,7 @@ async fn full_capacity_preserves_known_ids_before_busy_lock_and_new_profile_effe
         LockProcess::spawn(&case, "probe", b'B').finish(false);
         holder.finish(true);
         for result in [busy_start, busy_out, new_start, new_out] {
-            assert_error(result, "native_auth_operation_capacity");
+            assert_error(result, "native_profile_in_use");
         }
         assert_eq!(case.stored(), before);
         assert!(!case.profile("profile-z").exists());
