@@ -741,11 +741,12 @@ async fn master_dispatch_blocks_a_claude_turn_without_a_current_sign_in() {
 }
 
 #[tokio::test]
-async fn a_send_to_a_master_opened_before_an_engine_restart_is_refused_so_a_new_conversation_takes_it()
- {
+async fn a_send_after_a_restart_with_a_turn_left_queued_asks_for_a_new_conversation() {
     let mut fixture = DispatchFixture::start().await;
     fixture.create().await;
     let (_, _, stale) = fixture.open().await;
+    let (_, left) = fixture.submit(&stale, "left-queued").await;
+    operation(&left);
     fixture.restart().await;
     let (_, refused) = fixture.submit(&stale, "after-restart").await;
     let OwnerResponse::Applied { operation: refusal } = &refused.response else {
@@ -757,7 +758,8 @@ async fn a_send_to_a_master_opened_before_an_engine_restart_is_refused_so_a_new_
             code: "master_source_conflict".into()
         }
     );
-    assert_eq!(fixture.counts(), (0, 0));
+    assert_eq!(fixture.counts(), (1, 0));
+    assert_eq!(fixture.turn(&stale).await.phase, MasterTurnPhase::Queued);
     let (_, closed) = fixture
         .action(
             "close-after-restart",

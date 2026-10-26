@@ -123,7 +123,7 @@ fn current_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<
         tx,
         &Admission {
             db_instance: instance,
-            engine_epoch: session.owner.engine_epoch.clone(),
+            engine_epoch: session.engine_epoch().to_owned(),
             owner_id: session.owner.owner_id.clone(),
             owner_epoch: session.owner.resulting_epoch,
         },

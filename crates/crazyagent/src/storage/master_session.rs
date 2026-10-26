@@ -1036,7 +1036,7 @@ fn current_scope(
             owner_epoch: session.owner.resulting_epoch,
         },
     )?;
-    if session.owner.engine_epoch != host.engine_epoch
+    if session.engine_epoch() != host.engine_epoch
         || session.binding()
             != (
                 &config.id,
@@ -1230,7 +1230,7 @@ pub(super) fn validate_bootstrap_auth(
                 }
             }
             if !matches!(fact.action, NativeAuthAction::SignIn { .. })
-                || fact.binding.engine_epoch != session.owner.engine_epoch
+                || fact.binding.engine_epoch != session.engine_epoch()
                 || fact.binding.at_revision.value() > owner_revision(tx)?
                 || !crate::master_session::backend_member(
                     session.selection.backend,
@@ -3343,18 +3343,20 @@ fn reject(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Moves an open master session to the current settings when nothing it runs on changed
-/// (DEC-092): the config it is bound to and the current one have the same `master_scope`.
-/// Inputs: the transaction, the session, the current config and source hash, and the
-/// revision of this send. Output: true when the session runs under the current settings.
+/// Moves an open master session to the current settings and engine run when nothing it
+/// runs on changed (DEC-092, LB-23): the bound and current configs have the same `master_scope`.
+/// Inputs: the transaction, the session, the current config, source hash and engine epoch,
+/// and the revision of this send. Output: true when the session runs under all three now.
 fn rebind(
     tx: &Transaction<'_>,
     session: &mut MasterSessionView,
     config: &EffectiveConfig,
     source_hash: &str,
+    engine_epoch: &str,
     at: Cursor,
 ) -> Result<bool, EngineError> {
-    if session.binding() == (&config.id, source_hash) {
+    let moved = session.engine_epoch() != engine_epoch;
+    if !moved && session.binding() == (&config.id, source_hash) {
         return Ok(true);
     }
     if session.selection.backend == MasterBackend::Rcli || session.rebound.len() >= REBINDS_MAX {
@@ -3381,10 +3383,12 @@ fn rebind(
     session.rebound.push(MasterBinding {
         config_id: config.id.clone(),
         source_hash: source_hash.into(),
+        engine_epoch: moved.then(|| engine_epoch.into()),
         at,
     });
     assert!(session.rebound.len() <= REBINDS_MAX);
     assert_eq!(session.binding(), (&config.id, source_hash));
+    assert_eq!(session.engine_epoch(), engine_epoch);
     Ok(true)
 }
 
@@ -3479,9 +3483,15 @@ fn execute(
     }
     match action {
         MasterOwnerAction::Submit { text, .. } => {
-            if session.owner.engine_epoch != provenance.engine_epoch
-                || !rebind(tx, &mut session, config, source_hash, Cursor::new(next))?
-            {
+            let moved = session.engine_epoch() != provenance.engine_epoch;
+            if !rebind(
+                tx,
+                &mut session,
+                config,
+                source_hash,
+                &provenance.engine_epoch,
+                Cursor::new(next),
+            )? {
                 return Ok(reject("master_source_conflict"));
             }
             if let Err(reason) = validate_selection(config, project, &session.selection) {
@@ -3493,7 +3503,11 @@ fn execute(
                     let turn = load_turn(tx, &session, current, revision)?
                         .ok_or_else(|| error("master_current_turn_record"))?;
                     if turn.phase != MasterTurnPhase::Uncertain {
-                        return Ok(reject("master_turn_outstanding"));
+                        return Ok(reject(if moved {
+                            "master_source_conflict"
+                        } else {
+                            "master_turn_outstanding"
+                        }));
                     }
                     Some(turn)
                 }
