@@ -180,9 +180,7 @@ fn crash(root: &Path, test: &str) -> Vec<String> {
 fn escaped_after_crash(root: &Path) -> (String, i32) {
     let ids = crash(root, "agents::tests::escaping_engine_process");
     let (pid, grandchild) = pids(root, "escaping");
-    let path = root.join("work/escaping/escaped.json");
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let escaped = value["pid"].as_i64().unwrap() as i32;
+    let escaped = escaped(root, "escaping");
     rustix::process::kill_process_group(
         rustix::process::Pid::from_raw(pid).unwrap(),
         rustix::process::Signal::KILL,
@@ -193,6 +191,12 @@ fn escaped_after_crash(root: &Path) -> (String, i32) {
     });
     assert!(alive(escaped));
     (ids[0].clone(), escaped)
+}
+
+fn escaped(root: &Path, name: &str) -> i32 {
+    let path = root.join("work").join(name).join("escaped.json");
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    value["pid"].as_i64().unwrap() as i32
 }
 
 fn gone_within(pid: i32, wait: Duration) -> bool {
@@ -207,6 +211,34 @@ fn end_escaped(pid: i32) {
     if let Some(pid) = rustix::process::Pid::from_raw(pid) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
+}
+
+#[test]
+fn stopping_an_agent_also_ends_a_child_that_left_its_group_but_holds_its_log() {
+    let case = Case::new();
+    let root = case.path();
+    let agents = case.agents();
+    let agent = agents
+        .launch(spec(&root, "leaving", Some("escape")), None)
+        .unwrap();
+    until("the reply", || replied(&agents, &agent.id, "escaped"));
+    let (pid, grandchild) = pids(&root, "leaving");
+    let escaped = escaped(&root, "leaving");
+    assert!(alive(escaped));
+
+    let stopped = agents.stop(&agent.id).unwrap();
+
+    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
+    end_escaped(escaped);
+    assert!(
+        escaped_ended,
+        "stop left the child that left the agent's group running"
+    );
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert_eq!(stopped.reason, None);
+    until("the agent's own group to be gone", || {
+        !alive(pid) && !alive(grandchild)
+    });
 }
 
 #[test]
