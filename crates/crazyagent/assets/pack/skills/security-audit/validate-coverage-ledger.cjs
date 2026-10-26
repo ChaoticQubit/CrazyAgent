@@ -1,15 +1,9 @@
 #!/usr/bin/env node
 
-/**
- * Validates coverage-ledger.json and its canonical coverage IDs.
- * Usage: node validate-coverage-ledger.cjs <path-to-coverage-ledger.json>
- */
-
 const fs = require("node:fs");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
 
-// Conservative bounds apply before JSON.parse and again to the parsed document.
 const LIMITS = Object.freeze({
   inputBytes: 5 * 1024 * 1024,
   units: 10000,
@@ -676,9 +670,7 @@ function collectUnitErrors(unit, index) {
     }
     try {
       expectedId = canonicalCoverageId(unit.canonical_refs);
-    } catch {
-      // The specific reference errors above are more useful.
-    }
+    } catch {}
   }
   if (!isVisibleText(unit.coverage_id, 65536)) {
     errors.push(`${base}.coverage_id: invalid text`);
@@ -722,7 +714,6 @@ function readFileWithinLimit(file) {
   const noFollow = fs.constants.O_NOFOLLOW;
   const nonBlock = fs.constants.O_NONBLOCK;
   if (!Number.isInteger(noFollow) || noFollow === 0 || !Number.isInteger(nonBlock) || nonBlock === 0) {
-    // Node exposes no race-safe fallback on these platforms, so reject all inputs.
     throw new SafeInputError("OS no-follow and nonblocking input protection is unavailable");
   }
 

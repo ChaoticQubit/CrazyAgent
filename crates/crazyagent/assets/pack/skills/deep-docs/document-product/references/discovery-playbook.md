@@ -6,14 +6,11 @@ Work top-down (shape) then follow-the-flow (behavior). Record findings as you go
 
 ## Step 1 — Orient
 
-Establish size, languages, and top-level shape.
+Establish size, languages, and top-level shape. The three commands below show, in order: the top-level layout two levels deep without `.git` and `node_modules`; the language mix and lines of code (`cloc` when present, otherwise a count by file extension); and the most-churned files in the history, which are often the core.
 
 ```bash
-# Top-level layout (2 levels), ignoring noise
 find . -maxdepth 2 -type d -not -path '*/.git/*' -not -path '*/node_modules/*' | sort
-# Language mix and LOC (if cloc present); else count by extension
 cloc . 2>/dev/null || rg --files | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -30
-# Repo history signal: most-churned files (often the core)
 git log --pretty=format: --name-only 2>/dev/null | grep . | sort | uniq -c | sort -rn | head -30
 ```
 
@@ -45,8 +42,9 @@ Turn directories into subsystems.
 - Identify **process/network boundaries**: separate services, separate deployables, anything with its own manifest/Dockerfile, anything talking over HTTP/queue/socket.
 - Identify **core abstractions**: base classes, interfaces, protocols, ABCs, traits — these reveal the extension seams.
 
+Find the interfaces and abstractions with a search like this one, and tune the patterns per language:
+
 ```bash
-# Interfaces / abstractions (tune per language)
 rg -n -e 'class .*\(ABC\)|abstractmethod' -e 'interface [A-Z]' -e 'type .* interface' \
   -e 'trait [A-Z]' -e 'Protocol\)' -e '@runtime_checkable'
 ```
@@ -101,9 +99,10 @@ If the user has a code graph, use it — it is the fastest route to accurate str
    - **Orphan/dead nodes** → possible pending/unused code (feeds status §15).
 4. **Drive diagrams.** Convert the relevant subgraph directly into a mermaid dependency/component diagram (collapse to module level so it stays legible — do not dump hundreds of symbol nodes).
 
+Detect the graph file's format from its first bytes, then, for JSON, get a quick shape of its keys:
+
 ```bash
-head -c 2000 <graph-file>            # detect format
-# JSON quick shape:
+head -c 2000 <graph-file>
 rg -o '"(nodes|edges|source|target|type|label)"' <graph-file> | sort | uniq -c
 ```
 

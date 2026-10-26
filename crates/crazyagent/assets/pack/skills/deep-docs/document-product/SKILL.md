@@ -53,7 +53,7 @@ For each item in the system map, recognize its **archetype** and record the repo
 
 ### Phase 3 — Draft the document
 
-Follow the canonical outline in `${CLAUDE_PLUGIN_ROOT}/skills/document-product/references/documentation-outline.md` and fill the skeleton at `${CLAUDE_PLUGIN_ROOT}/skills/document-product/assets/report-skeleton.md`. Draft section by section:
+Follow the canonical outline in `${CLAUDE_PLUGIN_ROOT}/skills/document-product/references/documentation-outline.md` and fill the skeleton at `${CLAUDE_PLUGIN_ROOT}/skills/document-product/assets/report-skeleton.md`: copy it, replace every `<PLACEHOLDER>` and each example mermaid block (including its example names, such as `CoreType`, `Abstraction` and `EntityA`) with system-specific content, delete sections that do not apply (see the outline's applicability rule), and keep the "Documentation confidence" appendix honest. Draft section by section:
 
 - **Overview, context, and high/low-level architecture** — what it does, who it's for, and the layered picture.
 - **Subsystem deep-dives** — one per subsystem, using the repeatable deep-dive template (responsibility → key files → step-by-step mechanics → data structures → interfaces → failure modes → extension points).
