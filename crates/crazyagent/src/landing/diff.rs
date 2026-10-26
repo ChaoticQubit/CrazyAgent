@@ -66,13 +66,13 @@ pub(super) fn stats(repo: &Repo, base: &str, head: &str) -> Result<Stats, Engine
     Ok(stats)
 }
 
+/// Lines added and removed per changed path, keyed by the new path; None for a binary
+/// file's counts.
+type LineCounts = BTreeMap<String, (Option<u32>, Option<u32>)>;
+
 /// Reads git's line counts per changed path, keyed by the new path; a binary file
 /// counts None. Inputs: the repository and the two commits. Output: the counts.
-fn numstat(
-    repo: &Repo,
-    base: &str,
-    head: &str,
-) -> Result<BTreeMap<String, (Option<u32>, Option<u32>)>, EngineError> {
+fn numstat(repo: &Repo, base: &str, head: &str) -> Result<LineCounts, EngineError> {
     let printed = repo.run(&[
         "diff-tree",
         "-r",

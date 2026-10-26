@@ -75,7 +75,7 @@ impl Repo {
         )?;
         repo.overrides = crate::research::runner::filter_overrides(&listing)
             .map_err(|_| failure("changes_git_unsupported"))?;
-        assert!(repo.overrides.len() % 8 == 0);
+        assert!(repo.overrides.len().is_multiple_of(8));
         Ok(repo)
     }
 

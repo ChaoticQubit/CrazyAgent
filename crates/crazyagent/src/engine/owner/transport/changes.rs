@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
 pub(super) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
+const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Every code a Changes request can answer an owner client with: the landing engine's
 /// refusals, this protocol's own, and the owner connection's it travels on.
@@ -29,6 +30,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_stale",
     "changes_too_large",
     "changes_unavailable",
+    "changes_workspace_invalid",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
@@ -313,6 +315,29 @@ async fn handle(
     .map_err(|_| failure("changes_unavailable"))?
 }
 
+/// Keeps change sets tidy while the owner server runs: at start, and once a day after,
+/// it finishes or undoes Accepts and worktree resets an engine stop interrupted and
+/// deletes discarded refs past their restore window. Input: the authority, for the
+/// engine root. Runs until the server aborts it.
+pub(super) async fn upkeep(authority: Arc<Authority>) {
+    loop {
+        let tended = match engine_root(&authority) {
+            Ok(root) => tokio::task::spawn_blocking(move || {
+                let db = landing::open(&root)?;
+                landing::reconcile(&db)?;
+                landing::prune(&db, now_ms()?)
+            })
+            .await
+            .unwrap_or_else(|_| Err(failure("changes_unavailable"))),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = tended {
+            eprintln!("landing_upkeep_failed cause={}", error.0);
+        }
+        tokio::time::sleep(UPKEEP_EVERY).await;
+    }
+}
+
 fn now_ms() -> Result<u64, EngineError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -324,6 +349,159 @@ fn now_ms() -> Result<u64, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::engine::bootstrap::EngineService;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Runs git as a test owner would, with an empty home and no system config.
+    /// Inputs: the home, the folder and the arguments. Output: standard output.
+    #[cfg(unix)]
+    fn git(home: &Path, dir: &Path, args: &[&str]) -> String {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Starts an engine on a root, as the owner server tests do.
+    /// Inputs: the root and its stop signal. Output: the running service.
+    #[cfg(unix)]
+    async fn started(root: &Path, stop: &tokio::sync::watch::Receiver<bool>) -> EngineService {
+        EngineService::start_with_settings_sources(
+            root,
+            "e.sock",
+            &root.join("global.toml"),
+            &root.join("project.toml"),
+            stop,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// An engine that starts prunes the refs of change sets discarded more than seven
+    /// days before, so an owner who discarded work and restarted later keeps no refs.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_engine_start_prunes_change_sets_discarded_more_than_seven_days_before() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("global.toml"), "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(
+            root.join("global.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = started(root, &stopped).await;
+        assert!(root.join("engine.db").is_file());
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        git(&home, &repo, &["add", "README"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Start",
+            ],
+        );
+        git(
+            &home,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(worktree.join("NEW"), "new\n").unwrap();
+        let db = landing::open(root).unwrap();
+        let workspace = landing::Workspace {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        let head = landing::list(&db, &workspace.project).unwrap()[0]
+            .head
+            .clone();
+        let eight_days = 8 * 24 * 60 * 60 * 1000;
+        landing::discard(&db, &id, &head, now_ms().unwrap() - eight_days).unwrap();
+        drop(db);
+        let discarded = || {
+            git(
+                &home,
+                &repo,
+                &["for-each-ref", "refs/crazyagent/discarded/"],
+            )
+        };
+        assert!(discarded().contains(id.as_str()));
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut service = started(root, &stopped).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !discarded().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the start kept the ref"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let db = landing::open(root).unwrap();
+        assert_eq!(
+            landing::restore(&db, &id, now_ms().unwrap()).unwrap_err().0,
+            "changes_restore_expired"
+        );
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     /// Reads the plain codes a source file refuses with, before its tests.
     /// Input: the file text. Output: each `changes_` code once.
@@ -341,9 +519,19 @@ mod tests {
     /// so a client that passes listed codes through never hides a real one.
     #[test]
     fn changes_codes_cover_every_refusal_of_the_landing_engine_and_protocol() {
-        let engine = refusals(include_str!("../../../landing.rs"));
+        let engine: std::collections::BTreeSet<&str> = [
+            include_str!("../../../landing.rs"),
+            include_str!("../../../landing/diff.rs"),
+            include_str!("../../../landing/flow.rs"),
+            include_str!("../../../landing/git.rs"),
+            include_str!("../../../landing/owner.rs"),
+            include_str!("../../../landing/store.rs"),
+        ]
+        .into_iter()
+        .flat_map(refusals)
+        .collect();
         let protocol = refusals(include_str!("changes.rs"));
-        assert!(engine.len() >= 2 && protocol.len() >= 5);
+        assert!(engine.len() >= 15 && protocol.len() >= 5);
         for code in engine.iter().chain(&protocol) {
             assert!(
                 CHANGES_CODES.contains(code),

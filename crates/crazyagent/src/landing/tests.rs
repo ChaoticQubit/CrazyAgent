@@ -20,18 +20,21 @@ struct Case {
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
 /// Inputs: the owner home, the folder and the arguments. Output: standard output.
 fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("LC_ALL", "C")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "git {args:?} failed: {}",
@@ -581,4 +584,193 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert!(ran.is_empty(), "configured commands ran: {ran:?}");
+}
+
+#[test]
+fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() {
+    for step in [
+        owner::Step::Recorded,
+        owner::Step::FilesWritten,
+        owner::Step::BranchMoved,
+    ] {
+        let case = Case::new();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        let tip = case.tip();
+        let before = case.checkout();
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, &|at| at == step);
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+        assert_eq!(store::in_flight(&case.db).unwrap().len(), 1, "{step:?}");
+        reconcile(&case.db).unwrap();
+        assert!(store::in_flight(&case.db).unwrap().is_empty(), "{step:?}");
+        if step == owner::Step::Recorded {
+            assert_eq!(case.view(&id).state, ChangeState::Pending);
+            assert_eq!((case.tip(), case.checkout()), (tip, before));
+            assert!(matches!(
+                case.accept(&id).unwrap(),
+                AcceptOutcome::Landed { .. }
+            ));
+        } else {
+            assert_eq!(case.view(&id).state, ChangeState::Accepted, "{step:?}");
+            assert_ne!(case.tip(), tip);
+            assert_eq!(
+                case.owner(&["log", "-1", "--format=%P", "main"]).trim(),
+                tip
+            );
+            assert_eq!(case.owner(&["status", "--porcelain"]), "", "{step:?}");
+            assert_eq!(case.agent(&["rev-parse", "HEAD"]).trim(), case.tip());
+        }
+        assert_eq!(
+            std::fs::read_to_string(case.repo.join("README")).unwrap(),
+            "one\ntwo\nthree\nfour\n"
+        );
+    }
+}
+
+#[test]
+fn a_turn_past_the_tree_bounds_is_refused_and_leaves_nothing_committed_or_staged() {
+    let case = Case::new();
+    let bounds = crate::worktrees::TreeBounds {
+        files: 3,
+        bytes: 64,
+        components: 3,
+    };
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Too much".into(),
+    };
+    let head = case.agent(&["rev-parse", "HEAD"]);
+    let cases: [&[(&str, usize)]; 3] = [
+        &[("a", 1), ("b", 1), ("c", 1), ("d", 1)],
+        &[("large.txt", 65)],
+        &[("one/two/three/deep.txt", 1)],
+    ];
+    for files in cases {
+        for (path, size) in files {
+            case.edit(path, &"x".repeat(*size));
+        }
+        assert_eq!(
+            refused(flow::record(
+                &case.db,
+                &case.workspace,
+                &turn,
+                &bounds,
+                NOW_MS
+            )),
+            "changes_too_large",
+            "{files:?}"
+        );
+        assert_eq!(case.agent(&["rev-parse", "HEAD"]), head);
+        assert_eq!(case.agent(&["diff", "--cached", "--name-only"]), "");
+        assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+        for (path, _) in files {
+            let top = path.split('/').next().unwrap();
+            let target = case.workspace.worktree.join(top);
+            if target.is_dir() {
+                std::fs::remove_dir_all(target).unwrap();
+            } else {
+                std::fs::remove_file(target).unwrap();
+            }
+        }
+    }
+    case.edit("a", "x");
+    assert!(
+        flow::record(&case.db, &case.workspace, &turn, &bounds, NOW_MS)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
+    let case = Case::new();
+    let worktree = &case.workspace.worktree;
+    let big: String = (0..3000).map(|line| format!("line {line}\n")).collect();
+    case.edit("big.txt", &big);
+    case.edit("escape.txt", "\u{1b}[31mred\u{202E}txt\r\n");
+    case.edit("script.sh", "#!/bin/sh\n");
+    std::fs::set_permissions(
+        worktree.join("script.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        worktree.join("README"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("README", worktree.join("link")).unwrap();
+    case.edit(".gitmodules", "[submodule \"x\"]\n");
+    std::fs::write(worktree.join("bin.dat"), [0_u8, 1, 2, 255]).unwrap();
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (mut files, mut text, mut page) = (Vec::new(), String::new(), 0);
+    loop {
+        let diff = diff(&case.db, &id, page).unwrap();
+        assert!(!diff.truncated);
+        assert!(serde_json::to_vec(&diff).unwrap().len() < crate::protocol::FRAME_BYTES_MAX);
+        files.extend(diff.files);
+        text.push_str(&diff.text);
+        match diff.next {
+            Some(next) => page = next,
+            None => break,
+        }
+    }
+    assert!(page >= 1, "a 3000-line file fit one page");
+    let shown: Vec<_> = files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.status,
+                file.kind,
+                file.marks.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                ".gitmodules",
+                FileStatus::Added,
+                FileKind::Text,
+                vec![FileMark::Modules]
+            ),
+            (
+                "README",
+                FileStatus::Modified,
+                FileKind::Text,
+                vec![FileMark::Executable, FileMark::Mode]
+            ),
+            ("big.txt", FileStatus::Added, FileKind::Text, vec![]),
+            ("bin.dat", FileStatus::Added, FileKind::Binary, vec![]),
+            ("escape.txt", FileStatus::Added, FileKind::Text, vec![]),
+            (
+                "link",
+                FileStatus::Added,
+                FileKind::Symlink,
+                vec![FileMark::Symlink]
+            ),
+            (
+                "script.sh",
+                FileStatus::Added,
+                FileKind::Text,
+                vec![FileMark::Executable]
+            ),
+        ]
+    );
+    assert!(text.contains("+line 0\n") && text.contains("+line 2999\n"));
+    assert!(
+        text.contains("+\u{FFFD}[31mred\u{FFFD}txt\u{FFFD}\n"),
+        "{text:?}"
+    );
+    assert!(
+        !text
+            .chars()
+            .any(|c| c == '\u{1b}' || c == '\u{202E}' || c == '\r')
+    );
+    let past = diff(&case.db, &id, page + 5).unwrap();
+    assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
 }
