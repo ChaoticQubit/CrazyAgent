@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
-use crazyagent::adapters::codex::{AuthControl, CodexProtocol, Event, LoginChallenge, State};
+use crazyagent::adapters::codex::{
+    AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginChallenge, State, TurnStatus,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -32,6 +34,12 @@ struct AppServer {
 
 impl AppServer {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// Starts a real Codex app server in a private temporary home with extra `-c` settings.
+    /// Input: the settings, each a `key=value` text. Output: the running server.
+    fn start_with(settings: &[&str]) -> Self {
         let home = tempfile::Builder::new()
             .prefix("ca-codex-live")
             .tempdir()
@@ -39,13 +47,9 @@ impl AppServer {
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut child = crazyagent::spawn_gate::spawn(
             Command::new(codex_executable())
-                .args([
-                    "-c",
-                    "cli_auth_credentials_store=\"file\"",
-                    "app-server",
-                    "--listen",
-                    "stdio://",
-                ])
+                .args(["-c", "cli_auth_credentials_store=\"file\""])
+                .args(settings.iter().flat_map(|setting| ["-c", setting]))
+                .args(["app-server", "--listen", "stdio://"])
                 .env_clear()
                 .env("HOME", home.path())
                 .env("CODEX_HOME", home.path())
@@ -158,4 +162,70 @@ fn real_codex_device_code_sign_in_yields_verification_url_and_user_code() {
         }
         event => panic!("unexpected event {event:?}"),
     }
+}
+
+#[test]
+fn a_real_codex_turn_keeps_running_past_a_command_output_line_over_64_kib() {
+    let mut server = AppServer::start_with(&[
+        "model_providers.closed={name=\"closed\",base_url=\"http://127.0.0.1:9/v1\",wire_api=\"responses\"}",
+        "model_provider=\"closed\"",
+    ]);
+    let mut protocol = initialized(&mut server);
+    let cwd = server._home.path().to_path_buf();
+    server.send(protocol.start_thread(&cwd).unwrap());
+    let Event::ThreadStarted { thread_id } = server.until(&mut protocol, |event| {
+        matches!(event, Event::ThreadStarted { .. })
+    }) else {
+        unreachable!()
+    };
+    server.send(
+        protocol
+            .start_turn("Wait for the owner's shell command.")
+            .unwrap(),
+    );
+    server.until(&mut protocol, |event| {
+        matches!(event, Event::TurnStarted { .. })
+    });
+    let shell = serde_json::json!({
+        "id": "large-output",
+        "method": "thread/shellCommand",
+        "params": {
+            "threadId": thread_id,
+            "command": "head -c 100000 /dev/zero | tr '\\0' x; echo",
+        },
+    });
+    let mut request = serde_json::to_vec(&shell).unwrap();
+    request.push(b'\n');
+    server.send(request);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut largest = 0;
+    while largest <= FRAME_BYTES_MAX {
+        let line = server
+            .lines
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("codex app-server ran the command in time");
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        if value["id"] == "large-output" {
+            continue;
+        }
+        protocol.receive(&line).unwrap_or_else(|error| {
+            panic!("a {}-byte codex line failed with {error:?}", line.len())
+        });
+        largest = largest.max(line.len());
+    }
+    assert_eq!(protocol.state(), State::Active);
+    server.send(protocol.interrupt().unwrap());
+    let ended = server.until(&mut protocol, |event| {
+        matches!(event, Event::TurnCompleted { .. })
+    });
+    assert!(
+        matches!(
+            ended,
+            Event::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
 }

@@ -21,6 +21,9 @@ use tokio::sync::{mpsc, watch};
 
 const POLL_TIME: Duration = Duration::from_millis(5);
 const READ_BATCH: usize = 16;
+/// The longest stream line a host keeps, its newline included; a longer line before the
+/// turn's result retires the host with `claude_host_frame_limit`.
+const FRAME_LINE_MAX: usize = crate::adapters::LINE_BYTES_MAX + 1;
 
 /// How long cleanup lets the harness exit on its own before it kills the harness group, and
 /// how long it still drains the pipes once that group is empty: a pipe still open after it
@@ -371,9 +374,9 @@ impl Process {
 
     fn decode(&mut self, bytes: &[u8]) {
         assert!(bytes.len() <= 4096);
-        assert!(self.frame.len() <= crate::protocol::FRAME_BYTES_MAX);
+        assert!(self.frame.len() <= FRAME_LINE_MAX);
         for byte in bytes {
-            if self.frame.len() == crate::protocol::FRAME_BYTES_MAX {
+            if self.frame.len() == FRAME_LINE_MAX {
                 if self.completed_turns == 0 {
                     self.fail(Fault::Host("claude_host_frame_limit"));
                     return;
@@ -419,7 +422,7 @@ impl Process {
                 }
             }
         }
-        assert!(self.frame.len() <= crate::protocol::FRAME_BYTES_MAX);
+        assert!(self.frame.len() <= FRAME_LINE_MAX);
         assert!(self.completed_turns <= self.events);
     }
 
