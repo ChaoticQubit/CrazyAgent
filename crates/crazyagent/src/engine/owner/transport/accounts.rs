@@ -412,10 +412,11 @@ async fn handle(
             replace_key(root, credential_ref, key)?;
             let listed = match actor(engine, admission, Command::KeyReplaced(id)).await {
                 Ok(ResultValue::Account(current)) => current,
-                gone => {
+                Err(gone) if gone.0 == "account_not_found" => {
                     remove_key(root, credential_ref)?;
-                    return Err(gone.err().unwrap_or_else(unknown));
+                    return Err(gone);
                 }
+                _ => return Err(unknown()),
             };
             Reply::Account {
                 account: views(root, vec![*listed]).await?.remove(0),

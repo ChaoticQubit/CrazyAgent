@@ -717,6 +717,52 @@ async fn a_rejected_key_shows_in_the_list_until_the_owner_replaces_it() {
     fixture.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replaced_key_survives_a_confirm_the_busy_database_refuses() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let old = format!("sk-ant-old-{}-busy", std::process::id());
+    let new = format!("sk-ant-new-{}-busy", std::process::id());
+    let account = client
+        .add_account(
+            draft(
+                Provider::Claude,
+                SignInMethod::ApiKey,
+                "Busy key",
+                None,
+                Some("claude-team-model"),
+            ),
+            key(&old),
+        )
+        .await
+        .unwrap();
+
+    let mut writer = rusqlite::Connection::open(fixture.root.path().join("engine.db")).unwrap();
+    let held = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let refused = client
+        .replace_account_key(account.id.clone(), key(&new).unwrap())
+        .await
+        .unwrap_err();
+    held.rollback().unwrap();
+    assert_eq!(refused.0, "accounts_outcome_unknown");
+    assert!(
+        holders(fixture.root.path(), old.as_bytes()).is_empty(),
+        "the old key was replaced"
+    );
+    assert_eq!(
+        holders(fixture.root.path(), new.as_bytes()).len(),
+        1,
+        "the new key stays saved when only the confirm failed"
+    );
+    let listed = all_accounts(&client).await;
+    assert_eq!(listed[0].status_label, "Key saved", "{listed:?}");
+    client.remove_account(account.id.clone()).await.unwrap();
+    assert!(holders(fixture.root.path(), new.as_bytes()).is_empty());
+    fixture.stop().await;
+}
+
 /// Wiring test: a local stand-in server answers the check with an invented model list,
 /// so this checks the key replacement and what the engine sends, not a provider.
 /// Real model list: an_openai_compatible_account_check_lists_the_real_ollama_models.
