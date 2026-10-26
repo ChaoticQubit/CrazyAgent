@@ -111,11 +111,9 @@ test("on a self-hosted runner CI and release install nothing globally and keep t
     assert.match(text, /\(\( size_kib > 20 \* 1024 \* 1024 \)\)/, job);
     assert.match(text, /command -v rustup/, job);
     for (const step of all) {
-      for (const install of step.matchAll(/^.*\bsudo (?!-n true|apt-get)\S+.*$/gm)) {
-        assert(step.slice(0, install.index).includes('[ "$RUNNER_ENVIRONMENT" != github-hosted ]'), `${job}: "${install[0].trim()}" runs only after the step refuses self-hosted runners`);
-      }
-      for (const install of step.matchAll(/^.*brew install.*$/gm)) {
-        assert(step.slice(0, install.index).includes("command -v brew"), `${job}: "${install[0].trim()}" runs only where Homebrew already exists`);
+      for (const install of step.matchAll(/^(?!\s*echo ).*(\bsudo (?!-n true|apt-get)\S+|\bbrew install\b).*$/gm)) {
+        assert.match(step.slice(0, install.index), /if \[ "\$RUNNER_ENVIRONMENT" != github-hosted \]; then\n(?:[^\n]*\n)*?\s+exit 1\n\s+fi\n/,
+          `${job}: "${install[0].trim()}" is reached only after the step has exited on a self-hosted runner`);
       }
     }
   }
@@ -149,6 +147,22 @@ test("macOS release signing keeps the certificate in a job keychain under RUNNER
   assert.match(cleanup, /rm -rf "\$RUNNER_TEMP\/apple"/);
   assert.match(cleanup, /security delete-keychain "\$keychain"/);
   assert.doesNotMatch(cleanup, /secrets\./);
+  const edits = /security_line "create-keychain|security delete-keychain|security list-keychains -d user -s/;
+  for (const [step, expected] of [[build, ["create-keychain", "list-keychains -d user -s"]], [cleanup, ["delete-keychain", "list-keychains -d user -s"]]]) {
+    assert.match(step, /keychain_lock\(\) \{\n\s+exec 9>> "\$HOME\/\.crazyagent-keychain\.lock"\n\s+perl -MFcntl=:flock -e '[^'\n]*for \(1 \.\. 120\) \{ exit 0 if flock\(\$lock, LOCK_EX \| LOCK_NB\); sleep 1 \} exit 1' \|\|/);
+    let locked = false;
+    const inside = [];
+    for (const line of step.split("\n").map((line) => line.trim())) {
+      if (line === "keychain_lock" || line === "if ! keychain_lock; then") locked = true;
+      else if (line === "keychain_unlock") locked = false;
+      else if (edits.test(line)) {
+        assert(locked, `search-list edit outside the per-user lock: ${line}`);
+        inside.push(line);
+      }
+    }
+    for (const word of expected) assert(inside.some((line) => line.includes(word)), `${word} runs inside the lock`);
+  }
+  assert.equal(release.split("\n").filter((line) => edits.test(line)).length, 4, "no other step edits the keychain search list");
 });
 
 test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", async () => {

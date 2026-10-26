@@ -289,12 +289,13 @@ jobs:
             keychain_password="$(openssl rand -hex 32)"
             echo "::add-mask::$keychain_password"
             (umask 077 && mkdir -p "$key_dir" && printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$key_dir/certificate.p12")
+            keychain_lock() {
+              exec 9>> "$HOME/.crazyagent-keychain.lock"
+              perl -MFcntl=:flock -e 'open(my $lock, ">&=", 9) or exit 2; for (1 .. 120) { exit 0 if flock($lock, LOCK_EX | LOCK_NB); sleep 1 } exit 1' || { echo "::error::another job held $HOME/.crazyagent-keychain.lock for 120 s"; return 1; }
+            }
+            keychain_unlock() { exec 9>&-; }
+            keychain_lock
             security_line "create-keychain -p $(quote "$keychain_password") $(quote "$keychain")"
-            security_line "unlock-keychain -p $(quote "$keychain_password") $(quote "$keychain")"
-            security set-keychain-settings -lut 21600 "$keychain"
-            security_line "import $(quote "$key_dir/certificate.p12") -k $(quote "$keychain") -P $(quote "$APPLE_CERTIFICATE_PASSWORD") -f pkcs12 -t agg -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productbuild" > /dev/null
-            rm -f "$key_dir/certificate.p12"
-            security_line "set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $(quote "$keychain_password") $(quote "$keychain")" > /dev/null
             search=()
             while IFS= read -r line; do
               line="${line#"${line%%[![:space:]]*}"}"
@@ -303,6 +304,12 @@ jobs:
               if [ -n "$line" ] && [ "$line" != "$keychain" ]; then search+=("$line"); fi
             done < <(security list-keychains -d user)
             security list-keychains -d user -s "$keychain" ${search[@]+"${search[@]}"}
+            keychain_unlock
+            security_line "unlock-keychain -p $(quote "$keychain_password") $(quote "$keychain")"
+            security set-keychain-settings -lut 21600 "$keychain"
+            security_line "import $(quote "$key_dir/certificate.p12") -k $(quote "$keychain") -P $(quote "$APPLE_CERTIFICATE_PASSWORD") -f pkcs12 -t agg -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productbuild" > /dev/null
+            rm -f "$key_dir/certificate.p12"
+            security_line "set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $(quote "$keychain_password") $(quote "$keychain")" > /dev/null
             identities="$(security find-identity -p codesigning "$keychain")"
             [[ "$identities" == *"$APPLE_SIGNING_IDENTITY"* ]] || { echo "::error::the job keychain holds no codesigning identity named by APPLE_SIGNING_IDENTITY"; exit 1; }
             unset keychain_password
@@ -315,10 +322,19 @@ jobs:
         if: always() && matrix.os == 'macos'
         run: |
           set -uo pipefail
+          keychain_lock() {
+            exec 9>> "$HOME/.crazyagent-keychain.lock"
+            perl -MFcntl=:flock -e 'open(my $lock, ">&=", 9) or exit 2; for (1 .. 120) { exit 0 if flock($lock, LOCK_EX | LOCK_NB); sleep 1 } exit 1' || { echo "::error::another job held $HOME/.crazyagent-keychain.lock for 120 s"; return 1; }
+          }
+          keychain_unlock() { exec 9>&-; }
           keychain="$(cd "$RUNNER_TEMP" && pwd -P)/crazyagent-signing.keychain-db"
           rm -rf "$RUNNER_TEMP/apple" "$RUNNER_TEMP/macos-tmp"
+          if ! keychain_lock; then
+            rm -f "$keychain"
+            echo "::error::the job keychain file is deleted, but its search-list entry is left for the next job to sweep"
+            exit 1
+          fi
           if [ -e "$keychain" ]; then security delete-keychain "$keychain"; fi
-          rm -f "$keychain"
           search=()
           stale=0
           while IFS= read -r line; do
@@ -333,6 +349,8 @@ jobs:
             search+=("$line")
           done < <(security list-keychains -d user)
           if [ "$stale" = 1 ] && [ "${#search[@]}" -gt 0 ]; then security list-keychains -d user -s "${search[@]}"; fi
+          keychain_unlock
+          rm -f "$keychain"
           if security list-keychains -d user | grep -qF "$keychain"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
           if [ -e "$keychain" ] || [ -e "$RUNNER_TEMP/apple" ]; then echo "::error::signing material is still on disk"; exit 1; fi
           echo "signing keychain and Apple keys removed"
