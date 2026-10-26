@@ -6,6 +6,7 @@ use crate::agents::{Hold, Holder};
 use crate::config::ModelAuthentication;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::claude_host::ClaudeHost;
+use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::engine::codex_host::CodexHost;
 use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
@@ -600,7 +601,24 @@ impl OwnerRuntimeHandle {
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
         }
-        active.host.close().await.map_err(|error| {
+        let closed = active.host.close().await;
+        if let MasterHost::Claude(host) = &active.host
+            && let Some(diagnostic) = host.diagnostic()
+            && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
+            && self.authority.root.verify().is_ok()
+            && let Some(root) = self.authority.root.path.parent()
+        {
+            let error = closed.as_ref().err().or(observed.as_ref().err());
+            let _ = keep_stream_diagnostic(
+                root,
+                &prepared.session.session_id,
+                turn_id,
+                &active.runtime,
+                &diagnostic,
+                error.map(|error| error.0.as_str()),
+            );
+        }
+        closed.map_err(|error| {
             EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0))
         })?;
         let observed = match (observed, tool_record) {
@@ -781,6 +799,43 @@ impl OwnerRuntimeHandle {
             }
         }
     }
+}
+
+/// Appends a Claude Code master turn's stream diagnostic to the engine log
+/// `logs/master-stream.log` (0600, rotated, credentials redacted) so a failed turn or one
+/// whose harness kept talking after its result can be explained later. Input: the engine
+/// root, the conversation, turn, runtime, diagnostic and the turn's error code when it
+/// failed. Output: an error code when the log could not be written safely.
+fn keep_stream_diagnostic(
+    root: &std::path::Path,
+    session_id: &SessionId,
+    turn_id: &RequestId,
+    runtime: &MasterRuntimeView,
+    diagnostic: &StreamDiagnostic,
+    error: Option<&str>,
+) -> Result<(), EngineError> {
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let entry = serde_json::json!({
+        "at_ms": at_ms,
+        "session_id": session_id.as_str(),
+        "turn_id": turn_id.as_str(),
+        "native_session_id": runtime.native_session_id,
+        "artifact_sha256": runtime.artifact_sha256,
+        "error": error,
+        "fault": diagnostic.fault,
+        "message": diagnostic.message,
+        "late_lines": diagnostic.late_lines,
+        "late": diagnostic.late,
+        "tail": diagnostic.tail(),
+    });
+    crate::engine::claude_host::diagnostic::append(
+        &crate::paths::Layout::new(root.to_path_buf())
+            .map_err(|_| failure("master_stream_log_unavailable"))?
+            .logs(),
+        &entry,
+    )
 }
 
 /// The reply a master turn is building: its text so far and, for a tools-on master, the
@@ -1059,6 +1114,57 @@ mod tests {
             validate_event(&expected, &turn, &event).unwrap_err().0,
             "master_capture_identity"
         );
+    }
+
+    #[test]
+    fn a_master_stream_diagnostic_names_the_turn_and_its_late_lines_in_the_engine_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::Builder::new()
+            .prefix("crazyagent-stream-log")
+            .tempdir()
+            .unwrap();
+        let mut diagnostic = StreamDiagnostic::default();
+        diagnostic.keep(b"{\"type\":\"result\",\"subtype\":\"success\"}\n");
+        diagnostic.late(b"{\"type\":\"system\",\"subtype\":\"task_notification\"}\n");
+        diagnostic.fault = Some("claude_host_protocol_invalid_state".to_owned());
+        let runtime = MasterRuntimeView {
+            runtime_ref: RequestId::new("runtime-1").unwrap(),
+            artifact_sha256: "a".repeat(64),
+            native_session_id: Some("native-1".to_owned()),
+        };
+        keep_stream_diagnostic(
+            root.path(),
+            &SessionId::new("session-1").unwrap(),
+            &RequestId::new("turn-1").unwrap(),
+            &runtime,
+            &diagnostic,
+            Some("claude_host_protocol_invalid_state"),
+        )
+        .unwrap();
+        let log = root.path().join("logs").join("master-stream.log");
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        let entry: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&log).unwrap().trim_end()).unwrap();
+        assert_eq!(entry["session_id"], "session-1");
+        assert_eq!(entry["turn_id"], "turn-1");
+        assert_eq!(entry["native_session_id"], "native-1");
+        assert_eq!(entry["artifact_sha256"], "a".repeat(64));
+        assert_eq!(entry["error"], "claude_host_protocol_invalid_state");
+        assert_eq!(entry["fault"], "claude_host_protocol_invalid_state");
+        assert_eq!(entry["late_lines"], 1);
+        assert_eq!(
+            entry["late"],
+            serde_json::json!(["system/task_notification"])
+        );
+        assert_eq!(
+            entry["tail"],
+            "{\"type\":\"result\",\"subtype\":\"success\"}\n"
+        );
+        assert!(entry["at_ms"].as_u64().is_some_and(|at| at > 0));
     }
 
     struct RuntimeFixture {

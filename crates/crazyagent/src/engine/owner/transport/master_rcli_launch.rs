@@ -196,6 +196,7 @@ fallback_allowed = false
         root: tempfile::TempDir,
         service: EngineService,
         host: OwnerRuntimeHandle,
+        client: OwnerClient,
         prepared: PreparedMasterTurn,
         profile: NativeProfileUse,
         home: PathBuf,
@@ -266,6 +267,9 @@ fallback_allowed = false
         state
     }
 
+    /// Applies one owner change as a client must: an outcome left unknown because the job
+    /// outlasted the owner timeout is settled by sending the same request again, which the
+    /// engine answers from its record. Input: the host, client, request id and change.
     async fn apply(
         host: &OwnerRuntimeHandle,
         client: &OwnerClient,
@@ -290,12 +294,20 @@ fallback_allowed = false
             operation: OwnerOperation::Apply { mutation },
         };
         request.validate().unwrap();
-        let operation = host
-            .engine
-            .owner_job(|reply| Job::OwnerApply(admission, request, reply))
-            .await
-            .unwrap();
-        assert_eq!(operation.result, OwnerResult::Applied);
+        let (admission, request) = (&admission, &request);
+        super::super::master_dispatch::drive_until_settled(
+            move || async move {
+                let operation = host
+                    .engine
+                    .owner_job(|reply| Job::OwnerApply(admission.clone(), request.clone(), reply))
+                    .await?;
+                assert_eq!(operation.result, OwnerResult::Applied);
+                Ok(())
+            },
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
     }
 
     impl Fixture {
@@ -506,6 +518,7 @@ fallback_allowed = false
                 root,
                 service,
                 host,
+                client,
                 prepared: *prepared,
                 profile,
                 home,
@@ -547,6 +560,57 @@ fallback_allowed = false
         assert_eq!(case.prepared.cwd, PathBuf::from(&case.prepared.lease.path));
         assert!(case.prepared.cwd.join(".git").is_file());
         assert_eq!(case.profile.profile_path().unwrap(), case.home);
+        case.close().await;
+    }
+
+    /// Holds the engine database's write lock from a second real connection for `hold`, as
+    /// a slow disk does to the engine's own commits. Input: the database and the hold.
+    /// Output: the holding thread, returned once the lock is held.
+    fn hold_writes(database: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let database = database.to_path_buf();
+        let (held, wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            connection.execute_batch("COMMIT").unwrap();
+        });
+        wait.recv().unwrap();
+        holder
+    }
+
+    #[tokio::test]
+    async fn a_launch_setup_change_slower_than_the_owner_timeout_settles_on_the_same_request() {
+        let case = Fixture::start_with_timeout(100).await;
+        let database = case.root.path().join("state/engine.db");
+        assert!(database.is_file());
+        let before = read(&case.client, OwnerRead::Capabilities).await.revision;
+        let holder = hold_writes(&database, Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        apply(
+            &case.host,
+            &case.client,
+            "create-while-the-disk-is-slow",
+            OwnerMutation::CreateProject {
+                project_id: ProjectId::new("second-project").unwrap(),
+                spec: ProjectSpec {
+                    name: "Second project".into(),
+                    repositories: vec![
+                        case.root.path().join("repository").to_str().unwrap().into(),
+                    ],
+                },
+            },
+        )
+        .await;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        holder.join().unwrap();
+        let after = read(&case.client, OwnerRead::Capabilities).await.revision;
+        assert_eq!(
+            after.value(),
+            before.value() + 1,
+            "the repeated request applied once"
+        );
         case.close().await;
     }
 
