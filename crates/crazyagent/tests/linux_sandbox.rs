@@ -11,6 +11,8 @@ use std::ffi::{OsStr, OsString};
 
 use std::fs;
 
+use std::io::{BufRead, BufReader};
+
 use std::path::{Path, PathBuf};
 
 use std::process::{Command, Output, Stdio};
@@ -278,6 +280,10 @@ fn signal(sandbox: Option<&dyn Sandbox>, case: &Case, target: u32) -> String {
         .args(["-c", SIGNAL, "sh"])
         .arg(target.to_string())
         .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+}
+
+fn agent_stdout(sandbox: Option<&dyn Sandbox>, harness: Command) -> String {
     let mut command = match sandbox {
         Some(sandbox) => sandbox.wrap(&harness).unwrap(),
         None => harness,
@@ -345,6 +351,86 @@ fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
     assert_eq!(signal(Some(&bubblewrap), &case, target), "refused\n");
     outside.kill().unwrap();
     outside.wait().unwrap();
+}
+
+const HOLD_TERMINAL: &str = "import os, sys
+primary, secondary = os.openpty()
+print(os.ttyname(secondary), flush=True)
+sys.stdin.read()
+";
+
+const OPEN_TERMINAL: &str = "import os, sys
+try:
+    os.close(os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY))
+    print('opened')
+except OSError:
+    print('refused')
+";
+
+fn open_terminal(sandbox: Option<&dyn Sandbox>, case: &Case, terminal: &Path) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", OPEN_TERMINAL])
+        .arg(terminal)
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+}
+
+#[test]
+fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let mut holder = crazyagent::spawn_gate::spawn(
+        Command::new("/usr/bin/python3")
+            .args(["-I", "-c", HOLD_TERMINAL])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let terminal = PathBuf::from(line.trim_end());
+    assert!(terminal.starts_with("/dev/pts"), "{line}");
+    assert_eq!(
+        open_terminal(None, &case, &terminal),
+        "opened\n",
+        "the unsandboxed control must open the held terminal"
+    );
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        open_terminal(Some(&landlock), &case, &terminal),
+        "refused\n"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        open_terminal(Some(&bubblewrap), &case, &terminal),
+        "refused\n"
+    );
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
 }
 
 #[test]

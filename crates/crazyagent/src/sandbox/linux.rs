@@ -62,8 +62,6 @@ const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/random",
     "/dev/urandom",
     "/dev/tty",
-    "/dev/ptmx",
-    "/dev/pts",
     "/dev/shm",
 ];
 
