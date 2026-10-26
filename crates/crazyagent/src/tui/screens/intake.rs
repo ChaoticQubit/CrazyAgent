@@ -2,6 +2,7 @@ use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery};
 use crate::tui::ctx::Ctx;
 use crate::tui::seam::{Arrival, Request};
+use crate::tui::text::coded;
 
 /// The plain sentence a screen shows when the engine does not support a request yet.
 pub(in crate::tui) const NOT_READY: &str = "Not ready yet.";
@@ -38,10 +39,20 @@ pub(in crate::tui) fn not_ready(code: &str) -> bool {
 
 /// The plain sentence for one projects home, add project, onboarding or GitHub problem.
 /// Takes the bounded plain code the engine or the client sent.
-/// Returns the sentence; an unknown code gets a generic retry sentence, never the code.
-pub(in crate::tui) fn copy(code: &str) -> &'static str {
-    match code {
-        "projects_home_unset" => "Pick your projects folder first.",
+/// Returns the sentence; a code with no sentence gets a generic retry sentence naming the code.
+pub(in crate::tui) fn copy(code: &str) -> String {
+    known(code).map_or_else(
+        || coded("Something went wrong. Try again.", code),
+        str::to_owned,
+    )
+}
+
+/// The sentence for a projects home, add project, onboarding or GitHub problem code.
+/// Takes the code. Returns the sentence from this table or the engine's projects home
+/// table, or none for a code neither knows.
+pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "projects_home_unset" | "projects_home_not_set" => "Pick your projects folder first.",
         "projects_home_path_invalid" | "home_source_invalid" | "folder_size_path_invalid" => {
             "Type a full folder path, such as ~/Projects."
         }
@@ -61,7 +72,7 @@ pub(in crate::tui) fn copy(code: &str) -> &'static str {
             "This folder holds your home folder or app data, so it can't be added."
         }
         "home_source_hidden" | "home_source_name" => "Rename the folder to a plain name first.",
-        "home_destination_exists" => {
+        "home_destination_exists" | "clone_destination_exists" => {
             "Your projects folder already has a folder with this name. Rename one of them first."
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that can't be copied.",
@@ -96,30 +107,67 @@ pub(in crate::tui) fn copy(code: &str) -> &'static str {
         "project_setup_missing" | "project_missing" => "This project is gone. It was reloaded.",
         "pool_missing" => "That pool no longer exists. Pick another pool.",
         "stale_revision" => "This project changed meanwhile. Check it and confirm again.",
-        "github_signed_out" => "Sign in with GitHub first.",
+        "github_signed_out" | "github_not_signed_in" => "Sign in with GitHub first.",
         "github_token_blank" => "Paste a GitHub token.",
-        "github_token_invalid" | "account_secret_invalid" => {
+        "github_token_invalid" | "github_token_refused" | "account_secret_invalid" => {
             "GitHub didn't accept this token. Check it and try again."
         }
-        "github_device_expired" => "The GitHub code expired. Start again.",
-        "github_device_denied" => "The sign-in was cancelled on GitHub. Start again.",
+        "github_device_expired" | "github_sign_in_expired" => {
+            "The GitHub code expired. Start again."
+        }
+        "github_device_denied" | "github_sign_in_denied" | "github_sign_in_cancelled" => {
+            "The sign-in was cancelled on GitHub. Start again."
+        }
+        "github_sign_in_failed" => "The GitHub sign-in didn't finish. Start again.",
+        "github_device_flow_refused" | "github_client_id_refused" => {
+            "GitHub refused sign-in for this app. Paste a token or use the GitHub CLI."
+        }
         "github_cli_unavailable" => {
             "The GitHub CLI isn't installed or isn't signed in on this computer."
         }
+        "github_cli_missing" => "The GitHub CLI (gh) isn't installed on this computer.",
+        "github_cli_not_signed_in" => {
+            "The GitHub CLI isn't signed in. Run gh auth login, then try again."
+        }
         "github_unreachable" => "Couldn't reach GitHub. Check your connection and try again.",
-        "github_client_missing" => {
+        "github_reply_invalid" => "GitHub sent a reply CrazyAgent couldn't read. Try again.",
+        "github_client_missing" | "github_client_id_not_configured" => {
             "Sign in with GitHub isn't set up in this build yet. Paste a token or use the GitHub CLI."
         }
-        "github_page_invalid" => "There are no more repositories to show.",
+        "github_config_unsafe" | "github_config_invalid" => {
+            "The GitHub settings file is unreadable or not private to you."
+        }
+        "github_state_invalid" | "github_state_unavailable" => {
+            "The saved GitHub sign-in couldn't be read. Sign in again."
+        }
+        "credential_missing" => "The saved GitHub token is gone. Sign in again.",
+        "credential_store_unavailable" => {
+            "This computer's password store can't be used right now. Try again."
+        }
+        "github_outcome_unknown" => {
+            "CrazyAgent couldn't confirm the GitHub step. Check it and try again."
+        }
+        "github_page_invalid" | "github_repo_page_invalid" => {
+            "There are no more repositories to show."
+        }
+        "github_repo_name_invalid" => "That isn't a GitHub repository name. Use owner/name.",
         "repo_missing" => "This repository isn't on your GitHub account anymore.",
         "repo_already_cloned" => "This repository is already in your projects folder.",
-        "clone_failed" => "Couldn't clone this repository. Nothing was kept. Try again.",
+        "clone_failed" | "github_clone_failed" => {
+            "Couldn't clone this repository. Nothing was kept. Try again."
+        }
+        "github_clone_timed_out" => {
+            "Cloning took too long and was stopped. Nothing was kept. Try again."
+        }
+        "github_git_missing" => {
+            "Git isn't installed on this computer, so the repository can't be cloned."
+        }
         "trusted_connection_unavailable" | "trusted_connection_lost" => {
             "The engine connection dropped. CrazyAgent reconnects on its own."
         }
         code if not_ready(code) => NOT_READY,
-        _ => "Something went wrong. Try again.",
-    }
+        _ => return crate::projects_home::plain_problem(code),
+    })
 }
 
 #[cfg(test)]
@@ -127,19 +175,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_problem_reads_as_a_plain_sentence_without_the_code() {
+    fn a_known_problem_reads_as_a_plain_sentence_and_an_unknown_one_names_its_code() {
         for code in [
-            "folder_name_taken",
             "github_device_expired",
             "projects_home_unset",
             "owner_read_unsupported",
-            "something_new_and_odd",
+            "github_sign_in_expired",
+            "github_not_signed_in",
+            "github_clone_failed",
+            "github_clone_timed_out",
+            "github_cli_missing",
+            "github_config_unsafe",
+            "projects_home_not_set",
+            "clone_destination_exists",
+            "home_move_partial",
+            "home_move_nested",
         ] {
             let text = copy(code);
+            assert!(known(code).is_some(), "{code} has a sentence");
             assert!(!text.contains('_'), "{code} shows {text}");
             assert!(text.ends_with('.'), "{code} shows {text}");
         }
         assert_eq!(copy("owner_read_unsupported"), NOT_READY);
+        assert_eq!(
+            copy("home_move_partial"),
+            crate::projects_home::plain_problem("home_move_partial").unwrap()
+        );
+        assert_eq!(known("something_new_and_odd"), None);
+        assert_eq!(
+            copy("something_new_and_odd"),
+            "Something went wrong. Try again. (code: something_new_and_odd)"
+        );
+        assert_eq!(
+            copy("database is locked"),
+            "Something went wrong. Try again. (code: engine_error_unplain)"
+        );
         assert!(not_ready("github_unsupported"));
         assert!(!not_ready("github_unreachable"));
     }

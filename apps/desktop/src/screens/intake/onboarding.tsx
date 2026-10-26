@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadOnboarding, startOnboarding } from "../../api-intake";
 import {
-  assignPool, loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, updateProjectSetup, type ProjectCatalog, type StoredSetup,
+  loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, setProjectPool, updateProjectSetup, type ProjectCatalog, type StoredSetup,
 } from "../../api-projects";
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
@@ -53,7 +53,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
     <ol className="in-list" aria-label="Setup steps">{STEPS.map((step) => {
       const shown = stepView(value[step.key], value.finished);
       return <li className="in-row" key={step.key}>
-        <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className="pj-small pj-error">{shown.line}</span>}</span>
+        <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className={`pj-small ${shown.tone === "danger" ? "pj-error" : "pj-secondary"}`}>{shown.line}</span>}</span>
         <StatusBadge word={shown.word} tone={shown.tone} />
       </li>;
     })}</ol>
@@ -151,7 +151,7 @@ export function OnboardingReview({ id }: { id: string }) {
     if (state.kind === "rejected") { setBusy(false); setProblem(intakeCopy(state.code)); return; }
     if (state.kind === "unconfirmed") { setBusy(false); setProblem("We couldn't confirm setup was saved. Check the project and save again."); return; }
     const pool = request.setup.pool;
-    const assigned = pool ? await assignPool(id, pool, nextGeneration()) : null;
+    const assigned = pool ? await setProjectPool(id, pool, nextGeneration()) : null;
     setBusy(false);
     const unassigned = assigned !== null && (assigned.kind !== "ok" || assigned.value.kind !== "applied")
       ? ` Couldn't give ${pool} to its master. Choose it again in the project's Settings, Pool.` : "";

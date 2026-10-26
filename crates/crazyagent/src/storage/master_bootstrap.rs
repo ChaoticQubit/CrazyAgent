@@ -309,7 +309,7 @@ fn validate_receipt(
         || receipt.config_id != session.config_id
         || receipt.source_hash != session.source_hash
         || receipt.owner != session.owner
-        || receipt.proof != *proof
+        || !receipt_proof_matches(&receipt.proof, proof)
         || receipt.at_revision.value() < session.owner.revision_after.value()
         || receipt.at_revision.value() > owner_revision(tx)?
         || receipt.lease.state != LeaseState::Reserved
@@ -333,9 +333,20 @@ fn validate_receipt(
     if expected != actual {
         return Err(error("master_bootstrap_receipt_conflict"));
     }
-    assert!(receipt.proof == *proof);
+    assert!(receipt_proof_matches(&receipt.proof, proof));
     assert_eq!(expected, actual);
     Ok(actual)
+}
+
+/// Tells whether a turn's proof may use a workspace reserved under another proof: any
+/// native sign-in may, since each turn proves its own pool member in full before it uses
+/// the workspace; an RCLI configured proof must be the reserving one. Inputs: the
+/// receipt's proof and the turn's proof. Output: true when the workspace may be used.
+fn receipt_proof_matches(receipt: &MasterBootstrapAuth, proof: &MasterBootstrapAuth) -> bool {
+    match (receipt, proof) {
+        (MasterBootstrapAuth::NativeSignIn(_), MasterBootstrapAuth::NativeSignIn(_)) => true,
+        _ => receipt == proof,
+    }
 }
 
 pub(super) fn reserve(

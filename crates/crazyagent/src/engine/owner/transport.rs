@@ -52,6 +52,8 @@ mod native_auth_dispatch_diagnostic_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_lifetime_tests;
 #[cfg(all(test, unix))]
+mod native_auth_restart_tests;
+#[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
@@ -460,6 +462,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
+    reproof: tokio::sync::Mutex<()>,
 }
 
 impl Authority {
@@ -1167,6 +1170,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
+                reproof: tokio::sync::Mutex::new(()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1347,7 +1351,7 @@ impl OwnerServer {
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
-            eprintln!("master_dispatch_shutdown cause={}", error.0);
+            eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
         self.authority
             .usable
@@ -1954,11 +1958,7 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
-            Protocol::Agents => {
-                return agents::serve(stream, engine, authority, auth, &a, body)
-                    .await
-                    .map(|()| None);
-            }
+            Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2084,6 +2084,10 @@ async fn serve_admitted(
         Ok(Ok(Some(Deferred::Accounts(a)))) => {
             let _ = accounts::serve(stream, engine, authority, auth, &a, body).await;
         }
+        Ok(Ok(Some(Deferred::Agents(a)))) => {
+            let served = agents::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+        }
         _ => {}
     }
 }
@@ -2100,12 +2104,14 @@ struct Tasks {
 
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
-/// clones, and account checks that reach the network. Each carries the admission, and
-/// the projects home its validated request; the others read the request frame.
+/// clones, account checks that reach the network, and agent controls, which wait for an
+/// agent's process group or its host to end it. Each carries the admission, and the
+/// projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
+    Agents(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2226,6 +2232,16 @@ fn plain_cause<'a>(error: &'a EngineError, redacted: &'a str) -> &'a str {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
         });
     if plain { code } else { redacted }
+}
+
+/// Renders the engine log line for a master dispatch that stopped with an error.
+/// Input: the error. Output: the line naming its plain code, or a redacted marker for
+/// driver or parser text.
+fn master_dispatch_shutdown_line(error: &EngineError) -> String {
+    format!(
+        "master_dispatch_shutdown cause={}",
+        plain_cause(error, "master_dispatch_error_redacted")
+    )
 }
 
 fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Instant> {
@@ -3268,10 +3284,15 @@ fallback_allowed = false
         std::fs::create_dir(&long).unwrap();
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = long.join(SOCKET);
+        let address = crate::socket_address::address(&path).unwrap();
+        let link = address.parent().unwrap();
+        std::fs::remove_file(link).unwrap();
+        std::fs::create_dir(link).unwrap();
         let expected = crate::spawn_gate::bind_unix(&path)
             .err()
             .unwrap()
             .to_string();
+        assert_eq!(expected, "socket_alias_unsafe");
         let config =
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Arc::new(
@@ -3285,6 +3306,7 @@ fallback_allowed = false
             .unwrap();
         assert_eq!(error.0, expected);
         assert_eq!(std::fs::read_dir(&long).unwrap().count(), 0);
+        std::fs::remove_dir(link).unwrap();
         let (server, _) = OwnerServer::bind(root.path(), engine.clone(), &config)
             .await
             .unwrap();

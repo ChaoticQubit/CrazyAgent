@@ -1323,6 +1323,16 @@ impl NativeOwner {
                 .await
                 .map(|reply| native_auth::Output::Inspected(Box::new(reply)))
                 .map_err(|_| "native_auth_inspection_unavailable".into()),
+            native_auth::Command::Using => controller
+                .agents_using(job.context.connection.id.clone())
+                .await
+                .map(native_auth::Output::Using)
+                .map_err(|error| native_auth::public_problem(&error.0).into()),
+            native_auth::Command::StopUsing => controller
+                .stop_agents_using(job.context.connection.id.clone())
+                .await
+                .map(native_auth::Output::Using)
+                .map_err(|error| native_auth::public_problem(&error.0).into()),
             command => {
                 let reply = match command {
                     native_auth::Command::Start(request) => {
@@ -1337,11 +1347,13 @@ impl NativeOwner {
                     native_auth::Command::Logout(request) => {
                         controller.logout_native_auth(request.clone()).await
                     }
-                    native_auth::Command::Inspect => unreachable!(),
+                    native_auth::Command::Inspect
+                    | native_auth::Command::Using
+                    | native_auth::Command::StopUsing => unreachable!(),
                 };
                 reply
                     .map(|reply| native_auth::Output::Auth(Box::new(reply)))
-                    .map_err(|error| native_auth::public_problem(&error.0).into())
+                    .map_err(|error| native_auth::public_problem(&error.0))
             }
         }
     }

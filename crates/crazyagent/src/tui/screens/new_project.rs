@@ -7,6 +7,7 @@ use crate::project_setup::{
     SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TECH_ENTRIES_MAX, TECH_ENTRY_BYTES_MAX, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectSpec};
+use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 
@@ -1816,7 +1817,10 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
         ),
         _ => (
             "Could not create the project.",
-            "Press Enter to go back, then try again.".into(),
+            super::intake::known(code).map_or_else(
+                || coded("Press Enter to go back, then try again.", code),
+                |sentence| format!("{sentence} Press Enter to go back, then try again."),
+            ),
             Step::Review,
         ),
     }

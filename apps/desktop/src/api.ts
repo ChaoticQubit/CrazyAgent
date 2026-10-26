@@ -33,7 +33,8 @@ const COPY: Record<string, string> = {
   rejected: "The engine didn't accept this change.",
   unavailable: "This isn't available right now. Try again.",
   pool_member_limit: "A pool can hold up to 15 accounts.",
-  pool_in_use: "Can't delete this pool. A project uses it. Choose another pool for it first.",
+  pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
+  pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
@@ -66,7 +67,6 @@ const COPY: Record<string, string> = {
   account_reply_too_large: "The server at this URL sent a reply that is too large.",
   account_method_unavailable: "This sign-in method isn't available for this provider.",
   account_identity_unavailable: "Couldn't create the account. Try again.",
-  account_in_pool: "This account is in a pool. Remove it from the pool first.",
   native_auth_cancel_pending: "The sign-in is still stopping. Try again in a moment.",
   account_not_found: "This account no longer exists.",
   native_profile_not_managed: "This account doesn't use a subscription sign-in.",
@@ -235,6 +235,7 @@ const MODEL_ACCESS_CHANGE: Record<ModelAccessEdit["kind"], string> = {
   create_pool: "creating a pool",
   replace_pool: "changing a pool",
   remove_pool: "deleting a pool",
+  assign_project_pool: "changing a project's pool",
 };
 
 const CHANGE: Record<PendingIntent["kind"], string> = {
@@ -518,8 +519,8 @@ export async function savePool(id: string | undefined, name: string, members: st
   return change("desktop_edit_model_access", { ticket, edit, generation: nextGeneration() });
 }
 
-/** Deletes a pool; the engine refuses while a project uses it. Input: pool id.
- * Output: ok once deleted. */
+/** Deletes a pool and takes it off every project that uses it, in one engine change.
+ * Input: pool id. Output: ok once deleted; those projects then have no pool. */
 export async function deletePool(id: string): Promise<Result<void>> {
   const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
   if (detail.kind !== "ok") return detail;
@@ -640,6 +641,19 @@ export function interruptAgent(id: string): Promise<Result<void>> {
 /** Restarts one agent with its first task. Input: agent id. Output: the running agent. */
 export function restartAgent(id: string): Promise<Result<AgentView>> {
   return call<AgentView>("desktop_restart_agent", { id });
+}
+
+/** Lists the running agents that use one account, so a refused sign-out can name them.
+ * Input: the account id. Output: the agents, newest first. */
+export function agentsUsing(accountId: string): Promise<Result<AgentView[]>> {
+  return call<AgentView[]>("desktop_agents_using", { accountId });
+}
+
+/** Stops every agent that uses one account and waits for them to end, so the account can
+ * be signed out. Input: the account id. Output: the agents still using it, none once all
+ * have stopped. */
+export function stopAgentsUsing(accountId: string): Promise<Result<AgentView[]>> {
+  return call<AgentView[]>("desktop_stop_agents_using", { accountId });
 }
 
 /** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the

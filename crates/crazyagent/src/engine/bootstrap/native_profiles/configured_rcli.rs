@@ -108,8 +108,13 @@ fn validate_connection(connection: &ModelConnection) -> Result<(), EngineError> 
     Ok(())
 }
 
-pub(super) fn lock(file: &File) -> Result<(), EngineError> {
-    take_lock(file, FlockOperation::NonBlockingLockExclusive)
+/// Takes an exclusive lock on a profile file without waiting, for one custody step.
+/// Input: the open file. Output: the held lock, which unlocks when dropped;
+/// `native_profile_in_use` while another holder has it, or the lock failure.
+pub(super) fn lock(file: &File) -> Result<HeldLock, EngineError> {
+    let held = file.try_clone().map_err(unsafe_custody)?;
+    take_lock(&held, FlockOperation::NonBlockingLockExclusive)?;
+    Ok(HeldLock(held))
 }
 
 impl ConfiguredRcliUse {
@@ -407,7 +412,7 @@ impl NativeProfileCustody {
         self.validate_configured_home_path(configured_home)?;
         let captured = ConfiguredRcliUse::capture(configured_home, connection)?;
         let (root, root_manifest, root_identity) = self.root(host)?;
-        lock(&root_manifest.file)?;
+        let _root_lock = lock(&root_manifest.file)?;
         let locked = LockedRoot {
             root: &root,
             manifest: &root_manifest,
@@ -431,7 +436,7 @@ impl NativeProfileCustody {
             return Err(failure("native_profile_identity_changed"));
         }
         let key = digest(target_profile_ref.as_str().as_bytes());
-        let (profile, manifest, previous) = if slots.contains_key(&key) {
+        let (profile, manifest, previous, manifest_lock) = if slots.contains_key(&key) {
             let (profile, manifest, actual) =
                 self.read_configured_slot(root, locked.identity, &slots, &key, target_profile_ref)?;
             if actual.connection == *connection && actual.configured == configured.identity {
@@ -455,15 +460,15 @@ impl NativeProfileCustody {
                     },
                 ));
             }
-            lock(&manifest.file)?;
-            (Some(profile), Some(manifest), Some(actual))
+            let held = lock(&manifest.file)?;
+            (Some(profile), Some(manifest), Some(actual), Some(held))
         } else {
             if slots.len() >= MAX_PROFILES {
                 return Err(failure("native_profile_capacity"));
             }
-            (None, None, None)
+            (None, None, None, None)
         };
-        lock(&home.file)?;
+        let _home_lock = lock(&home.file)?;
         configured.verify(&home, connection)?;
         let generation = match &previous {
             Some(actual) => actual
@@ -501,6 +506,7 @@ impl NativeProfileCustody {
             }
             None => staged.commit(&root.file, &key)?,
         };
+        drop(manifest_lock);
         drop(manifest);
         assert_eq!(profile.identity, identity.directory);
         configured.verify(&home, connection)?;

@@ -288,14 +288,14 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Assign(picked.clone())
+        ProjectReply::Assign(Some(picked.clone()))
     );
     screen.open(Tab::Settings);
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert_eq!(drawn.help.first(), Some(&("Enter", "Assign pool")));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Assign(picked)
+        ProjectReply::Assign(Some(picked))
     );
     screen.pool.as_mut().unwrap().assigned = true;
     let drawn = project_screen(&mut screen, 80, 24, &look);
@@ -669,7 +669,15 @@ fn report_paths_map_back_to_their_research() {
     );
     assert_eq!(
         plain_problem("anything_else"),
-        "That didn't work. Try again."
+        "That didn't work. Try again. (code: anything_else)"
+    );
+    assert_eq!(
+        plain_problem("disk I/O error at /Users/owner/notes"),
+        "That didn't work. Try again. (code: engine_error_unplain)"
+    );
+    assert_eq!(
+        plain_problem("project_folder_unwritable"),
+        "CrazyAgent can't write in the project folder. Check its permissions."
     );
 }
 

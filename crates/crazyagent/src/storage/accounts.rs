@@ -23,6 +23,7 @@ pub(crate) struct Listed {
     pub(crate) connection: ModelConnection,
     pub(crate) details: AccountDetails,
     pub(crate) sign_in: Option<NativeAuthPhase>,
+    pub(crate) launchable: bool,
 }
 
 pub(crate) enum ResultValue {
@@ -129,7 +130,7 @@ pub(super) fn execute(
             let (connection, details) =
                 find(&tx, config, &id)?.ok_or_else(|| error("account_not_found"))?;
             Ok(ResultValue::Account(Box::new(listed(
-                &tx, connection, details,
+                &tx, admission, connection, details,
             )?)))
         }
         Command::Add(connection, details) => {
@@ -167,7 +168,7 @@ pub(super) fn execute(
                 params![record.connection.id.as_str(), encode(&record)?],
             )
             .map_err(|_| error("account_exists"))?;
-            let account = listed(&tx, record.connection, record.details)?;
+            let account = listed(&tx, admission, record.connection, record.details)?;
             tx.commit().map_err(error)?;
             Ok(ResultValue::Account(Box::new(account)))
         }
@@ -192,7 +193,7 @@ pub(super) fn execute(
                 params![id.as_str(), encode(&record)?],
             )
             .map_err(error)?;
-            let account = listed(&tx, record.connection, record.details)?;
+            let account = listed(&tx, admission, record.connection, record.details)?;
             tx.commit().map_err(error)?;
             Ok(ResultValue::Account(Box::new(account)))
         }
@@ -325,7 +326,12 @@ fn list(
     };
     let mut items = Vec::with_capacity(limit);
     for connection in unregistered.iter().skip(skip).take(limit) {
-        items.push(listed(&tx, (*connection).clone(), fallback(connection))?);
+        items.push(listed(
+            &tx,
+            admission,
+            (*connection).clone(),
+            fallback(connection),
+        )?);
     }
     let wanted = limit - items.len();
     let mut more = skip + items.len() < unregistered.len();
@@ -349,7 +355,7 @@ fn list(
                 .find(|c| c.id == record.connection.id)
                 .cloned()
                 .unwrap_or(record.connection);
-            items.push(listed(&tx, connection, record.details)?);
+            items.push(listed(&tx, admission, connection, record.details)?);
         }
     }
     let next = if more {
@@ -361,8 +367,13 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
+/// Lists one account with its latest sign-in and whether that sign-in passes the launch
+/// check every master, team and research turn uses on this engine run, so status never
+/// shows an account as signed in when a launch would refuse it. Inputs: the transaction,
+/// the admitted owner, the connection and its details. Output: the listed account.
 fn listed(
-    tx: &Connection,
+    tx: &Transaction<'_>,
+    admission: &Admission,
     connection: ModelConnection,
     details: AccountDetails,
 ) -> Result<Listed, EngineError> {
@@ -370,10 +381,18 @@ fn listed(
         ModelAuthentication::NativeManaged { profile_ref } => latest_sign_in(tx, profile_ref)?,
         _ => None,
     };
+    let host = HostStamp {
+        db_instance: admission.db_instance.clone(),
+        engine_epoch: admission.engine_epoch.clone(),
+    };
+    let launchable = sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
+        && crate::storage::native_sign_in(tx, &host, &connection, None).is_ok();
+    assert!(!launchable || sign_in == Some(NativeAuthPhase::AuthenticatedObserved));
     Ok(Listed {
         connection,
         details,
         sign_in,
+        launchable,
     })
 }
 

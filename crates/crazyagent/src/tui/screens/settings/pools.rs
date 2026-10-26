@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 const ROWS_START: usize = 10;
 const TABS_HEIGHT: usize = 2;
 const HEAD_HEIGHT: usize = 4;
+const MODAL_TEXT: usize = 50;
 
 /// Settings, Pools: every pool with its size, readiness and the projects using
 /// it.
@@ -26,12 +27,13 @@ pub struct Pools {
     offset: usize,
     rows: usize,
     confirm: Option<Confirm>,
-    deleting: bool,
+    deleting: Option<bool>,
 }
 
 struct Confirm {
     id: CredentialRef,
     name: String,
+    users: Option<String>,
     delete_focused: bool,
 }
 
@@ -50,7 +52,7 @@ impl Pools {
             offset: 0,
             rows: ROWS_START,
             confirm: None,
-            deleting: false,
+            deleting: None,
         }
     }
 
@@ -83,8 +85,8 @@ impl Pools {
             }
             Key::Enter if confirm.delete_focused => {
                 let id = confirm.id.clone();
+                self.deleting = Some(confirm.users.is_some());
                 self.confirm = None;
-                self.deleting = true;
                 ctx.request(Request::EditPool {
                     change: PoolChange::Remove { id },
                 });
@@ -104,16 +106,11 @@ impl Pools {
         else {
             return;
         };
-        if used_by(pool, false, ctx) != "Not used" {
-            ctx.say(Message::error(
-                plain_problem("pool_in_use").expect("pool_in_use has a sentence"),
-                "",
-            ));
-            return;
-        }
+        let users = used_by(pool, true, ctx);
         self.confirm = Some(Confirm {
             id: pool.id.clone(),
             name: pool.name.clone(),
+            users: (users != "Not used").then_some(users),
             delete_focused: false,
         });
     }
@@ -206,7 +203,7 @@ impl Screen for Pools {
         let count = ctx.store.pools.ready().map_or(0, Vec::len);
         match key {
             Key::Char('a') => Flow::Open(Place::NewPool),
-            Key::Char('d') if count > 0 && !self.deleting => {
+            Key::Char('d') if count > 0 && self.deleting.is_none() => {
                 self.ask_delete(ctx);
                 Flow::Handled
             }
@@ -264,9 +261,13 @@ impl Screen for Pools {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
             Arrival::Pools(Ok(pools)) => self.follow(pools.len()),
-            Arrival::PoolEdited(result) if self.deleting => {
-                self.deleting = false;
+            Arrival::PoolEdited(result) if self.deleting.is_some() => {
+                let used = self.deleting.take() == Some(true);
                 match result {
+                    Ok(()) if used => ctx.say(Message::success(
+                        "Pool deleted.",
+                        "Its projects have no pool now. Pick a pool to start in each project's Settings.",
+                    )),
                     Ok(()) => ctx.say(Message::success("Pool deleted.", "")),
                     Err(code) => ctx.say(Message::error(
                         plain_problem(code).unwrap_or("Could not delete the pool."),
@@ -283,21 +284,40 @@ impl Screen for Pools {
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
         let confirm = self.confirm.as_ref()?;
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
+        let mut body = vec![
+            Line::raw(format!("Delete {}?", confirm.name)),
+            Line::default(),
+        ];
+        let action = match &confirm.users {
+            Some(users) => {
+                body.extend(
+                    wrap(
+                        &format!(
+                            "Used by {users}. They will have no pool until you pick one. Its accounts stay saved."
+                        ),
+                        MODAL_TEXT,
+                    )
+                    .into_iter()
+                    .map(Line::raw),
+                );
+                "Unassign and delete"
+            }
+            None => {
+                body.push(Line::raw("No project uses it. Its accounts stay saved."));
+                "Delete"
+            }
+        };
+        body.push(Line::default());
+        body.push(buttons(
+            &["Cancel", action],
+            Some(usize::from(confirm.delete_focused)),
+            &ctx.theme,
+        ));
         Some((
             Modal {
                 width: 54,
                 title: "Delete pool".into(),
-                body: vec![
-                    Line::raw(format!("Delete {}?", confirm.name)),
-                    Line::default(),
-                    Line::raw("No project uses it. Its accounts stay saved."),
-                    Line::default(),
-                    buttons(
-                        &["Cancel", "Delete"],
-                        Some(usize::from(confirm.delete_focused)),
-                        &ctx.theme,
-                    ),
-                ],
+                body,
                 top: None,
             },
             vec![
@@ -422,7 +442,7 @@ impl Screen for Pools {
     }
 
     fn busy(&self, ctx: &Ctx) -> bool {
-        self.deleting || matches!(ctx.store.pools, Load::Loading | Load::Idle)
+        self.deleting.is_some() || matches!(ctx.store.pools, Load::Loading | Load::Idle)
     }
 
     fn place(&self) -> Option<Place> {
@@ -467,20 +487,64 @@ mod tests {
         ctx
     }
 
+    fn card(name: &str, pool: &str) -> crate::tui::seam::ProjectCard {
+        crate::tui::seam::ProjectCard {
+            id: crate::protocol::ProjectId::new(name.to_lowercase()).unwrap(),
+            name: name.into(),
+            about: String::new(),
+            platforms: Vec::new(),
+            pool: Some(pool.into()),
+            research: Default::default(),
+            created_ms: None,
+            activity: Default::default(),
+        }
+    }
+
+    fn body(modal: &Modal) -> String {
+        modal
+            .body
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn a_used_pool_cannot_be_deleted_and_says_why() {
+    fn a_used_pool_names_its_projects_and_unassigns_them_when_deleted() {
         let mut ctx = ctx();
+        ctx.store.projects = Load::Ready(vec![card("Alpha", "main"), card("Beta", "main")]);
         let mut screen = Pools::new();
-        assert!(matches!(
-            screen.key(&Key::Char('d'), &mut ctx),
-            Flow::Handled
-        ));
-        assert!(screen.modal(&ctx).is_none());
-        assert_eq!(
-            ctx.message().unwrap().lead,
-            "This pool is used by a project. Remove it from the project first."
+        screen.key(&Key::Char('d'), &mut ctx);
+        let (modal, _) = screen.modal(&ctx).expect("confirmation shows");
+        let shown = body(&modal).replace('\n', " ");
+        assert!(shown.contains("Used by Alpha, Beta."), "{shown}");
+        assert!(
+            shown.contains("They will have no pool until you pick one."),
+            "{shown}"
         );
-        assert_eq!(ctx.queued(), 0);
+        assert!(shown.contains("Unassign and delete"), "{shown}");
+        screen.key(&Key::Right, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        match ctx.next_request() {
+            Some(Request::EditPool {
+                change: PoolChange::Remove { id },
+            }) => assert_eq!(id.as_str(), "pool-main"),
+            other => panic!("unexpected request {other:?}"),
+        }
+        screen.arrive(&Arrival::PoolEdited(Ok(())), &mut ctx);
+        let message = ctx.message().unwrap();
+        assert_eq!(message.lead, "Pool deleted.");
+        assert!(
+            message.rest.contains("Pick a pool to start"),
+            "{}",
+            message.rest
+        );
+        assert!(screen.deleting.is_none());
     }
 
     #[test]
@@ -511,12 +575,12 @@ mod tests {
             "no second delete while one runs"
         );
 
-        screen.arrive(&Arrival::PoolEdited(Err("pool_in_use".into())), &mut ctx);
+        screen.arrive(&Arrival::PoolEdited(Err("pool_not_found".into())), &mut ctx);
         assert_eq!(
             ctx.message().unwrap().lead,
-            "This pool is used by a project. Remove it from the project first."
+            "This pool no longer exists. Refresh and try again."
         );
         assert!(matches!(ctx.next_request(), Some(Request::Pools)));
-        assert!(!screen.deleting);
+        assert!(screen.deleting.is_none());
     }
 }

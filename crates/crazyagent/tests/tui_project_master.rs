@@ -427,7 +427,7 @@ async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
         assert_eq!(turn.session_id, sessions[0].session_id);
         assert_eq!(turn.ordinal, 1);
         assert_eq!(turn.phase, MasterTurnPhase::Blocked);
-        assert_eq!(turn.reason, Some(MasterReason::Unknown));
+        assert_eq!(turn.reason, Some(MasterReason::RuntimeUnavailable));
         assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
         let evidence: Value = serde_json::from_slice(&fs::read(root.path().join("actual-contention-operation.json")).unwrap()).unwrap();
         assert_eq!(evidence["operation_id"].as_str().unwrap(), turn.id.as_str());

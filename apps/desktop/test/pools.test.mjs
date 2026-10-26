@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { toggleMember, notSignedInNote, deleteRefusal, poolReadiness, poolUse, PoolEditorView, PoolsView, POOL_FULL } = await import("../src/screens/settings/pools.tsx");
+const { toggleMember, notSignedInNote, deleteCopy, poolReadiness, poolUse, PoolEditorView, PoolsView, POOL_FULL } = await import("../src/screens/settings/pools.tsx");
 const { poolInput, POOL_MEMBER_MAX } = await import("../src/api.ts");
 
 const account = (index, patch = {}) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT / Codex",
@@ -43,8 +43,12 @@ test("pool lines: readiness, use, the not-signed-in note and the delete refusal"
   assert.equal(notSignedInNote(["b"], status), undefined);
   assert.equal(notSignedInNote(["a", "b"], status), "1 account isn't signed in. Agents skip it until you sign in again.");
   assert.equal(notSignedInNote(["a", "c"], status), "2 accounts aren't signed in. Agents skip them until you sign in again.");
-  assert.equal(deleteRefusal(pool(1, { project_count: 2 })), "Can't delete Main. 2 projects use it. Choose another pool for them first.");
-  assert.equal(deleteRefusal(pool(1, { project_count: 1 })), "Can't delete Main. 1 project uses it. Choose another pool for it first.");
+  assert.deepEqual(deleteCopy(pool(1), undefined), { body: "Its accounts stay in your list. Only the pool goes away.", confirmLabel: "Delete pool", done: "Main deleted." });
+  assert.deepEqual(deleteCopy(pool(1, { project_count: 2 }), ["Harbor", "Atlas"]), {
+    body: "Used by Harbor and Atlas. They will have no pool until you pick one. Its accounts stay in your list.",
+    confirmLabel: "Unassign and delete", done: "Main deleted. Its projects have no pool now. Pick a pool to start in each project's Settings." });
+  assert.equal(deleteCopy(pool(1, { project_count: 1 }), undefined).body, "Used by 1 project. It will have no pool until you pick one. Its accounts stay in your list.");
+  assert.equal(deleteCopy(pool(1, { project_count: 1 }), undefined).confirmLabel, "Unassign and delete");
 });
 
 test("a full pool marks unchecked rows unavailable but focusable and shows the limit notice", () => {

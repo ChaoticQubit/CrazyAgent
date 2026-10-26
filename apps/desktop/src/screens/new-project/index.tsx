@@ -2,7 +2,7 @@ import { checkUnconfirmed, harnessCatalog, nextGeneration, poolSummaries, receip
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import {
-  assignPool, failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, settledReceipt, setupProject,
+  failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, settledReceipt, setProjectPool, setupProject,
 } from "../../api-projects";
 import type { PoolChoice, ProjectCatalog } from "../../api-projects";
 import { SessionContext } from "../../state";
@@ -158,7 +158,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       ? `${name} created.${count ? ` ${count} research ${count === 1 ? "agent is" : "agents are"} starting.` : ""}`
       : `${name} created. Research starts when you choose a pool.`;
     if (draft.pool) {
-      const assigned = await assignPool(id, draft.pool, nextGeneration());
+      const assigned = await setProjectPool(id, draft.pool, nextGeneration());
       if (assigned.kind !== "ok" || assigned.value.kind !== "applied") {
         message = `${name} created. Couldn't assign ${chosenPool ? poolName(chosenPool.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
       }

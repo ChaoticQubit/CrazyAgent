@@ -1,7 +1,7 @@
 import type { ModelAccessDetail } from "./engine-client";
 import { displayText } from "./screens/conversation";
 
-export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official";
+export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official" | "claude_existing";
 export type NativeAuthCommand = NativeAuthMethod | "read" | "cancel" | "logout";
 export type NativeAuthAction = { kind: "sign_in"; method: NativeAuthMethod } | { kind: "logout" };
 export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account" |

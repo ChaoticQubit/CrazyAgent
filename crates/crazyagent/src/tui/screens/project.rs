@@ -12,6 +12,7 @@ use crate::project_setup::{
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::tui::seam::PoolScope;
+use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 
@@ -460,7 +461,7 @@ pub(in crate::tui) enum ProjectReply {
     },
     Open(OpenRequest),
     PickPool,
-    Assign(crate::protocol::CredentialRef),
+    Assign(Option<crate::protocol::CredentialRef>),
     Send(String),
     StopTurn,
     EndConversation,
@@ -1535,7 +1536,7 @@ impl ProjectScreen {
         }
         let picked = self.setup.as_ref().and_then(|setup| setup.pool.clone());
         match (&self.pool, picked) {
-            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(id),
+            (Some(pool), Some(id)) if !pool.assigned => ProjectReply::Assign(Some(id)),
             _ if self.pool_choices.is_empty() => ProjectReply::PickPool,
             (pool, _) => {
                 let current = pool.as_ref().filter(|pool| pool.assigned).and_then(|pool| {
@@ -1549,18 +1550,22 @@ impl ProjectScreen {
         }
     }
 
+    /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
+    /// Takes the key and the cursor. Returns the chosen pool, None for "No pool", or Handled.
     fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
-        assert!(cursor < self.pool_choices.len().max(1));
-        let last = self.pool_choices.len().saturating_sub(1);
+        let last = self.pool_choices.len();
+        assert!(cursor <= last);
         match key.code {
             KeyCode::Up => self.pool_picker = Some(cursor.saturating_sub(1)),
             KeyCode::Down => self.pool_picker = Some((cursor + 1).min(last)),
             KeyCode::Esc => self.pool_picker = None,
             KeyCode::Enter => {
                 self.pool_picker = None;
-                if let Some(choice) = self.pool_choices.get(cursor) {
-                    return ProjectReply::Assign(choice.id.clone());
-                }
+                return ProjectReply::Assign(
+                    self.pool_choices
+                        .get(cursor)
+                        .map(|choice| choice.id.clone()),
+                );
             }
             _ => {}
         }
@@ -1568,15 +1573,15 @@ impl ProjectScreen {
     }
 
     /// Replaces the pools the picker lists.
-    /// Takes the choices in the engine's order; an open picker keeps a cursor inside the list.
-    /// Returns nothing.
+    /// Takes the choices in the engine's order; an open picker keeps a cursor on a pool
+    /// or on "No pool", and closes when no pool is left. Returns nothing.
     pub fn set_pool_choices(&mut self, choices: Vec<PoolChoice>) {
         self.pool_choices = choices;
         if let Some(cursor) = self.pool_picker {
             self.pool_picker = if self.pool_choices.is_empty() {
                 None
             } else {
-                Some(cursor.min(self.pool_choices.len() - 1))
+                Some(cursor.min(self.pool_choices.len()))
             };
         }
     }
@@ -1698,7 +1703,7 @@ impl ProjectScreen {
 
     fn assert_consistent(&self) {
         if let Some(cursor) = self.pool_picker {
-            assert!(cursor < self.pool_choices.len());
+            assert!(!self.pool_choices.is_empty() && cursor <= self.pool_choices.len());
         }
         if let Some(jobs) = &self.jobs {
             assert!(self.agents_cursor <= jobs.len());
@@ -1778,7 +1783,7 @@ pub(in crate::tui) fn research_kind(path: &str) -> Option<ResearchKind> {
 
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
-/// Returns what happened and what to do.
+/// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
 pub(in crate::tui) fn plain_problem(code: &str) -> String {
     match code {
         "research_report_missing" => {
@@ -1793,12 +1798,16 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
+        "project_folder_unwritable" => {
+            "CrazyAgent can't write in the project folder. Check its permissions."
+        }
+        "project_folder_unavailable" => "Documents can't be added on this system yet.",
         "project_setup_missing" => {
             "This project was made before project setup. Its context is not available."
         }
         "trusted_connection_unavailable" => "Not connected to the engine. Retrying.",
         "pool_project_limit" => "That pool already serves 64 projects. Pick another pool.",
-        "pool_not_found" => "That pool no longer exists. Pick another pool.",
+        "pool_not_found" | "pool_missing" => "That pool no longer exists. Pick another pool.",
         "pool_changed" => "The pools changed meanwhile. Try again.",
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
@@ -1841,7 +1850,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
-        _ => "That didn't work. Try again.",
+        _ => return coded("That didn't work. Try again.", code),
     }
     .into()
 }

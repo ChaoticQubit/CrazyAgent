@@ -234,6 +234,22 @@ pub struct MasterTurnView {
     pub reply: Option<MasterReply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<MasterAccountState>,
+}
+
+/// One pool account named on a master turn that no account of its harness could run.
+/// Fields: the account, its connection, the connection's harness and why it cannot run
+/// the turn; a reason of None marks a ready account of another harness in the pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterAccountState {
+    pub account_ref: CredentialRef,
+    pub connection: CredentialRef,
+    pub harness: CredentialRef,
+    pub reason: Option<MasterReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +303,24 @@ pub enum MasterOwnerAction {
         registration: Box<RcliProfileRegistration>,
     },
 }
+
+/// Turns the engine error that stopped a master turn into the code the turn stores.
+/// Input: the raw error text. Output: the text itself when it is a plain code of at most
+/// 192 lowercase letters, digits, `_`, `:` or `;`, else a redacted marker, so provider
+/// text, paths and secrets never reach the stored turn.
+pub(crate) fn cause_code(raw: &str) -> String {
+    let plain = !raw.is_empty()
+        && raw.len() <= CAUSE_MAX
+        && raw.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':' | b';')
+        });
+    let code = if plain { raw } else { CAUSE_REDACTED };
+    assert!(!code.is_empty() && code.len() <= CAUSE_MAX);
+    code.to_owned()
+}
+
+const CAUSE_MAX: usize = 192;
+const CAUSE_REDACTED: &str = "master_cause_redacted";
 
 pub(crate) fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
@@ -388,24 +422,59 @@ pub(crate) fn validate_selection(
     if !catalog.connections.iter().any(|connection| {
         connection.account_ref == selection.route.account_ref
             && pool.members.contains(&connection.id)
-            && match selection.backend {
-                MasterBackend::Rcli => {
-                    connection.harness.as_str() == "rcli"
-                        && matches!(connection.endpoint, ModelEndpoint::Http { .. })
-                }
-                MasterBackend::Codex => {
-                    connection.harness.as_str() == "codex"
-                        && connection.protocol.as_str() == "native"
-                        && matches!(connection.endpoint, ModelEndpoint::Native {})
-                }
-                MasterBackend::Claude => {
-                    matches!(connection.harness.as_str(), "claude" | "claude-code")
-                        && connection.protocol.as_str() == "native"
-                        && matches!(connection.endpoint, ModelEndpoint::Native {})
-                }
-            }
+            && backend_member(selection.backend, connection)
     }) {
         return Err(error("master_backend_account_denied"));
     }
     Ok(())
+}
+
+/// Tells whether a connection can run a master of this backend.
+/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
+/// for a native connection of the Codex or Claude harness the backend names.
+pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnection) -> bool {
+    match backend {
+        MasterBackend::Rcli => {
+            connection.harness.as_str() == "rcli"
+                && matches!(connection.endpoint, ModelEndpoint::Http { .. })
+        }
+        MasterBackend::Codex => {
+            connection.harness.as_str() == "codex"
+                && connection.protocol.as_str() == "native"
+                && matches!(connection.endpoint, ModelEndpoint::Native {})
+        }
+        MasterBackend::Claude => {
+            matches!(connection.harness.as_str(), "claude" | "claude-code")
+                && connection.protocol.as_str() == "native"
+                && matches!(connection.endpoint, ModelEndpoint::Native {})
+        }
+    }
+}
+
+#[cfg(test)]
+mod cause_code_tests {
+    use super::cause_code;
+
+    #[test]
+    fn only_a_plain_bounded_code_is_stored_and_anything_else_is_redacted() {
+        for plain in [
+            "rcli_profile_configuration_required",
+            "repository_config_refused:core_hookspath",
+            "rcli_master_cleanup_incomplete;rcli_master_wait_failed",
+            &"a".repeat(192),
+        ] {
+            assert_eq!(cause_code(plain), plain);
+        }
+        for private in [
+            "",
+            "Error: token sk-live-123 rejected",
+            "/private/tmp/owner/repo: permission denied",
+            "gateway rate limited",
+            "Rcli_profile",
+            "caf\u{e9}_code",
+            &"a".repeat(193),
+        ] {
+            assert_eq!(cause_code(private), "master_cause_redacted", "{private}");
+        }
+    }
 }

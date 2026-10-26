@@ -1,5 +1,6 @@
 use super::new_project::{HarnessChoice, HarnessState, Phase, PoolChoice, Reply, Wizard};
 use super::new_project_view::{Look, Row, Screen as View, wizard_screen};
+use super::project::plain_problem;
 use super::project_page::ProjectPage;
 use super::settings_accounts::{plain, settings_event};
 use super::settings_harnesses::{control_sentence, control_word};
@@ -396,7 +397,7 @@ impl NewProjectPage {
                 creation.assigning = true;
                 ctx.request(Request::EditPool {
                     change: PoolChange::Assign {
-                        pool,
+                        pool: Some(pool),
                         project: creation.submission.project_id.clone(),
                     },
                 });
@@ -413,9 +414,12 @@ impl NewProjectPage {
         creation.assigning = false;
         match result {
             Ok(()) => ctx.request(Request::PoolProjects),
-            Err(_) => ctx.say(Message::error(
+            Err(code) => ctx.say(Message::error(
                 "The project is made, but its pool is not assigned.",
-                "Open the project's Settings tab to assign it.",
+                &format!(
+                    "{} Open the project's Settings tab to assign it.",
+                    plain_problem(code)
+                ),
             )),
         }
         self.finish(ctx)

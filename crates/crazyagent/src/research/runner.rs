@@ -828,7 +828,10 @@ impl ResearchRunner {
     ) -> Result<Ending, RunError> {
         let mut last = String::new();
         let mut counted: u64 = 0;
-        if session.send(prompt).is_err() {
+        if let Err(problem) = session.send_or_cancel(prompt, &self.stopping) {
+            if problem.0 == "launch_cancelled" {
+                return Ok(Ending::Interrupted);
+            }
             return Ok(Ending::Exited(false));
         }
         let mut beat = Instant::now();

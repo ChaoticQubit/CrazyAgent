@@ -155,7 +155,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
     if turn.reason == Some(MasterReason::RepositoryConfigRefused)
         && let Some(detail) = &turn.detail
     {
-        return Some(format!("{harness} stopped: {detail}"));
+        return Some(format!("{harness} stopped: {detail} ({code}){retry}"));
     }
     let why = match turn.reason {
         Some(MasterReason::ReadinessUnknown | MasterReason::ReadinessStale) => {
@@ -200,10 +200,13 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
     Some(format!("{harness} stopped: {why} ({code}){retry}"))
 }
 
-/// Names the engine code a stopped turn shows: its reason, or its phase when the engine
-/// gave no specific reason, so the owner never sees a bare "unknown".
-/// Takes the turn. Returns the code as the engine spells it.
+/// Names the engine code a stopped turn shows: the cause the engine stored, else its
+/// reason, else its phase when the engine gave no specific reason, so the owner never
+/// sees a bare "unknown". Takes the turn. Returns the code as the engine spells it.
 fn stop_code(turn: &MasterTurnView) -> String {
+    if let Some(cause) = &turn.cause {
+        return cause.clone();
+    }
     let value = match turn
         .reason
         .filter(|reason| *reason != MasterReason::Unknown)
@@ -262,7 +265,9 @@ mod tests {
             attempt: None,
             runtime: None,
             reply: None,
+            accounts: Vec::new(),
             detail: None,
+            cause: None,
         }
     }
 
@@ -568,6 +573,40 @@ mod tests {
             master_problem("master_dispatch_capacity"),
             "The engine refused it. (master_dispatch_capacity)"
         );
+    }
+
+    #[test]
+    fn a_stopped_turn_names_the_cause_the_engine_stored() {
+        let configured = Some(MasterSessionPhase::Configured);
+        let inputs = [entry(3, "Go.")];
+        let refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+        let cases = [
+            (
+                MasterReason::RuntimeUnavailable,
+                None,
+                "rcli_profile_configuration_required",
+                "Codex stopped: it could not start. Check it in Settings, Harnesses. (rcli_profile_configuration_required) Press r to try again.".to_owned(),
+            ),
+            (
+                MasterReason::Unknown,
+                None,
+                "master_runtime_binding",
+                "Codex stopped: something went wrong. (master_runtime_binding) Press r to try again.".to_owned(),
+            ),
+            (
+                MasterReason::RepositoryConfigRefused,
+                Some(refused),
+                "repository_config_refused:core_hookspath",
+                format!("Codex stopped: {refused} (repository_config_refused:core_hookspath) Press r to try again."),
+            ),
+        ];
+        for (reason, detail, cause, line) in cases {
+            let mut stopped = turn(1, 3, MasterTurnPhase::Blocked, Some(reason));
+            stopped.detail = detail.map(str::to_owned);
+            stopped.cause = Some(cause.to_owned());
+            let transcript = build(configured, &[stopped], &inputs);
+            assert_eq!(transcript.messages.last().unwrap().text, line);
+        }
     }
 
     #[test]

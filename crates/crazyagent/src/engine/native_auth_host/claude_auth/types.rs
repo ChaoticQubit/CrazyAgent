@@ -120,7 +120,7 @@ impl ClaudeAuthObservation {
             || !matches!(
                 fact.action,
                 NativeAuthAction::SignIn {
-                    method: NativeAuthMethod::ClaudeOfficial
+                    method: NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting
                 } | NativeAuthAction::Logout
             )
         {

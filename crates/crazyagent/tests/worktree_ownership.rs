@@ -368,7 +368,7 @@ async fn hostile_config_filters_and_attributes_never_execute() {
             },
         )
         .await;
-        let refusal = if admission.outcome == Outcome::Applied {
+        let result = if admission.outcome == Outcome::Applied {
             (
                 "allocation",
                 apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
@@ -380,18 +380,23 @@ async fn hostile_config_filters_and_attributes_never_execute() {
         };
         assert!(!marker.exists(), "hostile {hostile} executed");
         let expected = match hostile {
-            "attributes" => ("allocation", "unsupported_or_unsafe_tree_entry"),
-            "alternate" => ("admission", "unsupported_shared_or_partial_git_metadata"),
-            "filter" => ("admission", "repository_config_refused:filter_driver"),
-            "include" => ("admission", "repository_config_refused:include"),
-            "fsmonitor" => ("admission", "repository_config_refused:core_fsmonitor"),
+            "attributes" => ("allocation", Outcome::Applied),
+            "alternate" => (
+                "admission",
+                rejected("unsupported_shared_or_partial_git_metadata"),
+            ),
+            "filter" => (
+                "admission",
+                rejected("repository_config_refused:filter_driver"),
+            ),
+            "include" => ("admission", rejected("repository_config_refused:include")),
+            "fsmonitor" => (
+                "admission",
+                rejected("repository_config_refused:core_fsmonitor"),
+            ),
             _ => unreachable!(),
         };
-        assert_eq!(
-            refusal,
-            (expected.0, rejected(expected.1)),
-            "hostile {hostile}"
-        );
+        assert_eq!(result, expected, "hostile {hostile}");
         engine.close().await.unwrap();
     }
 }
@@ -859,47 +864,221 @@ async fn missing_branch_and_replaced_repository_are_uncertain() {
     engine.close().await.unwrap();
 }
 
+fn commit(repo: &Path, message: &str) {
+    git(repo, &["add", "-A"]);
+    git(
+        repo,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
+fn nested_text(module: usize, section: usize, file: usize) -> String {
+    format!("module {module} section {section} file {file}\n")
+}
+
+fn large_bytes() -> Vec<u8> {
+    (0..50 * 1024 * 1024)
+        .map(|index: usize| (index.wrapping_mul(31) % 251) as u8)
+        .collect()
+}
+
+const LFS_POINTER: &str = concat!(
+    "version https://git-lfs.github.com/spec/v1\n",
+    "oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n",
+    "size 12345\n"
+);
+
 #[tokio::test]
-async fn unsupported_symlink_and_oversized_trees_retain_ownership_without_checkout() {
-    for kind in ["symlink", "file-count", "file-bytes"] {
+async fn a_real_size_repository_gets_a_ready_lease_with_its_links_large_file_and_lfs_pointer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let repo = repository(&root, "repo");
+    for module in 0..16 {
+        for section in 0..8 {
+            let folder = repo.join(format!("src/m{module}/s{section}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            for file in 0..16 {
+                std::fs::write(
+                    folder.join(format!("f{file}.txt")),
+                    nested_text(module, section, file),
+                )
+                .unwrap();
+            }
+        }
+    }
+    let deep = repo.join("deep/a/b/c/d/e/f/g/h/i/j/k/l");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("leaf.txt"), b"deep leaf\n").unwrap();
+    std::fs::write(repo.join("big.bin"), large_bytes()).unwrap();
+    std::fs::write(repo.join("AGENTS.md"), b"agent rules\n").unwrap();
+    std::os::unix::fs::symlink("AGENTS.md", repo.join("CLAUDE.md")).unwrap();
+    std::fs::create_dir(repo.join("docs")).unwrap();
+    std::os::unix::fs::symlink("../src/m0", repo.join("docs/current")).unwrap();
+    std::fs::write(root.join("outside-file"), b"outside the lease\n").unwrap();
+    std::fs::create_dir(repo.join("links")).unwrap();
+    std::os::unix::fs::symlink("../../outside-file", repo.join("links/escape")).unwrap();
+    std::os::unix::fs::symlink(root.join("outside-file"), repo.join("links/absolute")).unwrap();
+    std::fs::write(
+        repo.join(".gitattributes"),
+        "*.psd filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .unwrap();
+    std::fs::create_dir(repo.join("art")).unwrap();
+    std::fs::write(repo.join("art/cover.psd"), LFS_POINTER).unwrap();
+    std::fs::create_dir(repo.join("bin")).unwrap();
+    std::fs::write(repo.join("bin/run.sh"), b"#!/bin/sh\necho run\n").unwrap();
+    std::fs::set_permissions(
+        repo.join("bin/run.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    commit(&repo, "real size");
+    std::fs::write(root.join("global"), "version = 1\ntimeout_ms = 30000\n").unwrap();
+    let (engine, _) = setup(&root, &repo).await;
+    admit(&engine, &repo).await;
+    assert_eq!(
+        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
+            .await
+            .outcome,
+        Outcome::Applied
+    );
+    let lease = leases(&engine).await.remove(0);
+    assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Ready);
+    let path = Path::new(&lease.path);
+    for module in 0..16 {
+        for section in 0..8 {
+            for file in 0..16 {
+                assert_eq!(
+                    std::fs::read_to_string(
+                        path.join(format!("src/m{module}/s{section}/f{file}.txt"))
+                    )
+                    .unwrap(),
+                    nested_text(module, section, file)
+                );
+            }
+        }
+    }
+    assert_eq!(
+        std::fs::read(path.join("deep/a/b/c/d/e/f/g/h/i/j/k/l/leaf.txt")).unwrap(),
+        b"deep leaf\n"
+    );
+    assert!(std::fs::read(path.join("big.bin")).unwrap() == large_bytes());
+    assert_eq!(
+        std::fs::read_link(path.join("CLAUDE.md")).unwrap(),
+        Path::new("AGENTS.md")
+    );
+    assert_eq!(
+        std::fs::read(path.join("CLAUDE.md")).unwrap(),
+        b"agent rules\n"
+    );
+    assert_eq!(
+        std::fs::read_link(path.join("docs/current")).unwrap(),
+        Path::new("../src/m0")
+    );
+    assert!(path.join("docs/current/s0/f0.txt").is_file());
+    for link in ["links/escape", "links/absolute"] {
+        assert!(
+            std::fs::symlink_metadata(path.join(link)).is_err(),
+            "{link} must not reach outside the lease"
+        );
+    }
+    assert_eq!(
+        git(
+            path,
+            &["ls-files", "-v", "--", "links/escape", "links/absolute"]
+        ),
+        "S links/absolute\nS links/escape\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("art/cover.psd")).unwrap(),
+        LFS_POINTER
+    );
+    assert_ne!(
+        std::fs::metadata(path.join("bin/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o100,
+        0
+    );
+    assert_eq!(git(path, &["status", "--porcelain"]), "");
+    assert_eq!(
+        std::fs::read(root.join("outside-file")).unwrap(),
+        b"outside the lease\n"
+    );
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn submodule_entries_and_content_git_would_convert_retain_ownership_without_checkout() {
+    for kind in ["submodule", "conversion"] {
         let temporary = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temporary.path()).unwrap();
         let repo = repository(&root, "repo");
+        let head = git(&repo, &["rev-parse", "HEAD"]);
         match kind {
-            "symlink" => {
-                std::os::unix::fs::symlink("../../outside", repo.join("link")).unwrap();
+            "submodule" => {
+                git(
+                    &repo,
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("160000,{},vendor/lib", head.trim_end()),
+                    ],
+                );
+                git(
+                    &repo,
+                    &[
+                        "-c",
+                        "user.name=Test",
+                        "-c",
+                        "user.email=test@invalid",
+                        "commit",
+                        "-q",
+                        "-m",
+                        "submodule",
+                    ],
+                );
             }
-            "file-count" => {
-                for index in 0..128 {
-                    std::fs::write(repo.join(format!("file-{index}")), b"bounded").unwrap();
-                }
-            }
-            "file-bytes" => {
-                std::fs::write(repo.join("large"), vec![b'x'; 8 * 1024 * 1024 + 1]).unwrap();
+            "conversion" => {
+                std::fs::write(
+                    repo.join(".gitattributes"),
+                    "*.txt working-tree-encoding=UTF-16LE\n",
+                )
+                .unwrap();
+                let wide = "hello\n"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>();
+                std::fs::write(repo.join("notes.txt"), wide).unwrap();
+                commit(&repo, "conversion");
             }
             _ => unreachable!(),
         }
-        git(&repo, &["add", "."]);
-        git(
-            &repo,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@invalid",
-                "commit",
-                "-m",
-                "unsupported",
-            ],
-        );
         let (engine, _) = setup(&root, &repo).await;
         admit(&engine, &repo).await;
-        assert!(matches!(
+        let expected = match kind {
+            "submodule" => "unsupported_or_unsafe_tree_entry",
+            "conversion" => "worktree_content_differs_from_commit",
+            _ => unreachable!(),
+        };
+        assert_eq!(
             apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
                 .await
                 .outcome,
-            Outcome::Rejected { .. }
-        ));
+            rejected(expected),
+            "{kind}"
+        );
         let lease = leases(&engine).await.remove(0);
         assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Uncertain);
         assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");

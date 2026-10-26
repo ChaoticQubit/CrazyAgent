@@ -203,10 +203,27 @@ impl Fault {
     fn error(self) -> EngineError {
         match self {
             Self::Host(code) => failure(code),
-            Self::Protocol(error) => EngineError(format!("claude_host_protocol_{error:?}")),
-            Self::Exit(code) => EngineError(format!("claude_host_native_exit_{code:?}")),
+            Self::Protocol(error) => protocol_error(error),
+            Self::Exit(Some(code)) => EngineError(format!("claude_host_native_exit_{code}")),
+            Self::Exit(None) => failure("claude_host_native_exit_signal"),
         }
     }
+}
+
+/// Names a Claude protocol fault as a plain lowercase code that engine logs can show.
+/// Input: the protocol error. Output: `claude_host_protocol_` followed by the error's
+/// name in snake case, for example `claude_host_protocol_stale_message`.
+#[cfg(unix)]
+fn protocol_error(error: ProtocolError) -> EngineError {
+    let name = format!("{error:?}");
+    let mut code = String::from("claude_host_protocol");
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            code.push('_');
+        }
+        code.push(character.to_ascii_lowercase());
+    }
+    EngineError(code)
 }
 
 #[cfg(unix)]

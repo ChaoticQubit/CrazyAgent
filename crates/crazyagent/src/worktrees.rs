@@ -19,9 +19,40 @@ use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
 #[cfg(unix)]
-const FILES_MAX: usize = 128;
+const TREE_BOUNDS: TreeBounds = TreeBounds {
+    files: 262_144,
+    bytes: 2 * 1024 * 1024 * 1024,
+    components: 64,
+};
 #[cfg(unix)]
-const TREE_BYTES_MAX: usize = 32 * 1024 * 1024;
+const TREE_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
+#[cfg(unix)]
+const LINK_TARGET_BYTES_MAX: u64 = 1024;
+#[cfg(unix)]
+const LINKS_LEFT_OUT_MAX: usize = 64;
+#[cfg(unix)]
+const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
+
+/// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
+/// the most content bytes across them, and the most path components in one path.
+#[cfg(unix)]
+struct TreeBounds {
+    files: usize,
+    bytes: u64,
+    components: usize,
+}
+
+/// One tracked file or symlink of the lease commit. Fields: whether it is a file (and
+/// executable) or a symlink, its blob id, its size in bytes and its path in the tree.
+#[cfg(unix)]
+#[derive(Debug)]
+struct TreeEntry {
+    link: bool,
+    executable: bool,
+    oid: String,
+    size: u64,
+    path: PathBuf,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseState {
@@ -165,50 +196,77 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
 }
 
 fn git(repository: &Path, args: &[&str]) -> Result<Vec<u8>, EngineError> {
-    let child = crate::spawn_gate::spawn(
-        Process::new("/usr/bin/git")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_ATTR_NOSYSTEM", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .arg("--no-replace-objects")
-            .arg("--no-optional-locks")
-            .args([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "core.pager=cat",
-                "-c",
-                "core.attributesFile=/dev/null",
-                "-c",
-                "submodule.recurse=false",
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "gc.auto=0",
-                "-c",
-                "maintenance.auto=false",
-            ])
-            .arg("--git-dir")
-            .arg(repository.join(".git"))
-            .arg("--work-tree")
-            .arg(repository)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
+    git_until(
+        repository,
+        args,
+        OUTPUT_BYTES_MAX,
+        Instant::now() + Duration::from_secs(5),
     )
-    .map_err(error)?;
-    collect_git_output(child)
 }
 
-fn collect_git_output(mut child: std::process::Child) -> Result<Vec<u8>, EngineError> {
+/// Runs one engine Git command and collects its output. Inputs: the repository, the
+/// arguments, the most output bytes accepted and the instant the command is killed.
+/// Output: the standard output, or an error naming the deadline, capacity or failure.
+fn git_until(
+    repository: &Path,
+    args: &[&str],
+    output_max: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, EngineError> {
+    let child = crate::spawn_gate::spawn(&mut git_command(repository, args)).map_err(error)?;
+    collect_git_output(child, output_max, deadline)
+}
+
+/// Builds the engine's Git process: the host Git with a cleared environment, no system
+/// or global config, hooks, fsmonitor, replace objects, protocols or automatic
+/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
+fn git_command(repository: &Path, args: &[&str]) -> Process {
+    let mut command = Process::new("/usr/bin/git");
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("--no-replace-objects")
+        .arg("--no-optional-locks")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "submodule.recurse=false",
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .arg("--git-dir")
+        .arg(repository.join(".git"))
+        .arg("--work-tree")
+        .arg(repository)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+fn collect_git_output(
+    mut child: std::process::Child,
+    output_max: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, EngineError> {
     let output = child
         .stdout
         .take()
@@ -216,11 +274,10 @@ fn collect_git_output(mut child: std::process::Child) -> Result<Vec<u8>, EngineE
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         output
-            .take((OUTPUT_BYTES_MAX + 1) as u64)
+            .take((output_max + 1) as u64)
             .read_to_end(&mut bytes)?;
         Ok::<_, std::io::Error>(bytes)
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(status) = child.try_wait().map_err(error)? {
             break status;
@@ -237,10 +294,10 @@ fn collect_git_output(mut child: std::process::Child) -> Result<Vec<u8>, EngineE
         .join()
         .map_err(|_| error("git_reader_failed"))?
         .map_err(error)?;
-    if !status.success() || bytes.len() > OUTPUT_BYTES_MAX {
+    if !status.success() || bytes.len() > output_max {
         return Err(error("git_operation_failed_or_output_capacity"));
     }
-    assert!(bytes.len() <= OUTPUT_BYTES_MAX);
+    assert!(bytes.len() <= output_max);
     assert!(status.success());
     Ok(bytes)
 }
@@ -1134,8 +1191,16 @@ fn materialize(_record: &mut LeaseRecord) -> Result<(), EngineError> {
     Err(error("worktree_filesystem_unavailable"))
 }
 
+/// Copies the lease commit into a new linked worktree without running anything the
+/// repository configures. Lists and bounds the tree first, lets Git check every path in
+/// the lease index, streams each blob through one `cat-file --batch` into files and
+/// symlinks written relative to the sealed worktree folder, marks the symlinks that would
+/// point outside the lease as skip-worktree instead of writing them, and requires Git to
+/// see the copy as the commit. Input: the reserved lease record, which gains its folder
+/// and metadata identities. Output: success, or the refusal code.
 #[cfg(unix)]
 fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
+    let deadline = Instant::now() + MATERIALIZE_TIME_MAX;
     verify(&record.admission)?;
     let repository = Path::new(&record.lease.repository);
     let target = Path::new(&record.lease.path);
@@ -1144,7 +1209,7 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
             .parent()
             .ok_or_else(|| error("target_parent_missing"))?,
     )?;
-    let entries = tree_entries(repository, &record.head)?;
+    let entries = tree_entries(repository, &record.head, &TREE_BOUNDS, deadline)?;
     git(
         repository,
         &[
@@ -1178,56 +1243,71 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
         .map_err(error)?;
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut total = 0;
-    for (mode, oid, path) in entries {
-        if Instant::now() >= deadline {
-            return Err(error("materialization_deadline"));
-        }
-        let bytes = git(repository, &["cat-file", "blob", &oid])?;
-        total += bytes.len();
-        if total > TREE_BYTES_MAX {
-            return Err(error("tree_byte_capacity"));
-        }
-        write_blob_at(&directory, &path, &bytes, mode == "100755")?;
-    }
     let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
-    git(
-        repository,
-        &[
+    let lease = |args: &[&str]| {
+        let mut full = vec![
+            "-c",
+            "core.protectHFS=true",
+            "-c",
+            "core.protectNTFS=true",
             "--git-dir",
             gitdir,
             "--work-tree",
             &record.lease.path,
-            "read-tree",
-            &record.head,
-        ],
-    )?;
+            "-C",
+            &record.lease.path,
+        ];
+        full.extend_from_slice(args);
+        git_until(repository, &full, OUTPUT_BYTES_MAX, deadline)
+    };
+    lease(&["read-tree", &record.head])?;
+    let left_out = write_tree(repository, &directory, &entries, deadline)?;
+    if !left_out.is_empty() {
+        let mut args = vec!["update-index", "--skip-worktree", "--"];
+        args.extend(left_out.iter().map(String::as_str));
+        lease(&args)?;
+    }
+    lease(&["update-index", "-q", "--refresh"])?;
+    if !lease(&["diff-files", "--name-only", "-z"])?.is_empty() {
+        return Err(error("worktree_content_differs_from_commit"));
+    }
     verify_record(record)?;
-    assert!(total <= TREE_BYTES_MAX);
+    assert!(left_out.len() <= LINKS_LEFT_OUT_MAX);
     assert!(record.directory.is_some());
     Ok(())
 }
 
+/// Lists the files and symlinks of a commit tree and refuses one the lease cannot copy:
+/// past its bounds, holding a submodule or other non-blob entry, an unsafe or `.git`
+/// path, or a symlink target longer than the system path limit. Inputs: the repository,
+/// the commit, the bounds and the deadline. Output: the entries in Git's tree order.
 #[cfg(unix)]
 fn tree_entries(
     repository: &Path,
     head: &str,
-) -> Result<Vec<(String, String, PathBuf)>, EngineError> {
-    let bytes = git(repository, &["ls-tree", "-r", "-z", head])?;
+    bounds: &TreeBounds,
+    deadline: Instant,
+) -> Result<Vec<TreeEntry>, EngineError> {
+    let bytes = git_until(
+        repository,
+        &["ls-tree", "-r", "-z", "-l", head],
+        TREE_LISTING_BYTES_MAX,
+        deadline,
+    )?;
     let mut entries = Vec::new();
+    let mut total: u64 = 0;
     for entry in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
-        if entries.len() >= FILES_MAX {
+        if entries.len() >= bounds.files {
             return Err(error("tree_file_capacity"));
         }
         let entry = std::str::from_utf8(entry).map_err(error)?;
         let (header, name) = entry
             .split_once('\t')
             .ok_or_else(|| error("invalid_tree_entry"))?;
-        let fields = header.split(' ').collect::<Vec<_>>();
+        let fields = header.split_whitespace().collect::<Vec<_>>();
         let path = PathBuf::from(name);
-        if fields.len() != 3
-            || !matches!(fields[0], "100644" | "100755")
+        if fields.len() != 4
+            || !matches!(fields[0], "100644" | "100755" | "120000")
             || fields[1] != "blob"
             || path
                 .components()
@@ -1235,64 +1315,281 @@ fn tree_entries(
             || path
                 .components()
                 .any(|p| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
-            || path.file_name().is_some_and(|n| n == ".gitattributes")
         {
             return Err(error("unsupported_or_unsafe_tree_entry"));
         }
+        if path.components().count() > bounds.components {
+            return Err(error("tree_path_depth"));
+        }
         validate_oid(fields[2])?;
-        entries.push((fields[0].into(), fields[2].into(), path));
+        let size = fields[3]
+            .parse::<u64>()
+            .map_err(|_| error("invalid_tree_entry"))?;
+        let link = fields[0] == "120000";
+        if link && size > LINK_TARGET_BYTES_MAX {
+            return Err(error("unsupported_or_unsafe_tree_entry"));
+        }
+        total = total.saturating_add(size);
+        if total > bounds.bytes {
+            return Err(error("tree_byte_capacity"));
+        }
+        entries.push(TreeEntry {
+            link,
+            executable: fields[0] == "100755",
+            oid: fields[2].into(),
+            size,
+            path,
+        });
     }
-    assert!(entries.len() <= FILES_MAX);
+    assert!(entries.len() <= bounds.files);
+    assert!(total <= bounds.bytes);
     Ok(entries)
 }
 
+/// Streams every entry's blob from one `git cat-file --batch` into the worktree folder,
+/// killing Git when the deadline passes. Inputs: the repository, the sealed worktree
+/// folder, the listed entries and the deadline. Output: the paths of the symlinks left
+/// out because they would point outside the lease, or the refusal code.
 #[cfg(unix)]
-fn write_blob_at(
-    root: &std::fs::File,
-    path: &Path,
-    bytes: &[u8],
-    executable: bool,
-) -> Result<(), EngineError> {
-    use rustix::fs::{Mode, OFlags, mkdirat, openat};
-    let components = path.components().collect::<Vec<_>>();
-    if components.is_empty()
-        || components.len() > 64
-        || components
-            .iter()
-            .any(|c| !matches!(c, Component::Normal(_)))
-    {
-        return Err(error("invalid_materialization_path"));
-    }
-    let mut parent = root.try_clone().map_err(error)?;
-    for component in &components[..components.len() - 1] {
-        match mkdirat(&parent, component.as_os_str(), Mode::from_raw_mode(0o700)) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(e) => return Err(error(e)),
+fn write_tree(
+    repository: &Path,
+    directory: &std::fs::File,
+    entries: &[TreeEntry],
+    deadline: Instant,
+) -> Result<Vec<String>, EngineError> {
+    let mut child = crate::spawn_gate::spawn(
+        git_command(repository, &["cat-file", "--batch"]).stdin(Stdio::piped()),
+    )
+    .map_err(error)?;
+    let input = child
+        .stdin
+        .take()
+        .ok_or_else(|| error("git_stdin_missing"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| error("git_stdout_missing"))?;
+    let copied = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || copy_blobs(input, output, directory, entries));
+        loop {
+            if Instant::now() >= deadline {
+                child.kill().map_err(error)?;
+                let _ = worker.join();
+                break Err(error("materialization_deadline"));
+            }
+            if worker.is_finished() {
+                break worker
+                    .join()
+                    .map_err(|_| error("materialization_worker_failed"))?;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        parent = openat(
-            &parent,
-            component.as_os_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(error)? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().map_err(error)?;
+            child.wait().map_err(error)?;
+            return Err(error("materialization_deadline"));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let left_out = copied?;
+    if !status.success() {
+        return Err(error("git_operation_failed_or_output_capacity"));
+    }
+    assert!(left_out.len() <= LINKS_LEFT_OUT_MAX);
+    Ok(left_out)
+}
+
+/// Asks Git for each entry's blob in turn and writes it: a file with its exact bytes and
+/// mode, a symlink when its target stays inside the lease. Inputs: Git's batch input and
+/// output, the worktree folder and the entries. Output: the left-out symlink paths.
+#[cfg(unix)]
+fn copy_blobs(
+    mut input: std::process::ChildStdin,
+    output: std::process::ChildStdout,
+    directory: &std::fs::File,
+    entries: &[TreeEntry],
+) -> Result<Vec<String>, EngineError> {
+    use std::io::BufRead;
+    let mut output = std::io::BufReader::with_capacity(64 * 1024, output);
+    let mut folders = Folders::new(directory);
+    let mut left_out = Vec::new();
+    for entry in entries {
+        input
+            .write_all(format!("{}\n", entry.oid).as_bytes())
+            .map_err(error)?;
+        input.flush().map_err(error)?;
+        let mut header = Vec::new();
+        (&mut output)
+            .take(128)
+            .read_until(b'\n', &mut header)
+            .map_err(error)?;
+        if header != format!("{} blob {}\n", entry.oid, entry.size).as_bytes() {
+            return Err(error("tree_object_mismatch"));
+        }
+        let mut body = (&mut output).take(entry.size);
+        if entry.link {
+            let mut target = Vec::new();
+            body.read_to_end(&mut target).map_err(error)?;
+            if target.len() as u64 != entry.size {
+                return Err(error("tree_object_truncated"));
+            }
+            if link_stays_inside(&entry.path, &target) {
+                folders.write_link(&entry.path, &target)?;
+            } else {
+                if left_out.len() >= LINKS_LEFT_OUT_MAX {
+                    return Err(error("tree_link_capacity"));
+                }
+                let path = entry
+                    .path
+                    .to_str()
+                    .ok_or_else(|| error("invalid_tree_entry"))?;
+                left_out.push(path.to_owned());
+            }
+        } else {
+            folders.write_file(&entry.path, &mut body, entry.size, entry.executable)?;
+        }
+        let mut end = [0u8; 1];
+        output.read_exact(&mut end).map_err(error)?;
+        if end != *b"\n" {
+            return Err(error("tree_object_mismatch"));
+        }
+    }
+    assert!(left_out.len() <= LINKS_LEFT_OUT_MAX);
+    Ok(left_out)
+}
+
+/// Says whether a tracked symlink resolves inside the lease wherever it is followed from:
+/// its target is relative, climbs only with leading `..` steps and no higher than the
+/// folder holding the link, then names plain components other than `.git`. Inputs: the
+/// link's path in the tree and its target bytes. Output: true when it stays inside.
+#[cfg(unix)]
+fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
+    let Ok(target) = std::str::from_utf8(target) else {
+        return false;
+    };
+    let depth = link.components().count().saturating_sub(1);
+    let mut climbing = true;
+    let mut up = 0;
+    for part in target.split('/') {
+        match part {
+            ".." if climbing => up += 1,
+            "" | "." | ".." => return false,
+            name if name.eq_ignore_ascii_case(".git") || name.contains('\0') => return false,
+            _ => climbing = false,
+        }
+    }
+    up <= depth
+}
+
+/// The worktree folder and the chain of subfolders opened for the previous entry, so
+/// entries in Git's tree order reuse open folders. Every folder is created or opened
+/// relative to its parent descriptor without following a symlink.
+#[cfg(unix)]
+struct Folders<'a> {
+    root: &'a std::fs::File,
+    open: Vec<(std::ffi::OsString, std::fs::File)>,
+}
+
+#[cfg(unix)]
+impl<'a> Folders<'a> {
+    fn new(root: &'a std::fs::File) -> Self {
+        Self {
+            root,
+            open: Vec::new(),
+        }
+    }
+
+    /// Opens, creating where missing, the folders above a tree path. Input: the path.
+    /// Output: the descriptor of its parent folder and its final component.
+    fn parent<'p>(
+        &mut self,
+        path: &'p Path,
+    ) -> Result<(&std::fs::File, &'p std::ffi::OsStr), EngineError> {
+        use rustix::fs::{Mode, OFlags, mkdirat, openat};
+        let components = path
+            .components()
+            .map(|c| match c {
+                Component::Normal(name) => Ok(name),
+                _ => Err(error("invalid_materialization_path")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((name, folders)) = components.split_last() else {
+            return Err(error("invalid_materialization_path"));
+        };
+        if components.len() > TREE_BOUNDS.components {
+            return Err(error("invalid_materialization_path"));
+        }
+        let shared = self
+            .open
+            .iter()
+            .zip(folders.iter())
+            .take_while(|((open, _), folder)| open.as_os_str() == **folder)
+            .count();
+        self.open.truncate(shared);
+        for folder in &folders[shared..] {
+            let parent = self.open.last().map_or(self.root, |(_, file)| file);
+            match mkdirat(parent, *folder, Mode::from_raw_mode(0o700)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(e) => return Err(error(e)),
+            }
+            let next = openat(
+                parent,
+                *folder,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(std::fs::File::from)
+            .map_err(error)?;
+            self.open.push((folder.to_os_string(), next));
+        }
+        assert_eq!(self.open.len(), folders.len());
+        Ok((self.open.last().map_or(self.root, |(_, file)| file), name))
+    }
+
+    /// Creates a new file at a tree path with the given bytes. Inputs: the path, the
+    /// source, its exact size and whether it is executable. Output: success or the error.
+    fn write_file(
+        &mut self,
+        path: &Path,
+        source: &mut impl Read,
+        size: u64,
+        executable: bool,
+    ) -> Result<(), EngineError> {
+        use rustix::fs::{Mode, OFlags, openat};
+        let (parent, name) = self.parent(path)?;
+        let mode = Mode::from_raw_mode(if executable { 0o700 } else { 0o600 });
+        let mut file = openat(
+            parent,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
         )
         .map(std::fs::File::from)
         .map_err(error)?;
+        let written = std::io::copy(&mut source.take(size), &mut file).map_err(error)?;
+        if written != size {
+            return Err(error("tree_object_truncated"));
+        }
+        let metadata = file.metadata().map_err(error)?;
+        assert_eq!(metadata.len(), size);
+        assert_eq!(metadata.nlink(), 1);
+        Ok(())
     }
-    let mode = Mode::from_raw_mode(if executable { 0o700 } else { 0o600 });
-    let mut file = openat(
-        &parent,
-        components.last().unwrap().as_os_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        mode,
-    )
-    .map(std::fs::File::from)
-    .map_err(error)?;
-    file.write_all(bytes).map_err(error)?;
-    file.sync_all().map_err(error)?;
-    assert_eq!(file.metadata().map_err(error)?.len(), bytes.len() as u64);
-    assert_eq!(file.metadata().map_err(error)?.nlink(), 1);
-    Ok(())
+
+    /// Creates a symlink at a tree path. Inputs: the path and a target that
+    /// `link_stays_inside` accepted. Output: success or the error.
+    fn write_link(&mut self, path: &Path, target: &[u8]) -> Result<(), EngineError> {
+        assert!(link_stays_inside(path, target));
+        let target = std::str::from_utf8(target).map_err(error)?;
+        let (parent, name) = self.parent(path)?;
+        rustix::fs::symlinkat(target, parent, name).map_err(error)?;
+        Ok(())
+    }
 }
 
 /// Finds and checks the Git metadata folder of an engine lease worktree: it must sit in
@@ -1624,20 +1921,161 @@ mod tests {
         let directory = std::fs::File::open(&root).unwrap();
         std::fs::rename(&root, &retained).unwrap();
         std::os::unix::fs::symlink(&outside, &root).unwrap();
-        write_blob_at(
-            &directory,
-            Path::new("nested/tracked"),
-            b"source bytes",
-            false,
-        )
-        .unwrap();
+        Folders::new(&directory)
+            .write_file(
+                Path::new("nested/tracked"),
+                &mut &b"source bytes"[..],
+                12,
+                false,
+            )
+            .unwrap();
         assert_eq!(
             std::fs::read(retained.join("nested/tracked")).unwrap(),
             b"source bytes"
         );
         assert!(!outside.join("nested").exists());
         std::os::unix::fs::symlink(&outside, retained.join("escape")).unwrap();
-        assert!(write_blob_at(&directory, Path::new("escape/file"), b"forbidden", false).is_err());
+        assert!(
+            Folders::new(&directory)
+                .write_file(Path::new("escape/file"), &mut &b"forbidden"[..], 9, false)
+                .is_err()
+        );
         assert!(!outside.join("file").exists());
+        let mut folders = Folders::new(&directory);
+        folders
+            .write_file(Path::new("open/first"), &mut &b"one"[..], 3, false)
+            .unwrap();
+        std::fs::rename(retained.join("open"), retained.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside, retained.join("open")).unwrap();
+        folders
+            .write_file(Path::new("open/second"), &mut &b"two"[..], 3, false)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(retained.join("moved/second")).unwrap(),
+            b"two"
+        );
+        assert!(!outside.join("second").exists());
+    }
+
+    fn committed_repository(root: &Path) -> PathBuf {
+        let repository = root.join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        std::fs::create_dir_all(repository.join("one/two")).unwrap();
+        std::fs::write(repository.join("top"), b"12345").unwrap();
+        std::fs::write(repository.join("one/middle"), b"123").unwrap();
+        std::fs::write(repository.join("one/two/leaf"), b"1").unwrap();
+        std::os::unix::fs::symlink("../top", repository.join("one/link")).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "-A"],
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@invalid",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        ] {
+            git(&repository, args).unwrap();
+        }
+        repository
+    }
+
+    #[test]
+    fn tree_listing_refuses_a_tree_past_its_file_byte_or_depth_bound() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = committed_repository(temporary.path());
+        let later = Instant::now() + Duration::from_secs(5);
+        let bounds = |files, bytes, components| TreeBounds {
+            files,
+            bytes,
+            components,
+        };
+        let entries = tree_entries(&repository, "HEAD", &bounds(4, 15, 3), later).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.path.to_str().unwrap(), e.size, e.link))
+                .collect::<Vec<_>>(),
+            [
+                ("one/link", 6, true),
+                ("one/middle", 3, false),
+                ("one/two/leaf", 1, false),
+                ("top", 5, false),
+            ]
+        );
+        for (bounds, code) in [
+            (bounds(3, 15, 3), "tree_file_capacity"),
+            (bounds(4, 14, 3), "tree_byte_capacity"),
+            (bounds(4, 15, 2), "tree_path_depth"),
+        ] {
+            assert_eq!(
+                tree_entries(&repository, "HEAD", &bounds, later)
+                    .unwrap_err()
+                    .0,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn writing_a_tree_stops_at_its_deadline() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = committed_repository(temporary.path());
+        let later = Instant::now() + Duration::from_secs(5);
+        let entries = tree_entries(&repository, "HEAD", &TREE_BOUNDS, later).unwrap();
+        let target = temporary.path().join("copy");
+        std::fs::create_dir(&target).unwrap();
+        let directory = std::fs::File::open(&target).unwrap();
+        assert_eq!(
+            write_tree(&repository, &directory, &entries, Instant::now())
+                .unwrap_err()
+                .0,
+            "materialization_deadline"
+        );
+        let copy = temporary.path().join("second-copy");
+        std::fs::create_dir(&copy).unwrap();
+        let directory = std::fs::File::open(&copy).unwrap();
+        assert!(
+            write_tree(&repository, &directory, &entries, later)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(copy.join("one/two/leaf")).unwrap(), b"1");
+        assert_eq!(
+            std::fs::read_link(copy.join("one/link")).unwrap(),
+            Path::new("../top")
+        );
+    }
+
+    #[test]
+    fn a_tracked_symlink_stays_inside_only_by_leading_parent_steps_within_its_depth() {
+        for (link, target, inside) in [
+            ("CLAUDE.md", "AGENTS.md", true),
+            ("docs/current", "../src/m0", true),
+            ("a/b/up", "../..", true),
+            ("a/b/c", "../../x/y", true),
+            ("top", "../outside", false),
+            ("a/b/c", "../../../outside", false),
+            ("abs", "/etc/passwd", false),
+            ("a/mid", "x/../../outside", false),
+            ("a/dot", "./x", false),
+            ("a/empty", "x//y", false),
+            ("a/trailing", "x/", false),
+            ("none", "", false),
+            ("a/git", "../.git/config", false),
+            ("a/git-case", "../.GIT", false),
+            ("a/nul", "x\0y", false),
+        ] {
+            assert_eq!(
+                link_stays_inside(Path::new(link), target.as_bytes()),
+                inside,
+                "{link} -> {target}"
+            );
+        }
+        assert!(!link_stays_inside(Path::new("bytes"), &[0xff, 0xfe]));
     }
 }

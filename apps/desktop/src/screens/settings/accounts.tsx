@@ -5,10 +5,14 @@ import {
   Button, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton, StatusBadge, WindowedList,
   navigate, type IconName,
 } from "../../ui";
-import { AccountDrawer, andList, removeBody } from "./account-drawer";
+import { AccountDrawer, andList, poolEffect } from "./account-drawer";
 import { AddAccountDialog } from "./add-account";
 import { startPoolWith } from "./pool-draft";
 import { cancelSignIn } from "./sign-in";
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
 
 /** One thing the owner can do to an account from its row. */
 export type AccountAction = "sign_in" | "cancel_sign_in" | "details" | "delete";
@@ -38,21 +42,23 @@ export function signInPolling(accounts: readonly AccountView[]): boolean {
   return accounts.some((account) => account.status === "signing_in");
 }
 
-/** Splits accounts to delete into those the engine can remove and those a pool still uses,
- * which it refuses. Inputs: the accounts and the pools read (undefined when unknown).
- * Output: the accounts to remove and a plain line for each one left out. */
-export function deletePlan(accounts: readonly AccountView[], pools: readonly PoolSummary[] | undefined): {
-  remove: AccountView[];
-  blocked: { name: string; message: string }[];
+/** The delete confirm for accounts: what is removed and which pools they leave, since the engine
+ * takes them out of every pool in the same step. Inputs: the accounts and the pools read
+ * (undefined when unknown). Output: the title, the button label and the body lines. */
+export function deleteDialog(accounts: readonly AccountView[], pools: readonly PoolSummary[] | undefined): {
+  title: string;
+  confirmLabel: string;
+  lines: string[];
 } {
-  const remove: AccountView[] = [];
-  const blocked: { name: string; message: string }[] = [];
-  for (const account of accounts) {
-    const names = (pools ?? []).filter((pool) => pool.members.some((member) => member.id === account.id)).map((pool) => pool.name);
-    if (names.length === 0) remove.push(account);
-    else blocked.push({ name: account.name, message: `${account.name} ${removeBody(names).replace(/^It /, "")}` });
-  }
-  return { remove, blocked };
+  assert(accounts.length > 0, "a delete confirm needs at least one account");
+  const one = accounts.length === 1;
+  const effect = poolEffect(accounts.map((account) => account.id), pools);
+  const removed = `${andList(accounts.map((account) => account.name))} ${one ? "and its saved sign-in or key are" : "and their saved sign-ins or keys are"} removed from CrazyAgent. A running sign-in is cancelled first.`;
+  return {
+    title: one ? `Delete ${accounts[0]!.name}?` : `Delete ${accounts.length} accounts?`,
+    confirmLabel: effect ? "Remove from pools and delete" : one ? "Delete account" : `Delete ${accounts.length} accounts`,
+    lines: effect ? [removed, effect] : [removed],
+  };
 }
 
 /** Deletes accounts one at a time, cancelling a running sign-in first so none is left behind.
@@ -254,12 +260,11 @@ export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: s
   const remove = async () => {
     if (!deleting) return;
     setWorking(true);
-    const plan = deletePlan(deleting, known);
-    const result = await deleteAccounts(plan.remove, session.noteResult);
+    const result = await deleteAccounts(deleting, session.noteResult);
     setWorking(false);
     setDeleting(undefined);
-    const failures = [...plan.blocked, ...result.failures];
-    if (opened && plan.remove.some((account) => account.id === opened.account.id)) setOpened(undefined);
+    const failures = result.failures;
+    if (opened && deleting.some((account) => account.id === opened.account.id)) setOpened(undefined);
     if (failures.length) setProblem(deleteSummary(result.removed, failures));
     else { setProblem(undefined); session.showToast(deleteSummary(result.removed, [])); }
     refresh();
@@ -271,7 +276,7 @@ export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: s
     else setDeleting([account]);
   };
 
-  const plan = deleting && deletePlan(deleting, known);
+  const dialog = deleting && deleting.length > 0 ? deleteDialog(deleting, known) : undefined;
   return <>
     {problem && <Notice tone="danger" alert><span className="grow">{problem}</span></Notice>}
     <AccountsView accounts={accounts} pools={pools} onAdd={() => setAdd(true)} onOpen={(account) => setOpened({ account, signIn: false })} onRetry={reload}
@@ -283,13 +288,9 @@ export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: s
     }} />
     <AccountDrawer account={current} pools={known} signIn={opened?.signIn} onClose={() => setOpened(undefined)}
       onChanged={(account) => { if (account) setOpened({ account, signIn: false }); refresh(); }} onDelete={(account) => setDeleting([account])} />
-    <ConfirmDialog open={Boolean(deleting)} pending={working} onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}
-      title={deleting?.length === 1 ? `Delete ${deleting[0]!.name}?` : `Delete ${deleting?.length ?? 0} accounts?`}
-      confirmLabel={deleting?.length === 1 ? "Delete account" : `Delete ${deleting?.length ?? 0} accounts`}>
-      {plan && <span className="stack-small">
-        {plan.remove.length > 0 && <span>{andList(plan.remove.map((account) => account.name))} {plan.remove.length === 1 ? "and its saved sign-in or key are" : "and their saved sign-ins or keys are"} removed from CrazyAgent. A running sign-in is cancelled first.</span>}
-        {plan.blocked.map((item) => <span key={item.name}>{item.message}</span>)}
-      </span>}
+    <ConfirmDialog open={Boolean(dialog)} pending={working} onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}
+      title={dialog?.title ?? "Delete accounts?"} confirmLabel={dialog?.confirmLabel ?? "Delete"}>
+      {dialog && <span className="stack-small">{dialog.lines.map((line) => <span key={line}>{line}</span>)}</span>}
     </ConfirmDialog>
   </>;
 }

@@ -99,20 +99,54 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [turn("blocked", "readiness_unknown")]), "Not signed in");
   assert.equal(research.masterStatus({ session_id: "s", phase: "closed", current_turn: null }, [turn("succeeded")]), "Stopped");
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [turn("failed", "provider_error")]), "Stopped");
-  assert.equal(research.turnLine(turn("blocked", "readiness_stale")), "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.");
-  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped: provider error.");
-  assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet.");
+  assert.equal(research.turnLine(turn("blocked", "readiness_stale")), "Sign-in is out of date. Sign in again in Settings, Accounts, then send again. (readiness_stale)");
+  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped. (provider_error)");
+  assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet. (repository_missing)");
   assert.equal(research.resendText([{ ...turn("blocked", "repository_missing"), id: "t1", ordinal: 1 }], { t1: "first" }), "first");
   const refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
-  assert.equal(research.turnLine({ ...turn("blocked", "repository_config_refused"), detail: refused }), `The master couldn't start: ${refused}`);
-  assert.equal(research.turnLine(turn("failed", "repository_config_refused")), "The master couldn't start: a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again.");
+  assert.equal(research.turnLine({ ...turn("blocked", "repository_config_refused"), detail: refused }), `The master couldn't start: ${refused} (repository_config_refused)`);
+  assert.equal(research.turnLine(turn("failed", "repository_config_refused")), "The master couldn't start: a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again. (repository_config_refused)");
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
 });
 
-test("unassigning a pool removes only this project", () => {
-  const pool = { id: "main", members: ["a"], projects: ["p-1", "p-2"], roles: ["project_leader"], fallback_allowed: false };
-  assert.deepEqual(api.unassignedPool(pool, "p-1"), { ...pool, projects: ["p-2"] });
-  assert.deepEqual(api.unassignedPool(pool, "p-9"), pool);
+test("a stopped master turn shows a plain sentence and the cause the engine stored", () => {
+  const turn = (phase, reason, cause, detail = null) => ({ id: "t", ordinal: 1, phase, reason, cause, detail, reply: null });
+  const refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+  assert.equal(research.turnLine(turn("blocked", "runtime_unavailable", "rcli_profile_configuration_required")),
+    "The master stopped: it could not start. Check it in Settings, Harnesses. (rcli_profile_configuration_required)");
+  assert.equal(research.turnLine(turn("failed", "unknown", "master_runtime_binding")), "The master stopped. (master_runtime_binding)");
+  assert.equal(research.turnLine(turn("blocked", "repository_config_refused", "repository_config_refused:core_hookspath", refused)),
+    `The master couldn't start: ${refused} (repository_config_refused:core_hookspath)`);
+  assert.equal(research.turnLine(turn("failed", "profile_busy", "native_profile_in_use")),
+    "The master stopped: its account is busy signing in or out. (native_profile_in_use)");
+  assert.equal(research.turnLine(turn("failed", "connection_changed", "native_profile_connection_missing")),
+    "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
+  for (const phase of ["failed", "blocked", "uncertain"]) {
+    const line = research.turnLine(turn(phase, "unknown", null));
+    assert.equal(line, `The master stopped. (${phase})`);
+    assert.ok(!line.includes("unknown"), line);
+  }
+});
+
+test("a master turn names its account, and a turn no account could run names each one and why", () => {
+  const running = { id: "t2", ordinal: 2, phase: "running", reason: null, reply: null, attempt: { connection: { account_ref: "work-claude" } } };
+  assert.deepEqual(research.accountLines(running), ["On account work-claude"]);
+  assert.deepEqual(research.accountLines({ id: "t1", ordinal: 1, phase: "queued", reason: null, reply: null }), []);
+  const blocked = {
+    id: "t3", ordinal: 3, phase: "blocked", reason: "readiness_unknown", reply: null, attempt: null,
+    accounts: [
+      { account_ref: "work-claude", connection: "claude-a", harness: "claude", reason: "readiness_unknown" },
+      { account_ref: "home-claude", connection: "claude-b", harness: "claude", reason: "rate_limited" },
+      { account_ref: "work-codex", connection: "codex-c", harness: "codex", reason: null },
+    ],
+  };
+  assert.equal(research.turnLine(blocked), "No account in this master's pool can run it now. (readiness_unknown)");
+  assert.deepEqual(research.accountLines(blocked), [
+    "work-claude: not signed in",
+    "home-claude: rate limited, paused for a few minutes",
+    "work-codex is ready on codex: change the master to codex to use it.",
+  ]);
+  assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [blocked]), "Not signed in");
 });
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
@@ -255,7 +289,7 @@ test("a stopped or failed master turn offers its own message to send again", () 
   assert.equal(research.resendText([], {}), null);
   const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
   assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
-  assert.equal(research.turnLine(crashed), "The master stopped: capture incomplete.", "the line names what happened");
+  assert.equal(research.turnLine(crashed), "The master stopped: its reply was cut off. (capture_incomplete)", "the line names what happened");
   assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
@@ -408,14 +442,27 @@ test("project Settings opens Plugins and skills for the old Skills and MCP serve
   assert.equal(settings.settingsSection(null), "general");
 });
 
-test("Save pool assigns a new pool, drops the old one and records the choice in the project details", async () => {
+test("Save pool gives the project the chosen pool or none in one step and records the choice in the project details", async () => {
   const settings = await import("../src/screens/project/settings.tsx");
-  assert.deepEqual(settings.poolSteps("old", "old", "new"), { add: true, drop: "old", record: true });
-  assert.deepEqual(settings.poolSteps(null, null, "new"), { add: true, drop: null, record: true });
-  assert.deepEqual(settings.poolSteps("new", "old", "new"), { add: false, drop: null, record: true });
-  assert.deepEqual(settings.poolSteps("new", "new", "new"), { add: false, drop: null, record: false });
-  assert.deepEqual(settings.poolSteps("old", undefined, "new"), { add: true, drop: "old", record: false });
-  assert.deepEqual(settings.poolSteps("old", "old", null), { add: false, drop: null, record: false });
+  assert.deepEqual(settings.poolSteps("old", "old", "new"), { assign: true, record: true });
+  assert.deepEqual(settings.poolSteps(null, null, "new"), { assign: true, record: true });
+  assert.deepEqual(settings.poolSteps("new", "old", "new"), { assign: false, record: true });
+  assert.deepEqual(settings.poolSteps("new", "new", "new"), { assign: false, record: false });
+  assert.deepEqual(settings.poolSteps("old", undefined, "new"), { assign: true, record: false });
+  assert.deepEqual(settings.poolSteps("old", "old", null), { assign: true, record: true });
+  assert.deepEqual(settings.poolSteps(null, null, null), { assign: false, record: false });
+});
+
+test("Project Settings offers No pool, and a project without a pool tells the owner to pick one", async () => {
+  const { PoolPicker } = await import("../src/screens/new-project/pool-picker.tsx");
+  const settings = await import("../src/screens/project/settings.tsx");
+  const choice = { pool: { id: "main", name: "Main", members: ["a"], projects: ["p-1"], roles: ["project_leader"], fallback_allowed: false }, members: [] };
+  const markup = renderToStaticMarkup(createElement(PoolPicker, { name: "ps-pool", pools: [choice], value: null, later: true, laterLabel: settings.NO_POOL.label, laterNote: settings.NO_POOL.note, onChange: () => {} }));
+  assert.match(markup, /<strong>No pool<\/strong>/);
+  assert.match(markup, /The master and agents wait and show Pick a pool to start\./);
+  assert.match(markup, /<label class="pj-radio-card selected"><input type="radio" name="ps-pool" checked="" value=""\/>/);
+  assert.equal(settings.poolSaved(null), "This project has no pool now. Pick a pool to start.");
+  assert.equal(settings.poolSaved("Main"), "Main is assigned.");
 });
 
 test("removing a project says its folder stays on disk", async () => {

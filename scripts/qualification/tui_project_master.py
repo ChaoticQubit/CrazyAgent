@@ -169,8 +169,10 @@ def wait_turn(database, child, master, phase):
         if len(found) == 1 and found[0]["phase"] == phase:
             turn = found[0]
             assert turn["attempt"] is None and turn["runtime"] is None and turn["reply"] is None
+            assert turn["reason"] == "runtime_unavailable", turn
+            assert turn["cause"] == "rcli_profile_configuration_required", turn
             tui_flow.expect(master, phase.capitalize(), child)
-            tui_flow.expect(master, "Reason unknown", child)
+            tui_flow.expect(master, "Model runtime unavailable (rcli_profile_configuration_required)", child)
             tui_flow.expect(master, turn["id"], child)
             tui_flow.expect(master, str(turn["input_cursor"]), child)
             return turn
@@ -319,7 +321,7 @@ def ambiguous_submit(root, session, child, master):
     os.write(master, b"\x12")
     turn = wait_turn(database, child, master, "blocked")
     assert turn["id"] == operation_id and turn["session_id"] == session["session_id"], turn
-    assert turn["reason"] == "unknown" and turn["ordinal"] == 1, turn
+    assert turn["reason"] == "runtime_unavailable" and turn["ordinal"] == 1, turn
     conversation.draft_contains(master, child, NEWER)
     rows = creation.read_rows(database,
         "SELECT o.operation_id,lower(hex(o.request_hash)),o.event_cursor,o.result,"
