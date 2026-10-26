@@ -342,6 +342,7 @@ impl OwnerController {
     /// Sends the prepared mutation through the actual owner client.
     /// Takes exclusive access and uses the stored exact request.
     /// Returns the actual typed owner response or transport error.
+    /// A refusal before sending, such as no connected client, changes no state.
     pub async fn send_pending(&mut self) -> Result<OwnerResponse, EngineError> {
         let pending = self
             .pending
@@ -350,16 +351,16 @@ impl OwnerController {
         if pending.identity.database_instance() != self.identity.database_instance() {
             return Err(EngineError("controller_pending_database_mismatch".into()));
         }
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?;
         let first = !pending.uncertain;
         pending.uncertain = true;
         let request = pending.request.clone();
         if let Some(view) = &mut self.view {
             view.fresh = false;
         }
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| EngineError("controller_disconnected".into()))?;
         let response = client.request(request).await?.response;
         self.settle_response(response, first)
     }

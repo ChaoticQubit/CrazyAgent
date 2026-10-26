@@ -754,11 +754,36 @@ async fn socket_proposal_cannot_carry_human_approval() {
     let server = Server::bind(&path, h.engine.clone(), &h.config).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(server.run(stopped));
-    let client = Client::new(path, Duration::from_secs(2)).unwrap();
+    let client = Client::new(path.clone(), Duration::from_secs(2)).unwrap();
     let request = h.request(Command::ProposePlan { plan: plan.clone() });
     let mut forged = serde_json::to_value(&request).unwrap();
     forged["command"]["plan"]["approved"] = true.into();
+    let body = serde_json::to_vec(&forged).unwrap();
+    let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+    frame.extend(body);
+    let mut stream = crazyagent::spawn_gate::connect_unix(&path).await.unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut stream, &frame)
+        .await
+        .unwrap();
+    let mut reply = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut reply),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(reply.is_empty(), "the socket answered a forged approval");
     assert!(serde_json::from_value::<WireRequest>(forged).is_err());
+    let missing = h.request(Command::CoordinationState {
+        plan_id: plan.id.clone(),
+    });
+    assert_eq!(
+        h.engine.apply(missing).await.unwrap().outcome,
+        Outcome::Rejected {
+            code: "plan_missing".into()
+        }
+    );
     assert_eq!(
         client.request(request).await.unwrap().outcome,
         Outcome::Applied

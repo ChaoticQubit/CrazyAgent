@@ -692,6 +692,7 @@ async fn controller_refuses_different_database_with_pending_intent() {
     first_cli.ready(first.path()).await;
     let mut second_cli = OwnedCli::start(second.path());
     second_cli.ready(second.path()).await;
+    seed_project(first.path()).await.unwrap();
     let mut controller = OwnerController::attach(
         first.path(),
         OwnerClientKind::Desktop,
@@ -708,20 +709,43 @@ async fn controller_refuses_different_database_with_pending_intent() {
         .begin_mutation(OwnerMutation::ProposeBaseline { draft: draft() }, 9)
         .unwrap()
         .clone();
-    let refused = controller.reattach(second.path()).await.is_err();
-    let unchanged_identity = *controller.identity() == identity;
-    let unchanged_pending = controller.pending() == Some(&pending);
-    let cannot_send = if refused {
-        controller.retry_pending().await.is_err()
-    } else {
-        false
-    };
-    assert!(first_cli.finish() && second_cli.finish());
-    assert!(
-        refused,
+    assert_eq!(
+        controller.reattach(second.path()).await.unwrap_err().0,
+        "controller_pending_database_mismatch",
         "pending intent must refuse a different database before installing the client"
     );
-    assert!(unchanged_identity && unchanged_pending && cannot_send);
+    assert_eq!(*controller.identity(), identity);
+    assert_eq!(
+        controller.retry_pending().await.unwrap_err().0,
+        "controller_disconnected"
+    );
+    assert_eq!(controller.pending(), Some(&pending));
+    for root in [second.path(), first.path()] {
+        let (observer, _) =
+            OwnerClient::discover(root, OwnerClientKind::Desktop, Duration::from_secs(2))
+                .await
+                .unwrap();
+        let observed = page(&observer, "not-delivered").await;
+        assert!(matches!(observed.data, OwnerData::Page { items, .. } if items.is_empty()));
+    }
+    controller.reattach(first.path()).await.unwrap();
+    let delivered = controller.retry_pending().await.unwrap();
+    assert!(
+        matches!(delivered, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+    );
+    assert!(controller.pending().is_none());
+    let (observer, _) = OwnerClient::discover(
+        first.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let observed = page(&observer, "delivered").await;
+    assert!(matches!(observed.data, OwnerData::Page { items, .. } if items.len() == 1));
+    let first_stopped = first_cli.finish();
+    let second_stopped = second_cli.finish();
+    assert!(first_stopped && second_stopped);
 }
 
 #[tokio::test]

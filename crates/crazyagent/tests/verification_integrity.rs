@@ -252,7 +252,7 @@ async fn unavailable_attempts_survive_restart_replay_and_revocation() {
         .await
         .unwrap();
     assert_eq!(h.state().await, state);
-    assert_eq!(h.engine.apply(request).await.unwrap(), first);
+    assert_eq!(h.engine.apply(request.clone()).await.unwrap(), first);
     assert_eq!(
         h.owner(OwnerVerification::Accept {
             candidate_id: id("candidate"),
@@ -267,15 +267,28 @@ async fn unavailable_attempts_survive_restart_replay_and_revocation() {
         h.owner(OwnerVerification::Revoke { baseline_id }).await,
         Outcome::Applied
     );
-    assert!(matches!(
+    assert_eq!(
         h.owner(OwnerVerification::Accept {
             candidate_id: id("candidate"),
             attempt_id: id("attempt")
         })
         .await,
-        Outcome::Rejected { .. }
-    ));
+        Outcome::Rejected {
+            code: "candidate_authority_revoked".into()
+        }
+    );
+    assert_eq!(h.engine.apply(request).await.unwrap(), first);
     h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT body FROM verification_attempts WHERE candidate='candidate' AND id='attempt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let kept: VerificationReceipt = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept.outcomes, state.attempts[0].1.outcomes);
 }
 
 #[tokio::test]
@@ -402,7 +415,10 @@ async fn stale_receipt_never_accepts_and_json_success_is_unproven() {
     }
     let mut missing = forged.clone();
     missing.outcomes.remove(&id("code"));
-    assert!(missing.accepts(&state.current).is_err());
+    assert_eq!(
+        missing.accepts(&state.current).unwrap_err().0,
+        "required_evidence_not_passed"
+    );
     let mut tampered = forged.clone();
     tampered.artifacts.values_mut().next().unwrap().push(0);
     assert_eq!(
@@ -964,7 +980,14 @@ fn bounded_imports_and_path_safe_snapshot_identity() {
         draft.origin = origin;
         assert!(draft.identity().is_ok());
     }
-    assert!(BaselineDraft::import(&vec![b' '; 32769]).is_err());
+    let mut padded = serde_json::to_vec(&original).unwrap();
+    padded.resize(32768, b' ');
+    assert_eq!(BaselineDraft::import(&padded).unwrap(), original);
+    padded.push(b' ');
+    assert_eq!(
+        BaselineDraft::import(&padded).unwrap_err().0,
+        "baseline_bounds"
+    );
     let mut invalid = original.clone();
     invalid.retry_limit = 1;
     assert!(invalid.validate().is_err());
@@ -1077,23 +1100,62 @@ fn worker_can_draft_content_but_cannot_allocate_or_admit_a_baseline() {
         crazyagent::verification::BaselineDraft::import(&serde_json::to_vec(&draft).unwrap())
             .is_ok()
     );
-    assert!(serde_json::from_value::<Command>(command).is_err());
-    for operation in [
-        "Approve",
-        "Revoke",
-        "Register",
-        "Escalate",
-        "FullSuite",
-        "Verify",
-        "Accept",
+    refused_variant(command, "ProposeBaseline");
+    let baseline_id = || BaselineId::new("b".repeat(64)).unwrap();
+    for action in [
+        OwnerVerification::Approve {
+            baseline_id: baseline_id(),
+        },
+        OwnerVerification::Revoke {
+            baseline_id: baseline_id(),
+        },
+        OwnerVerification::Register {
+            id: id("candidate"),
+            task_id: TaskId::new("task").unwrap(),
+            snapshot: snapshot(),
+            environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+        },
+        OwnerVerification::Escalate {
+            candidate_id: id("candidate"),
+            risk: Risk::Low,
+        },
+        OwnerVerification::FullSuite {
+            candidate_id: id("candidate"),
+        },
+        OwnerVerification::Verify {
+            candidate_id: id("candidate"),
+            attempt_id: id("attempt"),
+        },
+        OwnerVerification::Accept {
+            candidate_id: id("candidate"),
+            attempt_id: id("attempt"),
+        },
     ] {
-        let command =
-            serde_json::json!({"kind":"OwnerVerification", "action":{"operation":operation}});
-        assert!(serde_json::from_value::<Command>(command).is_err());
+        let command = serde_json::to_value(Command::OwnerVerification { action }).unwrap();
+        refused_variant(command, "OwnerVerification");
     }
     let request = serde_json::json!({
         "protocol_version":1,"client_id":"worker","request_id":"operation",
         "expected_revision":"0","command":{"kind":"ProposeBaseline","draft":draft}
     });
-    assert!(serde_json::from_value::<WireRequest>(request).is_err());
+    let error = serde_json::from_value::<WireRequest>(request)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unknown variant `ProposeBaseline`"),
+        "{error}"
+    );
+}
+
+/// Checks that a well-formed command is refused only because its kind is hidden.
+/// Takes the command JSON and its kind. Panics unless decoding fails with
+/// serde's unknown-variant error for exactly that kind.
+fn refused_variant(command: serde_json::Value, kind: &str) {
+    let error = serde_json::from_value::<Command>(command)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with(&format!("unknown variant `{kind}`")),
+        "{kind}: {error}"
+    );
 }
