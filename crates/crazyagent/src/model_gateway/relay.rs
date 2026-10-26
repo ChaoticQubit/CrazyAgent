@@ -6,8 +6,8 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -128,8 +128,49 @@ struct Shared {
     key: SecretString,
     token: String,
     scratch: PathBuf,
-    active: AtomicUsize,
+    open: Mutex<Vec<Open>>,
     stop: AtomicBool,
+}
+
+/// One harness connection the relay is serving: its accept number, a handle to shut it
+/// down, and whether its request carried the token.
+struct Open {
+    id: u64,
+    stream: TcpStream,
+    authorized: bool,
+}
+
+impl Shared {
+    fn open(&self) -> MutexGuard<'_, Vec<Open>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes a slot for a new connection. When all 16 are taken, the oldest connection
+    /// whose request has not shown the token is shut down to make room, so callers
+    /// without the token cannot starve the agent's own requests.
+    /// Output: false when every slot holds an authorized request.
+    fn admit(&self, open: Open) -> bool {
+        let mut connections = self.open();
+        if connections.len() >= CONNECTIONS_MAX {
+            let Some(oldest) = connections.iter().position(|open| !open.authorized) else {
+                return false;
+            };
+            let _ = connections.remove(oldest).stream.shutdown(Shutdown::Both);
+        }
+        connections.push(open);
+        assert!(connections.len() <= CONNECTIONS_MAX);
+        true
+    }
+
+    fn authorize(&self, id: u64) {
+        if let Some(open) = self.open().iter_mut().find(|open| open.id == id) {
+            open.authorized = true;
+        }
+    }
+
+    fn release(&self, id: u64) {
+        self.open().retain(|open| open.id != id);
+    }
 }
 
 /// An engine-owned model key relay on 127.0.0.1 for one agent launch. The agent's harness
@@ -167,7 +208,7 @@ impl Relay {
             key,
             token,
             scratch,
-            active: AtomicUsize::new(0),
+            open: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
         });
         let accepting = Arc::clone(&shared);
@@ -212,19 +253,23 @@ impl Drop for Relay {
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
+        for open in self.shared.open().drain(..) {
+            let _ = open.stream.shutdown(Shutdown::Both);
+        }
         let _ = std::fs::remove_dir_all(&self.shared.scratch);
     }
 }
 
-struct Active<'a>(&'a AtomicUsize);
+struct Slot<'a>(&'a Shared, u64);
 
-impl Drop for Active<'_> {
+impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.release(self.1);
     }
 }
 
 fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
+    let mut numbered: u64 = 0;
     while !shared.stop.load(Ordering::Acquire) {
         let (stream, peer) = match crate::spawn_gate::accept_tcp_std(listener) {
             Ok(accepted) => accepted,
@@ -238,8 +283,17 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
         }
         let _ = stream.set_read_timeout(Some(CLIENT_TIME));
         let _ = stream.set_write_timeout(Some(CLIENT_TIME));
-        if shared.active.fetch_add(1, Ordering::AcqRel) >= CONNECTIONS_MAX {
-            shared.active.fetch_sub(1, Ordering::AcqRel);
+        let Ok(handle) = stream.try_clone() else {
+            continue;
+        };
+        numbered += 1;
+        let id = numbered;
+        let open = Open {
+            id,
+            stream: handle,
+            authorized: false,
+        };
+        if !shared.admit(open) {
             let mut stream = stream;
             let _ = refuse(&mut stream, 503);
             continue;
@@ -248,11 +302,11 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
         let spawned = std::thread::Builder::new()
             .name("model-relay-request".into())
             .spawn(move || {
-                let _active = Active(&serving.active);
-                serve(stream, &serving);
+                let _slot = Slot(&serving, id);
+                serve(stream, &serving, id);
             });
         if spawned.is_err() {
-            shared.active.fetch_sub(1, Ordering::AcqRel);
+            shared.release(id);
         }
     }
 }
@@ -274,9 +328,9 @@ pub(crate) enum KeyHeader {
     Bearer,
 }
 
-fn serve(mut stream: TcpStream, shared: &Shared) {
+fn serve(mut stream: TcpStream, shared: &Shared, id: u64) {
     let outcome = match stream.try_clone() {
-        Ok(reading) => exchange(&mut BufReader::new(reading), &mut stream, shared),
+        Ok(reading) => exchange(&mut BufReader::new(reading), &mut stream, shared, id),
         Err(_) => Err(500),
     };
     if let Err(status) = outcome {
@@ -296,9 +350,15 @@ fn refuse(stream: &mut TcpStream, status: u16) -> std::io::Result<()> {
     )
 }
 
-fn exchange(reader: &mut impl BufRead, stream: &mut TcpStream, shared: &Shared) -> Result<(), u16> {
+fn exchange(
+    reader: &mut impl BufRead,
+    stream: &mut TcpStream,
+    shared: &Shared,
+    id: u64,
+) -> Result<(), u16> {
     let mut incoming = read_head(reader)?;
     let scheme = authorized(&incoming, &shared.token).ok_or(401_u16)?;
+    shared.authorize(id);
     confined(&incoming.target, &shared.upstream)?;
     incoming.body = read_body(reader, &incoming.headers)?;
     let body_file = if incoming.body.is_empty() {

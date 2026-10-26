@@ -319,6 +319,46 @@ fn a_request_without_the_token_is_refused_before_its_body_is_read() {
     assert!(provider.seen().is_empty());
 }
 
+/// Callers without the token that fill every slot with request heads they never finish
+/// must not starve the agent: its tokened request still reaches the provider, and
+/// dropping the relay closes every connection still held open.
+#[test]
+fn callers_without_the_token_cannot_hold_the_slots_the_agent_needs() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let mut held: Vec<TcpStream> = (0..CONNECTIONS_MAX)
+        .map(|_| {
+            let mut stream =
+                crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+            stream
+                .write_all(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+                .unwrap();
+            stream
+        })
+        .collect();
+    let (status, _, body) = send(
+        relay.port(),
+        &post(
+            "/v1/messages",
+            &format!("x-api-key: {}", relay.token()),
+            "{}",
+        ),
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(provider.seen().len(), 1);
+    drop(relay);
+    for stream in &mut held {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let read = stream.read_to_end(&mut Vec::new());
+        assert!(
+            !matches!(&read, Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+            "a held connection must close when the relay stops: {read:?}"
+        );
+    }
+}
+
 #[test]
 fn paths_outside_the_provider_base_and_other_methods_are_refused() {
     let provider = Provider::json();
