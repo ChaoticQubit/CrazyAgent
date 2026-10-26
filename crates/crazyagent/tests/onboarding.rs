@@ -39,6 +39,7 @@ const SAVED_DRAFT: &str = r#"{"name":"Demo Tool","draft":{"about":"Kept by the o
 const OWNER_OVERVIEW: &str = "# Owner overview\n\nWritten by hand.\n";
 const OWNER_ABOUT: &str = "A browser helper the owner described by hand.";
 const OWNER_NAME: &str = "Demo Browser";
+const FORGED_BRIEF: &str = "# Forged brief\n\nWritten by a project agent.\n";
 
 /// Fails the test with the command that fixes it unless the local Ollama serves the pool
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
@@ -869,6 +870,41 @@ async fn an_existing_crazyagent_folder_is_reused_not_overwritten() {
     let setup = bench.owner.project_setup(project).await.unwrap().unwrap();
     assert_eq!(setup.name, "Demo Tool");
     assert_eq!(setup.about, "Kept by the owner.");
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nested_crazyagent_folder_never_stands_in_for_the_onboarded_context() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let state = bench.repo.join(".crazyagent");
+    let brief = fs::read_to_string(state.join("context/brief.md")).unwrap();
+    assert!(!brief.contains(FORGED_BRIEF));
+    let forged = state.join(".crazyagent/context");
+    fs::create_dir_all(forged.join("research")).unwrap();
+    fs::write(forged.join("brief.md"), FORGED_BRIEF).unwrap();
+    fs::write(forged.join("research/market.md"), FORGED_BRIEF).unwrap();
+    let setup = bench
+        .owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(setup.state_folder(), state);
+    let context = bench.owner.project_context(project.clone()).await.unwrap();
+    assert_eq!(Path::new(&context.folder), state);
+    let paths: Vec<&str> = context
+        .items
+        .iter()
+        .map(|item| item.path.as_str())
+        .collect();
+    assert_eq!(paths, ["context/brief.md"]);
+    let chunk = bench
+        .owner
+        .project_context_item(project, "context/brief.md".into(), 0)
+        .await
+        .unwrap();
+    assert_eq!(chunk.text.as_deref(), Some(brief.as_str()));
     bench.stop().await;
 }
 

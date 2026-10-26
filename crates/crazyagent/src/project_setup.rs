@@ -409,10 +409,11 @@ impl StoredSetup {
     }
 
     /// The folder holding this project's context and agent worktrees:
-    /// `.crazyagent/` inside the project for projects in the projects home,
-    /// or the project folder itself for projects made before it.
+    /// `.crazyagent/` inside the project folder for projects in the projects
+    /// home and onboarded ones, or the project folder itself for projects made
+    /// before it. A `.crazyagent/` nested in the recorded folder never counts.
     pub fn state_folder(&self) -> PathBuf {
-        crate::projects_home::state_folder(Path::new(&self.folder))
+        crate::projects_home::state_folder(&self.project_folder())
     }
 
     /// The project's own folder: the recorded folder, or the folder holding
