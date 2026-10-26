@@ -8,6 +8,7 @@ import { setTimeout as pause } from "node:timers/promises";
 const READY_MS = 60000;
 const AUTH_MS = 60000;
 const TURN_MS = 90000;
+const REAL_TURN_MS = 300000;
 const SETUP_MS = 180000;
 const TEAM_MS = 90000;
 const POLL_MS = 250;
@@ -25,6 +26,7 @@ const NOT_ADMITTED = new Set(["readiness_unknown", "readiness_stale", "invalid_a
 const TMUX_SEARCH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const SILENT_MARK = "owner-flow-silent";
 const SILENT_TURN_S = 300;
+const BRIDGE_READY = /^ready (\d+) ([0-9a-f]{64})$/m;
 const STAND_IN = `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.owner-flow-signed-in"
 keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
@@ -68,6 +70,19 @@ function required(name, what) {
     process.exit(2);
   }
   return value;
+}
+
+/** Reads the approved real-profile run: the data root of a running engine where a Claude account
+ * is already signed in, and the project whose assigned pool holds it. Paths and ids only, never a
+ * secret; the smoke only sends master turns there. Input: none. Output: null without either
+ * variable, the problem when the run cannot start, else the engine's socket, database and project. */
+function realProfile() {
+  const root = process.env.CRAZYAGENT_MANAGED_RUNTIME;
+  const project = process.env.CRAZYAGENT_MANAGED_CLAUDE_PROJECT;
+  if (!root && !project) return null;
+  if (!root || !project) return { problem: "real_profile_incomplete: set CRAZYAGENT_MANAGED_RUNTIME and CRAZYAGENT_MANAGED_CLAUDE_PROJECT" };
+  if (!isAbsolute(root) || !existsSync(join(root, "engine.db"))) return { problem: "real_profile_runtime_without_engine_db" };
+  return { socket: join(root, "engine.sock"), database: join(root, "engine.db"), project, bridge: null, turnMs: REAL_TURN_MS };
 }
 
 /** Runs git in a folder and stops the run when it fails.
@@ -289,15 +304,15 @@ function groupAlive(group) {
   }
 }
 
-/** Drives the installed-style engine through the owner's path with the desktop bridge and
- * prints PASS, FAIL or BLOCKED with the engine code per step: the master, then the team
- * (delegate, agent status, stop, failover, cleanup). Send mirrors the app: an uncertain turn
- * is stopped first (except in 3b), and a master_source_conflict ends the conversation, opens
- * a new one and resends once. Input: environment paths. Output: exit 1 on any FAIL, 3 when
- * only BLOCKED steps remain. */
+/** Drives the installed-style engine through the owner's path with the desktop bridge and prints
+ * PASS, FAIL or BLOCKED with the engine code per step. Send mirrors the app (stop an uncertain turn
+ * except in 3b; on master_source_conflict end, reopen and resend once). A master step whose harness
+ * never replied is BLOCKED; with a real profile (realProfile) 3 and 3b pass only on its stored reply.
+ * Input: environment paths. Output: exit 1 on any FAIL, 3 when only BLOCKED steps remain. */
 async function main() {
   const engineBinary = required("CRAZYAGENT_TEST_NATIVE_AUTH_HOST", "crazyagent binary (the engine and its native-auth host)");
   const bridgeBinary = required("SMOKE_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
+  const real = realProfile();
   process.umask(0o077);
   const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "ca-of-")));
   const crazyHome = join(root, "h");
@@ -319,25 +334,26 @@ async function main() {
   const state = { generation: 0, accounts: [], pool: null, project: null };
   let engine;
   let bridgeProcess;
+  let realBridgeProcess;
   let bridge;
   const startEngine = async () => {
     ({ child: engine } = await start(engineBinary, ["engine"], env, evidence, "engine", /^ready$/m));
   };
-  const call = (cmd, args) => bridgeCall(bridge, trail, cmd, args);
-  const value = async (cmd, args) => {
-    let answer = await call(cmd, args);
+  const call = (cmd, args, via = bridge) => bridgeCall(via, trail, cmd, args);
+  const value = async (cmd, args, via = bridge) => {
+    let answer = await call(cmd, args, via);
     for (let attempt = 1; answer.failure?.code === "busy" && attempt < 8; attempt += 1) {
       await pause(250 * attempt);
-      answer = await call(cmd, args);
+      answer = await call(cmd, args, via);
     }
     if (!("value" in answer)) throw new Refused(failureCode(cmd, answer), answer.failure?.message);
     return answer.value;
   };
   const generation = () => (state.generation += 1);
-  const applied = (cmd, receipt) => {
+  const applied = (cmd, receipt, database = join(crazyHome, "engine.db")) => {
     if (receipt?.outcome === "applied" && !receipt.pending) return receipt;
     const code = receipt?.rejection ?? (receipt?.pending ? "pending" : receipt?.outcome ?? "no_receipt");
-    const recorded = receipt?.operation_id ? recordedCode(join(crazyHome, "engine.db"), receipt.operation_id) : null;
+    const recorded = receipt?.operation_id ? recordedCode(database, receipt.operation_id) : null;
     throw new Refused(recorded && recorded !== code ? `${code} (engine: ${recorded})` : code, cmd);
   };
   const engineErr = join(evidence, "engine.err");
@@ -425,56 +441,83 @@ async function main() {
     console.log(`note: ended the conversation first, since ${previous} failed (the owner's End conversation)`);
     return `fresh conversation since ${previous} failed; `;
   };
-  const submit = async (text, release) => {
-    const projectId = needs(state.project, "1");
-    const opened = await value("desktop_open_project", { id: projectId });
-    let master = await value("desktop_master_state", { ticket: opened.ticket });
+  const local = { get bridge() { return bridge; }, get project() { return needs(state.project, "1"); }, database: join(crazyHome, "engine.db"), turnMs: TURN_MS };
+  const submit = async (text, release, at = local) => {
+    const ask = (cmd, args) => value(cmd, args, at.bridge);
+    const done = (cmd, receipt) => applied(cmd, receipt, at.database);
+    const opened = await ask("desktop_open_project", { id: at.project });
+    let master = await ask("desktop_master_state", { ticket: opened.ticket });
     if (!master.session || master.session.phase !== "configured") {
-      applied("open_master", await value("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
-      master = await value("desktop_master_state", { ticket: opened.ticket });
+      done("open_master", await ask("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
+      master = await ask("desktop_master_state", { ticket: opened.ticket });
       if (!master.session) throw new Refused("master_session_missing");
     }
     let sessionId = master.session.session_id;
     const current = master.session.current_turn;
     if (release && current) {
-      const held = (await value("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null })).page.turns.find((item) => item.id === current);
+      const held = (await ask("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null })).page.turns.find((item) => item.id === current);
       if (held?.phase === "uncertain") {
         try {
-          applied("cancel_master_turn", await value("desktop_cancel_master_turn", { ticket: opened.ticket, session: sessionId, turn: current, generation: generation() }));
+          done("cancel_master_turn", await ask("desktop_cancel_master_turn", { ticket: opened.ticket, session: sessionId, turn: current, generation: generation() }));
         } catch (failure) {
           throw failure instanceof Refused ? new Refused(`release_uncertain_turn:${failure.code}`) : failure;
         }
       }
     }
-    let receipt = await value("desktop_submit_master", { ticket: opened.ticket, sessionId, text, generation: generation() });
+    let receipt = await ask("desktop_submit_master", { ticket: opened.ticket, sessionId, text, generation: generation() });
     let recovered = "";
     if (receipt.outcome === "rejected" && receipt.rejection === "master_source_conflict") {
-      applied("close_master", await value("desktop_close_master", { ticket: opened.ticket, sessionId, generation: generation() }));
-      applied("open_master", await value("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
-      const fresh = (await value("desktop_master_state", { ticket: opened.ticket })).session;
+      done("close_master", await ask("desktop_close_master", { ticket: opened.ticket, sessionId, generation: generation() }));
+      done("open_master", await ask("desktop_open_master", { ticket: opened.ticket, generation: generation() }));
+      const fresh = (await ask("desktop_master_state", { ticket: opened.ticket })).session;
       if (!fresh || fresh.phase !== "configured") throw new Refused("master_session_missing", "after settings changed");
       sessionId = fresh.session_id;
-      receipt = await value("desktop_submit_master", { ticket: opened.ticket, sessionId, text, generation: generation() });
+      receipt = await ask("desktop_submit_master", { ticket: opened.ticket, sessionId, text, generation: generation() });
       recovered = "new conversation after settings changed, ";
     }
-    applied("submit_master", receipt);
+    done("submit_master", receipt);
     return { opened, sessionId, receipt, recovered };
   };
-  const send = async (text, serving = null, release = true) => {
-    const { opened, sessionId, receipt, recovered } = await submit(text, release);
+  const send = async (text, serving = null, release = true, at = local) => {
+    const { opened, sessionId, receipt, recovered } = await submit(text, release, at);
     let turn;
-    for (const deadline = Date.now() + TURN_MS; ; await pause(POLL_MS)) {
-      const turns = await value("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null });
+    for (const deadline = Date.now() + at.turnMs; ; await pause(POLL_MS)) {
+      const turns = await value("desktop_master_turns", { ticket: opened.ticket, sessionId, cursor: null }, at.bridge);
       turn = turns.page.turns.find((item) => item.id === receipt.operation_id);
       if (!turn) throw new Refused("master_turn_missing");
       if (!ACTIVE_TURN.has(turn.phase)) break;
       if (Date.now() > deadline) throw new Refused(`master_turn_still_${turn.phase}`);
     }
     const reason = turn.reason ?? "no_reason";
-    const admitted = turn.phase === "succeeded" && turn.reply || turn.attempt !== null && !NOT_ADMITTED.has(reason);
+    const replied = turn.phase === "succeeded" && typeof turn.reply?.text === "string" && turn.reply.text.trim() !== "";
+    const admitted = replied || turn.attempt !== null && !NOT_ADMITTED.has(reason);
     if (!admitted) throw new Refused(`${turn.phase}:${reason}`, turn.attempt === null ? "never admitted" : "admitted");
     if (serving && turn.attempt?.connection?.id !== serving) throw new Refused("served_by_signed_out_account", turn.attempt?.connection?.id);
-    return `${recovered}${turn.phase === "succeeded" ? "replied" : `admitted, harness not runnable here (${turn.phase}:${reason})`}`;
+    return { replied, text: `${recovered}${replied ? `replied, ${turn.reply.text.length} characters stored` : `admitted, harness did not reply (${turn.phase}:${reason})`}` };
+  };
+  const ran = (sent, note = "") => {
+    if (sent.replied) return `${note}${sent.text}`;
+    throw new Blocked(`harness_not_run: ${note}${sent.text}`);
+  };
+  const realSend = async (text, release, here) => {
+    if (!real) throw new Blocked(`needs_real_signed_in_profile: stand-in ${here}`);
+    if (real.problem) throw new Blocked(`${real.problem}; stand-in ${here}`);
+    if (!real.bridge) {
+      if (!existsSync(real.socket)) throw new Blocked(`real_engine_not_running; stand-in ${here}`);
+      const started = await start(bridgeBinary, [real.socket], env, evidence, "real-bridge", BRIDGE_READY);
+      realBridgeProcess = started.child;
+      const via = { port: Number(started.match[1]), token: started.match[2] };
+      if ((await call("desktop_connect", {}, via)).value?.connected !== true) throw new Blocked(`real_engine_not_reachable; stand-in ${here}`);
+      real.bridge = via;
+    }
+    let sent;
+    try {
+      sent = await send(text, null, release, real);
+    } catch (failure) {
+      throw failure instanceof Refused ? new Refused(`real:${failure.code}`, failure.detail) : failure;
+    }
+    if (!sent.replied) throw new Refused(`real:${sent.text}`);
+    return `real claude ${sent.text}; stand-in ${here}`;
   };
 
   const database = join(crazyHome, "engine.db");
@@ -502,7 +545,7 @@ async function main() {
 
   try {
     await startEngine();
-    const started = await start(bridgeBinary, [join(crazyHome, "engine.sock")], env, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
+    const started = await start(bridgeBinary, [join(crazyHome, "engine.sock")], env, evidence, "bridge", BRIDGE_READY);
     bridgeProcess = started.child;
     bridge = { port: Number(started.match[1]), token: started.match[2] };
     if ((await value("desktop_connect")).connected !== true) throw new Error("the bridge did not connect to the engine");
@@ -536,8 +579,14 @@ async function main() {
       return "applied";
     });
     await step("2c", "assign the pool to the project", async () => assignPool(needs(state.project, "1"), needs(state.pool, "2b"), false));
-    await step("3", "open the conversation and send (readiness and worktree admission)", async () => `${await send("Hello master, what is in this repository?")}; ${leaseCopy(join(crazyHome, "engine.db"), repo)}`);
-    await step("3b", "send again after a turn the harness could not finish, with no extra owner action", () => send("Are you still there?", null, false));
+    await step("3", "open the conversation and send (readiness and worktree admission)", async () => {
+      const sent = await send("Hello master, what is in this repository?");
+      return realSend("This is the owner-flow smoke. Reply with one short sentence and use no tools.", true, `${sent.text}; ${leaseCopy(join(crazyHome, "engine.db"), repo)}`);
+    });
+    await step("3b", "send again after a turn the harness could not finish, with no extra owner action", async () => {
+      const sent = await send("Are you still there?", null, false);
+      return realSend("Still there? Reply with one short sentence and use no tools.", false, sent.text);
+    });
     await step("4a", "change project settings (details and pool), send again (LB-14)", async () => {
       const project = needs(state.project, "1");
       const before = needs(state.pool, "2b");
@@ -549,7 +598,7 @@ async function main() {
       await assignPool(project, before, true);
       await saveSetup(project, { pool: after });
       state.pool = after;
-      return send("Settings changed. Still there?");
+      return ran(await send("Settings changed. Still there?"));
     });
     await step("4b", "restart the engine, send again (LB-15)", async () => {
       await stop(engine);
@@ -560,7 +609,7 @@ async function main() {
         if (!connected && Date.now() > deadline) throw new Refused("bridge_reconnect_failed");
       }
       const note = await isolated("4a");
-      return `${note}${await send("The engine restarted. Still there?")}`;
+      return ran(await send("The engine restarted. Still there?"), note);
     });
     await step("4c", "first account signed out, send again (LB-17 failover)", async () => {
       const first = needs(state.accounts[0], "2a");
@@ -569,7 +618,7 @@ async function main() {
       const status = await memberStatus(first.id);
       if (status !== "not_signed_in") throw new Refused(`first_account_${status}`, "logout not shown");
       const note = await isolated("4b");
-      return `${note}${await send("The first account is signed out. Still there?", needs(state.accounts[1], "2a").id)}`;
+      return ran(await send("The first account is signed out. Still there?", needs(state.accounts[1], "2a").id), note);
     });
     await step("5a", "delete an account that is in a pool (LB-16)", async () => {
       const second = needs(state.accounts[1], "2a");
@@ -733,6 +782,7 @@ async function main() {
     console.log(`FAIL setup [${results.at(-1).code}]`);
   } finally {
     writeFileSync(join(evidence, "answers.json"), JSON.stringify(trail, null, 1).replace(/[0-9a-f]{64}/g, (hex) => hex.slice(0, 8)));
+    await stop(realBridgeProcess);
     await stop(bridgeProcess);
     await stop(engine);
     await pause(POLL_MS);
