@@ -1152,3 +1152,7 @@ mod dec_090_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/live_claude_tests.rs"]
 mod live_claude_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/claude_turn_tests.rs"]
+mod claude_turn_tests;
