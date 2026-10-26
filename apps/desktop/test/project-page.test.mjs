@@ -103,6 +103,9 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped: provider error.");
   assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet.");
   assert.equal(research.resendText([{ ...turn("blocked", "repository_missing"), id: "t1", ordinal: 1 }], { t1: "first" }), "first");
+  const refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+  assert.equal(research.turnLine({ ...turn("blocked", "repository_config_refused"), detail: refused }), `The master couldn't start: ${refused}`);
+  assert.equal(research.turnLine(turn("failed", "repository_config_refused")), "The master couldn't start: a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again.");
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
 });
 

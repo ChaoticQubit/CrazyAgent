@@ -282,6 +282,433 @@ fn validate_metadata(repository: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+const CONFIG_REFUSED: &str = "repository_config_refused:";
+const GIT_BOOLEANS: &[&str] = &["true", "false", "yes", "no", "on", "off", "1", "0"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Plain,
+    Named,
+    Either,
+}
+
+/// One repository-local Git config rule: the keys it covers (a section, whether the key
+/// has a subsection, and its variable names, none meaning all), the values that keep a
+/// covered key inert (none meaning every value is refused), and how the refusal reads.
+struct RefusedKey {
+    section: &'static str,
+    scope: Scope,
+    names: &'static [&'static str],
+    inert: &'static [&'static str],
+    code: &'static str,
+    key: &'static str,
+    why: &'static str,
+}
+
+const fn refused(
+    section: &'static str,
+    scope: Scope,
+    names: &'static [&'static str],
+    code: &'static str,
+    key: &'static str,
+    why: &'static str,
+) -> RefusedKey {
+    RefusedKey {
+        section,
+        scope,
+        names,
+        inert: &[],
+        code,
+        key,
+        why,
+    }
+}
+
+const RUNS: &str = "runs a command the repository chooses";
+
+const REFUSED_KEYS: [RefusedKey; 41] = [
+    RefusedKey {
+        inert: &["0", "1"],
+        ..refused(
+            "core",
+            Scope::Plain,
+            &["repositoryformatversion"],
+            "repository_format",
+            "core.repositoryFormatVersion",
+            "uses a repository format the engine does not read",
+        )
+    },
+    RefusedKey {
+        inert: &["false", "no", "off", "0"],
+        ..refused(
+            "core",
+            Scope::Plain,
+            &["bare"],
+            "core_bare",
+            "core.bare",
+            "marks the repository as having no working tree",
+        )
+    },
+    RefusedKey {
+        inert: GIT_BOOLEANS,
+        ..refused(
+            "extensions",
+            Scope::Plain,
+            &["worktreeconfig"],
+            "extensions_worktreeconfig",
+            "extensions.worktreeConfig",
+            "holds a value Git does not read as true or false",
+        )
+    },
+    refused(
+        "extensions",
+        Scope::Either,
+        &[],
+        "repository_extension",
+        "extensions.*",
+        "changes the repository format the engine reads",
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["hookspath"],
+        "core_hookspath",
+        "core.hooksPath",
+        "runs hooks from a folder the repository chooses",
+    ),
+    refused(
+        "hook",
+        Scope::Named,
+        &[],
+        "hook_command",
+        "hook.<name>.command",
+        "runs a hook command written in the config",
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["fsmonitor"],
+        "core_fsmonitor",
+        "core.fsmonitor",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["sshcommand"],
+        "core_sshcommand",
+        "core.sshCommand",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["gitproxy"],
+        "core_gitproxy",
+        "core.gitProxy",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["editor"],
+        "core_editor",
+        "core.editor",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["pager"],
+        "core_pager",
+        "core.pager",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["askpass"],
+        "core_askpass",
+        "core.askPass",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["alternaterefscommand"],
+        "core_alternaterefscommand",
+        "core.alternateRefsCommand",
+        RUNS,
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["worktree"],
+        "core_worktree",
+        "core.worktree",
+        "moves the working tree Git uses",
+    ),
+    refused(
+        "core",
+        Scope::Plain,
+        &["attributesfile"],
+        "core_attributesfile",
+        "core.attributesFile",
+        "reads attributes, which pick filters and drivers, from another file",
+    ),
+    refused(
+        "filter",
+        Scope::Named,
+        &[],
+        "filter_driver",
+        "filter.<driver>",
+        "runs a filter command when files are checked out or added",
+    ),
+    refused(
+        "diff",
+        Scope::Named,
+        &["command", "textconv"],
+        "diff_driver",
+        "diff.<driver>.command or textconv",
+        RUNS,
+    ),
+    refused(
+        "diff",
+        Scope::Plain,
+        &["external"],
+        "diff_external",
+        "diff.external",
+        RUNS,
+    ),
+    refused(
+        "difftool",
+        Scope::Either,
+        &[],
+        "difftool",
+        "difftool.*",
+        RUNS,
+    ),
+    refused(
+        "merge",
+        Scope::Named,
+        &["driver"],
+        "merge_driver",
+        "merge.<driver>.driver",
+        RUNS,
+    ),
+    refused(
+        "mergetool",
+        Scope::Either,
+        &[],
+        "mergetool",
+        "mergetool.*",
+        RUNS,
+    ),
+    refused(
+        "sequence",
+        Scope::Plain,
+        &["editor"],
+        "sequence_editor",
+        "sequence.editor",
+        RUNS,
+    ),
+    refused(
+        "credential",
+        Scope::Either,
+        &[],
+        "credential",
+        "credential.*",
+        "runs a credential helper",
+    ),
+    refused(
+        "gpg",
+        Scope::Either,
+        &["program", "defaultkeycommand"],
+        "gpg_program",
+        "gpg.program or gpg.ssh.defaultKeyCommand",
+        RUNS,
+    ),
+    refused(
+        "pager",
+        Scope::Plain,
+        &[],
+        "pager_command",
+        "pager.<command>",
+        RUNS,
+    ),
+    refused(
+        "trailer",
+        Scope::Named,
+        &["cmd", "command"],
+        "trailer_command",
+        "trailer.<key>.command",
+        RUNS,
+    ),
+    refused(
+        "interactive",
+        Scope::Plain,
+        &["difffilter"],
+        "interactive_difffilter",
+        "interactive.diffFilter",
+        RUNS,
+    ),
+    refused(
+        "submodule",
+        Scope::Named,
+        &["update"],
+        "submodule_update",
+        "submodule.<name>.update",
+        RUNS,
+    ),
+    refused(
+        "url",
+        Scope::Named,
+        &["insteadof", "pushinsteadof"],
+        "url_rewrite",
+        "url.<base>.insteadOf",
+        "rewrites the addresses Git fetches from or pushes to",
+    ),
+    refused(
+        "include",
+        Scope::Plain,
+        &["path"],
+        "include",
+        "include.path",
+        "loads more config from another file",
+    ),
+    refused(
+        "includeif",
+        Scope::Named,
+        &["path"],
+        "include_if",
+        "includeIf.<condition>.path",
+        "loads more config from another file",
+    ),
+    refused(
+        "remote",
+        Scope::Named,
+        &["uploadpack", "receivepack", "vcs", "proxy"],
+        "remote_command",
+        "remote.<name>.uploadpack, receivepack, vcs or proxy",
+        "runs a command or proxy for the remote",
+    ),
+    refused(
+        "http",
+        Scope::Either,
+        &["proxy"],
+        "http_proxy",
+        "http.proxy",
+        "sends Git traffic through a proxy",
+    ),
+    refused(
+        "protocol",
+        Scope::Either,
+        &["allow"],
+        "protocol_allow",
+        "protocol.allow",
+        "changes which transports, command transports included, Git may use",
+    ),
+    refused(
+        "uploadpack",
+        Scope::Plain,
+        &["packobjectshook"],
+        "uploadpack_hook",
+        "uploadpack.packObjectsHook",
+        RUNS,
+    ),
+    refused(
+        "gc",
+        Scope::Plain,
+        &["recentobjectshook"],
+        "gc_hook",
+        "gc.recentObjectsHook",
+        RUNS,
+    ),
+    refused(
+        "sendemail",
+        Scope::Either,
+        &["smtpserver", "sendmailcmd", "tocmd", "cccmd", "headercmd"],
+        "sendemail_command",
+        "sendemail.sendmailCmd",
+        RUNS,
+    ),
+    refused(
+        "imap",
+        Scope::Plain,
+        &["tunnel"],
+        "imap_tunnel",
+        "imap.tunnel",
+        RUNS,
+    ),
+    refused(
+        "browser",
+        Scope::Named,
+        &["cmd", "path"],
+        "browser_command",
+        "browser.<tool>.cmd",
+        RUNS,
+    ),
+    refused(
+        "man",
+        Scope::Named,
+        &["cmd", "path"],
+        "man_command",
+        "man.<tool>.cmd",
+        RUNS,
+    ),
+    refused(
+        "guitool",
+        Scope::Named,
+        &[],
+        "guitool_command",
+        "guitool.<name>.cmd",
+        RUNS,
+    ),
+];
+
+/// Finds the rule that refuses one repository-local Git config entry. Input: the key as
+/// `git config --list` prints it (section and variable lowercased, subsection as written)
+/// and its value. Output: the refusing rule, or None for inert metadata such as branch
+/// tracking, remotes, user identity, aliases and keys other tools store (VS Code, the
+/// Codex app, GitHub CLI); the first rule that covers a key decides it.
+fn refused_key(key: &str, value: &str) -> Option<&'static RefusedKey> {
+    let (section, rest) = key.split_once('.').unwrap_or((key, ""));
+    let (named, name) = match rest.rsplit_once('.') {
+        Some((_, name)) => (true, name),
+        None => (false, rest),
+    };
+    let rule = REFUSED_KEYS.iter().find(|rule| {
+        rule.section == section
+            && match rule.scope {
+                Scope::Plain => !named,
+                Scope::Named => named,
+                Scope::Either => true,
+            }
+            && (rule.names.is_empty() || rule.names.contains(&name))
+    })?;
+    if rule
+        .inert
+        .iter()
+        .any(|inert| inert.eq_ignore_ascii_case(value))
+    {
+        return None;
+    }
+    Some(rule)
+}
+
+/// Writes the plain line an owner reads when a repository's config was refused. Inputs:
+/// the refusal code and the repository path. Output: the line naming the repository, the
+/// key and why, or None when the code is no config refusal.
+pub(crate) fn refused_config_line(code: &str, repository: &str) -> Option<String> {
+    let code = code.strip_prefix(CONFIG_REFUSED)?;
+    let rule = REFUSED_KEYS.iter().find(|rule| rule.code == code)?;
+    Some(format!(
+        "{repository} has the Git setting {}, which {}. Remove it from the repository's \
+         .git/config, then send again.",
+        rule.key, rule.why
+    ))
+}
+
 fn validate_config(repository: &Path) -> Result<(), EngineError> {
     let bytes = git(
         repository,
@@ -295,28 +722,11 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
         let (key, value) = record
             .split_once('\n')
             .ok_or_else(|| error("invalid_git_config"))?;
-        let safe = match key {
-            "core.repositoryformatversion" => value == "0",
-            "core.bare" => value == "false",
-            "core.filemode"
-            | "core.logallrefupdates"
-            | "core.ignorecase"
-            | "core.precomposeunicode" => matches!(value, "true" | "false"),
-            "user.name" | "user.email" | "init.defaultbranch" => true,
-            key if key.starts_with("remote.")
-                && (key.ends_with(".url") || key.ends_with(".fetch")) =>
-            {
-                true
-            }
-            key if key.starts_with("branch.")
-                && (key.ends_with(".remote") || key.ends_with(".merge")) =>
-            {
-                true
-            }
-            _ => false,
-        };
-        if !safe {
-            return Err(error("unsupported_repository_config"));
+        if !key.contains('.') {
+            return Err(error("invalid_git_config"));
+        }
+        if let Some(rule) = refused_key(key, value) {
+            return Err(error(format!("{CONFIG_REFUSED}{}", rule.code)));
         }
     }
     assert!(bytes.len() <= 65536);
@@ -885,6 +1295,10 @@ fn write_blob_at(
     Ok(())
 }
 
+/// Finds and checks the Git metadata folder of an engine lease worktree: it must sit in
+/// the repository's .git/worktrees, link back to the lease, and hold no config.worktree,
+/// which Git reads for that worktree when extensions.worktreeConfig is on. Input: the
+/// lease record. Output: the metadata folder, or the refusal code.
 fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
     let target = Path::new(&record.lease.path);
     let bytes = bounded_read(&target.join(".git"), 4096)?;
@@ -904,6 +1318,9 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
             != format!("{}/.git\n", record.lease.path).as_bytes()
     {
         return Err(error("worktree_backlink_mismatch"));
+    }
+    if std::fs::symlink_metadata(path.join("config.worktree")).is_ok() {
+        return Err(error("worktree_config_present"));
     }
     Ok(path)
 }
@@ -1031,6 +1448,169 @@ mod tests {
         let mut record = reserved_record();
         record.lease.state = LeaseState::Ready;
         assert_record_consistent(&record);
+    }
+
+    #[test]
+    fn repository_config_rule_refuses_keys_git_runs_and_accepts_tool_metadata() {
+        for (key, value) in [
+            ("branch.feature/x.vscode-merge-base", "origin/trunk"),
+            ("branch.trunk.remote", "origin"),
+            ("branch.trunk.merge", "refs/heads/trunk"),
+            ("branch.trunk.description", "Owner notes"),
+            (
+                "remote.origin.url",
+                "https://example.invalid/owner/project.git",
+            ),
+            (
+                "remote.origin.pushurl",
+                "https://example.invalid/owner/project.git",
+            ),
+            ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
+            ("remote.origin.gh-resolved", "base"),
+            ("core.repositoryformatversion", "0"),
+            ("core.repositoryformatversion", "1"),
+            ("core.bare", "false"),
+            ("core.filemode", "true"),
+            ("core.logallrefupdates", "true"),
+            ("core.ignorecase", "true"),
+            ("core.precomposeunicode", "true"),
+            ("core.autocrlf", "input"),
+            ("extensions.worktreeconfig", "true"),
+            ("extensions.worktreeconfig", "FALSE"),
+            ("codex.localenvironmentconfigpath", "__none__"),
+            ("user.name", "Owner"),
+            ("user.email", "owner@example.invalid"),
+            ("init.defaultbranch", "trunk"),
+            ("alias.st", "status"),
+            ("lfs.repositoryformatversion", "0"),
+            ("submodule.lib.url", "https://example.invalid/lib.git"),
+            ("pull.rebase", "true"),
+        ] {
+            assert!(
+                refused_key(key, value).is_none(),
+                "{key}={value} must stay accepted"
+            );
+        }
+        let mut seen = Vec::new();
+        for (key, value, code) in [
+            ("core.repositoryformatversion", "2", "repository_format"),
+            ("core.bare", "true", "core_bare"),
+            (
+                "extensions.worktreeconfig",
+                "maybe",
+                "extensions_worktreeconfig",
+            ),
+            ("extensions.objectformat", "sha256", "repository_extension"),
+            ("core.hookspath", ".githooks", "core_hookspath"),
+            ("hook.lint.command", "make lint", "hook_command"),
+            ("hook.lint.event", "pre-commit", "hook_command"),
+            ("core.fsmonitor", "true", "core_fsmonitor"),
+            ("core.sshcommand", "ssh -F config", "core_sshcommand"),
+            ("core.gitproxy", "proxy-command", "core_gitproxy"),
+            ("core.editor", "vim", "core_editor"),
+            ("core.pager", "less", "core_pager"),
+            ("core.askpass", "prompt", "core_askpass"),
+            (
+                "core.alternaterefscommand",
+                "list",
+                "core_alternaterefscommand",
+            ),
+            ("core.worktree", "/elsewhere", "core_worktree"),
+            ("core.attributesfile", "/elsewhere", "core_attributesfile"),
+            (
+                "filter.lfs.process",
+                "git-lfs filter-process",
+                "filter_driver",
+            ),
+            ("filter.lfs.required", "true", "filter_driver"),
+            ("filter.a.b.smudge", "command", "filter_driver"),
+            ("diff.pdf.textconv", "pdftotext", "diff_driver"),
+            ("diff.pdf.command", "command", "diff_driver"),
+            ("diff.external", "command", "diff_external"),
+            ("difftool.vim.cmd", "command", "difftool"),
+            ("difftool.prompt", "false", "difftool"),
+            ("merge.ours.driver", "true", "merge_driver"),
+            ("mergetool.vim.cmd", "command", "mergetool"),
+            ("sequence.editor", "command", "sequence_editor"),
+            ("credential.helper", "store", "credential"),
+            (
+                "credential.https://example.invalid.helper",
+                "store",
+                "credential",
+            ),
+            ("gpg.program", "command", "gpg_program"),
+            ("gpg.openpgp.program", "command", "gpg_program"),
+            ("gpg.ssh.defaultkeycommand", "command", "gpg_program"),
+            ("pager.log", "command", "pager_command"),
+            ("trailer.sign.command", "command", "trailer_command"),
+            ("trailer.sign.cmd", "command", "trailer_command"),
+            (
+                "interactive.difffilter",
+                "command",
+                "interactive_difffilter",
+            ),
+            ("submodule.lib.update", "!command", "submodule_update"),
+            (
+                "url.https://example.invalid/.insteadof",
+                "git@example.invalid:",
+                "url_rewrite",
+            ),
+            ("url.ssh://h/.pushinsteadof", "https://h/", "url_rewrite"),
+            ("include.path", "/elsewhere", "include"),
+            ("includeif.gitdir:/a.b/.path", "/elsewhere", "include_if"),
+            ("remote.origin.uploadpack", "command", "remote_command"),
+            ("remote.origin.receivepack", "command", "remote_command"),
+            ("remote.origin.vcs", "helper", "remote_command"),
+            ("remote.origin.proxy", "http://proxy", "remote_command"),
+            ("http.proxy", "http://proxy", "http_proxy"),
+            (
+                "http.https://example.invalid.proxy",
+                "http://proxy",
+                "http_proxy",
+            ),
+            ("protocol.allow", "always", "protocol_allow"),
+            ("protocol.ext.allow", "always", "protocol_allow"),
+            ("uploadpack.packobjectshook", "command", "uploadpack_hook"),
+            ("gc.recentobjectshook", "command", "gc_hook"),
+            ("sendemail.sendmailcmd", "command", "sendemail_command"),
+            (
+                "sendemail.smtpserver",
+                "/usr/bin/command",
+                "sendemail_command",
+            ),
+            ("imap.tunnel", "command", "imap_tunnel"),
+            ("browser.firefox.cmd", "command", "browser_command"),
+            ("man.viewer.path", "command", "man_command"),
+            ("guitool.lint.cmd", "command", "guitool_command"),
+        ] {
+            assert_eq!(
+                refused_key(key, value).map(|rule| rule.code),
+                Some(code),
+                "{key}={value}"
+            );
+            seen.push(code);
+        }
+        let mut codes: Vec<_> = REFUSED_KEYS.iter().map(|rule| rule.code).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), REFUSED_KEYS.len(), "rule codes must be unique");
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, codes, "every rule needs a refused case");
+        assert_eq!(
+            refused_config_line("repository_config_refused:core_hookspath", "/owner/repo")
+                .as_deref(),
+            Some(concat!(
+                "/owner/repo has the Git setting core.hooksPath, which runs hooks from a ",
+                "folder the repository chooses. Remove it from the repository's .git/config, ",
+                "then send again."
+            ))
+        );
+        assert_eq!(refused_config_line("unsupported", "/owner/repo"), None);
+        assert_eq!(
+            refused_config_line("repository_config_refused:unknown", "/owner/repo"),
+            None
+        );
     }
 
     #[test]

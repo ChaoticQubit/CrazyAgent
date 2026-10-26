@@ -148,6 +148,7 @@ pub enum MasterReason {
     OutputLimit,
     UnsupportedCapability,
     RepositoryMissing,
+    RepositoryConfigRefused,
     Cancelled,
     Unknown,
 }
@@ -231,6 +232,8 @@ pub struct MasterTurnView {
     pub attempt: Option<Attempt>,
     pub runtime: Option<MasterRuntimeView>,
     pub reply: Option<MasterReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

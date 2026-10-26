@@ -1,4 +1,4 @@
-use super::native_auth_dispatch_diagnostic;
+use super::{master_turn_diagnostic, native_auth_dispatch_diagnostic};
 use crate::engine::EngineError;
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
 use std::os::unix::fs::PermissionsExt;
@@ -56,4 +56,20 @@ fn native_auth_dispatch_diagnostic_shows_joined_internal_codes_but_not_paths() {
     );
     let path = EngineError("master_capture_unavailable:/private/tmp/secret".into());
     assert!(!native_auth_dispatch_diagnostic(&path).contains("/private"));
+}
+
+#[test]
+fn master_turn_diagnostic_names_the_refusal_and_claims_no_fence() {
+    let refused = EngineError("repository_config_refused:core_hookspath".into());
+    let line = master_turn_diagnostic(&refused);
+    assert_eq!(
+        line,
+        "master_turn_not_completed cause=repository_config_refused:core_hookspath"
+    );
+    assert!(!line.contains("fence"));
+    let path = EngineError("master_capture_unavailable:/private/tmp/secret".into());
+    assert_eq!(
+        master_turn_diagnostic(&path),
+        "master_turn_not_completed cause=master_turn_error_redacted"
+    );
 }
