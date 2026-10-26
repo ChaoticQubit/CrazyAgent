@@ -123,10 +123,30 @@ fn a_record_lapsing_within_a_minute_that_cannot_be_renewed_is_refused_and_nothin
         let guard = execution(&mut case);
         assert_eq!(
             refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
-            "native_profile_credential_expiring"
+            "native_profile_renewal_failed"
         );
         assert!(entries(&agent).is_empty());
     }
+}
+
+#[test]
+fn a_failed_renewal_is_a_transient_refusal_even_for_a_turn_shorter_than_a_minute() {
+    let mut case = UseCase::new();
+    let agent = agent_home(&case);
+    let harness = case.root.path().join("offline-codex");
+    std::fs::write(&harness, "#!/bin/sh\n: > \"$0.ran\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    private_file(&case.home().join("auth.json"), &codex_auth(now() + 30));
+    let guard = execution(&mut case);
+    assert_eq!(
+        refused(guard.hand_to_agent(&agent, Duration::from_secs(10), &harness)),
+        "native_profile_renewal_failed"
+    );
+    assert!(
+        case.root.path().join("offline-codex.ran").is_file(),
+        "the renewal never ran before the refusal"
+    );
+    assert!(entries(&agent).is_empty());
 }
 
 #[test]
@@ -296,7 +316,7 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
     let guard = execution(&mut late);
     assert_eq!(
         refused(guard.hand_to_agent(&agent, TURN, &no_harness(&late))),
-        "native_profile_credential_expiring"
+        "native_profile_renewal_failed"
     );
     assert!(entries(&agent).is_empty());
 }

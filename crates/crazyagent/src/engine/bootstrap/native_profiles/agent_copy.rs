@@ -26,6 +26,10 @@ fn expiring() -> EngineError {
     failure("native_profile_credential_expiring")
 }
 
+fn renewal_failed() -> EngineError {
+    failure("native_profile_renewal_failed")
+}
+
 fn revoked() -> EngineError {
     failure("native_profile_sign_in_revoked")
 }
@@ -106,9 +110,10 @@ impl NativeProfileUse {
     /// access token lapses within the turn, the harness first renews the account in the
     /// managed home, and a keeper renews it again and replaces the copy while the turn runs.
     /// Inputs: the agent's private home, the turn's time bound and the harness executable.
-    /// Output: the copy, removed when dropped; `native_profile_credential_expiring` when the
-    /// token still lapses within a minute; `native_profile_sign_in_revoked` when Claude Code
-    /// ended the sign-in after its provider refused a refresh;
+    /// Output: the copy, removed when dropped; `native_profile_renewal_failed`, a transient
+    /// refusal, when the token still lapses within a minute after a renewal that ended
+    /// without a fresh token (no network, a timeout); `native_profile_sign_in_revoked` when
+    /// Claude Code ended the sign-in after its provider refused a refresh;
     /// `native_profile_credential_unavailable`, `native_profile_renewal_busy` or
     /// `native_profile_agent_home_unsafe`.
     pub(crate) fn hand_to_agent(
@@ -131,17 +136,18 @@ impl NativeProfileUse {
         };
         let path = self.profile_path()?;
         let mut record = account_record(harness, &self.home.file, &path)?;
-        let turn_end = since_epoch()?.checked_add(turn).ok_or_else(expiring)?;
-        let renewal = if record.expires <= turn_end {
+        let now = since_epoch()?;
+        let turn_end = now.checked_add(turn).ok_or_else(expiring)?;
+        let renewal = if record.expires <= turn_end.max(now + USABLE_MIN) {
             let renewal = self.renewal(harness, executable)?;
             record = renewal.renew(record.expires)?;
+            if record.expires <= since_epoch()? + USABLE_MIN {
+                return Err(renewal_failed());
+            }
             Some(renewal)
         } else {
             None
         };
-        if record.expires <= since_epoch()? + USABLE_MIN {
-            return Err(expiring());
-        }
         let name = harness.copy_name();
         place(&home, name, &record.copy)?;
         let mut credential = AgentCredential {

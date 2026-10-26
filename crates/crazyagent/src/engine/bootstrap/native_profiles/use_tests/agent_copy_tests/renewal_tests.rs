@@ -36,7 +36,7 @@ fn a_lapsed_codex_record_is_renewed_by_the_real_codex_in_the_managed_home_before
     let guard = execution(&mut case);
     assert_eq!(
         refused(guard.hand_to_agent(&agent, TURN, &codex())),
-        "native_profile_credential_expiring"
+        "native_profile_renewal_failed"
     );
     assert!(
         home.join("installation_id").is_file(),
