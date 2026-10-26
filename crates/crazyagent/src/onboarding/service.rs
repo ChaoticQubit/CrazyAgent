@@ -591,8 +591,17 @@ pub fn start_for_engine(
         move |pool: &CredentialRef, harnesses: &[ResearchHarness]| {
             resolver.pool_pick(pool, harnesses)
         },
-        installed_graphify,
+        move || engine_graphify(&runtime),
         OnboardingLimits::default(),
         ENGINE_TICK,
     ))
+}
+
+/// The graphify an engine's graph step runs, looked up again on each step the way
+/// setup finds it: `<engine root>/setup/bin`, where setup installs it, first, then
+/// the system folders setup searches. Input: the engine root. Output: the program,
+/// or `None` when neither has one.
+#[cfg(unix)]
+pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
+    crate::setup::platform_installer(runtime).program(crate::setup::Dependency::Graphify.program())
 }
