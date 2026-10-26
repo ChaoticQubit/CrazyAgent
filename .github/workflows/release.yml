@@ -19,6 +19,7 @@ env:
   RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
   ARTIFACT_SIGNING_CLIENT_VERSION: "1.0.146"
   ARTIFACT_SIGNING_CLIENT_SHA256: 7761e5d8f31e54b764da21d33cd8b0a2940e1b05526c7dfcb5e94b0431426f70
+  BUN_DARWIN_X64_SHA256: 62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
 
@@ -79,10 +80,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: [self-hosted, macOS, badal]
             target: aarch64-apple-darwin
             os: macos
-          - runner: macos-15-intel
+          - runner: [self-hosted, macOS, badal]
             target: x86_64-apple-darwin
             os: macos
           - runner: ubuntu-22.04
@@ -98,6 +99,15 @@ jobs:
       TARGET: ${{ matrix.target }}
       PLATFORM: ${{ matrix.os }}
     steps:
+      - name: Refuse to run under Rosetta
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+            echo "::error::this job runs as x86_64 under Rosetta; reinstall the runner with the macOS ARM64 package"
+            exit 1
+          fi
+          echo "native $(uname -m)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -116,9 +126,35 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      - id: bun-x64
+        name: Install x86_64 bun for the Intel rcli host
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          arch -x86_64 /usr/bin/true || { echo "::error::Rosetta 2 is required to build the x86_64 rcli host; install it with: softwareupdate --install-rosetta --agree-to-license"; exit 1; }
+          prefix="$RUNNER_TOOL_CACHE/bun/$BUN_VERSION/x64"
+          if [ ! -f "$prefix.complete" ]; then
+            work="$RUNNER_TEMP/bun-x64"
+            rm -rf "$work" "$prefix"
+            mkdir -p "$work" "$prefix/bin"
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-darwin-x64.zip"
+            echo "$BUN_DARWIN_X64_SHA256  $work/bun.zip" | shasum -a 256 -c -
+            unzip -q "$work/bun.zip" -d "$work"
+            install -m 0755 "$work/bun-darwin-x64/bun" "$prefix/bin/bun"
+            rm -rf "$work"
+            touch "$prefix.complete"
+          fi
+          test "$("$prefix/bin/bun" --version)" = "$BUN_VERSION"
+          test "$("$prefix/bin/bun" -e 'console.log(process.arch)')" = x64
+          echo "bun-path=$prefix/bin/bun" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
+          if ! command -v rustup >/dev/null && [ -x "$HOME/.cargo/bin/rustup" ]; then
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          command -v rustup >/dev/null || { echo "::error::rustup is not installed for the runner user; install it from https://rustup.rs and restart the runner service"; exit 1; }
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
       - name: Install Linux build packages
@@ -136,7 +172,8 @@ jobs:
             echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
             echo "VCPKGRS_TRIPLET=x64-windows-static-md"
           } >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -144,6 +181,19 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: release-${{ matrix.target }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      - name: Keep the Rust build cache under 20 GiB
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target"
+          mkdir -p "$target"
+          size_kib="$(du -sk "$target" | cut -f1)"
+          if (( size_kib > 20 * 1024 * 1024 )); then
+            echo "pruning $target: ${size_kib} KiB"
+            rm -rf "$target"
+            mkdir -p "$target"
+          fi
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: Set release version
         run: node scripts/release/version.mjs set "$VERSION"
       - name: Install desktop dependencies
@@ -151,7 +201,9 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install rcli source dependencies
         working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
+        env:
+          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun.outputs.bun-path }}
+        run: '"$BUN_PATH" install --frozen-lockfile --ignore-scripts'
       - name: Build command line binaries
         run: |
           set -euo pipefail
@@ -161,7 +213,7 @@ jobs:
           fi
       - name: Build rcli host
         env:
-          BUN_PATH: ${{ steps.bun.outputs.bun-path }}
+          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun.outputs.bun-path }}
         run: |
           set -euo pipefail
           exe=""
@@ -170,7 +222,7 @@ jobs:
           node scripts/release/rcli.mjs --sdk "$GITHUB_WORKSPACE/.local-state/tools/rcli-source" --bun "$BUN_PATH" --output "$RUNNER_TEMP/rcli/crazyagent-rcli$exe"
           echo "RCLI_HOST=$RUNNER_TEMP/rcli/crazyagent-rcli$exe" >> "$GITHUB_ENV"
       - name: Stage desktop sidecars
-        run: node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "target/$TARGET/release" --rcli "$RCLI_HOST" --tauri-dir apps/desktop/src-tauri
+        run: node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" --tauri-dir apps/desktop/src-tauri
       - name: Prepare Windows signing tools
         if: matrix.os == 'windows'
         run: |
@@ -225,9 +277,65 @@ jobs:
           if [ "$PLATFORM" = windows ]; then
             for binary in apps/desktop/src-tauri/binaries/*.exe; do node scripts/release/sign-windows.mjs "$binary"; done
           fi
-          rm -rf "target/$TARGET/release/bundle"
+          if [ "$PLATFORM" = macos ]; then
+            export TMPDIR="$RUNNER_TEMP/macos-tmp"
+            mkdir -p "$TMPDIR"
+          fi
+          if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then
+            security_line() { printf '%s\n' "$1" | security -i; }
+            quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"; }
+            case "$APPLE_CERTIFICATE_PASSWORD" in *$'\n'*|*$'\r'*) echo "::error::APPLE_CERTIFICATE_PASSWORD contains a line break"; exit 1 ;; esac
+            keychain="$(cd "$RUNNER_TEMP" && pwd -P)/crazyagent-signing.keychain-db"
+            keychain_password="$(openssl rand -hex 32)"
+            echo "::add-mask::$keychain_password"
+            (umask 077 && mkdir -p "$key_dir" && printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$key_dir/certificate.p12")
+            security_line "create-keychain -p $(quote "$keychain_password") $(quote "$keychain")"
+            security_line "unlock-keychain -p $(quote "$keychain_password") $(quote "$keychain")"
+            security set-keychain-settings -lut 21600 "$keychain"
+            security_line "import $(quote "$key_dir/certificate.p12") -k $(quote "$keychain") -P $(quote "$APPLE_CERTIFICATE_PASSWORD") -f pkcs12 -t agg -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productbuild" > /dev/null
+            rm -f "$key_dir/certificate.p12"
+            security_line "set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $(quote "$keychain_password") $(quote "$keychain")" > /dev/null
+            search=()
+            while IFS= read -r line; do
+              line="${line#"${line%%[![:space:]]*}"}"
+              line="${line#\"}"
+              line="${line%\"}"
+              if [ -n "$line" ] && [ "$line" != "$keychain" ]; then search+=("$line"); fi
+            done < <(security list-keychains -d user)
+            security list-keychains -d user -s "$keychain" ${search[@]+"${search[@]}"}
+            identities="$(security find-identity -p codesigning "$keychain")"
+            [[ "$identities" == *"$APPLE_SIGNING_IDENTITY"* ]] || { echo "::error::the job keychain holds no codesigning identity named by APPLE_SIGNING_IDENTITY"; exit 1; }
+            unset keychain_password
+          fi
+          unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD
+          rm -rf "${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle"
           cd apps/desktop
           node node_modules/@tauri-apps/cli/tauri.js build --ci --target "$TARGET" --config src-tauri/binaries/release.conf.json
+      - name: Remove the signing keychain and Apple keys
+        if: always() && matrix.os == 'macos'
+        run: |
+          set -uo pipefail
+          keychain="$(cd "$RUNNER_TEMP" && pwd -P)/crazyagent-signing.keychain-db"
+          rm -rf "$RUNNER_TEMP/apple" "$RUNNER_TEMP/macos-tmp"
+          if [ -e "$keychain" ]; then security delete-keychain "$keychain"; fi
+          rm -f "$keychain"
+          search=()
+          stale=0
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line#\"}"
+            line="${line%\"}"
+            case "$line" in
+              "" ) continue ;;
+              */crazyagent-signing.keychain-db)
+                if [ "$line" = "$keychain" ] || [ ! -e "$line" ]; then stale=1; continue; fi ;;
+            esac
+            search+=("$line")
+          done < <(security list-keychains -d user)
+          if [ "$stale" = 1 ] && [ "${#search[@]}" -gt 0 ]; then security list-keychains -d user -s "${search[@]}"; fi
+          if security list-keychains -d user | grep -qF "$keychain"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
+          if [ -e "$keychain" ] || [ -e "$RUNNER_TEMP/apple" ]; then echo "::error::signing material is still on disk"; exit 1; fi
+          echo "signing keychain and Apple keys removed"
       - name: Package release assets
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -236,7 +344,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then unset TAURI_SIGNING_PRIVATE_KEY_PASSWORD; fi
-          bundle="target/$TARGET/release/bundle"
+          bundle="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle"
           mkdir -p dist signing
           if [ "$PLATFORM" = macos ]; then
             node scripts/release/assets.mjs package --target "$TARGET" --version "$VERSION" --source "$bundle/macos/CrazyAgent.app/Contents/MacOS" --out dist --sign
