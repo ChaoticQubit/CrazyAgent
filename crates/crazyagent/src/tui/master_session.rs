@@ -2657,6 +2657,7 @@ mod turn_line_tests {
             attempt: None,
             runtime: None,
             reply: None,
+            accounts: Vec::new(),
         };
         for (reason, cause, expected) in [
             (
@@ -2765,6 +2766,7 @@ mod turn_line_tests {
             reply: None,
             accounts: Vec::new(),
             detail: None,
+            cause: None,
         };
         let mut lines = Vec::new();
         turn_lines(&running, &mut lines);

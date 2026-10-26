@@ -703,7 +703,10 @@ impl Fixture {
                 session_id: self.session.session_id.clone(),
                 turn_id: turn.clone(),
                 attempt_id: attempt.clone(),
-                observation: MasterRuntimeObservation::Failed { reason },
+                observation: MasterRuntimeObservation::Failed {
+                    reason,
+                    cause: "routing_test_failure".into(),
+                },
             })
             .await
             .unwrap();
@@ -1499,6 +1502,7 @@ async fn a_rate_limited_account_hands_the_next_turn_and_the_conversation_to_the_
             attempt_id: first.attempt.request.id.clone(),
             observation: MasterRuntimeObservation::Failed {
                 reason: MasterReason::RateLimited,
+                cause: "rate_limited".into(),
             },
         })
         .await

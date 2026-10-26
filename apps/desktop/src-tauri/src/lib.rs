@@ -1593,7 +1593,7 @@ async fn desktop_agents_using(
     account_id: String,
 ) -> Result<Vec<AgentView>, BridgeError> {
     main_window(&window)?;
-    lock(&state)?.agents_using(account_id).await
+    lock(&state).await?.agents_using(account_id).await
 }
 
 #[tauri::command]
@@ -1603,7 +1603,7 @@ async fn desktop_stop_agents_using(
     account_id: String,
 ) -> Result<Vec<AgentView>, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state)?.stop_agents_using(account_id)?;
+    let call = lock(&state).await?.stop_agents_using(account_id)?;
     call.await
 }
 
