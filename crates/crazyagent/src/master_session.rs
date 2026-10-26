@@ -1,4 +1,6 @@
-use crate::config::{EffectiveConfig, ModelConnection, ModelEndpoint};
+use crate::config::{
+    EffectiveConfig, ModelConnection, ModelEndpoint, Settings, connection_destination,
+};
 use crate::coordination::Role;
 use crate::engine::EngineError;
 use crate::engine::owner::{NativeAuthFact, NativeProfileBinding, OwnerProvenance, is_hex_id};
@@ -10,6 +12,7 @@ use std::path::PathBuf;
 
 pub(crate) const SESSIONS_MAX: usize = 64;
 pub(crate) const TURNS_MAX: usize = 1024;
+pub(crate) const REBINDS_MAX: usize = 32;
 pub(crate) const METADATA_BYTES_MAX: usize = 16384;
 pub(crate) const PAGE_BYTES_MAX: usize = 32768;
 pub(crate) const PAGE_ITEMS_MAX: u8 = 32;
@@ -175,6 +178,129 @@ pub struct MasterSessionView {
     pub version: Cursor,
     pub current_turn: Option<RequestId>,
     pub owner: OwnerProvenance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebound: Vec<MasterBinding>,
+}
+
+/// Settings an open master session was moved to after a change outside its own scope
+/// (DEC-092). Input: the config and source hash it now runs under and the owner
+/// revision of the send that moved it. The Open binding stays in the session itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterBinding {
+    pub config_id: ConfigId,
+    pub source_hash: String,
+    pub at: Cursor,
+}
+
+impl MasterSessionView {
+    /// The settings the session runs under now: its latest rebinding, else its Open.
+    /// Output: the config id and source hash a send or a turn must match.
+    pub(crate) fn binding(&self) -> (&ConfigId, &str) {
+        self.rebound
+            .last()
+            .map_or((&self.config_id, self.source_hash.as_str()), |binding| {
+                (&binding.config_id, binding.source_hash.as_str())
+            })
+    }
+
+    /// Whether a turn's attempt made under `config` belongs to this session. Input: the
+    /// attempt's config and whether its turn is still live. Output: a live attempt needs the
+    /// current binding; a settled one any binding the session has had.
+    pub(crate) fn admits_attempt(&self, config: &ConfigId, live: bool) -> bool {
+        if live {
+            return self.binding().0 == config;
+        }
+        &self.config_id == config
+            || self
+                .rebound
+                .iter()
+                .any(|binding| &binding.config_id == config)
+    }
+
+    /// Checks the stored rebindings: bounded, never on an RCLI master, well formed, made
+    /// after the Open in revision order up to the session's version, each a real change.
+    /// Output: false when the record cannot have come from `rebind`.
+    pub(crate) fn rebinds_valid(&self) -> bool {
+        let mut previous = (
+            &self.config_id,
+            self.source_hash.as_str(),
+            self.owner.revision_after.value(),
+        );
+        if self.rebound.len() > REBINDS_MAX
+            || (self.selection.backend == MasterBackend::Rcli && !self.rebound.is_empty())
+        {
+            return false;
+        }
+        for binding in &self.rebound {
+            if !is_hex_id(binding.config_id.as_str())
+                || !is_hex_id(&binding.source_hash)
+                || binding.at.value() <= previous.2
+                || binding.at.value() > self.version.value()
+                || (&binding.config_id, binding.source_hash.as_str()) == (previous.0, previous.1)
+            {
+                return false;
+            }
+            previous = (
+                &binding.config_id,
+                binding.source_hash.as_str(),
+                binding.at.value(),
+            );
+        }
+        true
+    }
+}
+
+/// The part of the settings an open master runs on (DEC-092): every setting except the
+/// pools, connections, accounts and account approvals outside the session's own pool, and,
+/// when the route pins its target, destinations that are neither the master's targets, its
+/// pool's targets nor knowledge processing destinations.
+/// Input: a config and the session's selection. Output: the settings to compare.
+pub(crate) fn master_scope(config: &EffectiveConfig, selection: &MasterSelection) -> Settings {
+    let mut settings = config.settings.clone();
+    let mut destinations: Vec<CredentialRef> = [
+        Some(&selection.target_profile_ref),
+        selection.route.preferred_target.as_ref(),
+        selection.route.required_target.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(&settings.knowledge.processing_destinations)
+    .cloned()
+    .collect();
+    if let Some(access) = settings.model_access.as_mut() {
+        access.pools.retain(|pool| pool.id == selection.pool_ref);
+        access.connections.retain(|connection| {
+            access
+                .pools
+                .iter()
+                .any(|pool| pool.members.contains(&connection.id))
+        });
+        let accounts: Vec<&CredentialRef> = access
+            .connections
+            .iter()
+            .map(|connection| &connection.account_ref)
+            .chain([&selection.route.account_ref])
+            .collect();
+        access
+            .accounts
+            .retain(|account| accounts.contains(&account));
+        settings
+            .routing
+            .approved_accounts
+            .retain(|account| accounts.contains(&account));
+        destinations.extend(access.connections.iter().filter_map(connection_destination));
+    }
+    if selection.route.required_target.is_some() {
+        for list in [
+            &mut settings.allowed_destinations,
+            &mut settings.revoked_destinations,
+            &mut settings.routing.preference_order,
+        ] {
+            list.retain(|destination| destinations.contains(destination));
+        }
+    }
+    settings
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

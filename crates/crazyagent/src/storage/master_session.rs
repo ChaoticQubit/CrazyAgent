@@ -14,11 +14,12 @@ use crate::engine::owner::{
 };
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::master_session::{
-    METADATA_BYTES_MAX, MasterBackend, MasterBootstrapAuth, MasterCursor, MasterOwnerAction,
-    MasterReason, MasterReply, MasterRuntimeView, MasterSessionPhase, MasterSessionView,
-    MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX, RcliConfiguredProfileProof,
-    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, error,
-    validate_action, validate_page, validate_selection,
+    METADATA_BYTES_MAX, MasterBackend, MasterBinding, MasterBootstrapAuth, MasterCursor,
+    MasterOwnerAction, MasterReason, MasterReply, MasterRuntimeView, MasterSessionPhase,
+    MasterSessionView, MasterTurnPage, MasterTurnPhase, MasterTurnView, PAGE_BYTES_MAX,
+    REBINDS_MAX, RcliConfiguredProfileProof, RcliProfileRegistration,
+    RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, error, master_scope, validate_action,
+    validate_page, validate_selection,
 };
 use crate::model_gateway::{
     self, Attempt, AttemptCompletion, AttemptOutcome, AttemptRequest,
@@ -419,6 +420,7 @@ fn decode_session(
         || session.owner.revision_after.value() != created
         || session.owner.revision_before.value().checked_add(1) != Some(created)
         || session.owner.event_cursor.as_ref().map(Cursor::value) != Some(created)
+        || !session.rebinds_valid()
     {
         return Err(error("master_session_record"));
     }
@@ -719,7 +721,15 @@ fn validate_runtime_record(
     }
     if let Some(attempt) = &turn.attempt {
         if model_gateway::read_attempt(tx, &attempt.request.id)?.as_ref() != Some(attempt)
-            || attempt.config_id != session.config_id
+            || !session.admits_attempt(
+                &attempt.config_id,
+                matches!(
+                    turn.phase,
+                    MasterTurnPhase::Prepared
+                        | MasterTurnPhase::Delivering
+                        | MasterTurnPhase::Running
+                ),
+            )
             || attempt.request.project_id != session.project_id
             || attempt.request.task_id != turn_task_id(&session.session_id, &turn.id)?
             || attempt.request.role != Role::ProjectLeader
@@ -970,8 +980,11 @@ fn current_scope(
         },
     )?;
     if session.owner.engine_epoch != host.engine_epoch
-        || session.config_id != config.id
-        || session.source_hash != settings::verified_source_hash(config, sources)?
+        || session.binding()
+            != (
+                &config.id,
+                settings::verified_source_hash(config, sources)?.as_str(),
+            )
     {
         return Err(error("master_source_conflict"));
     }
@@ -2814,6 +2827,51 @@ fn reject(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Moves an open master session to the current settings when nothing it runs on changed
+/// (DEC-092): the config it is bound to and the current one have the same `master_scope`.
+/// Inputs: the transaction, the session, the current config and source hash, and the
+/// revision of this send. Output: true when the session runs under the current settings.
+fn rebind(
+    tx: &Transaction<'_>,
+    session: &mut MasterSessionView,
+    config: &EffectiveConfig,
+    source_hash: &str,
+    at: Cursor,
+) -> Result<bool, EngineError> {
+    if session.binding() == (&config.id, source_hash) {
+        return Ok(true);
+    }
+    if session.selection.backend == MasterBackend::Rcli || session.rebound.len() >= REBINDS_MAX {
+        return Ok(false);
+    }
+    let body: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(CAST(body AS BLOB))<=33554432 THEN body END FROM configs WHERE id=?1",
+            [session.binding().0.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(Some(body)) = body else {
+        return Ok(false);
+    };
+    let bound: EffectiveConfig = serde_json::from_str(&body).map_err(error)?;
+    if &bound.id != session.binding().0 {
+        return Err(error("master_config_record"));
+    }
+    if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+        return Ok(false);
+    }
+    session.rebound.push(MasterBinding {
+        config_id: config.id.clone(),
+        source_hash: source_hash.into(),
+        at,
+    });
+    assert!(session.rebound.len() <= REBINDS_MAX);
+    assert_eq!(session.binding(), (&config.id, source_hash));
+    Ok(true)
+}
+
 fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2872,6 +2930,7 @@ fn execute(
             version: Cursor::new(next),
             current_turn: None,
             owner: provenance.clone(),
+            rebound: Vec::new(),
         };
         let changed = tx.execute("INSERT INTO master_sessions(id,project,created,version,phase,body) VALUES (?1,?2,?3,?3,'configured',?4)", params![session.session_id.as_str(), project_id.as_str(), signed(next)?, encode(&session)?]).map_err(error)?;
         assert_eq!(changed, 1);
@@ -2904,7 +2963,7 @@ fn execute(
     }
     match action {
         MasterOwnerAction::Submit { text, .. } => {
-            if session.config_id != config.id || session.source_hash != source_hash {
+            if !rebind(tx, &mut session, config, source_hash, Cursor::new(next))? {
                 return Ok(reject("master_source_conflict"));
             }
             if let Err(reason) = validate_selection(config, project, &session.selection) {
