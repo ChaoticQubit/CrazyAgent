@@ -535,7 +535,15 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     let again = Tmux::open(Some(tmux.clone()), &folder);
     assert_eq!(again.alive().unwrap(), std::slice::from_ref(&master));
     again.close(&[]).unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !socket.exists(),
+        "close returns only once the server is gone and its socket removed"
+    );
+    assert!(again.alive().unwrap().is_empty());
+    assert!(
+        !socket.exists(),
+        "listing after a clean quit starts no server"
+    );
     let listed = crazyagent::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")

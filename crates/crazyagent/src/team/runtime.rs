@@ -1203,7 +1203,7 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&self.framing(stored, team_tool));
+            prompt.push_str(&framing(stored, team_tool));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -1233,39 +1233,6 @@ impl TeamRuntime {
             super::direct::delivered(&self.connection, project, newest)?;
         }
         self.mark_agent(id, AgentStatus::Working, None)
-    }
-
-    fn framing(&self, stored: &StoredSetup, team_tool: bool) -> String {
-        let brief = std::fs::read_to_string(stored.state_folder().join("context/brief.md"))
-            .map(|brief| bound_text(&brief, BRIEF_BYTES_MAX))
-            .unwrap_or_default();
-        let team = stored
-            .team
-            .sub_harnesses
-            .iter()
-            .map(|slot| {
-                format!(
-                    "- {}: up to {} agents, tools {}",
-                    slot.harness,
-                    slot.agents,
-                    if slot.tools { "on" } else { "off" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let how = if team_tool {
-            format!(
-                "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
-                tool::TOOL_NAME,
-                tool::SERVER_NAME
-            )
-        } else {
-            "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
-        };
-        format!(
-            "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
-            stored.name, team, brief
-        )
     }
 
     fn mark_agent(
@@ -2289,6 +2256,71 @@ impl TeamRuntime {
             )?;
         }
         tx.commit().map_err(error)
+    }
+}
+
+/// Builds the master's opening frame: its sub-agents, how to hand out work
+/// and the project brief. Input: the setup and whether the team tool is on.
+/// Output: the frame text, with the brief from `master_brief`.
+fn framing(stored: &StoredSetup, team_tool: bool) -> String {
+    let brief = master_brief(stored);
+    let team = stored
+        .team
+        .sub_harnesses
+        .iter()
+        .map(|slot| {
+            format!(
+                "- {}: up to {} agents, tools {}",
+                slot.harness,
+                slot.agents,
+                if slot.tools { "on" } else { "off" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let how = if team_tool {
+        format!(
+            "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
+            tool::TOOL_NAME,
+            tool::SERVER_NAME
+        )
+    } else {
+        "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+    };
+    format!(
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
+        stored.name, team, brief
+    )
+}
+
+/// Reads the project brief for the master the way setup reads context: one
+/// chunk at most, never through a link and never blocking on a special file.
+/// Input: the setup. Output: the brief cut to `BRIEF_BYTES_MAX`, with a plain
+/// note when it is longer, or a plain reason when it is missing or not a file.
+fn master_brief(stored: &StoredSetup) -> String {
+    const BRIEF: &str = "context/brief.md";
+    match crate::project_setup::read_context(stored, BRIEF, 0) {
+        Ok(chunk) => {
+            let text = chunk.text.unwrap_or_default();
+            let shown = bound_text(&text, BRIEF_BYTES_MAX);
+            assert!(shown.len() <= BRIEF_BYTES_MAX);
+            if chunk.next_offset.is_none() && shown.len() == text.len() {
+                return shown;
+            }
+            format!(
+                "{shown}\n(The brief is {} bytes, longer than shown here. The rest is in {BRIEF}.)",
+                chunk.bytes
+            )
+        }
+        Err(_) => match std::fs::symlink_metadata(stored.state_folder().join(BRIEF)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                format!("(No brief yet: {BRIEF} is missing.)")
+            }
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                format!("(The brief is not shown: {BRIEF} is not a regular file.)")
+            }
+            _ => format!("(The brief is not shown: {BRIEF} could not be read.)"),
+        },
     }
 }
 

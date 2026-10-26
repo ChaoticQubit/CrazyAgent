@@ -118,6 +118,29 @@ impl Tmux {
             .is_ok_and(|metadata| metadata.file_type().is_socket())
     }
 
+    /// Waits until the private server stops listening after kill-server, then
+    /// removes the socket file tmux leaves behind, so `running` reports no server
+    /// and a later `alive` starts none. Output: Ok once it is gone, or
+    /// `terminal_not_answering` when it still listens at the deadline.
+    fn forget_server(&self) -> Result<(), HostError> {
+        let socket = self.socket();
+        let deadline = Instant::now() + REPLY_TIME;
+        while crate::spawn_gate::connect_unix_std(&socket).is_ok() {
+            if Instant::now() >= deadline {
+                return Err(failure("terminal_not_answering"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !self.running() {
+            return Ok(());
+        }
+        match std::fs::remove_file(&socket) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(failure("terminal_folder_unsafe")),
+        }
+    }
+
     fn live_control(&self) -> Result<Arc<Control>, HostError> {
         if self.executable.is_none() {
             return Err(failure("terminal_unavailable"));
@@ -891,13 +914,12 @@ impl Host for Tmux {
             return Ok(());
         }
         let control = self.control()?;
-        let (reply, _answer) = sync_channel(1);
-        let _ = control.send("kill-server", Pending::Reply(reply));
+        let _ = control.run("kill-server");
         control.close();
         if let Ok(mut slot) = self.control.lock() {
             *slot = None;
         }
-        Ok(())
+        self.forget_server()
     }
 }
 
