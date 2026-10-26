@@ -1113,3 +1113,110 @@ fn a_conversation_note_names_the_task_its_agent_how_it_ended_and_where_its_resul
     assert!(note.len() <= NOTE_BYTES_MAX, "{} bytes", note.len());
     assert!(note.ends_with("..."), "a cut result says so: {note}");
 }
+
+/// Writes a small owner-only executable at `path`, replacing any file there.
+fn engine_file(path: &Path) {
+    std::fs::write(path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
+    let fixture = Fixture::new(1);
+    let folder = fixture.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let runtime = fixture.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let master = runtime
+        .context(&project, 1, AgentRole::Master, true)
+        .unwrap();
+    let delegate: Vec<&crate::plugins::LaunchServer> = master
+        .plugins()
+        .servers
+        .iter()
+        .filter(|server| server.name == tool::SERVER_NAME)
+        .collect();
+    assert_eq!(delegate.len(), 1);
+    let crate::plugins::ServerSpec::Stdio { command, args } = &delegate[0].spec else {
+        panic!("the delegate server is a stdio server");
+    };
+    assert_eq!(Some(command.as_str()), engine.to_str());
+    assert_eq!(
+        args,
+        &[
+            tool::SERVER_COMMAND.to_owned(),
+            runtime.tool_record(1).to_str().unwrap().to_owned()
+        ]
+    );
+    let sub = runtime.context(&project, 2, AgentRole::Sub, true).unwrap();
+    assert!(
+        sub.plugins()
+            .servers
+            .iter()
+            .all(|server| server.name != tool::SERVER_NAME)
+    );
+
+    let replacement = folder.join("replacement");
+    engine_file(&replacement);
+    std::fs::rename(&replacement, &engine).unwrap();
+    let Err(swapped) = runtime.context(&project, 1, AgentRole::Master, true) else {
+        panic!("a master context was built on a replaced engine");
+    };
+    assert!(
+        swapped.contains("native_auth_host_executable_changed"),
+        "{swapped}"
+    );
+    assert!(runtime.context(&project, 2, AgentRole::Sub, true).is_ok());
+}
+
+#[test]
+fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex.clone())]),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+    };
+    let runtime = open();
+    assert!(
+        runtime
+            .prepare(&fixture.setup, 1, AgentRole::Sub, "codex", true, &account)
+            .is_ok()
+    );
+    drop(runtime);
+    let objects = fixture.base.join("project").join(".git").join("objects");
+    let engine = objects.join("crazyagent");
+    engine_file(&engine);
+    let runtime = open().with_delegation_tool(&engine).unwrap();
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        2,
+        AgentRole::Master,
+        "codex",
+        true,
+        &account,
+    ) else {
+        panic!("a master was prepared with a delegate engine it can write");
+    };
+    assert!(refused.contains("team_delegate_writable"), "{refused}");
+}
