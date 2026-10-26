@@ -97,16 +97,17 @@ impl Case {
         launch_context::for_project(&connection, project).map_err(|problem| problem.0)
     }
 
-    fn master(&self, project: &ProjectId) -> Result<String, String> {
+    fn master(&self, project: &ProjectId, tools: bool) -> Result<(bool, String), String> {
         let connection = rusqlite::Connection::open_with_flags(
             self.root.path().join("engine.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
         let tx = connection.unchecked_transaction().unwrap();
-        let text = launch_context::for_master(&tx, project).map_err(|problem| problem.0);
+        let switch = launch_context::master_tools(&tx, project).map_err(|problem| problem.0)?;
+        let text = launch_context::for_master(&tx, project, tools).map_err(|problem| problem.0)?;
         drop(tx);
-        text
+        Ok((switch, text))
     }
 
     async fn close(mut self) {
@@ -447,7 +448,11 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
         assert!(!format!("{context:?}").contains(secret));
     }
 
-    let master = case.master(&project).unwrap();
+    let (switch, master) = case.master(&project, false).unwrap();
+    assert!(
+        switch,
+        "a new project's team plan turns the master's tools on"
+    );
     assert!(master.len() <= launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
     assert!(
         master.starts_with(&instructions),
@@ -477,7 +482,13 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     ] {
         assert!(!master.contains(hidden), "{hidden}");
     }
-    let other_master = case.master(&other).unwrap();
+    let (_, tools_master) = case.master(&project, true).unwrap();
+    assert!(tools_master.len() <= launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(tools_master.starts_with(&instructions));
+    assert!(tools_master.contains("Your tools are on in this conversation"));
+    assert!(tools_master.contains("`delegate` tool of the `crazyagent-team` MCP server"));
+    assert!(!tools_master.contains("Your own tools are off"));
+    let (_, other_master) = case.master(&other, false).unwrap();
     assert!(other_master.contains("- Skill other-only: "));
     assert!(other_master.contains("- MCP server approved-tools\n"));
     assert!(!other_master.contains("meal-tips"));

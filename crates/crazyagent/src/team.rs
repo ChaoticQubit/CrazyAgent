@@ -790,6 +790,62 @@ pub fn admit(
     Ok(Ok(id))
 }
 
+/// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
+/// project's team (DEC-093) as the owner's own tasks: each passes `admit` against the team
+/// plan and pool, and the refused ones are listed in one engine note in the Team view, never
+/// dropped silently. Takes the transaction, live model access, the project, at most
+/// `DELEGATIONS_PER_REPLY_MAX` proposals and the time. Returns the admitted task ids.
+pub fn admit_conversation(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    project: &ProjectId,
+    proposed: &[Delegation],
+    now: i64,
+) -> Result<Vec<i64>, EngineError> {
+    assert!(proposed.len() <= DELEGATIONS_PER_REPLY_MAX);
+    let stored = crate::project_setup::load_setup(tx, project)?;
+    let mut admitted = Vec::new();
+    let mut refused = Vec::new();
+    for delegation in proposed {
+        let outcome = match &stored {
+            Some(stored) => admit(
+                tx,
+                access,
+                stored,
+                delegation.harness.as_deref(),
+                &delegation.prompt,
+                TaskSource::Owner,
+                None,
+                now,
+            )?,
+            None => Err("team_plan_missing"),
+        };
+        match outcome {
+            Ok(id) => admitted.push(id),
+            Err(code) => refused.push(format!(
+                "- {}: {}",
+                bound_text(&delegation.prompt, 200),
+                runtime::refusal(code)
+            )),
+        }
+    }
+    if !refused.is_empty() {
+        let _ = append_message(
+            tx,
+            project,
+            MessageAuthor::Engine,
+            &format!(
+                "The conversation master's tasks were not handed off:\n{}",
+                refused.join("\n")
+            ),
+            MessageState::Note,
+            now,
+        )?;
+    }
+    assert_eq!(admitted.len() + refused.len(), proposed.len());
+    Ok(admitted)
+}
+
 fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }

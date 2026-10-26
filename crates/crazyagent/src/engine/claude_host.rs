@@ -37,6 +37,19 @@ const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 #[cfg(unix)]
 const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
+#[cfg(unix)]
+const TOOL_STEPS_MAX: &str = "24";
+#[cfg(unix)]
+const TOOLS_SHELL: &str = "/bin/zsh";
+
+/// What a Claude Code master turn with its tools on is given beyond the team agents' tool
+/// set: the engine executable that serves its `delegate` tool, and the absolute drop file in
+/// the turn's private temporary folder where that tool records each proposed task.
+#[derive(Clone, Copy)]
+pub(in crate::engine) struct MasterTools<'a> {
+    pub(in crate::engine) engine: &'a Path,
+    pub(in crate::engine) drop: &'a Path,
+}
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -96,6 +109,75 @@ pub(in crate::engine) fn launch_command(
     model: &str,
     instructions: Option<&Path>,
 ) -> Result<Command, EngineError> {
+    command_for(
+        executable,
+        project_root,
+        profile_home,
+        model,
+        instructions,
+        None,
+    )
+}
+
+/// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
+/// agents' tool flags, a bounded number of steps, hooks and setting sources still off, and
+/// only the engine's `delegate` MCP server. Input: as `launch_command`, plus the engine
+/// executable and drop file. Output: the command, or a plain refusal for an unsafe input.
+#[cfg(unix)]
+pub(in crate::engine) fn tools_launch_command(
+    executable: &Path,
+    project_root: &Path,
+    profile_home: &Path,
+    model: &str,
+    instructions: Option<&Path>,
+    tools: MasterTools<'_>,
+) -> Result<Command, EngineError> {
+    command_for(
+        executable,
+        project_root,
+        profile_home,
+        model,
+        instructions,
+        Some(tools),
+    )
+}
+
+/// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
+/// executable serving `team-mcp` on the drop file. Input: the tools. Output: the JSON text,
+/// or `claude_host_invalid_launch` for a relative path or one with a control character.
+#[cfg(unix)]
+fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
+    let plain = |path: &Path| {
+        path.is_absolute()
+            .then(|| path.to_str())
+            .flatten()
+            .filter(|text| !text.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let (Some(engine), Some(drop)) = (plain(tools.engine), plain(tools.drop)) else {
+        return Err(failure("claude_host_invalid_launch"));
+    };
+    let config = serde_json::json!({"mcpServers": {crate::team::tool::SERVER_NAME: {
+        "type": "stdio",
+        "command": engine,
+        "args": [crate::team::tool::SERVER_COMMAND, drop],
+    }}});
+    Ok(config.to_string())
+}
+
+#[cfg(unix)]
+fn command_for(
+    executable: &Path,
+    project_root: &Path,
+    profile_home: &Path,
+    model: &str,
+    instructions: Option<&Path>,
+    tools: Option<MasterTools<'_>>,
+) -> Result<Command, EngineError> {
+    let servers = match tools {
+        Some(tools) => delegate_config(tools)?,
+        None => "{\"mcpServers\":{}}".to_owned(),
+    };
     if !executable.is_absolute()
         || !project_root.is_absolute()
         || !profile_home.is_absolute()
@@ -146,12 +228,19 @@ pub(in crate::engine) fn launch_command(
     if model != ACCOUNT_DEFAULT_MODEL {
         command.args(["--model", model]);
     }
+    match tools {
+        Some(_) => command.args([
+            "--tools",
+            "default",
+            "--permission-mode",
+            "bypassPermissions",
+        ]),
+        None => command.args(["--tools", ""]),
+    };
     command.args([
-        "--tools",
-        "",
         "--strict-mcp-config",
         "--mcp-config",
-        "{\"mcpServers\":{}}",
+        servers.as_str(),
         "--setting-sources",
         "",
         "--settings",
@@ -159,7 +248,7 @@ pub(in crate::engine) fn launch_command(
         "--disable-slash-commands",
         "--no-session-persistence",
         "--max-turns",
-        "1",
+        if tools.is_some() { TOOL_STEPS_MAX } else { "1" },
     ]);
     if let Some(file) = instructions {
         command.arg(INSTRUCTIONS_FLAG).arg(file);
@@ -171,6 +260,9 @@ pub(in crate::engine) fn launch_command(
         .env("CLAUDE_CONFIG_DIR", profile_home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
         .env("TERM", "dumb");
+    if tools.is_some() {
+        command.env("SHELL", TOOLS_SHELL);
+    }
     assert_eq!(command.get_current_dir(), Some(project_root));
     assert_eq!(command.get_program(), executable.as_os_str());
     Ok(command)
@@ -186,6 +278,21 @@ pub(in crate::engine) fn launch_command(
     _profile_home: &Path,
     _model: &str,
     _instructions: Option<&Path>,
+) -> Result<Command, EngineError> {
+    Err(failure("claude_host_unavailable"))
+}
+
+/// Refuses the tools-on Claude Code master command where the profile home's Unix owner and
+/// mode cannot be checked. Takes the executable, project, home, model, instruction file and
+/// tools, all unused. Returns `claude_host_unavailable`.
+#[cfg(not(unix))]
+pub(in crate::engine) fn tools_launch_command(
+    _executable: &Path,
+    _project_root: &Path,
+    _profile_home: &Path,
+    _model: &str,
+    _instructions: Option<&Path>,
+    _tools: MasterTools<'_>,
 ) -> Result<Command, EngineError> {
     Err(failure("claude_host_unavailable"))
 }
@@ -495,12 +602,30 @@ fn failure(code: &'static str) -> EngineError {
     EngineError(code.into())
 }
 
+/// Reads the delegate server a tools-on master command names, so the command can be built
+/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable
+/// and drop file, or none when the text is not one engine server.
+#[cfg(unix)]
+fn named_tools(config: &str) -> Option<(PathBuf, PathBuf)> {
+    let config: serde_json::Value = serde_json::from_str(config).ok()?;
+    let server = config
+        .get("mcpServers")?
+        .get(crate::team::tool::SERVER_NAME)?;
+    let engine = server.get("command")?.as_str()?;
+    let drop = server.get("args")?.as_array()?.get(1)?.as_str()?;
+    Some((PathBuf::from(engine), PathBuf::from(drop)))
+}
+
+/// Confirms a master command is exactly one the engine builds: tools off, or tools on with
+/// only the engine's delegate server, for this directory, home, model and instruction file.
+/// Input: the command, the profile lease and the turn home. Output: whether the tools are
+/// on, or the fault that refuses the command.
 #[cfg(unix)]
 fn validate_command(
     command: &Command,
     profile: &NativeProfileUse,
     home: &Path,
-) -> Result<(), Fault> {
+) -> Result<bool, Fault> {
     let directory = command
         .get_current_dir()
         .ok_or(Fault::Host("claude_host_project_unavailable"))?;
@@ -522,12 +647,28 @@ fn validate_command(
         )),
         None => None,
     };
-    let expected = launch_command(
+    let tools = args.contains(&OsStr::new("--permission-mode"));
+    let named = if tools {
+        let named = args
+            .iter()
+            .position(|arg| *arg == OsStr::new("--mcp-config"))
+            .and_then(|index| args.get(index + 1))
+            .and_then(|config| config.to_str())
+            .and_then(named_tools)
+            .ok_or(Fault::Host("claude_host_invalid_command"))?;
+        Some(named)
+    } else {
+        None
+    };
+    let expected = command_for(
         Path::new(command.get_program()),
         directory,
         home,
         model,
         instructions,
+        named
+            .as_ref()
+            .map(|(engine, drop)| MasterTools { engine, drop }),
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
     if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {
@@ -538,7 +679,8 @@ fn validate_command(
         .map_err(|_| Fault::Host("claude_host_profile_changed"))?;
     assert!(directory.is_absolute());
     assert_eq!(args.len(), expected.get_args().count());
-    Ok(())
+    assert_eq!(tools, named.is_some());
+    Ok(tools)
 }
 
 #[cfg(all(test, unix))]

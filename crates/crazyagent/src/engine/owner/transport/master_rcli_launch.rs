@@ -530,6 +530,7 @@ fallback_allowed = false
         PreparedMasterTurn {
             text: prepared.text.clone(),
             instructions: prepared.instructions.clone(),
+            tools: prepared.tools,
             session: prepared.session.clone(),
             attempt: prepared.attempt.clone(),
             profile: PreparedNativeProfile::from_binding(prepared.profile.binding().clone()),
