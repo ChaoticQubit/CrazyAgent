@@ -11,7 +11,7 @@ use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::{Arrival, PoolChange, Request};
 use crate::tui::text::{join, list_row, row, status, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, checkbox};
@@ -156,6 +156,7 @@ enum Phase {
     Running(Load<Box<OnboardingView>>),
     Review(Box<Review>),
     Confirming(Box<Review>),
+    Assigning(String),
 }
 
 /// The onboarding page for a found, cloned or added folder: picks the pool,
@@ -358,15 +359,19 @@ impl OnboardingPage {
                 match result {
                     Ok(SetupView::Changed(OwnerResult::Applied)) => {
                         let name = review.name.value().trim().to_owned();
-                        ctx.say(Message::success("Set up.", &format!("{name} is ready.")));
-                        Flow::Replace(open(
-                            &Place::Project {
-                                id: project,
-                                name,
-                                tab: ProjectTab::Overview,
-                            },
-                            ctx,
-                        ))
+                        match review.onboarding.draft.pool.clone() {
+                            Some(pool) => {
+                                ctx.request(Request::EditPool {
+                                    change: PoolChange::Assign { pool, project },
+                                });
+                                self.phase = Phase::Assigning(name);
+                                Flow::Handled
+                            }
+                            None => {
+                                ctx.say(Message::success("Set up.", &format!("{name} is ready.")));
+                                Self::opened(project, name, ctx)
+                            }
+                        }
                     }
                     other => {
                         let code = match other {
@@ -386,6 +391,41 @@ impl OnboardingPage {
             }
             _ => Flow::Handled,
         }
+    }
+
+    /// Finishes an assignment of the setup's pool to the project's master the way
+    /// New project does: a refused assignment is said plainly and the project opens
+    /// either way. Takes the pool edit reply and the context. Returns the project page.
+    fn assigned(&mut self, result: &Result<(), String>, ctx: &mut Ctx) -> Flow {
+        let Phase::Assigning(name) = std::mem::replace(&mut self.phase, Phase::Starting) else {
+            unreachable!("only an assigning onboarding takes a pool edit reply");
+        };
+        let project = self
+            .project
+            .clone()
+            .expect("an assigning onboarding names its project");
+        match result {
+            Ok(()) => {
+                ctx.request(Request::PoolProjects);
+                ctx.say(Message::success("Set up.", &format!("{name} is ready.")));
+            }
+            Err(_) => ctx.say(Message::error(
+                &format!("{name} is set up, but its pool is not assigned."),
+                "Open the project's Settings tab to assign it.",
+            )),
+        }
+        Self::opened(project, name, ctx)
+    }
+
+    fn opened(project: ProjectId, name: String, ctx: &mut Ctx) -> Flow {
+        Flow::Replace(open(
+            &Place::Project {
+                id: project,
+                name,
+                tab: ProjectTab::Overview,
+            },
+            ctx,
+        ))
     }
 
     fn step_line(label: &str, step: &Step, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -739,6 +779,11 @@ impl Screen for OnboardingPage {
             let (query, result) = (setup.query.clone(), setup.result.clone());
             return self.setup(&query, &result, ctx);
         }
+        if let Arrival::PoolEdited(result) = arrival
+            && matches!(self.phase, Phase::Assigning(_))
+        {
+            return self.assigned(result, ctx);
+        }
         Flow::Handled
     }
 
@@ -761,6 +806,9 @@ impl Screen for OnboardingPage {
         match &self.phase {
             Phase::Pool { selected } => lines.extend(self.pool_lines(*selected, limit, ctx)),
             Phase::Starting => lines.push(ctx.loading("Starting the setup")),
+            Phase::Assigning(_) => {
+                lines.push(ctx.loading("Giving the pool to the project's master"))
+            }
             Phase::Running(load) => match load {
                 Load::Ready(onboarding) => {
                     lines.extend(Self::step_line(
@@ -812,7 +860,7 @@ impl Screen for OnboardingPage {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         match &self.phase {
-            Phase::Starting | Phase::Confirming(_) => true,
+            Phase::Starting | Phase::Confirming(_) | Phase::Assigning(_) => true,
             Phase::Running(load) => !matches!(load, Load::Failed(_) | Load::NotReady),
             _ => false,
         }
