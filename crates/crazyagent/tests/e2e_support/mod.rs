@@ -144,6 +144,7 @@ pub fn scratch(prefix: &str) -> tempfile::TempDir {
 /// stderr is kept for failure messages; dropping it kills the process.
 pub struct Engine {
     pub root: tempfile::TempDir,
+    pub home: Option<PathBuf>,
     child: Option<Child>,
     stderr: Option<std::thread::JoinHandle<String>>,
 }
@@ -158,6 +159,7 @@ impl Engine {
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         Self {
             root,
+            home: None,
             child: None,
             stderr: None,
         }
@@ -186,19 +188,21 @@ impl Engine {
     pub fn launch(&mut self) {
         assert!(self.child.is_none());
         let root = self.root.path();
-        let mut child = crazyagent::spawn_gate::spawn(
-            Command::new(ENGINE)
-                .arg("engine")
-                .arg(root)
-                .arg(root.join("global.toml"))
-                .arg(root.join("project.toml"))
-                .arg("engine.sock")
-                .arg("--writable-settings")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap();
+        let mut command = Command::new(ENGINE);
+        command
+            .arg("engine")
+            .arg(root)
+            .arg(root.join("global.toml"))
+            .arg(root.join("project.toml"))
+            .arg("engine.sock")
+            .arg("--writable-settings")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(home) = &self.home {
+            command.env("HOME", home);
+        }
+        let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
         std::thread::spawn(move || {

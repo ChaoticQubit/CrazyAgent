@@ -8,6 +8,9 @@ mod linux;
 #[cfg(target_os = "macos")]
 #[path = "credential_store/macos.rs"]
 mod macos;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "credential_store/test_keychain.rs"]
+pub(crate) mod test_keychain;
 #[cfg(target_os = "windows")]
 #[path = "credential_store/windows.rs"]
 mod windows;

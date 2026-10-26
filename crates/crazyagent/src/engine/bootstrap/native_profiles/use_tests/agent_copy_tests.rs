@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "macos")]
+use crate::credentials::test_keychain::TestKeychain;
 use base64::Engine;
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -221,37 +223,6 @@ fn links_at_either_end_are_refused_or_replaced_and_never_followed() {
 }
 
 #[cfg(target_os = "macos")]
-fn security(home: &Path, args: &[&str], input: Option<&str>) -> String {
-    let mut child = crate::spawn_gate::spawn(
-        Command::new("/usr/bin/security")
-            .args(args)
-            .env_clear()
-            .env("HOME", home)
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-    .unwrap();
-    if let Some(input) = input {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-    }
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "security {args:?} failed");
-    String::from_utf8(output.stdout).unwrap()
-}
-
-#[cfg(target_os = "macos")]
 fn claude_record(expires_ms: u64) -> Value {
     json!({
         "claudeAiOauth": {
@@ -266,39 +237,19 @@ fn claude_record(expires_ms: u64) -> Value {
 }
 
 #[cfg(target_os = "macos")]
-fn claude_keychain(home: &Path, record: &Value) -> (PathBuf, String) {
-    let folder = home.join("Library/Keychains");
-    std::fs::create_dir_all(&folder).unwrap();
-    for private in [home.join("Library"), folder.clone()] {
-        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let keychain = folder.join("login.keychain-db");
-    let path = keychain.to_str().unwrap();
-    security(home, &["create-keychain", "-p", "", path], None);
+fn claude_keychain(home: &Path, record: &Value) -> (TestKeychain, String) {
+    let keychain = TestKeychain::create(home);
     let service = format!(
         "Claude Code-credentials-{}",
         &digest(home.to_str().unwrap().as_bytes())[..8]
     );
-    let hex: String = record
-        .to_string()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    security(
-        home,
-        &["-i"],
-        Some(&format!(
-            "add-generic-password -a unit -s \"{service}\" -X {hex} \"{path}\"\n"
-        )),
-    );
+    keychain.add("unit", &service, &record.to_string());
     (keychain, service)
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_token() {
-    let owner = PathBuf::from(std::env::var_os("HOME").unwrap());
-    let owner_list = security(&owner, &["list-keychains", "-d", "user"], None);
     let mut case = UseCase::with_harness("claude-code");
     let home = case.home();
     let expires = (now() + 8 * 3600) * 1000;
@@ -325,19 +276,8 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
             }
         })
     );
-    let kept = security(
-        &home,
-        &[
-            "find-generic-password",
-            "-s",
-            &service,
-            "-w",
-            keychain.to_str().unwrap(),
-        ],
-        None,
-    );
     assert_eq!(
-        serde_json::from_str::<Value>(kept.trim_end()).unwrap(),
+        serde_json::from_str::<Value>(&keychain.find(&service)).unwrap(),
         claude_record(expires)
     );
     drop(copy);
@@ -346,7 +286,7 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
 
     let soon = (now() + 30) * 1000;
     let mut late = UseCase::with_harness("claude-code");
-    claude_keychain(&late.home(), &claude_record(soon));
+    let (_late_keychain, _) = claude_keychain(&late.home(), &claude_record(soon));
     let agent = agent_home(&late);
     let guard = execution(&mut late);
     assert_eq!(
@@ -354,10 +294,6 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         "native_profile_credential_expiring"
     );
     assert!(entries(&agent).is_empty());
-    assert_eq!(
-        security(&owner, &["list-keychains", "-d", "user"], None),
-        owner_list
-    );
 }
 
 #[cfg(target_os = "macos")]
@@ -369,8 +305,13 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
     let (keychain, service) = claude_keychain(&home, &claude_record(expires));
     let mut record = claude_record(expires);
     record["mcpOAuth"]["unit-server"]["accessToken"] = json!("m".repeat(40_000));
-    security(
-        &home,
+    let hex: String = record
+        .to_string()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = keychain.path().to_str().unwrap().to_owned();
+    keychain.security(
         &[
             "add-generic-password",
             "-U",
@@ -378,23 +319,13 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
             "unit",
             "-s",
             &service,
-            "-w",
-            &record.to_string(),
-            keychain.to_str().unwrap(),
+            "-X",
+            &hex,
+            &path,
         ],
         None,
     );
-    let stored = security(
-        &home,
-        &[
-            "find-generic-password",
-            "-s",
-            &service,
-            "-w",
-            keychain.to_str().unwrap(),
-        ],
-        None,
-    );
+    let stored = keychain.find(&service);
     assert!(stored.len() > 40_000);
     let agent = agent_home(&case);
     let guard = execution(&mut case);

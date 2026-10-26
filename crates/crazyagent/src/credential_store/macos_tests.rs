@@ -1,21 +1,29 @@
 use super::*;
+use crate::credentials::test_keychain::TestKeychain;
 use crate::credentials::{SecretString, Store, parts, reference};
 use std::process::{Command, Stdio};
 
 struct Scratch {
     store: Keychain,
     namespace: String,
+    keychain: TestKeychain,
+}
+
+fn suffix() -> String {
+    let mut bytes = [0_u8; 6];
+    getrandom::fill(&mut bytes).unwrap();
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl Scratch {
     fn new() -> Self {
-        let mut bytes = [0_u8; 6];
-        getrandom::fill(&mut bytes).unwrap();
-        let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let namespace = format!("dev.crazyagent.test-{suffix}");
+        let namespace = format!("dev.crazyagent.test-{}", suffix());
+        let mut keychain = TestKeychain::temporary();
+        keychain.serve(&namespace);
         Self {
             store: Keychain::new(&namespace).unwrap(),
             namespace,
+            keychain,
         }
     }
 
@@ -47,6 +55,42 @@ fn token() -> String {
     getrandom::fill(&mut bytes).unwrap();
     let tail: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     format!("gho_test{tail}")
+}
+
+#[test]
+fn a_lib_test_store_lives_in_its_own_temporary_keychain() {
+    let scratch = Scratch::new();
+    assert_eq!(scratch.store.keychain, scratch.keychain.path());
+    let value = token();
+    let service = scratch.service("github");
+    scratch
+        .store
+        .put(&service, "token", &secret(&value))
+        .unwrap();
+    let path = scratch.keychain.path().to_str().unwrap().to_owned();
+    let found = scratch.keychain.security(
+        &[
+            "find-generic-password",
+            "-s",
+            &service,
+            "-a",
+            "token",
+            "-w",
+            &path,
+        ],
+        None,
+    );
+    assert_eq!(found.trim_end(), value);
+}
+
+#[test]
+fn a_lib_test_store_with_no_temporary_keychain_is_refused() {
+    let namespace = format!("dev.crazyagent.test-unserved-{}", suffix());
+    let refused = std::panic::catch_unwind(|| Keychain::new(&namespace).map(drop));
+    assert!(
+        refused.is_err(),
+        "{namespace} opened a store with no temporary keychain"
+    );
 }
 
 #[test]
