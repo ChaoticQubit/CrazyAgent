@@ -461,6 +461,7 @@ pub(in crate::tui) enum ProjectReply {
     Assign(crate::protocol::CredentialRef),
     Send(String),
     StopTurn,
+    EndConversation,
     Retry,
     Team,
 }
@@ -484,6 +485,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub pool_choices: Vec<PoolChoice>,
     pub pool_picker: Option<usize>,
     pub transcript: Option<Transcript>,
+    pub master_open: bool,
     pub input: TextInput,
     pub typing: bool,
     pub transcript_scroll: usize,
@@ -535,6 +537,7 @@ impl ProjectScreen {
             pool_choices: Vec::new(),
             pool_picker: None,
             transcript: None,
+            master_open: false,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
             transcript_scroll: 0,
@@ -1165,6 +1168,7 @@ impl ProjectScreen {
                 ProjectReply::Retry
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('e') if !control && self.master_open => ProjectReply::EndConversation,
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             KeyCode::Enter => {

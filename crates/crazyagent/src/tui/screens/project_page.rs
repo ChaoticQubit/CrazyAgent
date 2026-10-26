@@ -229,6 +229,13 @@ impl ProjectPage {
             ctx.request(Request::Master(Box::new(job)));
         }
         self.screen.transcript = self.transcript();
+        self.screen.master_open = self
+            .master
+            .transcript()
+            .and_then(|(session, _, _)| session)
+            .is_some_and(|session| {
+                session.phase == crate::master_session::MasterSessionPhase::Configured
+            });
     }
 
     fn transcript(&self) -> Option<Transcript> {
@@ -461,6 +468,19 @@ impl ProjectPage {
         }
     }
 
+    /// Ends the project's open master conversation, so the project can be
+    /// removed; the next message opens a new one.
+    /// Takes the context for the plain outcome.
+    fn end_master(&mut self, ctx: &mut Ctx) {
+        match self.master.control(true) {
+            Ok(()) => ctx.say(Message::success(
+                "Ending the master conversation.",
+                "Your next message starts a new one.",
+            )),
+            Err(_) => ctx.say(Message::warning("The master conversation is not open.", "")),
+        }
+    }
+
     fn retry_master(&mut self, ctx: &mut Ctx) {
         let last = self
             .master
@@ -621,6 +641,10 @@ impl ProjectPage {
             }
             ProjectReply::StopTurn => {
                 self.stop_master(ctx);
+                Flow::Handled
+            }
+            ProjectReply::EndConversation => {
+                self.end_master(ctx);
                 Flow::Handled
             }
             ProjectReply::Retry => {
