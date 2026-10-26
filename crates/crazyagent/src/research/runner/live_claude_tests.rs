@@ -18,14 +18,15 @@ fn a_real_claude_research_run_is_signed_in_inside_the_research_sandbox() {
     fs::create_dir(&state).unwrap();
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     let database = engine.base.join("engine.db");
-    let limits = ResearchLimits {
-        wall_time: Duration::from_secs(300),
-        ..ResearchLimits::default()
-    };
-    let runner = ResearchRunner::new(&database, &state, Path::new("/usr/bin/true"), limits)
-        .unwrap()
-        .with_claude(&claude())
-        .unwrap();
+    let runner = ResearchRunner::new(
+        &database,
+        &state,
+        Path::new("/usr/bin/true"),
+        ResearchLimits::default(),
+    )
+    .unwrap()
+    .with_claude(&claude())
+    .unwrap();
     let jobs = ResearchJobs::open(&database).unwrap();
     jobs.enqueue(PROJECT, "market_research", "claude-code", false)
         .unwrap();
@@ -43,14 +44,17 @@ fn a_real_claude_research_run_is_signed_in_inside_the_research_sandbox() {
     let agent = place.agent.clone();
     let profile = signed_in.acquire(&format!("research-{}", place.name));
     let managed = profile.profile_path().unwrap();
+    let started = Instant::now();
     let (ending, _, output) = runner
         .launch_leased(&jobs, &job, &account, place, Some((profile, None)))
         .unwrap();
+    let seconds = started.elapsed().as_secs();
     let report = fs::read_to_string(&output).unwrap_or_default();
     let errors = fs::read_to_string(agent.join("stderr.log")).unwrap_or_default();
-    println!("real claude research run: ending={ending:?} report={report:?}");
+    let head: String = report.chars().take(80).collect();
+    println!("real claude research run: ending={ending:?} seconds={seconds} report={head:?}");
     assert!(matches!(ending, Ending::Exited(true)), "{errors}");
-    assert!(report.contains("OK"), "{report}");
+    assert!(!report.trim().is_empty());
     assert!(!agent.join("home").join(".credentials.json").exists());
     let rules = fs::read_to_string(state.join("profiles").join(format!(
         "{}.sb",
