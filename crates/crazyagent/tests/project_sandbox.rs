@@ -678,3 +678,76 @@ fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
     fs::write(&link, &original).unwrap();
     assert!(confine(&one).is_ok());
 }
+
+#[test]
+fn an_agent_cannot_plant_the_git_redirect_files_the_engine_rejects() {
+    let plants: [(&str, &str, &str); 12] = [
+        (
+            "commondir",
+            "printf '/x\\n' > .git/commondir",
+            ".git/commondir",
+        ),
+        (
+            "config.worktree",
+            "printf '[core]\\n' > .git/config.worktree",
+            ".git/config.worktree",
+        ),
+        (
+            "alternates",
+            "printf '/x\\n' > .git/objects/info/alternates",
+            ".git/objects/info/alternates",
+        ),
+        (
+            "http-alternates",
+            "printf 'http://x\\n' > .git/objects/info/http-alternates",
+            ".git/objects/info/http-alternates",
+        ),
+        (
+            "grafts",
+            "mkdir -p .git/info; printf 'x\\n' > .git/info/grafts",
+            ".git/info/grafts",
+        ),
+        ("shallow", "printf 'x\\n' > .git/shallow", ".git/shallow"),
+        (
+            "alternates through a staged objects/info",
+            "mkdir s; printf '/x\\n' > s/alternates; mv .git/objects/info .git/objects/i0; mv s .git/objects/info",
+            ".git/objects/info/alternates",
+        ),
+        (
+            "alternates through a staged objects store",
+            "cp -R .git/objects o; mkdir -p o/info; printf '/x\\n' > o/info/alternates; mv .git/objects .git/o0; mv o .git/objects",
+            ".git/objects/info/alternates",
+        ),
+        (
+            "grafts through a staged info folder",
+            "mkdir s; printf 'x\\n' > s/grafts; mv .git/info .git/i0; mv s .git/info",
+            ".git/info/grafts",
+        ),
+        (
+            "grafts through a staged info folder with none before",
+            "rm -rf .git/info; mkdir s; printf 'x\\n' > s/grafts; mv s .git/info",
+            ".git/info/grafts",
+        ),
+        (
+            "commondir through a staged .git",
+            "cp -R .git g; printf '/x\\n' > g/commondir; mv .git .g0; mv g .git",
+            ".git/commondir",
+        ),
+        (
+            "brief through a staged .crazyagent",
+            "cp -R .crazyagent c; echo agent > c/context/brief.md; mv .crazyagent .c0; mv c .crazyagent",
+            ".crazyagent/context/brief.md",
+        ),
+    ];
+    let mut landed = Vec::new();
+    for (name, script, target) in plants {
+        let (case, sandbox, profile, _) = git_case();
+        let target = case.project.join(target);
+        let before = fs::read(&target).ok();
+        let _ = run(&sandbox, &profile, script);
+        if fs::read(&target).ok() != before {
+            landed.push(name);
+        }
+    }
+    assert_eq!(landed, Vec::<&str>::new());
+}
