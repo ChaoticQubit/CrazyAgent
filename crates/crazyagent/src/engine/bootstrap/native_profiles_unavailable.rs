@@ -29,6 +29,7 @@ pub(crate) enum NativeProfileUsePurpose {
         reason = "Execution requires the separately qualified native host"
     )]
     Execution,
+    Check,
 }
 
 /// Native profile custody, which cannot exist without Unix directory-relative file custody.

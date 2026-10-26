@@ -226,6 +226,28 @@ impl Restart {
         tx.commit().unwrap();
     }
 
+    /// Holds the account the way a running agent or research run does, with a shared
+    /// execution lease on its profile, until the lease is dropped. Inputs: the run the
+    /// account was signed in on, the sign-in and a launch name. Output: the held lease.
+    fn agent(
+        &self,
+        run: &Run,
+        signed: &NativeAuthFact,
+        name: &str,
+    ) -> crate::engine::bootstrap::NativeProfileUse {
+        let path = self.root.path().join("engine.db");
+        crate::engine::NativeProfileCustody::capture(&path, &std::fs::metadata(&path).unwrap())
+            .unwrap()
+            .acquire_use(
+                &run.handle.identity(),
+                &signed.binding,
+                &request(name),
+                1,
+                crate::engine::bootstrap::NativeProfileUsePurpose::Execution,
+            )
+            .unwrap()
+    }
+
     fn held(&self) -> (bool, crate::model_gateway::Health) {
         let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
         let paused = database
@@ -305,13 +327,27 @@ impl Run {
     }
 
     async fn sign_in_to(&self, restart: &Restart, id: CredentialRef, name: &str) -> NativeAuthFact {
+        self.authenticate(restart, id, name, NativeAuthMethod::ClaudeOfficial)
+            .await
+    }
+
+    /// Runs one real sign-in operation on the account through the owner and follows it
+    /// until it finishes authenticated. Inputs: the case, the account, the request name
+    /// and the method, a sign-in or a check of the existing one. Output: the final fact.
+    async fn authenticate(
+        &self,
+        restart: &Restart,
+        id: CredentialRef,
+        name: &str,
+        method: NativeAuthMethod,
+    ) -> NativeAuthFact {
         let scope = self.scope_of(restart.config().id, id).await;
         let client = self.client();
         let started = client
             .start_native_auth(NativeAuthStart {
                 request_id: request(name),
                 scope: scope.clone(),
-                method: NativeAuthMethod::ClaudeOfficial,
+                method,
             })
             .await
             .unwrap();
@@ -584,4 +620,58 @@ async fn an_account_still_in_use_when_the_engine_starts_is_re_proved_once_it_is_
     })
     .await
     .expect("the in-use restart case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_an_agent_keeps_using_across_an_engine_start_is_re_proved_while_it_runs() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        let signed = first.sign_in(&restart).await;
+        let agent = restart.agent(&first, &signed, "restart-running-agent");
+        first.stop().await;
+        let second = restart.start().await;
+        assert_eq!(
+            settled(&restart, &second, AccountStatus::SignedIn).await,
+            Ok(())
+        );
+        assert_eq!(
+            restart.latest_phase(),
+            NativeAuthPhase::AuthenticatedObserved
+        );
+        drop(agent);
+        second.stop().await;
+    })
+    .await
+    .expect("the running-agent restart case exceeded 60 seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_check_of_an_account_an_agent_is_using_runs_beside_the_agent() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let signed = run.sign_in(&restart).await;
+        let agent = restart.agent(&run, &signed, "check-running-agent");
+        let checked = run
+            .authenticate(
+                &restart,
+                connection(),
+                "check-beside-agent",
+                NativeAuthMethod::ClaudeExisting,
+            )
+            .await;
+        assert_eq!(
+            checked.action,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::ClaudeExisting
+            }
+        );
+        assert_eq!(restart.launch(), Ok(()));
+        assert_eq!(run.status().await, AccountStatus::SignedIn);
+        drop(agent);
+        run.stop().await;
+    })
+    .await
+    .expect("the check-beside-agent case exceeded 60 seconds");
 }

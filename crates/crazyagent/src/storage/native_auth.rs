@@ -250,10 +250,7 @@ pub(super) fn dispatch_host(dispatch: &NativeAuthDispatch) -> HostStamp {
 
 #[cfg(unix)]
 fn custody_purpose(fact: &NativeAuthFact) -> NativeProfileUsePurpose {
-    match fact.action {
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-    }
+    fact.action.profile_purpose()
 }
 
 fn validate_dispatch(
@@ -603,11 +600,10 @@ pub(crate) fn begin_native_auth(
     ensure_capacity(&tx, true)?;
     ensure_idle(&tx, &key)?;
     let generation = next_generation(&tx, &key)?;
-    let purpose = if matches!(command, Command::Logout(_)) {
-        NativeProfileUsePurpose::Logout
-    } else {
-        NativeProfileUsePurpose::Authentication
-    };
+    let purpose = command
+        .action()
+        .ok_or_else(|| error("native_auth_operation_missing"))?
+        .profile_purpose();
     let guard = custody
         .as_mut()
         .map_err(|error| error.clone())?
@@ -764,10 +760,7 @@ pub(crate) fn finish_native_auth_without_effect(
     ) {
         return Err(error("native_auth_recovery_required"));
     }
-    let purpose = match fact.action {
-        NativeAuthAction::Logout => NativeProfileUsePurpose::Logout,
-        NativeAuthAction::SignIn { .. } => NativeProfileUsePurpose::Authentication,
-    };
+    let purpose = fact.action.profile_purpose();
     let guard = custody
         .as_mut()
         .map_err(|error| error.clone())?

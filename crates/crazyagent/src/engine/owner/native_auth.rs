@@ -70,6 +70,23 @@ pub enum NativeAuthAction {
     Logout,
 }
 
+impl NativeAuthAction {
+    /// The lock this action takes on the account's profile: a shared check for a check of
+    /// an existing sign-in, which only reads or renews the account in place and so runs
+    /// beside its agents, and exclusive for a sign-in or logout, which changes it.
+    /// Input: the action. Output: its profile purpose.
+    pub(crate) fn profile_purpose(&self) -> crate::engine::bootstrap::NativeProfileUsePurpose {
+        use crate::engine::bootstrap::NativeProfileUsePurpose;
+        match self {
+            Self::SignIn {
+                method: NativeAuthMethod::ClaudeExisting | NativeAuthMethod::CodexExisting,
+            } => NativeProfileUsePurpose::Check,
+            Self::SignIn { .. } => NativeProfileUsePurpose::Authentication,
+            Self::Logout => NativeProfileUsePurpose::Logout,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeAuthPhase {

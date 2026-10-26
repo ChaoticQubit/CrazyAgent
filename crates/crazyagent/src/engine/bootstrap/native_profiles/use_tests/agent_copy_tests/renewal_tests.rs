@@ -123,6 +123,42 @@ fn the_agents_copy_is_replaced_during_the_turn_once_the_account_is_renewed() {
 }
 
 #[test]
+fn an_account_check_runs_beside_agents_but_never_beside_a_renewal() {
+    let mut case = UseCase::new();
+    let agent = execution(&mut case);
+    let check = |case: &UseCase, name: &str| {
+        case.recapture().acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id(name),
+            1,
+            NativeProfileUsePurpose::Check,
+        )
+    };
+    let renewal = agent.hold_renewal(Duration::ZERO).unwrap();
+    assert_eq!(
+        check(&case, "check-during-renewal").err().unwrap().0,
+        "native_profile_in_use"
+    );
+    drop(renewal);
+    let running = check(&case, "check-beside-agent").unwrap();
+    assert_eq!(
+        agent
+            .hold_renewal(Duration::from_millis(200))
+            .err()
+            .unwrap()
+            .0,
+        "native_profile_renewal_busy"
+    );
+    let second = execution(&mut case);
+    drop(running);
+    let renewed = second.hold_renewal(Duration::ZERO).unwrap();
+    drop(renewed);
+    drop(second);
+    drop(agent);
+}
+
+#[test]
 fn one_renewal_runs_at_a_time_per_account() {
     let mut case = UseCase::new();
     let first = execution(&mut case);
