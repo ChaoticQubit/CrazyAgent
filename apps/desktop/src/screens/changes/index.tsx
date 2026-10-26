@@ -5,7 +5,7 @@ import type { ChangeDiff, ChangeSet } from "../../api-changes";
 import { ConfirmDialog } from "../../ui";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { actions, agentName, checkedNote, diffText, fileLine, fileMarks, outcomeNote, restoreNote, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptNote, actions, agentName, checkedNote, conflictNote, diffText, fileLine, fileMarks, outcomeNote, restoreNote, sizeLine, stateBadge, updatingNote } from "./model";
 import "./changes.css";
 
 const LIST_POLL_MS = 5000;
@@ -35,11 +35,12 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
   onUpdate: (set: ChangeSet) => void;
   onRestore: (set: ChangeSet) => void;
 }) {
-  const [page, setPage] = useState(0);
+  const [pages, setPages] = useState<number[]>([0]);
+  const page = pages[pages.length - 1];
   const [diff, setDiff] = useState<Result<ChangeDiff>>();
   const allowed = actions(set, now);
-  const notes = [checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
-  useEffect(() => { setPage(0); }, [set.id]);
+  const notes = [conflictNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
+  useEffect(() => { setPages([0]); }, [set.id]);
   useEffect(() => {
     let current = true;
     setDiff(undefined);
@@ -70,10 +71,10 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
       </li>)}</ul>
       <DiffText text={value.text} />
       {value.truncated && <p className="pj-note warn">Part of this diff is not shown: it is longer than CrazyAgent shows at once.</p>}
-      {value.pages > 1 && <div className="pj-row">
-        <button type="button" className="btn" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous page</button>
-        <span className="pj-small pj-secondary">Page {page + 1} of {value.pages}</span>
-        <button type="button" className="btn" disabled={page + 1 >= value.pages} onClick={() => setPage(page + 1)}>Next page</button>
+      {(pages.length > 1 || value.next !== null) && <div className="pj-row">
+        <button type="button" className="btn" disabled={pages.length === 1} onClick={() => setPages(pages.slice(0, -1))}>Previous page</button>
+        <span className="pj-small pj-secondary">Page {pages.length}</span>
+        <button type="button" className="btn" disabled={value.next === null} onClick={() => { if (value.next !== null) setPages([...pages, value.next]); }}>Next page</button>
       </div>}
     </>}
   </section>;
@@ -98,13 +99,14 @@ export function ChangesTab({ data }: { data: ProjectData }) {
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
-  async function settle<T>(result: Result<T>, done: (value: T) => string) {
+  async function settle<T>(result: Result<T>, done: (value: T) => string, worked: (value: T) => boolean = () => true) {
     setBusy(false);
     setAsking(null);
-    if (result.kind === "ok") {
+    if (result.kind === "ok" && worked(result.value)) {
       setNote("");
       data.notify(done(result.value));
-    } else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
+    } else if (result.kind === "ok") setNote(done(result.value));
+    else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
     setRound((value) => value + 1);
   }
 
@@ -112,7 +114,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     if (!asking) return;
     const { kind, set } = asking;
     setBusy(true);
-    if (kind === "accept") await settle(await acceptChange(set.id, set.head), (value) => `Accepted as ${value.commit.slice(0, 7)} on ${value.branch}.`);
+    if (kind === "accept") await settle(await acceptChange(set.id, set.head), acceptNote, (outcome) => outcome.kind === "landed");
     else await settle(await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
   }
 

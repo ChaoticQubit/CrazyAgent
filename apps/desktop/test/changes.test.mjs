@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -12,7 +13,7 @@ const NOW = Date.UTC(2026, 9, 26, 18, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 3, added: 12, removed: 4, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, ...extra,
+  restorable_until_ms: null, conflicts: [], ...extra,
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
 
@@ -46,6 +47,11 @@ test("each state offers only the actions the engine can take", () => {
   assert.equal(model.restoreNote({ ...discarded, restorable_until_ms: NOW - 1 }, NOW), "These changes can no longer be restored.");
   assert.equal(model.restoreNote(set(), NOW), null);
   assert.equal(model.updatingNote(set({ state: "updating" })), "The agent is resolving the conflicts with your branch. Review again when it finishes.");
+  assert.equal(model.conflictNote(set({ state: "conflict", conflicts: ["a.ts", "b.ts"] })), "These files also changed on your branch: a.ts, b.ts. Ask the agent to update, or discard.");
+  assert.equal(model.conflictNote(set({ state: "conflict" })), "These changes conflict with your branch. Ask the agent to update, or discard.");
+  assert.equal(model.conflictNote(set({ conflicts: ["a.ts"] })), null);
+  assert.equal(model.acceptNote({ kind: "landed", commit: "c".repeat(40), branch: "main" }), "Accepted as ccccccc on main.");
+  assert.equal(model.acceptNote({ kind: "conflict", files: ["src/app.ts"] }), "These files also changed on your branch: src/app.ts. Ask the agent to update, or discard.");
 });
 
 test("every file says how it changed and marks what can change more than its text", () => {
@@ -88,7 +94,20 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_restore_expired" }), "These changes can no longer be restored. Discarded changes are kept for 7 days.");
   assert.equal(client.changesRefusal({ code: "changes_agent_has_pending" }), "This agent has newer changes waiting. Accept or discard those first.");
   assert.equal(client.changesRefusal({ code: "changes_agent_busy" }), "The agent is working right now. Try again when it finishes.");
+  assert.equal(client.changesRefusal({ code: "changes_git_failed" }), "Git couldn't finish this step in your project folder. Try again; if it keeps failing, check the folder with Git.");
+  assert.equal(client.changesRefusal({ code: "changes_not_found" }), "These changes are no longer there. The list shows what is left.");
+  assert.equal(client.changesRefusal({ code: "changes_outcome_unknown" }), "CrazyAgent couldn't confirm what happened. Check the list before you try again.");
+  assert.equal(client.changesRefusal({ code: "changes_owner_identity_missing" }), "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.");
+  assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
+  assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
   assert.equal(client.changesRefusal({ code: "made_up_code" }), "Something went wrong. Try again. (made_up_code)");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/changes.rs", import.meta.url), "utf8");
+  const codes = engine.slice(engine.indexOf("pub const CHANGES_CODES"), engine.indexOf("];", engine.indexOf("pub const CHANGES_CODES")));
+  const own = [...codes.matchAll(/"(changes_[a-z_]+)"/g)].map((match) => match[1]);
+  assert.ok(own.length >= 20, `engine changes codes: ${own.length}`);
+  for (const code of own.filter((code) => !["changes_request_bounds", "changes_reply_bounds", "changes_request_invalid"].includes(code))) {
+    assert.ok(client.CHANGES_REFUSALS.includes(code), `${code} has its own sentence`);
+  }
   for (const code of client.CHANGES_REFUSALS) {
     const line = client.changesRefusal({ code, files: ["x"] });
     assert.match(line, /^[A-Z].*\.$/, code);

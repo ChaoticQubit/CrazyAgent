@@ -1,4 +1,5 @@
-import type { ChangedFile, ChangeSet, FileStatus } from "../../api-changes";
+import { changesRefusal } from "../../api-changes";
+import type { AcceptOutcome, ChangedFile, ChangeSet, FileStatus } from "../../api-changes";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
 
@@ -77,7 +78,7 @@ export function actions(set: ChangeSet, now: number): ChangeActions {
 }
 
 function restorable(set: ChangeSet, now: number): boolean {
-  return typeof set.restorable_until_ms === "number" && set.restorable_until_ms > now;
+  return set.restorable_until_ms !== null && set.restorable_until_ms > now;
 }
 
 /** Says until when discarded changes can be restored. Inputs: the change set and now in
@@ -85,7 +86,7 @@ function restorable(set: ChangeSet, now: number): boolean {
 export function restoreNote(set: ChangeSet, now: number): string | null {
   if (set.state !== "discarded") return null;
   if (!restorable(set, now)) return "These changes can no longer be restored.";
-  const until = new Date(set.restorable_until_ms as number).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const until = new Date(set.restorable_until_ms ?? now).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   return `You can restore these changes until ${until}.`;
 }
 
@@ -93,6 +94,19 @@ export function restoreNote(set: ChangeSet, now: number): string | null {
  * the note, or null in any other state. */
 export function updatingNote(set: ChangeSet): string | null {
   return set.state === "updating" ? "The agent is resolving the conflicts with your branch. Review again when it finishes." : null;
+}
+
+/** Names the files a conflicting change set clashes on. Input: the change set. Output:
+ * the note, or null in any other state. */
+export function conflictNote(set: ChangeSet): string | null {
+  return set.state === "conflict" ? changesRefusal({ code: "changes_conflict", files: set.conflicts.map(displayText) }) : null;
+}
+
+/** What an Accept did, in one sentence. Input: the engine's outcome. Output: the line. */
+export function acceptNote(outcome: AcceptOutcome): string {
+  return outcome.kind === "landed"
+    ? `Accepted as ${outcome.commit.slice(0, 7)} on ${displayText(outcome.branch)}.`
+    : changesRefusal({ code: "changes_conflict", files: outcome.files.map(displayText) });
 }
 
 /** One line for a changed file: how it changed and its path. Input: the file. */

@@ -18,7 +18,8 @@ export interface ChangeSet {
   checked: boolean;
   created_ms: number;
   updated_ms: number;
-  restorable_until_ms?: number | null;
+  restorable_until_ms: number | null;
+  conflicts: string[];
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -35,15 +36,11 @@ export interface ChangedFile {
 export interface ChangeDiff {
   files: ChangedFile[];
   text: string;
-  page: number;
-  pages: number;
+  next: number | null;
   truncated: boolean;
 }
 
-export interface Accepted {
-  commit: string;
-  branch: string;
-}
+export type AcceptOutcome = { kind: "landed"; commit: string; branch: string } | { kind: "conflict"; files: string[] };
 
 export interface ChangesRefusal {
   code: string;
@@ -65,6 +62,12 @@ const REFUSALS: Record<string, string> = {
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",
   changes_agent_busy: "The agent is working right now. Try again when it finishes.",
   changes_unavailable: "Landing changes isn't ready in this engine yet.",
+  changes_git_failed: "Git couldn't finish this step in your project folder. Try again; if it keeps failing, check the folder with Git.",
+  changes_not_found: "These changes are no longer there. The list shows what is left.",
+  changes_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
+  changes_owner_identity_missing: "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.",
+  changes_owner_unavailable: "Your project folder couldn't be read. Check that it is still there, then try again.",
+  changes_too_large: "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.",
 };
 
 /** The refusal codes of the changes protocol that have their own sentence. */
@@ -96,21 +99,22 @@ export function loadChanges(projectId: string): Promise<Result<ChangeSet[]>> {
 }
 
 /** Reads one page of a change set's diff. Inputs: the change set id and the page, from 0.
- * Output: its files with marks and that page of plain diff text. */
+ * Output: that page's files with marks, its plain diff text and the next page, if any. */
 export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeDiff>> {
   return call<ChangeDiff>("desktop_change_diff", { id, page });
 }
 
 /** Lands a change set as one commit on the owner's checked-out branch. Inputs: the id and
- * the head the owner reviewed. Output: the new commit and its branch. */
-export function acceptChange(id: string, expectedHead: string): Promise<Result<Accepted>> {
-  return call<Accepted>("desktop_accept_change", { id, expectedHead });
+ * the head the owner reviewed. Output: the new commit and its branch, or the files that
+ * conflict with the branch, in which case nothing changed. */
+export function acceptChange(id: string, expectedHead: string): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead });
 }
 
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the
  * owner reviewed. Output: when it can no longer be restored, in milliseconds. */
-export function discardChange(id: string, expectedHead: string): Promise<Result<{ restorable_until_ms: number }>> {
-  return call<{ restorable_until_ms: number }>("desktop_discard_change", { id, expectedHead });
+export function discardChange(id: string, expectedHead: string): Promise<Result<number>> {
+  return call<number>("desktop_discard_change", { id, expectedHead });
 }
 
 /** Restores a discarded change set to its agent. Input: the id. */
