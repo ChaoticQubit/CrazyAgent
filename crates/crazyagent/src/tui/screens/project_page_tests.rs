@@ -139,6 +139,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     });
                     connection.project_setup(query).unwrap();
                 }
+                Request::Changes(query) => {
+                    sent.push("changes");
+                    connection.changes(*query).unwrap();
+                }
                 other => panic!("project pages never send {other:?}"),
             }
         }
@@ -488,6 +492,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
     assert_eq!(
         shell.place(),
         Some(Place::Project {
@@ -501,6 +506,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     assert!(shown.contains("brief.md"), "{shown}");
     assert!(shown.contains("Home  /  Notes CLI  /  Context"), "{shown}");
 
+    shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
@@ -517,6 +523,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                 Request::Pools
                     | Request::PoolProjects
                     | Request::Master(_)
+                    | Request::Changes(_)
                     | Request::Setup(
                         SetupQuery::Jobs { .. }
                             | SetupQuery::Context { .. }
@@ -767,6 +774,7 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
     let sent = pump(&mut shell, &mut connection).await;
     assert!(sent.contains(&"master"), "{sent:?}");
     let shown = render(&mut shell, 80, 24);
@@ -933,6 +941,7 @@ async fn conversation_with_a_settled_turn(
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Plan the first slice").await;
     let first = settled_master(engine, &notes, &mut shell, &mut connection, 1).await;
@@ -953,6 +962,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
     pump(&mut shell, &mut connection).await;
     shell.key(Key::Enter);
     shell.key(Key::Down);
@@ -965,6 +975,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     assert_eq!(open.as_ref(), Some(&first));
     assert_ne!(first.config_id, changed);
 
+    shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
@@ -1071,7 +1082,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     shell.key(Key::Enter);
     shell.key(Key::Enter);
     pump(&mut shell, &mut connection).await;
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::ShiftLeft);
     }
     pump(&mut shell, &mut connection).await;
@@ -1089,7 +1100,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     let open = open.expect("the first message opened a master conversation");
     assert_eq!(open.phase, MasterSessionPhase::Configured);
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::ShiftRight);
     }
     shell.key(Key::Char('x'));
@@ -1521,4 +1532,26 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
         "{shown}"
     );
     assert!(!engine.home.path().join("tidepool").exists(), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Changes,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"changes"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
+    assert!(shown.contains("No changes yet."), "{shown}");
 }

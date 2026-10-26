@@ -1,6 +1,7 @@
 pub mod add_folder;
 pub mod add_project;
 pub mod app_setup;
+pub(in crate::tui) mod changes;
 pub mod clone_repo;
 pub mod home;
 pub mod home_folder;
@@ -117,16 +118,18 @@ pub enum ProjectTab {
     Overview,
     Conversation,
     Agents,
+    Changes,
     Context,
     Settings,
 }
 
 impl ProjectTab {
     /// Every tab in order.
-    pub const ALL: [ProjectTab; 5] = [
+    pub const ALL: [ProjectTab; 6] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
+        Self::Changes,
         Self::Context,
         Self::Settings,
     ];
@@ -138,6 +141,7 @@ impl ProjectTab {
             Self::Overview => "Overview",
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
+            Self::Changes => "Changes",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }

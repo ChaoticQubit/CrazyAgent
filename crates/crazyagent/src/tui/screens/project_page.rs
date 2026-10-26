@@ -673,6 +673,11 @@ impl ProjectPage {
     }
 
     fn pump(&mut self, ctx: &mut Ctx) {
+        if self.screen.tab == Tab::Changes
+            && let Some(query) = self.screen.changes.next_query(now_ms())
+        {
+            ctx.request(Request::Changes(Box::new(query)));
+        }
         if self.screen.tab == Tab::Settings
             && let Some(job) = self.screen.plugins.next_job()
         {
@@ -779,6 +784,12 @@ impl ProjectPage {
         flow
     }
 
+    fn changes_have_keys(&self) -> bool {
+        self.screen.tab == Tab::Changes
+            && self.screen.edit.is_none()
+            && self.screen.review.is_none()
+    }
+
     fn plugins_have_keys(&self) -> bool {
         self.screen.tab == Tab::Settings
             && self.screen.pool_picker.is_none()
@@ -838,6 +849,14 @@ impl Screen for ProjectPage {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         self.screen.width = ctx.width;
+        if self.changes_have_keys()
+            && let Some(event) = key_event(key)
+            && self.screen.changes.key(event, now_ms())
+        {
+            self.pump(ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
         if self.plugins_have_keys()
             && let Some(event) = key_event(key)
         {
@@ -872,6 +891,7 @@ impl Screen for ProjectPage {
                 OwnerEvent::Setup(event) => self.setup_arrived(event, ctx),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
                 OwnerEvent::Settings(event) => self.screen.plugins.apply(event),
+                OwnerEvent::Changes(event) => self.screen.changes.apply(event),
                 _ => return Flow::Handled,
             },
             Arrival::PoolEdited(result) => self.assigned(result, ctx),
@@ -884,6 +904,7 @@ impl Screen for ProjectPage {
                 self.sent.clear();
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
+                self.screen.changes.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
             }
@@ -927,6 +948,7 @@ impl Screen for ProjectPage {
             || self.master.has_pending()
             || self.waiting.is_some()
             || self.screen.plugins.busy()
+            || self.screen.changes.busy()
     }
 
     fn draft(&self) -> bool {

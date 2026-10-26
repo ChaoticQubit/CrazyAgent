@@ -106,6 +106,7 @@ pub enum Request {
         agent: AgentId,
     },
     Intake(Box<super::client::intake::IntakeJob>),
+    Changes(Box<super::client::changes::ChangesQuery>),
     Reconnect,
 }
 
@@ -145,6 +146,7 @@ impl std::fmt::Debug for Request {
             Self::TerminalResize { .. } => "TerminalResize",
             Self::TerminalDetach { .. } => "TerminalDetach",
             Self::Intake(_) => "Intake",
+            Self::Changes(_) => "Changes",
             Self::Reconnect => "Reconnect",
         })
     }

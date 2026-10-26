@@ -1,3 +1,4 @@
+use super::changes::ProjectChanges;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
@@ -26,7 +27,7 @@ const NAME_BYTES_MAX: usize = 256;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 
-/// Names the five tabs of a project.
+/// Names the six tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
 /// The order is the tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,15 +35,17 @@ pub(in crate::tui) enum Tab {
     Overview,
     Conversation,
     Agents,
+    Changes,
     Context,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
+        Self::Changes,
         Self::Context,
         Self::Settings,
     ];
@@ -55,6 +58,7 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
+            Self::Changes => "Changes",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }
@@ -68,6 +72,7 @@ impl Tab {
             Self::Overview => "\u{25eb}",
             Self::Conversation => "\u{00bb}",
             Self::Agents => "\u{229b}",
+            Self::Changes => "\u{2213}",
             Self::Context => "\u{29c9}",
             Self::Settings => "\u{2630}",
         }
@@ -507,6 +512,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub log: Option<JobLog>,
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
+    pub changes: ProjectChanges,
     pub now_ms: i64,
     pub offset: i64,
     jobs_read_ms: Option<i64>,
@@ -524,6 +530,7 @@ impl ProjectScreen {
     pub fn new(project: ProjectId, name: String, home: Option<PathBuf>) -> Self {
         Self {
             plugins: ProjectPlugins::new(project.clone()),
+            changes: ProjectChanges::new(project.clone()),
             project,
             name,
             tab: Tab::Overview,
@@ -580,6 +587,9 @@ impl ProjectScreen {
         self.adding = None;
         self.general = None;
         self.typing = tab == Tab::Conversation;
+        if tab == Tab::Changes {
+            self.changes.refresh();
+        }
     }
 
     /// Gives the next engine read this screen needs, at most one at a time.
@@ -1059,6 +1069,7 @@ impl ProjectScreen {
             Tab::Overview => self.overview_key(key),
             Tab::Conversation => self.conversation_key(key),
             Tab::Agents => self.agents_key(key),
+            Tab::Changes => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
