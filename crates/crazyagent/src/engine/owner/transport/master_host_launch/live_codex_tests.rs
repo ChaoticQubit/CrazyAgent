@@ -271,10 +271,10 @@ async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() 
             let mut url = std::ffi::OsString::from("file://");
             url.push(&source);
             let git = |arguments: &[&std::ffi::OsStr]| {
-                let status = std::process::Command::new("/usr/bin/git")
-                    .args(arguments)
-                    .status()
-                    .unwrap();
+                let status = crate::spawn_gate::status(
+                    std::process::Command::new("/usr/bin/git").args(arguments),
+                )
+                .unwrap();
                 assert!(status.success(), "git {arguments:?}");
             };
             git(&[
