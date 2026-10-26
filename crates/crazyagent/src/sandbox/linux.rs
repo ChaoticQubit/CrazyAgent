@@ -4,7 +4,7 @@ use super::{
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -36,6 +36,7 @@ const FS_ABI: ABI = ABI::V3;
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 const NET_ABI: ABI = ABI::V4;
+const SCOPE_ABI: ABI = ABI::V6;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
     "/usr",
@@ -192,6 +193,17 @@ fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
     created.restrict_self()
 }
 
+/// Adds a second Landlock layer that keeps signals and abstract Unix sockets inside the
+/// agent's domain, so the agent cannot signal the engine, its tmux server or other agents.
+/// Linux before 6.12 has no scopes: there the layer holds nothing and the first layer's
+/// boundary stands alone. No input. Output: the status, or the ruleset error.
+fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
+    Ruleset::default()
+        .scope(Scope::from_all(SCOPE_ABI))?
+        .create()?
+        .restrict_self()
+}
+
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
 /// socket and a new io_uring ring both fail with `EACCES`. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
@@ -266,11 +278,11 @@ fn own_session() -> Result<(), String> {
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
-/// A probe applies an empty ruleset and the Unix-socket filter to itself and exits 0 when
-/// this kernel holds both; a run applies the policy and the filter to itself, moves into a
-/// session of its own and then replaces itself with the harness. Output: the exit code, 2
-/// for refused arguments, 3 when the kernel cannot hold the policy or the session, 126 when
-/// the harness cannot start.
+/// A probe applies an empty ruleset, the scope layer and the Unix-socket filter to itself
+/// and exits 0 when this kernel holds them; a run applies the policy, the scope layer and
+/// the filter to itself, moves into a session of its own and then replaces itself with the
+/// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
+/// the policy or the session, 126 when the harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
         Ok(request) => request,
@@ -306,6 +318,10 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             eprintln!("crazyagent-landlock: {error}");
             return ExitCode::from(3);
         }
+    }
+    if let Err(error) = scope_signals() {
+        eprintln!("crazyagent-landlock: {error}");
+        return ExitCode::from(3);
     }
     if let Err(reason) = refuse_unix_sockets() {
         eprintln!("crazyagent-landlock: {reason}");

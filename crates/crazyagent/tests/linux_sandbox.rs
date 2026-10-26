@@ -5,6 +5,8 @@ use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
 
+use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
+
 use std::ffi::{OsStr, OsString};
 
 use std::fs;
@@ -266,6 +268,83 @@ fn assert_own_session(command: &mut Command) {
         fields[3], "0",
         "the agent has no controlling terminal: {text}"
     );
+}
+
+const SIGNAL: &str = "kill -0 \"$1\" 2>/dev/null && echo delivered || echo refused";
+
+fn signal(sandbox: Option<&dyn Sandbox>, case: &Case, target: u32) -> String {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", SIGNAL, "sh"])
+        .arg(target.to_string())
+        .current_dir(case.project.join("worktrees"));
+    let mut command = match sandbox {
+        Some(sandbox) => sandbox.wrap(&harness).unwrap(),
+        None => harness,
+    };
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
+    let case = case();
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id();
+    let scoped = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .scope(Scope::Signal)
+        .is_ok();
+    assert_eq!(
+        signal(None, &case, target),
+        "delivered\n",
+        "the unsandboxed control must reach the outside process"
+    );
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        signal(Some(&landlock), &case, target),
+        if scoped { "refused\n" } else { "delivered\n" },
+        "Landlock scopes signals from Linux 6.12; scoped here: {scoped}"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(signal(Some(&bubblewrap), &case, target), "refused\n");
+    outside.kill().unwrap();
+    outside.wait().unwrap();
 }
 
 #[test]
