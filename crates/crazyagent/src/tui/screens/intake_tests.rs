@@ -865,7 +865,7 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
     assert!(
         shows(
             &rows,
-            "Graphify is off in Setup, so no code graph is built."
+            "The Graphify skill isn't on in Setup, so no code graph is built."
         ),
         "{rows:#?}"
     );

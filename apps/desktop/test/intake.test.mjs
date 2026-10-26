@@ -135,7 +135,7 @@ test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
-  assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Setup, so no code graph is built." });
+  assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "The Graphify skill isn't on in Setup, so no code graph is built." });
 });
 
 test("a finished onboarding opens its saved setup, shows unstarted steps as skipped and saves changes", () => {
