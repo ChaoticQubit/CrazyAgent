@@ -979,6 +979,7 @@ fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its
 /// slow first launch, an update check or a sign-in screen can make last up to the whole
 /// ready wait. The stop ends the agent, its pane and its process group within one bound,
 /// not after the ready wait.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
     const STOP_BOUND: Duration = Duration::from_secs(5);
@@ -1171,6 +1172,7 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
     assert!(runtime.context(&project, 2, AgentRole::Sub, true).is_ok());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     let fixture = Fixture::new(1);

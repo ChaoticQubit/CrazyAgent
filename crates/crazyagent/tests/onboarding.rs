@@ -20,7 +20,9 @@ use crazyagent::research::runner::{
 use crazyagent::setup::PackState;
 use research_support::{claude, codex, hanging_endpoint, processes_with};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -33,8 +35,11 @@ const PROJECT: &str = "demo-app";
 const GRAPHIFY_MISSING: &str = "graphify not installed";
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MODEL: &str = "qwen2.5:7b";
+#[cfg(target_os = "macos")]
 const OLLAMA: &str = "127.0.0.1:11434";
+#[cfg(target_os = "macos")]
 const OLLAMA_TIME: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
 const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"demo-app\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 const SAVED_DRAFT: &str = r#"{"name":"Demo Tool","draft":{"about":"Kept by the owner.","tech_stack":["Postgres"],"platforms":["cli"],"research":[],"pool":null,"team":null,"documents":[]},"facts":{"languages":[],"build_commands":[],"test_commands":[],"entry_points":[]}}"#;
@@ -45,6 +50,7 @@ const FORGED_BRIEF: &str = "# Forged brief\n\nWritten by a project agent.\n";
 
 /// Fails the test with the command that fixes it unless the local Ollama serves the pool
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
+#[cfg(target_os = "macos")]
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
     let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
@@ -615,6 +621,7 @@ async fn stop_service(service: OnboardingService) {
 /// A local model endpoint that answers every request with HTTP 400 and an
 /// OpenAI-style error naming the missing model, so a real Codex run fails at
 /// once. Returns the port; the serving thread ends with the test process.
+#[cfg(target_os = "macos")]
 fn rejecting_endpoint() -> u16 {
     let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -659,6 +666,7 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     require_model();
@@ -921,6 +929,7 @@ async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let mut bench = Bench::start(|_| {}).await;
@@ -950,6 +959,7 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1441,6 +1451,7 @@ async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_runnin
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_mapping_agent_reports_its_own_reason() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1471,6 +1482,35 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
         "Agent stopped: The model closed-model does not exist"
     );
     assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let account = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "linux-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        || None,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed("Team agents and research are not available on Linux in this version."),
+        "{view:?}"
+    );
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
