@@ -140,6 +140,20 @@ impl NativeProfileCustody {
         match *self {}
     }
 
+    /// Matches the Unix use with a chosen renewal wait. No custody exists here, so this
+    /// never runs. Inputs: the use request and the wait, unused. Output: none.
+    pub(crate) fn acquire_use_within(
+        &mut self,
+        _host: &HostStamp,
+        _binding: &NativeProfileBinding,
+        _operation_id: &RequestId,
+        _generation: u64,
+        _purpose: NativeProfileUsePurpose,
+        _renewal_wait: Option<Duration>,
+    ) -> Result<NativeProfileUse, EngineError> {
+        match *self {}
+    }
+
     pub(crate) fn prepare(
         &mut self,
         _host: &HostStamp,
