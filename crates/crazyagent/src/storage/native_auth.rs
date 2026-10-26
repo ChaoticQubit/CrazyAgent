@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::native_auth::{
     Command, FACT_BYTES_MAX, OPERATIONS_MAX, REQUEST_BYTES_MAX, decode_fact, encode_fact,
