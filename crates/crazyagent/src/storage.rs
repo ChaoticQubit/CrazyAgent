@@ -283,14 +283,13 @@ impl Storage {
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
                 let mut model_access_snapshot = None;
-                let mut home_watch = if readonly {
-                    None
-                } else {
+                let mut home_watch = projects_home::WatchSlot::default();
+                if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
                     }
-                    projects_home::watch_saved(&connection)
-                };
+                    home_watch.restart(&connection);
+                }
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::Accounts(admission, command, reply) => {
@@ -559,8 +558,7 @@ impl Storage {
                             let restart = matches!(result, Ok(true));
                             let _ = reply.send(result.map(|_| ()));
                             if restart {
-                                drop(home_watch.take());
-                                home_watch = projects_home::watch_saved(&connection);
+                                home_watch.restart(&connection);
                             }
                         }
                         Job::HomeRecord(admission, request, effect, reply) => {
@@ -576,8 +574,7 @@ impl Storage {
                             let restart = moved_home && result.is_ok();
                             let _ = reply.send(result);
                             if restart {
-                                drop(home_watch.take());
-                                home_watch = projects_home::watch_saved(&connection);
+                                home_watch.restart(&connection);
                             }
                         }
                         Job::SetupPlan(admission, request, reply) => {
@@ -670,8 +667,7 @@ impl Storage {
                             let restart = set_home && result.is_ok();
                             let _ = reply.send(result);
                             if restart {
-                                drop(home_watch.take());
-                                home_watch = projects_home::watch_saved(&connection);
+                                home_watch.restart(&connection);
                             }
                         }
                         Job::OwnerRead(admission, query, reply) => {
@@ -710,7 +706,7 @@ impl Storage {
                                     &config,
                                     &admission,
                                     &query,
-                                    home_watch.as_ref(),
+                                    &mut home_watch,
                                 ));
                                 continue;
                             }
