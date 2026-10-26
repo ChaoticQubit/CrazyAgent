@@ -1,8 +1,9 @@
 import type { IconName, Tone } from "../../ui";
-import { failureCopy, receiptState } from "../../api-projects";
+import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import type { IntentReceipt, MasterState, MasterTurn, ProjectDetail } from "../../engine-client";
+import { namedFailure } from "../../api";
+import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -147,10 +148,10 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
  * the command isn't in this build. Output: the toast, the panel line and whether to reload the list. */
 export function changeOutcome(result: Result<IntentReceipt>, done: string, missing: string): { toast: string; note: string; reload: boolean } {
   if (result.kind === "not_ready") return { toast: "", note: `Not ready yet: ${missing} isn't in this build.`, reload: false };
-  if (result.kind === "error") return { toast: "", note: failureCopy(result.code), reload: false };
+  if (result.kind === "error") return { toast: "", note: failureCopy(result), reload: false };
   const state = receiptState(result.value);
   if (state.kind === "applied") return { toast: done, note: "", reload: true };
-  return { toast: "", note: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
+  return { toast: "", note: state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.", reload: true };
 }
 
 /** What Pause all agents will do to the team's tasks: running ones stop, waiting ones are
@@ -271,21 +272,46 @@ export function masterStatus(session: MasterState["session"], turns: MasterTurn[
   return "Stopped";
 }
 
-/** One plain line for a master turn that has no reply yet or ended without one.
+const STOP_LINES: Record<string, string> = {
+  readiness_unknown: "Not signed in. Sign in again in Settings, Accounts, then send again.",
+  readiness_stale: "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.",
+  connection_changed: "Settings changed since the master started. End the conversation, then send again.",
+  repository_missing: "The master couldn't start: this project has no repository yet.",
+  invalid_authentication: "The master stopped: the provider refused the account's sign-in. Sign in again in Settings, Accounts, then send again.",
+  quota_unknown: "The master stopped: the account's usage limit couldn't be read. Send again shortly.",
+  quota_exhausted: "The master stopped: the account reached its usage limit. Send again later, or add another account to the pool.",
+  rate_limited: "The master stopped: the provider is limiting requests. Send again in a moment.",
+  cooldown_active: "The master stopped: the account is resting after errors. Send again in a moment.",
+  scope_revoked: "The master stopped: its access to this project was withdrawn. End the conversation, then send again.",
+  capacity_unavailable: "The master stopped: another reply is still running. Wait for it, then send again.",
+  budget_exhausted: "The master stopped: it used up the time and resources allowed for this message. Send again.",
+  profile_busy: "The master stopped: the account is busy signing in or out. Send again in a moment.",
+  approval_required: "The master stopped: it needs an approval this window can't give yet.",
+  runtime_unavailable: "The master stopped: its model couldn't run on this computer. Send again.",
+  capture_incomplete: "The master stopped: its reply came back incomplete. Send again.",
+  output_limit: "The master stopped: its reply was longer than allowed.",
+  unsupported_capability: "The master stopped: this account can't run the master. Choose another pool.",
+  cancelled: "The master stopped: the reply was cancelled.",
+};
+
+const UNKNOWN_STOP = "The master stopped for a reason this window doesn't know.";
+
+/** One plain line for a master turn that has no reply yet or ended without one. A stop names
+ * the engine code it came from, and a reason this window has no sentence for is named too.
  * Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
-  const reason = turn.reason ? turn.reason.replaceAll("_", " ") : "";
-  if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return "Not signed in. Sign in again in Settings, Accounts, then send again.";
-  if (turn.phase === "blocked" && turn.reason === "readiness_stale") return "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.";
-  if (turn.phase === "blocked" && turn.reason === "connection_changed") return "Settings changed since the master started. End the conversation, then send again.";
-  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return "The master couldn't start: this project has no repository yet.";
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
     case "running": return "Thinking...";
     case "waiting_approval": return "Waiting for your approval";
     case "succeeded": return "Replied";
     case "cancelled": return "Stopped";
-    case "failed": case "blocked": case "uncertain": return `The master stopped${reason ? `: ${reason}` : ""}.`;
+    case "failed": case "blocked": case "uncertain": {
+      if (turn.reason === null) return "The master stopped.";
+      const line = Object.hasOwn(STOP_LINES, turn.reason) ? STOP_LINES[turn.reason] : undefined;
+      if (line === undefined) return withCode(UNKNOWN_STOP, turn.reason_code ?? turn.reason);
+      return turn.reason_code === undefined ? line : withCode(line, turn.reason_code);
+    }
   }
 }
 
@@ -347,10 +373,12 @@ export function resendText(turns: MasterTurn[], sent: Record<string, string>): s
 const SEND_FALLBACK = "Couldn't send. Try again.";
 
 /** The inline line under the composer when a message could not be sent; the message stays
- * in the composer. Input: the failure code. Output: the plain line. */
-export function sendFailureLine(code: string): string {
-  const copy = failureCopy(code);
-  return copy === failureCopy("") ? SEND_FALLBACK : `Couldn't send. ${copy}`;
+ * in the composer. Input: the failure code, or the failure with the engine cause behind it.
+ * Output: the plain line, naming the code when there is no sentence for it. */
+export function sendFailureLine(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  const sentence = failureSentence(code);
+  return sentence === undefined ? withCode(SEND_FALLBACK, code) : `Couldn't send. ${namedFailure(sentence, code, cause)}`;
 }
 
 /** The muted line shown when a send found its conversation older than the settings and a new

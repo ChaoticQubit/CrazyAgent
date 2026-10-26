@@ -100,7 +100,7 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.masterStatus({ session_id: "s", phase: "closed", current_turn: null }, [turn("succeeded")]), "Stopped");
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [turn("failed", "provider_error")]), "Stopped");
   assert.equal(research.turnLine(turn("blocked", "readiness_stale")), "Sign-in is out of date. Sign in again in Settings, Accounts, then send again.");
-  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped: provider error.");
+  assert.equal(research.turnLine(turn("failed", "provider_error")), "The master stopped for a reason this window doesn't know. (code: provider_error)");
   assert.equal(research.turnLine(turn("blocked", "repository_missing")), "The master couldn't start: this project has no repository yet.");
   assert.equal(research.resendText([{ ...turn("blocked", "repository_missing"), id: "t1", ordinal: 1 }], { t1: "first" }), "first");
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
@@ -252,13 +252,13 @@ test("a stopped or failed master turn offers its own message to send again", () 
   assert.equal(research.resendText([], {}), null);
   const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
   assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
-  assert.equal(research.turnLine(crashed), "The master stopped: capture incomplete.", "the line names what happened");
+  assert.equal(research.turnLine(crashed), "The master stopped: its reply came back incomplete. Send again.", "the line names what happened");
   assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
 
 test("a failed send says Couldn't send and keeps specific engine copy", () => {
-  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again.");
+  assert.equal(research.sendFailureLine("made_up_code"), "Couldn't send. Try again. (code: made_up_code)");
   assert.equal(research.sendFailureLine("engine_unreachable"), `Couldn't send. ${api.failureCopy("engine_unreachable")}`);
 });
 
@@ -624,7 +624,7 @@ test("files named like object built-ins get the plain file icon instead of crash
 test("an engine code named like an object built-in gets the plain fallback sentence", () => {
   for (const code of ["constructor", "__proto__", "toString"]) {
     assert.equal(typeof api.failureCopy(code), "string", code);
-    assert.equal(api.failureCopy(code), api.failureCopy("some_unknown_code"), code);
+    assert.equal(api.failureCopy(code), `Something went wrong. Try again. (code: ${/^[a-z0-9_]+$/.test(code) ? code : "unknown"})`, code);
   }
 });
 

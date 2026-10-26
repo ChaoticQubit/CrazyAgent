@@ -46,7 +46,7 @@ function AgentLog({ data, job }: { data: ProjectData; job: ResearchJob }) {
   return <div className="pj-log" id={`pj-log-${job.id}`}>
     {log === undefined && <p className="pj-muted pj-small" role="status">Loading log...</p>}
     {log?.kind === "not_ready" && <NotReady what="the agent log isn't in this build." />}
-    {log?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the log. {failureCopy(log.code)}</p>}
+    {log?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the log. {failureCopy(log)}</p>}
     {log?.kind === "ok" && (log.value.length
       ? <>
         <ol className="pj-log-lines" ref={list} aria-label={`${displayText(job.kind_label)} log`} onScroll={(event) => setFollow(nearBottom(event.currentTarget))}>
@@ -106,7 +106,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
         : "No pool. Agents wait until you choose one."}</span>
     </div>
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
-    {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research.code)}</p>}
+    {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}

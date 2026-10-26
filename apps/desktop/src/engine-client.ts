@@ -189,6 +189,16 @@ export function retry(): Promise<ActionReceipt> {
   return invoke<ActionReceipt>("desktop_retry");
 }
 
+const PLAIN_CODE = /^[a-z0-9_]{1,96}$/;
+
+/** Names a failure's code after its sentence, the one rule for failures this window has no
+ * sentence of its own for. A code that is not 1 to 96 lowercase letters, digits or
+ * underscores shows as `unknown`, so raw error text never appears. Inputs: the sentence and
+ * the code. Output: "<sentence> (code: <code>)". */
+export function withCode(sentence: string, code: string): string {
+  return `${sentence} (code: ${PLAIN_CODE.test(code) ? code : "unknown"})`;
+}
+
 export function errorMessage(error: unknown): string {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String(error.code) : "unknown";
@@ -320,7 +330,7 @@ export function errorMessage(error: unknown): string {
     invalid_baseline_data: "The engine returned a baseline that could not be validated.",
     unexpected_reply: "The engine returned an unexpected response. Refresh before continuing.",
   };
-  return messages[code] ?? "The owner request failed. Refresh before continuing.";
+  return messages[code] ?? withCode("The owner request failed. Refresh before continuing.", code);
 }
 
 export interface ProjectPage {
@@ -1445,6 +1455,7 @@ export interface MasterTurn {
   ordinal: number;
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
+  reason_code?: string;
   reply: { text: string } | null;
 }
 

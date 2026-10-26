@@ -103,9 +103,9 @@ export function ProjectsHomeSettings() {
     const result = await send();
     setBusy(false);
     setAsk(null);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result)); return; }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") { setProblem(intakeCopy(state.code)); return; }
+    if (state.kind === "rejected") { setProblem(intakeCopy(state)); return; }
     if (state.kind === "unconfirmed") { setProblem("We couldn't confirm the change. Check the folder shown here."); reload(); return; }
     setPicked(null);
     reload();
@@ -120,7 +120,7 @@ export function ProjectsHomeSettings() {
     const size = await loadFolderSize(current);
     setAsk((old) => old?.path !== path ? old
       : size.kind === "ok" ? { path, bytes: size.value.bytes, sizeProblem: "" }
-      : { path, bytes: null, sizeProblem: size.kind === "not_ready" ? "Measuring the folder isn't in this build." : intakeCopy(size.code) });
+      : { path, bytes: null, sizeProblem: size.kind === "not_ready" ? "Measuring the folder isn't in this build." : intakeCopy(size) });
   };
 
   return <>

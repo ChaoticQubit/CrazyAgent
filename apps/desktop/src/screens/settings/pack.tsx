@@ -125,7 +125,7 @@ export function PackSettings() {
     const result = await change();
     setBusy(null);
     setAsk(null);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Changing the pack isn't in this build." : intakeCopy(result.code)); reload(); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Changing the pack isn't in this build." : intakeCopy(result)); reload(); return; }
     setFresh(result.value);
     session.showToast(done);
   };

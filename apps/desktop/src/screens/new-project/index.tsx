@@ -136,7 +136,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     const result = await setupProject(request.spec, request.setup, nextGeneration());
     if (result.kind !== "ok") {
       setCreating(false);
-      setCreateError(result.kind === "not_ready" ? "Not ready yet: creating a project with research isn't in this build." : `Couldn't create the project. Your answers are kept. ${failureCopy(result.code)}`);
+      setCreateError(result.kind === "not_ready" ? "Not ready yet: creating a project with research isn't in this build." : `Couldn't create the project. Your answers are kept. ${failureCopy(result)}`);
       return;
     }
     let receipt = result.value;
@@ -181,7 +181,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     }
     if (result.kind === "error") {
       setPicker("failed");
-      setDocErrors([failureCopy(result.code)]);
+      setDocErrors([failureCopy(result)]);
       return;
     }
     const added = addDocuments(draft.documents, result.value, catalogValue?.document_extensions ?? [], catalogValue?.documents_max ?? 16);
@@ -199,7 +199,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   return <div className="pj pj-new">
     <PageHeader title="New project" actions={<Button variant="quiet" onClick={() => setDiscarding(true)}>Cancel</Button>} />
     {catalog?.kind === "not_ready" && <NotReady what="creating a project with research isn't in this build of the engine. You can fill in the steps; Create project stays off." />}
-    {catalog?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(catalog.code)}</p>}
+    {catalog?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(catalog)}</p>}
     <div className="pj-new-body">
       <nav className="pj-step-rail" aria-label="Steps">
         <ol>{STEPS.map((item, position) => {
@@ -251,7 +251,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           <h2 id="pj-step-title">Which accounts should this project use?</h2>
           {pools === undefined && <p className="pj-muted" role="status">Loading pools...</p>}
           {pools?.kind === "not_ready" && <NotReady what="pools aren't in this build." />}
-          {pools?.kind === "error" && <p className="pj-error" role="alert">Couldn't load your pools. {failureCopy(pools.code)}</p>}
+          {pools?.kind === "error" && <p className="pj-error" role="alert">Couldn't load your pools. {failureCopy(pools)}</p>}
           {poolValue && poolValue.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
             <button type="button" className="btn" onClick={() => navigate("/settings/pools?action=new")}>Create pool</button></div>}
           {poolValue && <PoolPicker name="np-pool" pools={poolValue} summaries={summaries} value={draft.pool} later onChange={(pool) => setDraft({ ...draft, pool, poolChosen: true })} />}

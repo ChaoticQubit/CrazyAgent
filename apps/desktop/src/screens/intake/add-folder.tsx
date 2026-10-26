@@ -120,9 +120,9 @@ export function AddFolder() {
     const result = await addExistingFolder(source, mode, nextGeneration());
     setBusy(false);
     setConfirming(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Adding a folder isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Adding a folder isn't in this build." : intakeCopy(result)); return; }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") { setProblem(intakeCopy(state.code)); return; }
+    if (state.kind === "rejected") { setProblem(intakeCopy(state)); return; }
     if (state.kind === "unconfirmed") { setProblem("We couldn't confirm the folder was added. Check Home before trying again."); return; }
     session.showToast(`${folderName(source)} is in your projects folder. Set it up from Home.`);
     navigate({ name: "home" });

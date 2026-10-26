@@ -55,15 +55,15 @@ export function TeamPanel({ data, team, filter, harnesses, reload }: {
     const result = await cancelTeamTask(data.id, row.stop.task, nextGeneration());
     setBusy(false);
     setStopping(null);
-    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping team work isn't in this build." : failureCopy(result.code));
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping team work isn't in this build." : failureCopy(result));
     const state = receiptState(result.value);
-    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the list before trying again.");
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
     reload();
   }
 
   if (team.result === undefined) return <p className="pj-muted" role="status">Loading the team...</p>;
   if (team.result.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
-  if (team.result.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result.code)}</p>;
+  if (team.result.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>;
   const status = team.result.value;
   const panel = teamPanel(status, accounts.kind === "ok" ? accounts.value : [], (id) => harnessName(harnesses, id), filter, team.at);
   const working = status.agents.filter((agent) => agent.status === "working").length;

@@ -62,7 +62,7 @@ export function GitHubSettings() {
     const result = await gitHubSignOut();
     setBusy(false);
     setAsking(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Signing out of GitHub isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Signing out of GitHub isn't in this build." : intakeCopy(result)); return; }
     if (result.value.signed_in) { setProblem("GitHub is still signed in. Try again."); reload(); return; }
     reload();
     session.showToast("Signed out of GitHub.");

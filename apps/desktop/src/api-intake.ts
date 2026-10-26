@@ -1,4 +1,4 @@
-import { classifyFailure, nextGeneration, plainError, type Result } from "./api";
+import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
@@ -132,10 +132,12 @@ const COPY: Record<string, string> = {
   owner_outcome_unknown_reconcile_same_identity: "CrazyAgent didn't answer in time. Try again.",
 };
 
-/** Plain sentence for one intake, GitHub or setup failure code.
- * Input: the code. Output: the intake copy, then the project and app copy, then the fallback. */
-export function intakeCopy(code: string): string {
-  return Object.hasOwn(COPY, code) ? COPY[code] : failureCopy(code);
+/** Plain sentence for one intake, GitHub or setup failure.
+ * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
+ * the project and app copy, then the fallback naming the code; a different cause is named after. */
+export function intakeCopy(failure: string | { code: string; cause?: string }): string {
+  const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  return Object.hasOwn(COPY, code) ? namedFailure(COPY[code], code, cause) : failureCopy({ code, cause });
 }
 
 function failure<T>(code: string): Result<T> {
@@ -151,7 +153,7 @@ async function wrap<T>(action: () => Promise<T>): Promise<Result<T>> {
     return { kind: "ok", value: await action() };
   } catch (error) {
     const sorted = classifyFailure(error);
-    return sorted.kind === "error" ? { ...sorted, message: intakeCopy(sorted.code) } : sorted;
+    return sorted.kind === "error" ? { ...sorted, message: intakeCopy(sorted) } : sorted;
   }
 }
 

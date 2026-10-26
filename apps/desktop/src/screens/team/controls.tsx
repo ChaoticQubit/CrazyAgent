@@ -34,10 +34,10 @@ export function taskInput(text: string): { kind: "ok"; prompt: string } | { kind
  * the "Not ready yet" subject. Output: the note to show, empty when it applied. */
 export function changeNote(result: Result<IntentReceipt>, missing: string): string {
   if (result.kind === "not_ready") return `Not ready yet: ${missing} isn't in this build.`;
-  if (result.kind === "error") return failureCopy(result.code);
+  if (result.kind === "error") return failureCopy(result);
   const state = receiptState(result.value);
   if (state.kind === "applied") return "";
-  return state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the team before trying again.";
+  return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
 /** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, and hand one task

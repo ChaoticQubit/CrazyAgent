@@ -36,12 +36,11 @@ registerHooks({
 const client = await import("../src/engine-client.ts");
 
 test("skill and MCP server refusals read as plain sentences", () => {
-  const fallback = client.errorMessage({ code: "unknown" });
   assert.equal(client.errorMessage({ code: "skill_missing_skill_md" }), "This folder has no SKILL.md file.");
   assert.equal(client.errorMessage({ code: "server_command_not_found" }), "Can't start: command not found.");
   assert.equal(client.errorMessage({ code: "server_changed" }), "This server changed. Review it again before approving.");
   for (const code of ["skill_name_taken", "skill_link_outside", "server_url_invalid", "server_secret_invalid", "server_secret_duplicate", "plugin_switch_global_only", "plugins_failed"]) {
-    assert.notEqual(client.errorMessage({ code }), fallback, code);
+    assert.doesNotMatch(client.errorMessage({ code }), /\(code: /, code);
   }
 });
 

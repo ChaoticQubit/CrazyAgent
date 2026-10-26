@@ -125,9 +125,9 @@ export function OnboardingReview({ id }: { id: string }) {
     setProblem("");
     const result = await startOnboarding(projectFolder(saved), pool, nextGeneration());
     setRetrying(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Retrying the mapping isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Retrying the mapping isn't in this build." : intakeCopy(result)); return; }
     const started = startedProject(result.value);
-    if (started.kind === "rejected") { setProblem(intakeCopy(started.code)); return; }
+    if (started.kind === "rejected") { setProblem(intakeCopy(started)); return; }
     if (started.kind === "unconfirmed" && receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm the mapping started again. Check again in a moment."); return; }
     setDraft(null);
     reloadView();
@@ -146,9 +146,9 @@ export function OnboardingReview({ id }: { id: string }) {
     setBusy(true);
     setProblem("");
     const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision);
-    if (result.kind !== "ok") { setBusy(false); setProblem(result.kind === "not_ready" ? "Confirming setup isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setBusy(false); setProblem(result.kind === "not_ready" ? "Confirming setup isn't in this build." : intakeCopy(result)); return; }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") { setBusy(false); setProblem(intakeCopy(state.code)); return; }
+    if (state.kind === "rejected") { setBusy(false); setProblem(intakeCopy(state)); return; }
     if (state.kind === "unconfirmed") { setBusy(false); setProblem("We couldn't confirm setup was saved. Check the project and save again."); return; }
     const pool = request.setup.pool;
     const assigned = pool ? await assignPool(id, pool, nextGeneration()) : null;

@@ -67,7 +67,7 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
     if (steps.add) {
       const added = await assignPool(data.id, choice, nextGeneration());
       error = added.kind !== "ok" ? failureCopy(added.kind === "error" ? added.code : "unknown")
-        : added.value.kind === "rejected" ? failureCopy(added.value.code)
+        : added.value.kind === "rejected" ? failureCopy(added.value)
           : added.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
     }
     if (!error && steps.drop) {
@@ -88,7 +88,7 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
     <h2>Pool</h2>
     {data.pools === undefined && <p className="pj-muted" role="status">Loading pools...</p>}
     {data.pools?.kind === "not_ready" && <NotReady what="pools aren't in this build." />}
-    {data.pools?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.pools.code)}</p>}
+    {data.pools?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.pools)}</p>}
     {pools && pools.length === 0 && <div className="pj-note"><p>You don't have a pool yet.</p>
       <button type="button" className="btn" onClick={() => data.navigate("/settings/pools?action=new")}>Create pool</button></div>}
     {pools && pools.length > 0 && <PoolPicker name="ps-pool" pools={pools} summaries={summaries.kind === "ok" ? summaries.value : []} value={choice} later={false} onChange={setChoice} />}
@@ -104,9 +104,9 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
   async function save() {
     const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration(), null, setup.revision);
     if (result.kind === "not_ready") return setNote("Not ready yet: changing a project's team isn't in this build.");
-    if (result.kind === "error") return setNote(failureCopy(result.code));
+    if (result.kind === "error") return setNote(failureCopy(result));
     const state = receiptState(result.value);
-    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check it and save again.");
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
     if (state.kind === "applied") { data.notify("Team saved."); data.reload(); }
   }
   return <div className="pj-stack">
@@ -137,7 +137,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     setBusy(false);
     setConfirming(false);
     if (result.kind === "not_ready") return setNote("Not ready yet: removing a project isn't in this build.");
-    if (result.kind === "error") return setNote(failureCopy(result.code));
+    if (result.kind === "error") return setNote(failureCopy(result));
     const state = receiptState(result.value);
     if (state.kind === "applied") {
       await session?.refreshProjects();
@@ -145,7 +145,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
       data.navigate("/home");
       return;
     }
-    setNote(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check it and try again.");
+    setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and try again.");
   }
   return <div className="pj-stack">
     <h2>Remove project</h2>

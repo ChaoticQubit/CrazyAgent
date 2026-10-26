@@ -142,12 +142,12 @@ export function ContextTab({ data }: { data: ProjectData }) {
     setSaveState({ busy: true, error: "" });
     const result = await saveResearchToMemory(data.id, kind, saving.heading, nextGeneration());
     if (result.kind !== "ok") {
-      setSaveState({ busy: false, error: result.kind === "not_ready" ? "Not ready yet: saving to memory isn't in this build." : failureCopy(result.code) });
+      setSaveState({ busy: false, error: result.kind === "not_ready" ? "Not ready yet: saving to memory isn't in this build." : failureCopy(result) });
       return;
     }
     const state = receiptState(result.value);
     if (state.kind !== "applied") {
-      setSaveState({ busy: false, error: state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check Project memory before saving again." : failureCopy(state.code) });
+      setSaveState({ busy: false, error: state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check Project memory before saving again." : failureCopy(state) });
       return;
     }
     setSaveState({ busy: false, error: "" });
@@ -170,7 +170,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   async function fileAction(command: string, label: string) {
     if (!chosen) return;
     const result = await call<unknown>(command, { id: data.id, path: chosen });
-    setActionNote(result.kind === "ok" ? "" : result.kind === "not_ready" ? `Not ready yet: ${label} isn't in this build.` : failureCopy(result.code));
+    setActionNote(result.kind === "ok" ? "" : result.kind === "not_ready" ? `Not ready yet: ${label} isn't in this build.` : failureCopy(result));
   }
 
   async function confirmDelete() {
@@ -179,9 +179,9 @@ export function ContextTab({ data }: { data: ProjectData }) {
     setDeleting({ path, busy: true });
     const result = await deleteContextItem(data.id, path, nextGeneration());
     setDeleting(null);
-    if (result.kind !== "ok") return setActionNote(result.kind === "not_ready" ? "Not ready yet: deleting files isn't in this build." : failureCopy(result.code));
+    if (result.kind !== "ok") return setActionNote(result.kind === "not_ready" ? "Not ready yet: deleting files isn't in this build." : failureCopy(result));
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setActionNote(state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again.");
+    if (state.kind !== "applied") return setActionNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the folder before trying again.");
     data.notify(`${path.slice(path.lastIndexOf("/") + 1)} deleted.`);
     setSelected(null);
     data.navigate(`/projects/${encodeURIComponent(data.id)}/context`);
@@ -191,9 +191,9 @@ export function ContextTab({ data }: { data: ProjectData }) {
   async function addDocuments(paths: string[]) {
     setAdding({ path: "", busy: true, error: "" });
     const result = await addProjectDocuments(data.id, paths, nextGeneration());
-    if (result.kind !== "ok") return setAdding({ path: retryPath(paths), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result.code) });
+    if (result.kind !== "ok") return setAdding({ path: retryPath(paths), busy: false, error: result.kind === "not_ready" ? "Not ready yet: adding documents isn't in this build." : failureCopy(result) });
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setAdding({ path: retryPath(paths), busy: false, error: state.kind === "rejected" ? failureCopy(state.code) : "We couldn't confirm your last change. Check the folder before trying again." });
+    if (state.kind !== "applied") return setAdding({ path: retryPath(paths), busy: false, error: state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the folder before trying again." });
     setAdding(null);
     data.notify(paths.length === 1 ? "Document added." : `${paths.length} documents added.`);
     data.reload();
@@ -202,7 +202,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   async function chooseDocuments() {
     const picked = await pickDocuments();
     if (picked.kind === "ok") { if (picked.value.length) void addDocuments(picked.value); return; }
-    setAdding({ path: "", busy: false, error: picked.kind === "not_ready" ? "" : failureCopy(picked.code) });
+    setAdding({ path: "", busy: false, error: picked.kind === "not_ready" ? "" : failureCopy(picked) });
   }
 
   const select = (path: string) => {
@@ -214,7 +214,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
     <nav className="pj-tree" aria-label="Project folder">
       {data.context === undefined && <p className="pj-muted" role="status">Loading the project folder...</p>}
       {data.context?.kind === "not_ready" && <NotReady what="the project folder view isn't in this build." />}
-      {data.context?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.context.code)}</p>}
+      {data.context?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.context)}</p>}
       {context && <>
         <div className="pj-stack-s pj-tree-root"><span className="pj-mono" title={context.folder}>{displayText(folderLabel(context.folder))}</span>
           <div className="pj-row"><Button size="small" icon="folder-open" onClick={() => void fileAction("desktop_reveal_project_folder", "Show in Finder")}>Show in Finder</Button>
@@ -290,7 +290,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
         </form>}
         {file === undefined && <p className="pj-muted" role="status">Opening {displayText(item.path)}...</p>}
         {file?.kind === "not_ready" && <NotReady what="reading project files isn't in this build." />}
-        {file?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(file.code)}</p>}
+        {file?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(file)}</p>}
         {file?.kind === "ok" && text === null && <p className="pj-secondary">{formatBytes(item.bytes)}. A preview isn't shown for this kind of file. Use Open in default app.</p>}
         <div ref={reading} onMouseUp={readSelection} onKeyUp={readSelection}>
         {text !== null && markdown && <article className="pj-md">

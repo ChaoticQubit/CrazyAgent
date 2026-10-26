@@ -58,13 +58,15 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("home_move_worktrees"), "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it.");
   assert.equal(api.intakeCopy("home_move_project"), "This folder holds or sits inside a project you already added. Use it where it is or copy it.");
   assert.equal(api.intakeCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
-  assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again.");
+  assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again. (code: made_up)");
+  assert.equal(api.intakeCopy({ code: "made_up", cause: "engine_detail" }), "Something went wrong. Try again. (code: engine_detail)");
+  assert.equal(api.intakeCopy({ code: "setup_busy", cause: "engine_detail" }), "Setup is already running. Wait for it to finish. (code: engine_detail)");
 });
 
 test("setup takes at most 64 pack entries and its failures read as plain sentences", async () => {
   assert.throws(() => api.runSetup(Array.from({ length: 65 }, (_, index) => `entry-${index}`)), /64/);
   assert.equal((await api.runSetup(["superpowers"])).code, "engine_unreachable");
-  assert.equal(api.intakeCopy("pack_required"), "Something went wrong. Try again.");
+  assert.equal(api.intakeCopy("pack_required"), "Something went wrong. Try again. (code: pack_required)");
   assert.equal(api.intakeCopy("setup_busy"), "Setup is already running. Wait for it to finish.");
   assert.equal(api.intakeCopy("owner_outcome_unknown_reconcile_same_identity"), "CrazyAgent didn't answer in time. Try again.");
 });
@@ -79,11 +81,11 @@ test("every refusal code the native bridge can return has a plain sentence", () 
   }
   for (const match of bridge.matchAll(/failure\("([a-z_]+)"\)/g)) codes.add(match[1]);
   assert.ok(codes.size > 100);
-  for (const code of codes) assert.notEqual(api.intakeCopy(code), "Something went wrong. Try again.", code);
+  for (const code of codes) assert.doesNotMatch(api.intakeCopy(code), /\(code: /, code);
 });
 
 test("an intake code named like an object built-in gets the plain fallback sentence", () => {
   for (const code of ["constructor", "__proto__", "toString"]) {
-    assert.equal(api.intakeCopy(code), api.intakeCopy("some_unknown_code"), code);
+    assert.equal(api.intakeCopy(code), `Something went wrong. Try again. (code: ${/^[a-z0-9_]+$/.test(code) ? code : "unknown"})`, code);
   }
 });
