@@ -1,4 +1,5 @@
 use crate::plan::{Access, READ_EXECUTE};
+use std::ops::Range;
 
 /// The SID `S-1-15-2-1` (ALL APPLICATION PACKAGES) as bytes. System folders such as
 /// `C:\Windows` and `C:\Program Files` grant it read and run, so every container reads them.
@@ -27,6 +28,22 @@ pub struct Entry<'a> {
 /// size against the bytes present; entries of other types are skipped. Input: the access list
 /// bytes. Output: the entries, or the plain reason the bytes are not a well-formed list.
 pub fn entries(acl: &[u8]) -> Result<Vec<Entry<'_>>, &'static str> {
+    Ok(spans(acl)?
+        .into_iter()
+        .filter_map(|span| span.entry)
+        .collect())
+}
+
+/// The bytes one entry takes in an access list, and the allow or deny entry they hold (None
+/// for other types).
+struct Span<'a> {
+    range: Range<usize>,
+    entry: Option<Entry<'a>>,
+}
+
+/// Splits an access list into its entries' spans, checking every size against the bytes
+/// present.
+fn spans(acl: &[u8]) -> Result<Vec<Span<'_>>, &'static str> {
     if acl.len() < ACL_HEADER_BYTES {
         return Err("the access list is shorter than its header");
     }
@@ -47,20 +64,80 @@ pub fn entries(acl: &[u8]) -> Result<Vec<Entry<'_>>, &'static str> {
         if length < ACE_HEADER_BYTES || at + length > size {
             return Err("an access entry has a bad size");
         }
-        if matches!(kind, ACCESS_ALLOWED | ACCESS_DENIED) {
+        let entry = if matches!(kind, ACCESS_ALLOWED | ACCESS_DENIED) {
             let mask = u32::from_le_bytes([acl[at + 4], acl[at + 5], acl[at + 6], acl[at + 7]]);
             let sid = sid_at(&acl[at + ACE_HEADER_BYTES..at + length])?;
-            found.push(Entry {
+            Some(Entry {
                 allows: kind == ACCESS_ALLOWED,
                 flags,
                 mask,
                 sid,
-            });
-        }
+            })
+        } else {
+            None
+        };
+        found.push(Span {
+            range: at..at + length,
+            entry,
+        });
         at += length;
     }
     assert!(at <= size);
     Ok(found)
+}
+
+/// The access list without the entries the boundary puts there for `sid`: every allow or
+/// deny entry of that SID that is not inherited goes, inherit-only ones included, and every
+/// other entry is kept byte for byte and in order, so the list stays in Windows' canonical
+/// order. Unused room at the end is dropped. Inputs: the access list bytes and the SID.
+/// Output: the new list, None when it holds no such entry, or the reason it is malformed.
+pub fn without(acl: &[u8], sid: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
+    let spans = spans(acl)?;
+    let total = spans.len();
+    let kept: Vec<Range<usize>> = spans
+        .into_iter()
+        .filter(|span| {
+            !span
+                .entry
+                .is_some_and(|entry| entry.sid == sid && entry.flags & INHERITED == 0)
+        })
+        .map(|span| span.range)
+        .collect();
+    if kept.len() == total {
+        return Ok(None);
+    }
+    let body: Vec<u8> = kept
+        .iter()
+        .flat_map(|range| &acl[range.clone()])
+        .copied()
+        .collect();
+    let size = u16::try_from(ACL_HEADER_BYTES + body.len()).expect("a list only shrinks");
+    let count = u16::try_from(kept.len()).expect("a list only shrinks");
+    let mut list = Vec::with_capacity(usize::from(size));
+    list.extend_from_slice(&acl[..2]);
+    list.extend(size.to_le_bytes());
+    list.extend(count.to_le_bytes());
+    list.extend_from_slice(&acl[6..ACL_HEADER_BYTES]);
+    list.extend(body);
+    assert_eq!(list.len(), usize::from(size));
+    assert!(list.len() < acl.len());
+    Ok(Some(list))
+}
+
+/// Whether the list gives `sid` more than `mask` through an allow entry of its own, explicit
+/// or inherit-only, as when an earlier profile granted modify where this one grants read and
+/// run. Inherited entries follow the folder above and are not counted. Inputs: the access
+/// list bytes, the SID and the planned rights. Output: true when it does; true for a
+/// malformed list, so it is never taken as settled.
+pub fn exceeds(acl: &[u8], sid: &[u8], mask: u32) -> bool {
+    entries(acl).map_or(true, |found| {
+        found.iter().any(|entry| {
+            entry.allows
+                && entry.sid == sid
+                && entry.flags & INHERITED == 0
+                && entry.mask & !mask != 0
+        })
+    })
 }
 
 fn sid_at(bytes: &[u8]) -> Result<&[u8], &'static str> {
@@ -218,6 +295,82 @@ mod tests {
             Access::KeepEntries,
             true
         ));
+    }
+
+    #[test]
+    fn without_drops_only_the_containers_own_explicit_entries() {
+        let object_ace = {
+            let mut bytes = vec![5, 0];
+            bytes.extend(16u16.to_le_bytes());
+            bytes.extend([0; 12]);
+            bytes
+        };
+        let kept = [
+            object_ace.clone(),
+            ace(ACCESS_ALLOWED, 0x13, READ_EXECUTE, &CONTAINER),
+            ace(
+                ACCESS_ALLOWED,
+                0x03,
+                READ_EXECUTE,
+                &ALL_APPLICATION_PACKAGES,
+            ),
+        ];
+        let list = acl(&[
+            ace(ACCESS_DENIED, 0x00, KEEP_ENTRIES, &CONTAINER),
+            ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER),
+            kept[0].clone(),
+            kept[1].clone(),
+            kept[2].clone(),
+            ace(ACCESS_ALLOWED, 0x0b, MODIFY, &CONTAINER),
+        ]);
+        let stripped = without(&list, &CONTAINER).unwrap().unwrap();
+        assert_eq!(
+            stripped,
+            acl(&kept),
+            "explicit and inherit-only entries of the container go; inherited ones and every \
+             other SID's stay byte for byte"
+        );
+        assert_eq!(without(&stripped, &CONTAINER).unwrap(), None);
+        assert_eq!(
+            without(&list, &[1, 1, 0, 0, 0, 0, 0, 5, 7, 0, 0, 0]),
+            Ok(None)
+        );
+        let mut slack = list.clone();
+        slack.extend([0; 8]);
+        let size = u16::try_from(slack.len()).unwrap();
+        slack[2..4].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(
+            without(&slack, &CONTAINER).unwrap().unwrap(),
+            acl(&kept),
+            "unused room at the end of a list is dropped"
+        );
+        assert!(without(&list[..7], &CONTAINER).is_err());
+        let mut count = list.clone();
+        count[4..6].copy_from_slice(&7u16.to_le_bytes());
+        assert!(without(&count, &CONTAINER).is_err());
+        let only = acl(&[ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER)]);
+        assert_eq!(without(&only, &CONTAINER).unwrap(), Some(acl(&[])));
+    }
+
+    #[test]
+    fn exceeds_finds_an_explicit_grant_beyond_the_planned_rights() {
+        let modify = acl(&[ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER)]);
+        assert!(exceeds(&modify, &CONTAINER, READ_EXECUTE));
+        assert!(!exceeds(&modify, &CONTAINER, MODIFY));
+        assert!(!exceeds(&modify, &ALL_APPLICATION_PACKAGES, READ_EXECUTE));
+        let inherited = acl(&[ace(ACCESS_ALLOWED, 0x13, MODIFY, &CONTAINER)]);
+        assert!(
+            !exceeds(&inherited, &CONTAINER, READ_EXECUTE),
+            "an inherited grant follows the folder above"
+        );
+        let inherit_only = acl(&[ace(ACCESS_ALLOWED, 0x0b, MODIFY, &CONTAINER)]);
+        assert!(exceeds(&inherit_only, &CONTAINER, READ_EXECUTE));
+        let denied = acl(&[ace(ACCESS_DENIED, 0x03, DENY_WRITE, &CONTAINER)]);
+        assert!(!exceeds(&denied, &CONTAINER, READ_EXECUTE));
+        assert!(
+            exceeds(&modify[..7], &CONTAINER, MODIFY),
+            "a list that cannot be read is never taken as settled"
+        );
     }
 
     #[test]
