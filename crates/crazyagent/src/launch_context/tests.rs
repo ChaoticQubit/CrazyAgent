@@ -424,7 +424,11 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
     assert!(text.contains("Your tools are on in this conversation"));
     assert!(text.contains("`delegate` tool of the `crazyagent-team` MCP server"));
     assert!(text.contains("Start sub-agents only with this tool"));
-    assert!(text.contains("your harness's own sub-agent tools are disabled"));
+    assert!(text.contains(
+        "Never use your harness's own sub-agent tools, such as Codex's `spawn_agent`, `followup_task`, `send_message` or `wait_agent`"
+    ));
+    assert!(text.contains("CrazyAgent stops any agent they start"));
+    assert!(!text.contains("sub-agent tools are disabled"));
     assert!(text.contains("appear in the project's Agents tab and Team view"));
     assert!(text.contains("a short note on how it went comes back to this conversation"));
     assert!(!text.contains("not in this conversation"));

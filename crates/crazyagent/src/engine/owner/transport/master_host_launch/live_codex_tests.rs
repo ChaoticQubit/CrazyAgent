@@ -228,8 +228,10 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
 
 /// Reproduces the owner's failed turn (LB-48): a real tools-on Codex master with the startup
 /// tools section of a project whose team plan has ten Codex sub-agents with tools on is asked
-/// "Hey can you start 2 sub agents". The turn must complete without a protocol fault; on a
-/// fault the test prints the host's stream diagnostic. With `CRAZYAGENT_LIVE_REPOSITORY` set
+/// "Hey can you start 2 sub agents". The turn must complete without a protocol fault and hand
+/// one or two tasks to the engine's delegate tool, even when the model first starts Codex's
+/// own sub-agent, which the host interrupts; it prints how many it interrupted and, on a fault,
+/// the host's stream diagnostic. With `CRAZYAGENT_LIVE_REPOSITORY` set
 /// the master works in a git worktree of a shallow clone of that repository, as an owner's
 /// master works in a worktree of the project. Bounded by a 240 s wall time.
 #[tokio::test]
@@ -398,13 +400,17 @@ async fn a_real_codex_master_asked_to_start_two_sub_agents_completes_its_turn() 
     };
     master.close().await.unwrap();
     let delegations = crate::team::tool::take(&record);
+    let native = steps
+        .iter()
+        .filter(|step| *step == "native_sub_agent")
+        .count();
     println!(
-        "real codex sub-agents master turn: outcome={outcome:?} errors={errors:?} steps={steps:?} delegations={delegations:?} reply={:?}",
+        "real codex sub-agents master turn: outcome={outcome:?} native_sub_agents={native} errors={errors:?} steps={steps:?} delegations={delegations:?} reply={:?}",
         reply.text
     );
     assert_eq!(errors, Vec::<String>::new());
     assert_eq!(outcome, TurnOutcome::Success);
-    assert!(delegations.len() <= 2, "{delegations:?}");
+    assert!((1..=2).contains(&delegations.len()), "{delegations:?}");
     drop(credential);
     drop(folder);
 }

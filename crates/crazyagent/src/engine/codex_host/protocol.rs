@@ -97,6 +97,13 @@ impl CodexHostProtocol {
                         .outbound
                         .push(self.protocol.deny_request(id).map_err(protocol_error)?);
                 }
+                Event::NativeSubAgentStarted { thread_id, turn_id } => {
+                    batch.outbound.push(
+                        self.protocol
+                            .interrupt_child(thread_id, turn_id)
+                            .map_err(protocol_error)?,
+                    );
+                }
                 _ => {}
             }
             let ended = matches!(

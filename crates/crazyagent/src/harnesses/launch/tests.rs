@@ -392,3 +392,90 @@ fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_nex
     );
     session.stop();
 }
+
+fn codex_driver_in_a_turn() -> Driver {
+    let working_dir = std::env::temp_dir();
+    let cwd = working_dir.to_str().unwrap().to_owned();
+    let request = LaunchRequest {
+        harness: "codex".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir,
+        account: AccountBinding::Url {
+            home: std::env::temp_dir().join("launch-test-home"),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: None,
+        },
+        model: None,
+        tools: false,
+        sandbox_profile: None,
+        limits: LaunchLimits::default(),
+    };
+    let (mut driver, startup) = Driver::new(&request).unwrap();
+    assert_eq!(startup.len(), 1);
+    assert!(driver.send("Reply with OK.").unwrap().is_none());
+    let (_, writes) = driver
+        .receive(&line(json!({"id":1,"result":{
+            "userAgent":"unit-agent", "codexHome":"/unit/codex",
+            "platformFamily":"unix", "platformOs":"macos"
+        }})))
+        .unwrap();
+    assert_eq!(writes.len(), 2);
+    let (events, writes) = driver
+        .receive(&line(json!({"id":2,"result":{
+            "thread":{
+                "id":"own-thread", "cliVersion":"0.164.0", "createdAt":1, "updatedAt":1,
+                "cwd":cwd, "ephemeral":false, "modelProvider":"unit-provider", "preview":"",
+                "projectId":null, "sessionId":"own-session", "source":"appServer",
+                "status":{"type":"idle"}, "turns":[]
+            },
+            "cwd":cwd, "model":"unit-model", "modelProvider":"unit-provider",
+            "approvalPolicy":"on-request", "approvalsReviewer":"user",
+            "sandbox":{"type":"readOnly","networkAccess":false}
+        }})))
+        .unwrap();
+    assert!(matches!(events.as_slice(), [LaunchEvent::Ready { .. }]));
+    assert_eq!(writes.len(), 1);
+    driver
+        .receive(&line(json!({"id":3,"result":{"turn":{
+            "id":"own-turn", "rootTurnId":"own-turn", "items":[], "status":"inProgress"
+        }}})))
+        .unwrap();
+    driver
+}
+
+#[test]
+fn a_team_codex_agent_interrupts_a_codex_native_sub_agent_and_finishes_its_turn() {
+    let mut driver = codex_driver_in_a_turn();
+    let (events, writes) = driver
+        .receive(&line(json!({"method":"turn/started","params":{
+            "threadId":"child-thread",
+            "turn":{"id":"child-turn","rootTurnId":"own-turn","items":[],"status":"inProgress"}
+        }})))
+        .unwrap();
+    assert!(events.is_empty());
+    assert_eq!(writes.len(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&writes[0]).unwrap(),
+        json!({"id":4,"method":"turn/interrupt","params":{
+            "threadId":"child-thread","turnId":"child-turn"
+        }})
+    );
+    let (events, writes) = driver
+        .receive(&line(json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"child-thread", "turnId":"child-turn", "itemId":"child-item",
+            "delta":"child text"
+        }})))
+        .unwrap();
+    assert!(events.is_empty() && writes.is_empty());
+    let (events, _) = driver
+        .receive(&line(json!({"method":"turn/completed","params":{
+            "threadId":"own-thread",
+            "turn":{"id":"own-turn","items":[],"status":"completed"}
+        }})))
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnFinished { success: true }))
+    );
+}

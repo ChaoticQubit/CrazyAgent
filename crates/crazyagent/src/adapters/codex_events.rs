@@ -199,6 +199,10 @@ impl CodexEventBridge {
                     subtype: Some(method),
                 }
             }
+            Event::NativeSubAgentStarted { .. } => EventKind::Unsupported {
+                message_type: "notification".into(),
+                subtype: Some("native_sub_agent".into()),
+            },
         };
         serde_json::to_writer(
             &mut OutputLimit {

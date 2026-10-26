@@ -581,6 +581,44 @@ fn codex_host_declines_requests_read_together_with_their_turn_end() {
 }
 
 #[test]
+fn codex_host_interrupts_a_codex_native_sub_agent_and_keeps_the_turn() {
+    let (mut host, request) = active();
+    let mut input = wire(json!({"method":"turn/started","params":{
+        "threadId":"unit-child-thread",
+        "turn":{"id":"unit-child-turn","rootTurnId":"unit-native-turn","items":[],"status":"inProgress"}
+    }}));
+    input.extend(wire(json!({"method":"item/agentMessage/delta","params":{
+        "threadId":"unit-child-thread", "turnId":"unit-child-turn",
+        "itemId":"unit-child-item", "delta":"child text"
+    }})));
+    let batch = host.receive(&input).unwrap();
+    assert_eq!(batch.events.len(), 1);
+    assert!(matches!(
+        &batch.events[0].kind,
+        EventKind::Unsupported { subtype: Some(subtype), .. } if subtype == "native_sub_agent"
+    ));
+    assert_eq!(batch.outbound.len(), 1);
+    assert_eq!(
+        message(&batch.outbound[0]),
+        json!({"id":4,"method":"turn/interrupt","params":{
+            "threadId":"unit-child-thread","turnId":"unit-child-turn"
+        }})
+    );
+    assert!(reply(&mut host, 4, json!({})).events.is_empty());
+    assert_eq!(host.state(), State::Active);
+    let finished = host.receive(&completed("completed")).unwrap();
+    assert_eq!(finished.events.len(), 1);
+    assert!(matches!(
+        &finished.events[0].kind,
+        EventKind::TurnFinished {
+            outcome: TurnOutcome::Success,
+            ..
+        }
+    ));
+    assert_eq!(finished.events[0].request_id, Some(request));
+}
+
+#[test]
 fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_success() {
     let (mut host, _) = active();
     assert!(
@@ -616,13 +654,13 @@ fn codex_host_names_the_frame_it_refused_for_the_stream_diagnostic() {
     let (mut host, _) = active();
     assert!(
         host.receive(&wire(json!({"method":"thread/started","params":{
-            "thread":{"id":"unit child","parentThreadId":"unit-native-thread"}
+            "thread":{"id":"unit other","parentThreadId":"unit-other-thread"}
         }})))
         .is_err()
     );
     assert_eq!(
         host.refused(),
-        Some("thread/started id=- thread=? parent=unit-native-thread turn=-")
+        Some("thread/started id=- thread=? parent=unit-other-thread turn=-")
     );
     let (mut host, _) = active();
     assert!(host.receive(&wire(json!({"id":99,"result":{}}))).is_err());

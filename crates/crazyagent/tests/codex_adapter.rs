@@ -618,6 +618,156 @@ fn requests_read_together_with_their_turn_end_are_still_declined_by_their_own_pr
     assert_eq!(request(&protocol.start_turn("next").unwrap())["id"], 4);
 }
 
+fn child_turn(thread: &str, turn: &str, root: &str, status: &str) -> Vec<u8> {
+    let method = if status == "inProgress" {
+        "turn/started"
+    } else {
+        "turn/completed"
+    };
+    wire(json!({"method":method,"params":{"threadId":thread,"turn":{
+        "id":turn, "rootTurnId":root, "items":[], "itemsView":"notLoaded", "status":status,
+        "error":null, "startedAt":1, "completedAt":null, "durationMs":null
+    }}}))
+}
+
+#[test]
+fn a_codex_native_sub_agent_is_interrupted_and_its_frames_never_reach_the_turn() {
+    let mut protocol = active();
+    let mut input = wire(json!({"method":"item/started","params":{
+        "item":{"type":"subAgentActivity","model":"unit-model","reasoningEffort":"low",
+            "id":"call-unit","kind":"started","agentThreadId":"child-unit","agentPath":"/root/agent_1"},
+        "threadId":"thread-unit", "turnId":"turn-unit", "startedAtMs":1
+    }}));
+    input.extend(child_turn(
+        "child-unit",
+        "child-turn",
+        "turn-unit",
+        "inProgress",
+    ));
+    input.extend(wire(json!({"method":"item/agentMessage/delta","params":{
+        "threadId":"child-unit", "turnId":"child-turn", "itemId":"child-item", "delta":"child text"
+    }})));
+    input.extend(wire(json!({"method":"error","params":{
+        "error":{"message":"child failure"}, "willRetry":false,
+        "threadId":"child-unit", "turnId":"child-turn"
+    }})));
+    assert_eq!(
+        protocol.receive(&input).unwrap(),
+        vec![
+            Event::UnsupportedNotification {
+                method: "item/started".into()
+            },
+            Event::NativeSubAgentStarted {
+                thread_id: "child-unit".into(),
+                turn_id: "child-turn".into()
+            }
+        ]
+    );
+    assert_eq!(protocol.state(), State::Active);
+    assert_eq!(
+        request(
+            &protocol
+                .interrupt_child("child-unit", "child-turn")
+                .unwrap()
+        ),
+        json!({"id":4,"method":"turn/interrupt","params":{"threadId":"child-unit","turnId":"child-turn"}})
+    );
+    assert_eq!(
+        protocol.interrupt_child("other-unit", "other-turn"),
+        Err(ProtocolError::StaleMessage)
+    );
+    assert!(reply(&mut protocol, 4, json!({})).is_empty());
+    assert!(
+        protocol
+            .receive(&child_turn(
+                "child-unit",
+                "child-turn",
+                "turn-unit",
+                "interrupted"
+            ))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        protocol
+            .receive(&child_turn(
+                "grandchild-unit",
+                "grandchild-turn",
+                "turn-unit",
+                "inProgress"
+            ))
+            .unwrap(),
+        vec![Event::NativeSubAgentStarted {
+            thread_id: "grandchild-unit".into(),
+            turn_id: "grandchild-turn".into()
+        }]
+    );
+    assert_eq!(
+        request(
+            &protocol
+                .interrupt_child("grandchild-unit", "grandchild-turn")
+                .unwrap()
+        )["id"],
+        5
+    );
+    assert_eq!(
+        protocol
+            .receive(&wire(
+                json!({"id":5,"error":{"code":-32600,"message":"no active turn"}})
+            ))
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        protocol
+            .receive(&wire(json!({"method":"item/agentMessage/delta","params":{
+                "threadId":"thread-unit", "turnId":"turn-unit", "itemId":"own-item", "delta":"own text"
+            }})))
+            .unwrap(),
+        vec![Event::AgentMessageDelta {
+            turn_id: "turn-unit".into(),
+            item_id: "own-item".into(),
+            delta: "own text".into()
+        }]
+    );
+    assert_eq!(
+        protocol
+            .receive(&notification("turn/completed", "turn-unit", "completed"))
+            .unwrap(),
+        vec![Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }]
+    );
+    assert!(
+        protocol
+            .receive(&child_turn(
+                "child-unit",
+                "child-turn",
+                "turn-unit",
+                "completed"
+            ))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(protocol.state(), State::Idle);
+}
+
+#[test]
+fn a_foreign_turn_that_did_not_start_from_this_turn_is_still_refused() {
+    let mut protocol = active();
+    assert_eq!(
+        protocol.receive(&child_turn(
+            "other-unit",
+            "other-turn",
+            "other-root",
+            "inProgress"
+        )),
+        Err(ProtocolError::StaleMessage)
+    );
+    assert_eq!(protocol.state(), State::Failed);
+}
+
 #[test]
 fn stale_mismatched_and_malformed_turn_events_are_rejected() {
     for value in [

@@ -795,7 +795,11 @@ impl Driver {
                 let decoded = protocol
                     .receive(&framed)
                     .map_err(|_| failure("launch_protocol_failed"))?;
-                if started {
+                if started
+                    && !decoded
+                        .iter()
+                        .any(|event| matches!(event, CodexEvent::NativeSubAgentStarted { .. }))
+                {
                     *server_turn = true;
                 }
                 for event in decoded {
@@ -837,6 +841,13 @@ impl Driver {
                             events.push(LaunchEvent::TurnFinished {
                                 success: status == TurnStatus::Completed,
                             });
+                        }
+                        CodexEvent::NativeSubAgentStarted { thread_id, turn_id } => {
+                            writes.push(
+                                protocol
+                                    .interrupt_child(&thread_id, &turn_id)
+                                    .map_err(|_| failure("launch_protocol_failed"))?,
+                            );
                         }
                         CodexEvent::ApprovalRequired { id, .. }
                         | CodexEvent::UnsupportedRequest { id, .. } => {
