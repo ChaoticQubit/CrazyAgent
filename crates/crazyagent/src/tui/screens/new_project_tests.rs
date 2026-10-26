@@ -839,6 +839,23 @@ fn create_jumps_to_the_first_step_that_needs_a_fix() {
 }
 
 #[test]
+fn a_busy_engine_refusal_says_why_and_keeps_the_draft_on_review() {
+    let mut wizard = wizard();
+    wizard.go(Step::Review);
+    wizard.failed("owner_busy");
+    assert_eq!(
+        wizard.phase,
+        Phase::Failed {
+            title: "CrazyAgent is busy with other windows.".into(),
+            detail:
+                "Your draft is kept. Wait a moment, then press Enter and create the project again."
+                    .into(),
+            step: Step::Review
+        }
+    );
+}
+
+#[test]
 fn engine_failures_map_to_plain_copy_and_the_step_that_fixes_them() {
     let mut wizard = wizard();
     wizard.go(Step::Review);
