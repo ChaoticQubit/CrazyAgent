@@ -130,11 +130,11 @@ fn rejected(reply: OwnerReply) {
     }
 }
 
-fn queued(turn: &MasterTurnView, session: &MasterSessionView, id: &str) {
+fn blocked(turn: &MasterTurnView, session: &MasterSessionView, id: &str, reason: MasterReason) {
     assert_eq!(turn.id, RequestId::new(id).unwrap());
     assert_eq!(turn.session_id, session.session_id);
-    assert_eq!(turn.phase, MasterTurnPhase::Queued);
-    assert_eq!(turn.reason, None);
+    assert_eq!(turn.phase, MasterTurnPhase::Blocked);
+    assert_eq!(turn.reason, Some(reason));
     assert_eq!(turn.attempt, None);
     assert_eq!(turn.runtime, None);
     assert_eq!(turn.reply, None);
@@ -355,6 +355,22 @@ impl Fixture {
         panic!("actual master dispatch left turn {} queued", id.as_str());
     }
 
+    async fn quiet(&self, owner: &OwnerClient, name: &str) {
+        for _ in 0..1000 {
+            if self
+                .session(owner, name)
+                .await
+                .unwrap()
+                .current_turn
+                .is_none()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("actual master dispatch left project {name} with an outstanding turn");
+    }
+
     async fn history(&self, owner: &OwnerClient, name: &str) -> ConversationPage {
         let state = self
             .read(
@@ -403,19 +419,6 @@ impl Fixture {
             },
         )
         .await
-    }
-
-    async fn cancel(&self, owner: &OwnerClient, id: &str, session: &MasterSessionView, turn: &str) {
-        self.apply(
-            owner,
-            id,
-            MasterOwnerAction::Cancel {
-                project_id: session.project_id.clone(),
-                session_id: session.session_id.clone(),
-                turn_id: RequestId::new(turn).unwrap(),
-            },
-        )
-        .await;
     }
 
     async fn close(&self, owner: &OwnerClient, id: &str, session: &MasterSessionView) {
@@ -566,10 +569,9 @@ async fn master_open_and_submit_precede_development_plan_with_real_applied_input
             "Help me clarify the project requirements.",
         )
         .await;
-    let page = f.page(&reader, &session).await;
-    assert_eq!(page.turns.len(), 1);
-    let turn = &page.turns[0];
-    queued(turn, &session, "requirements");
+    let turn = &f.settled(&reader, &session, "requirements").await;
+    assert_eq!(f.page(&reader, &session).await.turns.len(), 1);
+    blocked(turn, &session, "requirements", MasterReason::Unknown);
     assert_eq!(turn.ordinal, 1);
     let history = f.history(&reader, "p").await;
     assert_eq!(history.entries.len(), 1);
@@ -586,10 +588,7 @@ async fn master_open_and_submit_precede_development_plan_with_real_applied_input
         sent.provenance.event_cursor,
         Some(turn.input_cursor.clone())
     );
-    assert_eq!(
-        f.session(&reader, "p").await.unwrap().current_turn,
-        Some(turn.id.clone())
-    );
+    assert_eq!(f.session(&reader, "p").await.unwrap().current_turn, None);
     f.stop().await;
 }
 
@@ -647,10 +646,11 @@ async fn master_configured_allowances_do_not_consume_the_single_active_capacity_
             "Owner-authorized planning input.",
         )
         .await;
-        queued(
-            &f.page(&owner, &session).await.turns[0],
+        blocked(
+            &f.settled(&owner, &session, &format!("turn-{name}")).await,
             &session,
             &format!("turn-{name}"),
+            MasterReason::Unknown,
         );
     }
     let config = resolve_config(
@@ -693,6 +693,7 @@ async fn master_open_and_submit_exact_replay_preserve_one_session_input_and_turn
         },
     );
     let first = applied(owner.request(submit.clone()).await.unwrap());
+    f.settled(&owner, &session, "turn").await;
     let before = counts(f.root.path());
     let replay = applied(owner.request(submit).await.unwrap());
     assert!(replay.historical_replay);
@@ -721,6 +722,7 @@ async fn master_conflicting_operation_id_cannot_replace_the_committed_owner_inpu
         },
     );
     applied(owner.request(exact.clone()).await.unwrap());
+    f.settled(&owner, &session, "turn").await;
     let mut conflicting = exact;
     let OwnerOperation::Apply {
         mutation:
@@ -810,14 +812,20 @@ async fn master_one_outstanding_turn_survives_competing_owner_requests() {
     let page = f.page(&tui, &session).await;
     assert_eq!(page.turns.len(), 1);
     assert_eq!(f.history(&desktop, "p").await.entries.len(), 1);
-    let second = mutation(
-        "second-turn",
-        f.revision(&tui).await,
-        action("Still outstanding."),
+    let winner = page.turns[0].id.clone();
+    blocked(
+        &f.settled(&tui, &session, winner.as_str()).await,
+        &session,
+        winner.as_str(),
+        MasterReason::Unknown,
     );
-    rejected(tui.request(second).await.unwrap());
-    assert_eq!(f.page(&tui, &session).await.turns, page.turns);
-    assert_eq!(f.history(&desktop, "p").await.entries.len(), 1);
+    f.submit(&tui, "second-turn", &session, "Retry after the block.")
+        .await;
+    let retried = f.settled(&tui, &session, "second-turn").await;
+    blocked(&retried, &session, "second-turn", MasterReason::Unknown);
+    assert_eq!(retried.ordinal, 2);
+    assert_eq!(f.page(&tui, &session).await.turns.len(), 2);
+    assert_eq!(f.history(&desktop, "p").await.entries.len(), 2);
     f.stop().await;
 }
 
@@ -850,25 +858,41 @@ async fn master_only_one_nonclosed_session_exists_per_project() {
 }
 
 #[tokio::test]
-async fn master_cancel_before_delivery_is_durable_and_allows_a_new_planning_turn() {
+async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
     let mut f = Fixture::start(CATALOG).await;
     let owner = f.owner(OwnerClientKind::Tui).await;
     f.create(&owner, "p").await;
     let (_, session) = f
         .open(&owner, "open", "p", selection(MasterBackend::Rcli))
         .await;
-    f.submit(&owner, "turn", &session, "Cancel this planning input.")
-        .await;
-    f.cancel(&owner, "cancel", &session, "turn").await;
-    let cancelled = f.page(&owner, &session).await.turns.remove(0);
-    assert_eq!(cancelled.phase, MasterTurnPhase::Cancelled);
-    assert_eq!(cancelled.attempt, None);
-    assert_eq!(cancelled.runtime, None);
-    assert_eq!(cancelled.reply, None);
+    f.submit(
+        &owner,
+        "turn",
+        &session,
+        "Plan without a configured profile.",
+    )
+    .await;
+    let ended = f.settled(&owner, &session, "turn").await;
+    blocked(&ended, &session, "turn", MasterReason::Unknown);
+    rejected(
+        owner
+            .request(mutation(
+                "cancel",
+                f.revision(&owner).await,
+                MasterOwnerAction::Cancel {
+                    project_id: project("p"),
+                    session_id: session.session_id.clone(),
+                    turn_id: ended.id.clone(),
+                },
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(f.page(&owner, &session).await.turns, vec![ended.clone()]);
     assert_eq!(f.session(&owner, "p").await.unwrap().current_turn, None);
     f.restart().await;
     let reader = f.owner(OwnerClientKind::Desktop).await;
-    assert_eq!(f.page(&reader, &session).await.turns, vec![cancelled]);
+    assert_eq!(f.page(&reader, &session).await.turns, vec![ended]);
     f.submit(
         &reader,
         "next-turn",
@@ -891,7 +915,7 @@ async fn master_cancel_before_delivery_is_durable_and_allows_a_new_planning_turn
 }
 
 #[tokio::test]
-async fn master_close_before_delivery_cancels_queue_without_fabricating_a_reply() {
+async fn master_close_keeps_a_blocked_turn_and_its_reason_without_fabricating_a_reply() {
     let f = Fixture::start(CATALOG).await;
     let owner = f.owner(OwnerClientKind::Desktop).await;
     f.create(&owner, "p").await;
@@ -902,18 +926,16 @@ async fn master_close_before_delivery_cancels_queue_without_fabricating_a_reply(
         &owner,
         "turn",
         &session,
-        "Close before genuine preparation.",
+        "Close after the engine says why it cannot start.",
     )
     .await;
+    let ended = f.settled(&owner, &session, "turn").await;
+    blocked(&ended, &session, "turn", MasterReason::Unknown);
     f.close(&owner, "close", &session).await;
     let closed = f.session(&owner, "p").await.unwrap();
     assert_eq!(closed.phase, MasterSessionPhase::Closed);
     assert_eq!(closed.current_turn, None);
-    let turn = f.page(&owner, &session).await.turns.remove(0);
-    assert_eq!(turn.phase, MasterTurnPhase::Cancelled);
-    assert_eq!(turn.attempt, None);
-    assert_eq!(turn.runtime, None);
-    assert_eq!(turn.reply, None);
+    assert_eq!(f.page(&owner, &session).await.turns, vec![ended]);
     rejected(
         owner
             .request(mutation(
@@ -933,7 +955,7 @@ async fn master_close_before_delivery_cancels_queue_without_fabricating_a_reply(
 }
 
 #[tokio::test]
-async fn master_restart_retains_queued_input_and_reconciles_the_original_receipt() {
+async fn master_restart_retains_owner_input_and_reconciles_the_original_receipt() {
     let mut f = Fixture::start(CATALOG).await;
     let owner = f.owner(OwnerClientKind::Tui).await;
     f.create(&owner, "p").await;
@@ -950,6 +972,7 @@ async fn master_restart_retains_queued_input_and_reconciles_the_original_receipt
         },
     );
     let first = applied(owner.request(exact.clone()).await.unwrap());
+    f.settled(&owner, &session, "turn").await;
     let saved = f.page(&owner, &session).await;
     f.restart().await;
     let owner = f.owner(OwnerClientKind::Tui).await;
@@ -957,7 +980,7 @@ async fn master_restart_retains_queued_input_and_reconciles_the_original_receipt
     assert!(replay.historical_replay);
     assert_eq!(replay.provenance, first.provenance);
     assert_eq!(f.page(&owner, &session).await, saved);
-    queued(&saved.turns[0], &session, "turn");
+    blocked(&saved.turns[0], &session, "turn", MasterReason::Unknown);
     let reply = owner
         .request(request(
             "reconcile",
@@ -1201,6 +1224,10 @@ async fn master_session_actions_cannot_cross_project_or_cancel_another_turn() {
         .await;
     f.submit(&owner, "q-turn", &q, "Project Q requirement.")
         .await;
+    let p_turn = f.settled(&owner, &p, "p-turn").await;
+    let q_turn = f.settled(&owner, &q, "q-turn").await;
+    blocked(&p_turn, &p, "p-turn", MasterReason::Unknown);
+    blocked(&q_turn, &q, "q-turn", MasterReason::Unknown);
     for (index, action) in [
         MasterOwnerAction::Submit {
             project_id: project("q"),
@@ -1231,8 +1258,8 @@ async fn master_session_actions_cannot_cross_project_or_cancel_another_turn() {
                 .unwrap(),
         );
     }
-    queued(&f.page(&owner, &p).await.turns[0], &p, "p-turn");
-    queued(&f.page(&owner, &q).await.turns[0], &q, "q-turn");
+    assert_eq!(f.page(&owner, &p).await.turns, vec![p_turn]);
+    assert_eq!(f.page(&owner, &q).await.turns, vec![q_turn]);
     assert_eq!(f.history(&owner, "p").await.entries.len(), 1);
     assert_eq!(f.history(&owner, "q").await.entries.len(), 1);
     f.stop().await;
@@ -1294,12 +1321,12 @@ async fn master_maximum_utf8_owner_input_is_not_a_model_reply_or_storage_only_se
     let text = "é".repeat(4096);
     f.submit(&owner, "maximum", &session, &text).await;
     assert_eq!(f.history(&owner, "p").await.entries[0].text, text);
-    queued(
-        &f.page(&owner, &session).await.turns[0],
+    blocked(
+        &f.settled(&owner, &session, "maximum").await,
         &session,
         "maximum",
+        MasterReason::Unknown,
     );
-    f.cancel(&owner, "cancel", &session, "maximum").await;
     applied(
         owner
             .request(request(
@@ -1335,8 +1362,7 @@ async fn master_turn_pages_are_ordered_complete_bounded_and_resync_after_mutatio
         let turn = format!("turn-{index}");
         f.submit(&owner, &turn, &session, "Planning page input.")
             .await;
-        f.cancel(&owner, &format!("cancel-{index}"), &session, &turn)
-            .await;
+        f.quiet(&owner, "p").await;
     }
     let first = f.page(&owner, &session).await;
     assert_eq!(first.project_id, project("p"));
@@ -1367,7 +1393,8 @@ async fn master_turn_pages_are_ordered_complete_bounded_and_resync_after_mutatio
     for (index, turn) in turns.iter().enumerate() {
         assert_eq!(turn.ordinal, u64::try_from(index + 1).unwrap());
         assert_eq!(turn.id, RequestId::new(format!("turn-{index}")).unwrap());
-        assert_eq!(turn.phase, MasterTurnPhase::Cancelled);
+        assert_eq!(turn.phase, MasterTurnPhase::Blocked);
+        assert_eq!(turn.reason, Some(MasterReason::Unknown));
         assert_eq!(turn.reply, None);
     }
     f.submit(
@@ -1396,13 +1423,7 @@ async fn master_cursor_binds_database_owner_epochs_project_session_config_source
     for index in 0..2 {
         f.submit(&owner, &format!("turn-{index}"), &session, "Cursor basis.")
             .await;
-        f.cancel(
-            &owner,
-            &format!("cancel-{index}"),
-            &session,
-            &format!("turn-{index}"),
-        )
-        .await;
+        f.quiet(&owner, "p").await;
     }
     let OwnerData::ProjectMasterTurns { page } = f.turns(&owner, &session, None, 1).await.data
     else {
@@ -1474,13 +1495,7 @@ async fn master_cursor_rejects_unbounded_ordinal_and_unknown_serialized_fields()
             "Bounded ordinal.",
         )
         .await;
-        f.cancel(
-            &owner,
-            &format!("cancel-{index}"),
-            &session,
-            &format!("turn-{index}"),
-        )
-        .await;
+        f.quiet(&owner, "p").await;
     }
     let OwnerData::ProjectMasterTurns { page } = f.turns(&owner, &session, None, 1).await.data
     else {
@@ -1562,8 +1577,7 @@ async fn master_retained_turn_bound_rejects_1025_without_losing_the_original_inp
         let turn = format!("turn-{index}");
         f.submit(&owner, &turn, &session, "Retained planning input.")
             .await;
-        f.cancel(&owner, &format!("cancel-{index}"), &session, &turn)
-            .await;
+        f.quiet(&owner, "p").await;
     }
     let before = counts(f.root.path());
     rejected(

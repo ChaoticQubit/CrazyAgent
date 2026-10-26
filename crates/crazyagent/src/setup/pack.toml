@@ -3,7 +3,7 @@ version = 1
 [[entries]]
 id = "graphify"
 kind = "skill"
-group = "always"
+group = "graph"
 license = "MIT"
 on_by_default = true
 install = "uv tool install graphifyy==0.9.9, then install the graphify skill the package ships"

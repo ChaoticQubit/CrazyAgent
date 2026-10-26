@@ -625,15 +625,31 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
          ( exec 3<{other} ) 2>/dev/null && echo read_other=ok || echo read_other=denied\n\
          ( exec 3>{other} ) 2>/dev/null && echo write_other=ok || echo write_other=denied\n\
          n=$(/usr/bin/script -q /dev/null /usr/bin/tty </dev/null 2>&1)\n\
-         case $n in *\"/dev/ttys\"*) echo nested=ok ;; *) echo \"nested=failed $n\" ;; esac\n"
+         case $n in *\"/dev/ttys\"*) echo nested=ok ;; *) echo \"nested=failed $n\" ;; esac\n\
+         ( exec 3</dev/console ) 2>/dev/null && echo console=ok || echo console=denied\n\
+         ( exec 3</dev/auditsessions ) 2>/dev/null && echo device=ok || echo device=denied\n\
+         /bin/ls /dev >/dev/null 2>&1 && echo listing=ok || echo listing=denied\n\
+         /usr/bin/head -c 4 /dev/urandom >/dev/null 2>&1 && echo random=ok || echo random=denied\n\
+         ( echo x > /dev/stdout ) >/dev/null 2>&1 && echo stdout=ok || echo stdout=denied\n"
+    );
+    let control = crazyagent::spawn_gate::status(
+        Command::new("/bin/sh")
+            .args(["-c", "exec 3</dev/auditsessions"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        control.success(),
+        "this machine must let its user open /dev/auditsessions"
     );
     let inner = sandbox.command(&profile, Path::new("/bin/sh"));
     let mut command = Command::new("/usr/bin/script");
     command
-        .args(["-q", "/dev/null"])
-        .arg(inner.get_program())
-        .args(inner.get_args())
-        .arg("-c")
+        .args(["-q", "/dev/null", "/usr/bin/sandbox-exec", "-f"])
+        .arg(&profile)
+        .args(["/bin/sh", "-c"])
         .arg(&probe)
         .env_clear()
         .envs(
@@ -656,7 +672,172 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
         "nested=ok",
         "read_other=denied",
         "write_other=denied",
+        "console=denied",
+        "device=denied",
+        "listing=ok",
+        "random=ok",
+        "stdout=ok",
     ] {
         assert!(text.contains(expected), "missing {expected} in {text}");
     }
+}
+
+const ENGINE_TERMINAL: &str = "CRAZYAGENT_TEST_ENGINE_TERMINAL";
+
+fn engine_with_a_terminal() {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .expect("the engine role runs with a controlling terminal");
+    println!("engine=open");
+    let case = case();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("session.sb");
+    let output = shell(
+        &sandbox,
+        &profile,
+        "msg=$( ( exec 3</dev/tty ) 2>&1 ) && msg=opened; echo \"agent=$msg\"\n\
+         /usr/bin/perl -e 'print getpgrp(0) == $ARGV[0] ? \"group=own\\n\" : \"group=other\\n\"' \"$$\"\n",
+    );
+    print!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_headless_agent_cannot_open_the_engine_terminal() {
+    if std::env::var_os(ENGINE_TERMINAL).is_some() {
+        engine_with_a_terminal();
+        return;
+    }
+    let output = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_headless_agent_cannot_open_the_engine_terminal",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ENGINE_TERMINAL, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+    for expected in [
+        "engine=open",
+        "agent=/bin/sh: /dev/tty: Device not configured",
+        "group=own",
+        "test result: ok. 1 passed",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+}
+
+struct TmuxServer {
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+impl TmuxServer {
+    fn tmux(&self, arguments: &[&str]) -> Output {
+        crazyagent::spawn_gate::output(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .args(arguments)
+                .env_remove("TMUX")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    }
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = self.tmux(&["kill-server"]);
+    }
+}
+
+fn appears(path: &Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn a_tools_on_agent_cannot_drive_the_engine_tmux_server() {
+    let case = case();
+    let tmux = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("macOS test machines need tmux, as the engine does");
+    let terminal = case.runtime.join("terminal");
+    fs::create_dir_all(&terminal).unwrap();
+    let server = TmuxServer {
+        tmux,
+        socket: terminal.join("tmux.sock"),
+    };
+    let started = server.tmux(&[
+        "-f",
+        "/dev/null",
+        "new-session",
+        "-d",
+        "-s",
+        "crazyagent",
+        "/bin/sleep 120",
+    ]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let outside = case.profiles.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let control = outside.join("control");
+    let window = format!("/usr/bin/touch {}", quoted(&control));
+    assert!(server.tmux(&["new-window", "-d", &window]).status.success());
+    assert!(
+        appears(&control),
+        "the unsandboxed control must run a command through the server"
+    );
+    let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
+        .unwrap()
+        .guard_engine(&case.runtime)
+        .unwrap();
+    let escaped = outside.join("escaped");
+    let output = shell(
+        &open,
+        &case.profiles.join("open.sb"),
+        &format!(
+            "cd \"$TMPDIR\" && {} -S ../../../../terminal/tmux.sock new-window -d \"/usr/bin/touch {}\"",
+            quoted(&server.tmux),
+            quoted(&escaped)
+        ),
+    );
+    let after = outside.join("after");
+    let window = format!("/usr/bin/touch {}", quoted(&after));
+    assert!(server.tmux(&["new-window", "-d", &window]).status.success());
+    assert!(appears(&after));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
+    assert!(
+        !escaped.exists(),
+        "the agent ran a command outside its sandbox"
+    );
 }

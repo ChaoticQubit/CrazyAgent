@@ -1111,6 +1111,14 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
         1
     );
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms)
+            VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0)",
+            [],
+        )
+        .unwrap();
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
@@ -1126,6 +1134,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM research_jobs WHERE project='setup-pooled'"),
         0,
         "the project's research jobs go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_owner_prompts WHERE project='setup-pooled'"),
+        0,
+        "the owner's prompts to its agents go with it"
     );
     assert!(
         Path::new(&folder)

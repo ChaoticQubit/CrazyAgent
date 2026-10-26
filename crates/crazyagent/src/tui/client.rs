@@ -931,9 +931,9 @@ impl NativeOwner {
     }
 
     /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
-    /// reply deadline, so it stops blocking every later change: a change the engine refused
-    /// on its only send is dropped, a recorded one is confirmed, and one the engine never
-    /// recorded is sent once more with its original identity and revision.
+    /// reply deadline, so it stops blocking every later change: a change never sent is
+    /// dropped, a recorded one is confirmed, and one the engine never recorded is sent once
+    /// more with its original identity and revision.
     /// Takes the owner; creation, master, conversation and model access settle their own.
     /// Returns the outcome to tell the owner, or none while nothing was settled.
     async fn settle_stray(&mut self) -> Option<Result<(), String>> {
@@ -2161,6 +2161,97 @@ mod creation_recovery_tests {
         assert!(
             matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
             if operation.result == OwnerResult::Applied)
+        );
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_creation_the_engine_refuses_frees_its_slot_for_the_next_creation_and_master_change()
+    {
+        let mut h = RealNative::new().await;
+        let refused = h.submission();
+        h.native.prepare_creation(&refused).await.unwrap();
+        let owner_socket = std::fs::read_dir(h.root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("owner.sock"))
+            .find(|path| path.exists())
+            .expect("the engine serves its owner socket in a generation under the root");
+        let mut silent = Vec::new();
+        for _ in 0..3 {
+            silent.push(
+                crate::spawn_gate::connect_unix(&owner_socket)
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let result = h
+            .native
+            .deliver_creation(MutationDelivery::Submit)
+            .await
+            .map(Box::new);
+        let event = h.native.creation_event(refused.clone(), result);
+        assert!(
+            matches!(event.result.as_deref(), Ok(OwnerResponse::Rejected { code }) if code == "owner_busy"),
+            "the engine refuses the creation while its owner queue is full: {:?}",
+            event.result
+        );
+        assert!(!event.retained, "a refused creation is not kept");
+        assert!(h.native.creation_pending.is_none());
+        assert!(h.native.controller.as_ref().unwrap().pending().is_none());
+        drop(silent);
+        let mut served = false;
+        for _ in 0..50 {
+            if h.native
+                .controller
+                .as_mut()
+                .unwrap()
+                .read(OwnerRead::Capabilities)
+                .await
+                .is_ok()
+            {
+                served = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(served, "the engine serves again once the queue empties");
+
+        let created = h
+            .native
+            .creation(CreationJob {
+                submission: refused.clone(),
+                delivery: MutationDelivery::Submit,
+            })
+            .await;
+        assert!(
+            matches!(created.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+                if operation.result == OwnerResult::Applied),
+            "the same project can be created again without a restart"
+        );
+        assert!(!created.retained);
+
+        let master = h
+            .native
+            .master(master_session::Job::Mutation {
+                submission: master_session::Submission {
+                    identity: refused.identity.clone(),
+                    generation: 8,
+                    action: crate::master_session::MasterOwnerAction::Close {
+                        project_id: refused.project_id.clone(),
+                        session_id: crate::protocol::SessionId::new("absent-session").unwrap(),
+                    },
+                },
+                delivery: MutationDelivery::Submit,
+            })
+            .await;
+        let master_session::Event::Mutation { result, .. } = master else {
+            panic!("a master change answers as a mutation");
+        };
+        assert!(
+            result.is_ok(),
+            "the master change reaches the engine instead of waiting on the refused creation: {:?}",
+            result.err()
         );
         h.close().await;
     }

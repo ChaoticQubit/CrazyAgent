@@ -995,8 +995,10 @@ export function applyTheme(choice: ThemeChoice): void {
 }
 
 /** Reads the engine state from a connect or status reply.
- * Input: the reply. Output: running when connected, otherwise down. */
+ * Input: the reply. Output: running when connected, outdated when the engine is another
+ * version than this app, otherwise down. */
 export function engineState(result: Result<api.ConnectionStatus>): EngineState {
+  if (result.kind === "error" && result.code === "engine_version_mismatch") return "outdated";
   return result.kind === "ok" && result.value.connected ? "running" : "down";
 }
 

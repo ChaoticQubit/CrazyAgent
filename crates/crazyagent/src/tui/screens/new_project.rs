@@ -1793,6 +1793,12 @@ fn failure_copy(code: &str, pool: Option<&str>) -> (&'static str, String, Step) 
                 .into(),
             Step::Review,
         ),
+        "owner_busy" => (
+            "CrazyAgent is busy with other windows.",
+            "Your draft is kept. Wait a moment, then press Enter and create the project again."
+                .into(),
+            Step::Review,
+        ),
         "creation_outcome_unknown" => (
             "CrazyAgent could not confirm the new project.",
             "Check Home for it before you create it again. Your draft is kept.".into(),

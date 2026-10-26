@@ -11,7 +11,7 @@ import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
 import { basicsErrors, draftOf, editRequest, poolName, teamValid, wireTeam } from "../new-project/wizard";
 import type { TeamDraft } from "../new-project/wizard";
-import { folderLabel } from "./overview";
+import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { SessionContext, useLoad } from "../../state";
 import { PluginsAndSkills } from "../settings/plugins";
@@ -130,7 +130,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  const line = removeLine(setup ? setup.folder : null);
+  const line = removeLine(setup ? projectFolder(setup.folder) : null);
   async function remove() {
     setBusy(true);
     const result = await removeProject(data.id, nextGeneration());
@@ -199,7 +199,7 @@ function GeneralSection({ data, setup }: { data: ProjectData; setup: StoredSetup
     </fieldset>
     <div className="pj-field">
       <span className="pj-label">Project folder</span>
-      <p className="pj-mono">{displayText(folderLabel(setup.folder))}</p>
+      <p className="pj-mono">{displayText(folderLabel(projectFolder(setup.folder)))}</p>
     </div>
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button type="submit" variant="primary" pending={busy} pendingLabel="Saving..." disabled={!canSave}>Save changes</Button></div>

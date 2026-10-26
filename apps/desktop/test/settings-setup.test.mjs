@@ -19,7 +19,7 @@ const GB = 1024 ** 3;
 
 const entry = (id, kind, group, state, extra = {}) => ({ id, kind, group, source: `github.com/example/${id}`, license: "MIT", on_by_default: group !== "optional", state, ...extra });
 const pack = [
-  entry("graphify", "skill", "always", { state: "on" }),
+  entry("graphify", "skill", "graph", { state: "on" }),
   entry("superpowers", "skill", "workflow", { state: "off" }),
   entry("headroom", "mcp_server", "context", { state: "on" }),
   entry("serena", "mcp_server", "optional", { state: "available" }),
@@ -36,11 +36,12 @@ const rowOf = (markup, id) => {
 
 test("Settings, Pack lists the pack by group with a switch, Remove or Install on each entry", () => {
   const markup = html(PackSettingsView, packProps(ok(setup())));
-  assert.match(markup, /<h2>Always on<\/h2>[\s\S]*<h2>Workflow skills<\/h2>[\s\S]*<h2>Context plugins<\/h2>[\s\S]*<h2>Optional<\/h2>/);
-  const always = rowOf(markup, "graphify");
-  assert.match(always, /role="switch"[^>]*aria-checked="true"[^>]*aria-disabled="true"/);
-  assert.match(always, /Always on\./);
-  assert.doesNotMatch(always, />Remove</);
+  assert.match(markup, /<h2>Code graph<\/h2>[\s\S]*<h2>Workflow skills<\/h2>[\s\S]*<h2>Context plugins<\/h2>[\s\S]*<h2>Optional<\/h2>/);
+  assert.doesNotMatch(markup, /Always on/);
+  const graph = rowOf(markup, "Graphify skill for agents");
+  assert.match(graph, /role="switch"[^>]*aria-checked="true"/);
+  assert.doesNotMatch(graph, /aria-disabled/);
+  assert.match(graph, />Remove<\/button>/);
   const off = rowOf(markup, "superpowers");
   assert.match(off, /role="switch"[^>]*aria-checked="false"/);
   assert.doesNotMatch(off, /aria-disabled/);
@@ -62,7 +63,7 @@ test("Settings, Pack locks every change while setup runs or another change is in
   }
   assert.match(html(PackSettingsView, packProps(ok(setup({ running: true })))), /role="status">Setup is installing\. Changes wait until it finishes\./);
   assert.doesNotMatch(html(PackSettingsView, packProps(ok(setup()))), /role="status"/);
-  assert.match(html(PackSettingsView, packProps(ok(setup()), { problem: "This entry is always on and can't be removed." })), /role="alert">This entry is always on/);
+  assert.match(html(PackSettingsView, packProps(ok(setup()), { problem: "That entry isn't installed." })), /role="alert">That entry isn&#x27;t installed\./);
 });
 
 const tool = (name, state) => ({ name, label: name, state });
@@ -71,7 +72,7 @@ const present = { state: "found", version: "3.5a" };
 
 test("Settings, Pack lists tmux, uv and graphify first and offers Install tools while one is missing", () => {
   const skipped = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, { state: "missing" }, { state: "failed", reason: "Checksum didn't match." }) }))));
-  assert.match(skipped, /<h2[^>]*>[\s\S]*Tools<\/h2>[\s\S]*<h2>Always on<\/h2>/);
+  assert.match(skipped, /<h2[^>]*>[\s\S]*Tools<\/h2>[\s\S]*<h2>Code graph<\/h2>/);
   assert.match(rowOf(skipped, "tmux"), /Found[\s\S]*Version 3\.5a on this Mac\./);
   assert.match(rowOf(skipped, "uv"), /Not installed/);
   assert.match(rowOf(skipped, "graphify"), /Checksum didn&#x27;t match\./);

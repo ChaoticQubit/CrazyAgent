@@ -433,6 +433,15 @@ pub(in crate::tui) struct JobLog {
     pub read_ms: i64,
 }
 
+/// What the owner asked to see from a project page: its folder, shown in the file manager,
+/// or one context file inside it, as the engine's project record names them.
+/// `Context` keeps the folder and the path inside it apart so the host can check both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum OpenRequest {
+    Folder(String),
+    Context { folder: String, path: String },
+}
+
 /// What the project screen asks its host to do after a key.
 /// Ignored lets global keys run; the other replies are engine calls or navigation.
 /// Engine calls carry exactly what the engine needs.
@@ -447,7 +456,7 @@ pub(in crate::tui) enum ProjectReply {
         version: u64,
         decision: ReviewDecision,
     },
-    Open(String),
+    Open(OpenRequest),
     PickPool,
     Assign(crate::protocol::CredentialRef),
     Send(String),
@@ -939,16 +948,19 @@ impl ProjectScreen {
         counts
     }
 
-    /// Gives the absolute path of a context file.
-    /// Takes the path inside the project folder.
-    /// Returns the path, or none before the folder is known.
-    pub fn absolute(&self, path: &str) -> Option<String> {
+    /// Names one context file to open: the folder its context paths start from and the
+    /// path inside it. Takes the path inside the project folder.
+    /// Returns the request, or none before the folder is known.
+    pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
         let folder = self
             .setup
             .as_ref()
             .map(|setup| setup.folder.clone())
             .or_else(|| self.context.as_ref().map(|context| context.folder.clone()))?;
-        Some(format!("{}/{path}", folder.trim_end_matches('/')))
+        Some(OpenRequest::Context {
+            folder,
+            path: path.to_owned(),
+        })
     }
 
     /// Handles one key for the open tab, the edit box or the delete question.
@@ -1275,7 +1287,9 @@ impl ProjectScreen {
             KeyCode::Char('y' | 'n' | 'e') => return self.decide(focused, key.code),
             KeyCode::Char('o') => {
                 return self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
-                    ProjectReply::Open(s.project_folder().display().to_string())
+                    ProjectReply::Open(OpenRequest::Folder(
+                        s.project_folder().display().to_string(),
+                    ))
                 });
             }
             KeyCode::Enter
@@ -1451,8 +1465,8 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('o') => {
-                if let Some(path) = item.and_then(|item| self.absolute(&item.path)) {
-                    return ProjectReply::Open(path);
+                if let Some(request) = item.and_then(|item| self.context_request(&item.path)) {
+                    return ProjectReply::Open(request);
                 }
             }
             KeyCode::Char('a') => {
@@ -1565,7 +1579,9 @@ impl ProjectScreen {
         match key.code {
             KeyCode::Enter => self.pool_reply(),
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
-                ProjectReply::Open(s.project_folder().display().to_string())
+                ProjectReply::Open(OpenRequest::Folder(
+                    s.project_folder().display().to_string(),
+                ))
             }),
             KeyCode::Char('g') => {
                 match self.setup.as_ref() {

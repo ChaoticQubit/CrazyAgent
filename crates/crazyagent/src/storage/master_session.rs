@@ -96,6 +96,13 @@ pub(crate) enum MasterRuntimeCommand {
         attempt_id: RequestId,
         observation: MasterRuntimeObservation,
     },
+    Fail {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        reason: MasterReason,
+    },
 }
 
 pub(crate) enum MasterRuntimeObservation {
@@ -2081,13 +2088,23 @@ fn publish_rcli_profile(
         }
         return Ok(record.proof);
     }
-    let count: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM configured_master_profiles p JOIN master_sessions s ON s.id=p.session WHERE s.phase='configured' LIMIT 65)",
+    let counted = || -> Result<i64, EngineError> {
+        tx.query_row(
+            "SELECT COUNT(*) FROM configured_master_profiles",
             [],
             |row| row.get(0),
         )
+        .map_err(error)
+    };
+    let mut count = counted()?;
+    if count >= SESSIONS_MAX as i64 {
+        tx.execute(
+            "DELETE FROM configured_master_profiles WHERE rowid IN (SELECT p.rowid FROM configured_master_profiles p WHERE NOT EXISTS (SELECT 1 FROM master_sessions s WHERE s.id=p.session AND s.phase='configured') ORDER BY p.rowid LIMIT ?1)",
+            [count - (SESSIONS_MAX as i64 - 1)],
+        )
         .map_err(error)?;
+        count = counted()?;
+    }
     if count >= SESSIONS_MAX as i64 {
         return Err(error("master_configured_receipt_limit"));
     }
@@ -2191,11 +2208,17 @@ fn adopt_account_profile(
             continue;
         }
         if receipt.as_ref().is_some_and(|previous| {
-            previous.custody_id != candidate.custody_id
-                || previous.profile_config_sha256 != candidate.profile_config_sha256
-                || previous.profile_generation != candidate.profile_generation
+            previous.profile_generation == candidate.profile_generation
+                && (previous.custody_id != candidate.custody_id
+                    || previous.profile_config_sha256 != candidate.profile_config_sha256)
         }) {
             return Err(error("master_configured_receipt_conflict"));
+        }
+        if receipt
+            .as_ref()
+            .is_some_and(|previous| previous.profile_generation >= candidate.profile_generation)
+        {
+            continue;
         }
         receipt = Some(candidate);
     }
@@ -2648,6 +2671,13 @@ pub(super) fn runtime(
             session_id,
             turn_id,
             ..
+        }
+        | MasterRuntimeCommand::Fail {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
         } => (host, project_id, session_id, turn_id),
     };
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
@@ -2755,6 +2785,25 @@ pub(super) fn runtime(
                 }
             }
             observe_turn(&tx, config, &mut session, &mut turn, observation)?;
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+        MasterRuntimeCommand::Fail { reason, .. } => {
+            if matches!(
+                turn.phase,
+                MasterTurnPhase::Queued | MasterTurnPhase::Prepared
+            ) && session.current_turn.as_ref() == Some(&turn.id)
+            {
+                turn.phase = if turn.phase == MasterTurnPhase::Queued {
+                    MasterTurnPhase::Blocked
+                } else {
+                    complete_local(&tx, &mut turn, MasterTurnPhase::Failed)?;
+                    MasterTurnPhase::Failed
+                };
+                turn.reason = Some(reason);
+                persist_runtime(&tx, config, &mut session, &turn)?;
+                assert!(session.current_turn.is_none());
+            }
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
@@ -3371,6 +3420,18 @@ fallback_allowed = false
     }
 
     async fn owner_apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
+        assert_eq!(
+            owner_result(storage, started, id, mutation).await,
+            OwnerResult::Applied
+        );
+    }
+
+    async fn owner_result(
+        storage: &Storage,
+        started: &Started,
+        id: &str,
+        mutation: OwnerMutation,
+    ) -> OwnerResult {
         let basis = owner_read(storage, started, OwnerRead::Capabilities).await;
         let (send, receive) = oneshot::channel();
         storage
@@ -3386,7 +3447,7 @@ fallback_allowed = false
                 send,
             ))
             .unwrap_or_else(|_| panic!("actual owner mutation queue unavailable"));
-        assert_eq!(receive.await.unwrap().unwrap().result, OwnerResult::Applied);
+        receive.await.unwrap().unwrap().result
     }
 
     impl Fixture {
@@ -3633,6 +3694,58 @@ fallback_allowed = false
                 panic!("actual configured profile receipt missing");
             };
             *proof
+        }
+
+        async fn view(&self) -> (MasterSessionView, Vec<MasterTurnView>) {
+            let project_id = self.session.project_id.clone();
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMaster {
+                    project_id: project_id.clone(),
+                },
+            )
+            .await;
+            let OwnerData::ProjectMaster {
+                session: Some(session),
+            } = state.data
+            else {
+                panic!("actual master session missing");
+            };
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMasterTurns {
+                    project_id,
+                    session_id: self.session.session_id.clone(),
+                    cursor: None,
+                    limit: 8,
+                },
+            )
+            .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turns missing");
+            };
+            (*session, page.turns)
+        }
+
+        fn action(&self, id: &str, action: MasterOwnerAction) -> (String, OwnerMutation) {
+            (id.into(), OwnerMutation::ProjectMaster { action })
+        }
+
+        fn submit(&self, id: &str, text: &str) -> (String, OwnerMutation) {
+            self.action(
+                id,
+                MasterOwnerAction::Submit {
+                    project_id: self.session.project_id.clone(),
+                    session_id: self.session.session_id.clone(),
+                    text: text.into(),
+                },
+            )
+        }
+
+        async fn result(&self, (id, mutation): (String, OwnerMutation)) -> OwnerResult {
+            owner_result(&self.storage, &self.started, &id, mutation).await
         }
 
         fn prepare(&self) -> MasterRuntimeCommand {
@@ -4017,7 +4130,8 @@ fallback_allowed = false
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(registrations > crate::master_session::SESSIONS_MAX as i64);
+        assert!(registrations >= 1);
+        assert!(registrations <= crate::master_session::SESSIONS_MAX as i64);
         drop(tx);
         case.close().await;
     }
@@ -4134,6 +4248,127 @@ fallback_allowed = false
             .try_send(Job::Close(send))
             .unwrap_or_else(|_| panic!("actual actor close queue unavailable"));
         receive.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_profile_capacity_counts_live_sessions_not_closed_history() {
+        let case = Fixture::new(false).await;
+        {
+            let mut db = Connection::open(&case.path).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            let tx = db.transaction().unwrap();
+            for n in 0..SESSIONS_MAX {
+                tx.execute(
+                    "INSERT INTO configured_master_profiles(id,session,body) VALUES (?1,?1,'{}')",
+                    [format!("closed-{n:02}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let proof = case.register().await;
+        let db = case.db();
+        let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM configured_master_profiles"),
+            SESSIONS_MAX as i64
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM configured_master_profiles WHERE id='closed-00'"),
+            0
+        );
+        let stored: String = db
+            .query_row(
+                "SELECT id FROM configured_master_profiles WHERE session=?1",
+                [case.session.session_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, proof.registration_id.as_str());
+        drop(db);
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_turn_holds_the_session_until_its_own_cancel_frees_it() {
+        let case = Fixture::new(false).await;
+        let rejected = |code: &str| OwnerResult::Rejected { code: code.into() };
+        let before = case.snapshot();
+        assert_eq!(
+            case.result(case.submit("second-turn", "Still outstanding."))
+                .await,
+            rejected("master_turn_outstanding")
+        );
+        let cancel = |id: &str, turn: &str| {
+            case.action(
+                id,
+                MasterOwnerAction::Cancel {
+                    project_id: case.session.project_id.clone(),
+                    session_id: case.session.session_id.clone(),
+                    turn_id: RequestId::new(turn).unwrap(),
+                },
+            )
+        };
+        assert_eq!(
+            case.result(cancel("cancel-other", "another-turn")).await,
+            rejected("master_turn_not_current")
+        );
+        let held = case.snapshot();
+        assert_eq!((held.turn, held.counts), (before.turn, before.counts));
+        assert_eq!(
+            case.result(cancel("cancel-turn", case.turn.id.as_str()))
+                .await,
+            OwnerResult::Applied
+        );
+        let (session, turns) = case.view().await;
+        assert_eq!(session.current_turn, None);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, case.turn.id);
+        assert_eq!(turns[0].phase, MasterTurnPhase::Cancelled);
+        assert_eq!(turns[0].attempt, None);
+        assert_eq!(turns[0].runtime, None);
+        assert_eq!(turns[0].reply, None);
+        assert_eq!(
+            case.result(case.submit("next-turn", "Use the revised requirement."))
+                .await,
+            OwnerResult::Applied
+        );
+        let (session, turns) = case.view().await;
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].ordinal, 2);
+        assert_eq!(turns[1].phase, MasterTurnPhase::Queued);
+        assert_eq!(session.current_turn, Some(turns[1].id.clone()));
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_cancels_its_queued_turn_and_refuses_late_input() {
+        let case = Fixture::new(false).await;
+        let close = case.action(
+            "close-session",
+            MasterOwnerAction::Close {
+                project_id: case.session.project_id.clone(),
+                session_id: case.session.session_id.clone(),
+            },
+        );
+        assert_eq!(case.result(close).await, OwnerResult::Applied);
+        let (session, turns) = case.view().await;
+        assert_eq!(session.phase, MasterSessionPhase::Closed);
+        assert_eq!(session.current_turn, None);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].phase, MasterTurnPhase::Cancelled);
+        assert_eq!(turns[0].attempt, None);
+        assert_eq!(turns[0].runtime, None);
+        assert_eq!(turns[0].reply, None);
+        assert_eq!(
+            case.result(case.submit("late-turn", "Must not reopen."))
+                .await,
+            OwnerResult::Rejected {
+                code: "master_session_not_active".into()
+            }
+        );
+        assert_eq!(case.view().await.1, turns);
+        case.close().await;
     }
 }
 

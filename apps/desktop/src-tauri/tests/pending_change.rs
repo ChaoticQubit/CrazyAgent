@@ -3,7 +3,7 @@ use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::ModelAccessCollection;
 use crazyagent::owner_profile::OwnerProfile;
-use crazyagent::protocol::CredentialRef;
+use crazyagent::protocol::{CredentialRef, ProjectSpec};
 use crazyagent_desktop::bridge::{ActionOutcome, IntentReceipt, NativeBridge};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -264,6 +264,53 @@ async fn desktop_change_saved_after_its_reply_was_lost_settles_on_the_next_check
         assert_eq!(
             case.bridge.owner_profile().await?.map(|saved| saved.name),
             Some("Saved late".to_owned())
+        );
+        Ok(())
+    }
+    .await;
+    case.close().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_refused_creation_frees_the_next_creation_and_master_change() {
+    let mut case = Case::start().await.unwrap();
+    let result: TestResult<()> = async {
+        let spec = ProjectSpec {
+            name: "Refused first".into(),
+            repositories: vec![
+                case.root.path().join("absent-one").display().to_string(),
+                case.root.path().join("absent-two").display().to_string(),
+            ],
+        };
+        case.bridge.projects(false).await?;
+        case.sqlite("UPDATE owner_meta SET runtime_state='offline' WHERE singleton=1;")?;
+        let refused = case.bridge.create_project(spec.clone(), 1).await;
+        case.sqlite("UPDATE owner_meta SET runtime_state='active' WHERE singleton=1;")?;
+        let refused = refused?;
+        assert_eq!(refused.outcome, ActionOutcome::Rejected);
+        assert!(
+            !refused.pending,
+            "a creation the engine refused on its only send is not kept as pending"
+        );
+        assert!(case.bridge.pending_intent()?.is_none());
+
+        case.bridge.projects(false).await?;
+        let created = case.bridge.create_project(spec, 2).await?;
+        assert_eq!(created.outcome, ActionOutcome::Applied);
+        assert!(!created.pending);
+        let project_id = created
+            .intent
+            .project_id
+            .ok_or("actual project receipt required")?;
+        let detail = case.bridge.open_project(&project_id).await?;
+        let master = case
+            .bridge
+            .close_master(&detail.ticket, "absent-session", 3)
+            .await?;
+        assert!(
+            !master.pending,
+            "the master change reaches the engine instead of waiting on the refused creation"
         );
         Ok(())
     }

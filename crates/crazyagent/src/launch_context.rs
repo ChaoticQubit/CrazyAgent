@@ -16,7 +16,10 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const HEADER_BYTES_MAX: usize = 1536;
+pub const HEADER_BYTES_MAX: usize = HEADER_TITLE.len()
+    + "You are working on the project \"\".\n".len()
+    + NAME_BYTES_MAX
+    + 2 * ("Project folder: \n".len() + FOLDER_BYTES_MAX);
 pub const BRIEF_BYTES_MAX: usize = crate::project_setup::CONTEXT_CHUNK_BYTES;
 pub const INDEX_ITEMS_MAX: usize = crate::project_setup::CONTEXT_ITEMS_MAX;
 pub const INDEX_BYTES_MAX: usize = 7 * 1024;
@@ -34,6 +37,7 @@ const SECTION_SLACK: usize = 512;
 const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
+const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
@@ -339,10 +343,15 @@ impl Installed {
 }
 
 impl Drop for Installed {
+    /// Deletes the launch's files, then releases the home lock on its open file
+    /// description, so a process that shares it, such as a child another thread is
+    /// starting, can never keep the home busy after the launch ends.
     fn drop(&mut self) {
         for path in &self.removals {
             remove(path);
         }
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
     }
 }
 
@@ -363,7 +372,7 @@ fn size(bytes: u64) -> String {
 }
 
 fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> String {
-    let mut header = String::from("# Project context from CrazyAgent\n\n");
+    let mut header = String::from(HEADER_TITLE);
     let mut brief = String::new();
     let mut index = String::new();
     match setup {

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadOnboarding, startOnboarding } from "../../api-intake";
 import {
-  loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, updateProjectSetup, type ProjectCatalog, type StoredSetup,
+  assignPool, loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, updateProjectSetup, type ProjectCatalog, type StoredSetup,
 } from "../../api-projects";
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
@@ -146,13 +146,17 @@ export function OnboardingReview({ id }: { id: string }) {
     setBusy(true);
     setProblem("");
     const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision);
-    setBusy(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Confirming setup isn't in this build." : intakeCopy(result.code)); return; }
+    if (result.kind !== "ok") { setBusy(false); setProblem(result.kind === "not_ready" ? "Confirming setup isn't in this build." : intakeCopy(result.code)); return; }
     const state = receiptState(result.value);
-    if (state.kind === "rejected") { setProblem(intakeCopy(state.code)); return; }
-    if (state.kind === "unconfirmed") { setProblem("We couldn't confirm setup was saved. Check the project and save again."); return; }
+    if (state.kind === "rejected") { setBusy(false); setProblem(intakeCopy(state.code)); return; }
+    if (state.kind === "unconfirmed") { setBusy(false); setProblem("We couldn't confirm setup was saved. Check the project and save again."); return; }
+    const pool = request.setup.pool;
+    const assigned = pool ? await assignPool(id, pool, nextGeneration()) : null;
+    setBusy(false);
+    const unassigned = assigned !== null && (assigned.kind !== "ok" || assigned.value.kind !== "applied")
+      ? ` Couldn't give ${pool} to its master. Choose it again in the project's Settings, Pool.` : "";
     void session.refreshProjects();
-    session.showToast(value?.finished ? `${draft.name.trim()} is saved.` : `${draft.name.trim()} is set up.`);
+    session.showToast(`${draft.name.trim()} ${value?.finished ? "is saved" : "is set up"}.${unassigned}`);
     navigate({ name: "project", id, tab: "overview" });
   };
 

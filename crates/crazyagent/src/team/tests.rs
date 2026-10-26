@@ -1177,14 +1177,9 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let seen = folder.join("seen-config.toml");
     let executable = harness(
         &base,
-        format!(
-            "#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > \"{}\"\nexit 1\n",
-            seen.display()
-        )
-        .as_bytes(),
+        b"#!/bin/sh\n/bin/cat \"$CODEX_HOME/config.toml\" > seen-config.toml\nexit 1\n",
     );
     let engine_folder = base.join("engine-bin");
     std::fs::create_dir(&engine_folder).unwrap();
@@ -1238,6 +1233,9 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         Some(format!("worktrees/agent-{}", master.id)),
         "the master works in its own git worktree like every agent"
     );
+    let seen = folder
+        .join(master.worktree.as_deref().unwrap())
+        .join("seen-config.toml");
     let config: toml::Table = std::fs::read_to_string(&seen)
         .unwrap_or_else(|e| panic!("the probe harness saw no config ({e}): {team_now:#?}"))
         .parse()

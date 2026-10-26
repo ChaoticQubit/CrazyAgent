@@ -2,8 +2,8 @@ use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
 use super::new_project_view::{Row, Screen as View};
 use super::project::{
-    MasterStatus, ProjectReply, ProjectScreen, Speaker, Tab, Transcript, plain_problem,
-    project_pool,
+    MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
+    plain_problem, project_pool,
 };
 use super::project_master::{MasterRead, transcript_from};
 use super::project_plugins::PluginsReply;
@@ -31,7 +31,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
@@ -130,16 +130,42 @@ fn project_tab(tab: Tab) -> ProjectTab {
         .expect("every tab is listed")]
 }
 
-/// Opens a project folder or file with the system's default app.
-/// Takes an absolute path from the engine's project record.
-/// Returns the plain problem when the path is not absolute, does not exist or nothing opened it.
-pub(in crate::tui) fn open_path(path: &str) -> Result<(), String> {
-    let target = Path::new(path);
-    if !target.is_absolute() || !target.exists() {
-        return Err("That file or folder is not there any more.".into());
+/// What the TUI hands the system opener for one request.
+/// `Reveal` shows a folder in the file manager; `Open` opens a file with its default app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Opening {
+    Reveal(PathBuf),
+    Open(PathBuf),
+}
+
+/// Decides what the system opener gets for one open request, with the desktop's checks
+/// (`platform::project_folder` and `platform::context_file`): a project folder is revealed,
+/// never opened, so a folder named like an app bundle is not launched; a context file opens
+/// only as a project document type, not a link, and a regular file inside the folder.
+/// Takes the request. Returns the opening, or the plain problem.
+pub(in crate::tui) fn opening(request: &OpenRequest) -> Result<Opening, String> {
+    let missing = |_| "That file or folder is not there any more.".to_owned();
+    match request {
+        OpenRequest::Folder(folder) => crate::platform::project_folder(folder)
+            .map(Opening::Reveal)
+            .map_err(missing),
+        OpenRequest::Context { folder, path } => {
+            let folder = crate::platform::project_folder(folder).map_err(missing)?;
+            crate::platform::context_file(&folder, path)
+                .map(Opening::Open)
+                .map_err(|_| "CrazyAgent opens only documents inside the project folder.".into())
+        }
     }
-    crate::platform::open(target.as_os_str())
-        .map_err(|_| "Could not open it on this computer.".to_owned())
+}
+
+/// Shows a project folder or opens one context file once [`opening`] allows it.
+/// Takes the request. Returns the plain problem when it is refused or nothing opened it.
+fn open_request(request: &OpenRequest) -> Result<(), String> {
+    match opening(request)? {
+        Opening::Reveal(folder) => crate::platform::reveal(&folder),
+        Opening::Open(file) => crate::platform::open(file.as_os_str()),
+    }
+    .map_err(|_| "Could not open it on this computer.".to_owned())
 }
 
 /// One project as a shell screen.
@@ -571,8 +597,8 @@ impl ProjectPage {
                 );
                 Flow::Handled
             }
-            ProjectReply::Open(path) => {
-                match open_path(&path) {
+            ProjectReply::Open(request) => {
+                match open_request(&request) {
                     Ok(()) => ctx.say(Message::success("Opened.", "")),
                     Err(problem) => ctx.say(Message::error(&problem, "")),
                 }

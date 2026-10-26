@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import type { Failure } from "../../api";
+import { engineVersions, restartEngine, type EngineVersions, type Failure } from "../../api";
 import { checkForUpdate, installUpdate, linkCommandLineTool, loadUpdateSettings, restartApp, setUpdateChannel, type UpdateChannel, type UpdateSettings } from "../../api-updates";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Segmented, Skeleton } from "../../ui";
@@ -9,6 +9,7 @@ import "../project/projects.css";
 import "../intake/intake.css";
 
 export type CliState = { kind: "idle" } | { kind: "busy" } | { kind: "done"; message: string } | { kind: "failed"; message: string };
+export type EngineRestart = { kind: "idle" } | { kind: "busy" } | { kind: "failed"; message: string };
 
 const CHANNELS: { value: UpdateChannel; label: string }[] = [
   { value: "stable", label: "Stable" },
@@ -73,12 +74,55 @@ function UpdateStatus({ phase, onCheck, onInstall, onRestart }: {
   }
 }
 
+/** Restart engine with its outcome: the plain error of a failed restart above the button.
+ * Inputs: the restart state, the handler and whether the button is the page's main action. */
+export function RestartEngine({ restart, onRestart, primary = false }: { restart: EngineRestart; onRestart: () => void; primary?: boolean }) {
+  return <>
+    {restart.kind === "failed" && <p className="pj-error" role="alert">{restart.message}</p>}
+    <span><Button variant={primary ? "primary" : "secondary"} icon="refresh-cw" pending={restart.kind === "busy"} pendingLabel="Restarting..." onClick={onRestart}>Restart engine</Button></span>
+  </>;
+}
+
+/** The engine's version under this app's and, when they differ, the engine's message with
+ * Restart engine. Nothing shows until the version is read. Inputs: the read, the restart state
+ * and the handler. */
+export function EngineVersionLine({ versions, restart, onRestart }: { versions: Loaded<EngineVersions>; restart: EngineRestart; onRestart: () => void }) {
+  if (versions.kind !== "ok") return null;
+  const { engine, message } = versions.value;
+  return <>
+    <p className="pj-secondary">{engine === null ? "The engine isn't answering." : `Engine ${displayText(engine)}`}</p>
+    {message && <><p role="status">{displayText(message)}</p><RestartEngine restart={restart} onRestart={onRestart} /></>}
+  </>;
+}
+
+/** Restarts the default engine on this app's version on the owner's click. Input: what to do
+ * once it runs again. Output: the restart state and the handler. */
+export function useEngineRestart(onDone: () => void): [EngineRestart, () => void] {
+  const [restart, setRestart] = useState<EngineRestart>({ kind: "idle" });
+  const run = async () => {
+    if (restart.kind === "busy") return;
+    setRestart({ kind: "busy" });
+    const result = await restartEngine();
+    if (result.kind === "ok") {
+      setRestart({ kind: "idle" });
+      onDone();
+    } else {
+      setRestart({ kind: "failed", message: result.kind === "error" ? result.message : "Restarting the engine isn't in this build." });
+    }
+  };
+  return [restart, () => void run()];
+}
+
 /** Settings, Updates as a view of its state: this app's version and channel with the channel
- * switch, the check and install status with progress, Restart, and Install command line tool.
- * Inputs: the settings read, the update phase, the channel save state, the command line tool
- * state and the handlers. Output: the page. */
-export function UpdatesView({ settings, phase, channelBusy, channelProblem, cli, onChannel, onCheck, onInstall, onRestart, onLinkCli, onRetry }: {
+ * switch, the engine's version with Restart engine when it differs, the check and install
+ * status with progress, Restart, and Install command line tool. Inputs: the settings and
+ * engine version reads, the update phase, the channel, engine restart and command line tool
+ * states and the handlers. Output: the page. */
+export function UpdatesView({ settings, engine, phase, channelBusy, channelProblem, cli, engineRestart, onChannel, onCheck, onInstall, onRestart, onLinkCli, onRestartEngine, onRetry }: {
   settings: Loaded<UpdateSettings>;
+  engine: Loaded<EngineVersions>;
+  engineRestart: EngineRestart;
+  onRestartEngine: () => void;
   phase: UpdatePhase;
   channelBusy: boolean;
   channelProblem: string;
@@ -98,6 +142,7 @@ export function UpdatesView({ settings, phase, channelBusy, channelProblem, cli,
   return <div className="pj pj-stack">
     <section className="pj-stack-s in-panel" aria-label="Version and channel">
       <h2 className="row"><Icon name="shield-check" size={16} />CrazyAgent {displayText(current_version)}</h2>
+      <EngineVersionLine versions={engine} restart={engineRestart} onRestart={onRestartEngine} />
       <p className="pj-secondary">Stable gets tested releases. Dev gets every change as soon as it's merged.</p>
       {busy || channelBusy
         ? <p>Channel: {channel === "dev" ? "Dev" : "Stable"}</p>
@@ -150,6 +195,11 @@ export function useUpdateWatch(announce: (message: string) => void) {
 export function UpdatesSettings() {
   const session = useAppSession();
   const [settings, reload] = useLoad(loadUpdateSettings);
+  const [engine, reloadEngine] = useLoad(engineVersions);
+  const [engineRestart, restartEngineNow] = useEngineRestart(() => {
+    reloadEngine();
+    session.showToast("The engine restarted.");
+  });
   const phase = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   const [channelBusy, setChannelBusy] = useState(false);
   const [channelProblem, setChannelProblem] = useState("");
@@ -197,7 +247,8 @@ export function UpdatesSettings() {
       : { kind: "failed", message: failure(result, "Installing the command line tool") });
   };
 
-  return <UpdatesView settings={settings} phase={phase} channelBusy={channelBusy} channelProblem={channelProblem} cli={cli} onRetry={reload}
+  return <UpdatesView settings={settings} engine={engine} phase={phase} channelBusy={channelBusy} channelProblem={channelProblem} cli={cli} onRetry={reload}
+    engineRestart={engineRestart} onRestartEngine={restartEngineNow}
     onChannel={(channel) => void switchChannel(channel)} onCheck={() => void check()} onInstall={() => void install()}
     onRestart={() => void restart()} onLinkCli={() => void linkCli()} />;
 }

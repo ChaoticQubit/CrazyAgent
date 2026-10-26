@@ -159,14 +159,13 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             | MasterReason::QuotaUnknown
             | MasterReason::BudgetExhausted,
         ) => {
-            "the account hit its usage limit. Add an account to the pool, or wait for one to be free."
+            "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset."
         }
         Some(MasterReason::RateLimited | MasterReason::CooldownActive) => {
             "the account is resting after too many requests."
         }
-        Some(MasterReason::CapacityUnavailable | MasterReason::ProfileBusy) => {
-            "no account in the pool is free right now."
-        }
+        Some(MasterReason::CapacityUnavailable) => "another turn is still running.",
+        Some(MasterReason::ProfileBusy) => "its account is busy signing in or out.",
         Some(MasterReason::ConnectionChanged) => "its settings changed while it was open.",
         Some(MasterReason::ScopeRevoked) => "it no longer has access to this project.",
         Some(MasterReason::RuntimeUnavailable) => {
@@ -175,6 +174,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::CaptureIncomplete) => "its reply was cut off.",
         Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
+        Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -255,6 +255,61 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_could_not_start_names_the_missing_repository_and_offers_a_retry() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let turns = [turn(
+            1,
+            3,
+            MasterTurnPhase::Blocked,
+            Some(MasterReason::RepositoryMissing),
+        )];
+        let transcript = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Plan the dashboard.", false),
+                (
+                    Speaker::Notice,
+                    "Codex stopped: this project has no repository yet. Press r to try again.",
+                    true
+                ),
+            ]
+        );
+        assert_ne!(transcript.status, MasterStatus::Thinking { since_ms: None });
+    }
+
+    #[test]
+    fn a_shared_account_never_tells_the_owner_to_wait_for_a_free_account() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let cases = [
+            (
+                MasterReason::ProfileBusy,
+                "Codex stopped: its account is busy signing in or out. Press r to try again.",
+            ),
+            (
+                MasterReason::CapacityUnavailable,
+                "Codex stopped: another turn is still running. Press r to try again.",
+            ),
+            (
+                MasterReason::QuotaExhausted,
+                "Codex stopped: the account hit its usage limit. Add an account to the pool, or wait for its limit to reset. Press r to try again.",
+            ),
+        ];
+        for (reason, notice) in cases {
+            let turns = [turn(1, 3, MasterTurnPhase::Failed, Some(reason))];
+            let transcript = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
+            assert_eq!(
+                said(&transcript),
+                [
+                    (Speaker::You, "Plan the dashboard.", false),
+                    (Speaker::Notice, notice, true),
+                ]
+            );
+            assert!(!notice.contains("free"));
+        }
+    }
+
+    #[test]
     fn no_session_is_not_ready_and_an_open_master_without_turns_is_ready() {
         let empty = build(None, &[], &[]);
         assert_eq!(empty.status, MasterStatus::NotReady);
@@ -289,7 +344,7 @@ mod tests {
                 (Speaker::You, "Plan the dashboard.", false),
                 (
                     Speaker::Notice,
-                    "Codex stopped: the account hit its usage limit. Add an account to the pool, or wait for one to be free.",
+                    "Codex stopped: the account hit its usage limit. Add an account to the pool, or wait for its limit to reset.",
                     true
                 ),
                 (Speaker::You, "Add a dark theme.", false),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::github::GitHubMethod;
-use crate::setup::{Dependency, DependencyStatus, Version};
+use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
 use crate::tui::screens::settings_accounts::tests::{ctx, render};
@@ -72,7 +72,7 @@ fn first_run_status() -> SetupStatus {
             entry(
                 "graphify",
                 PackKind::Skill,
-                PackGroup::Always,
+                PackGroup::Graph,
                 true,
                 PackState::Available,
             ),
@@ -222,11 +222,8 @@ fn tools_show_found_missing_and_failed_in_plain_words() {
         let rows = render(&mut shell, width, height);
         assert!(find(&rows, "tmux").contains("Found 3.5a"));
         assert!(find(&rows, &format!("{:<14}", "uv")).contains("Not installed"));
-        assert!(find(&rows, &format!("{:<14}", "Graphify")).contains("Failed"));
-        find(
-            &rows,
-            "uv is needed to install Graphify and it is not installed.",
-        );
+        assert!(find(&rows, "Graphify command").contains("Failed"));
+        find(&rows, "uv is needed to install Graphify");
         assert!(rows.iter().all(|row| !row.contains("setup_")));
         assert!(
             rows.iter()
@@ -239,7 +236,7 @@ fn tools_show_found_missing_and_failed_in_plain_words() {
 fn ticks_follow_the_pack_and_ticked_mcp_servers_are_listed_for_approval() {
     let mut shell = first_run(120, 36);
     let rows = render(&mut shell, 120, 36);
-    assert!(find(&rows, "[x] graphify").contains("Skill"));
+    assert!(find(&rows, "[x] Graphify skill for agents").contains("Skill"));
     assert!(find(&rows, "[x] context-mode").contains("MCP server"));
     assert!(find(&rows, "[ ] serena").contains("Not installed"));
     assert!(find(&rows, "Skills and plugins").contains("5 of 6 ticked"));
@@ -258,7 +255,7 @@ fn ticks_follow_the_pack_and_ticked_mcp_servers_are_listed_for_approval() {
 }
 
 #[test]
-fn space_unticks_an_entry_but_graphify_stays_on() {
+fn space_unticks_any_entry_including_graphify_and_unticked_entries_are_not_sent() {
     let mut shell = first_run(120, 36);
     shell.key(Key::Down);
     shell.key(Key::Char(' '));
@@ -267,8 +264,41 @@ fn space_unticks_an_entry_but_graphify_stays_on() {
     assert!(find(&rows, "Skills and plugins").contains("4 of 6 ticked"));
     shell.key(Key::Up);
     shell.key(Key::Char(' '));
-    assert_eq!(lead(&shell), "graphify is always on.");
-    find(&render(&mut shell, 120, 36), "[x] graphify");
+    let rows = render(&mut shell, 120, 36);
+    find(&rows, "[ ] Graphify skill for agents");
+    assert!(find(&rows, "Skills and plugins").contains("3 of 6 ticked"));
+    shell.key(Key::Enter);
+    let sent = jobs(&mut shell);
+    let [AppSetupJob::Run { pack, .. }] = sent.as_slice() else {
+        panic!("one setup run required")
+    };
+    assert_eq!(pack, &["caveman", "context-mode", "headroom"]);
+}
+
+#[test]
+fn an_entry_already_installed_reads_installed_and_first_run_does_not_install_it_again() {
+    let mut status = first_run_status();
+    status.pack[0].state = PackState::On;
+    status.pack[1].state = PackState::Off;
+    let mut shell = Shell::with(ctx(120, 36), Box::new(AppSetup::new(true)));
+    jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    jobs(&mut shell);
+    let rows = render(&mut shell, 120, 36);
+    assert!(find(&rows, "Graphify skill for agents").contains("Installed"));
+    assert!(find(&rows, "superpowers").contains("Turned off"));
+    shell.key(Key::Char(' '));
+    assert_eq!(
+        lead(&shell),
+        "Graphify skill for agents is already installed."
+    );
+    assert!(jobs(&mut shell).is_empty());
+    shell.key(Key::Enter);
+    let sent = jobs(&mut shell);
+    let [AppSetupJob::Run { pack, .. }] = sent.as_slice() else {
+        panic!("one setup run required")
+    };
+    assert_eq!(pack, &["caveman", "context-mode", "headroom"]);
 }
 
 #[test]
@@ -438,7 +468,12 @@ fn settings_switch_installed_entries_and_remove_after_yes() {
 
     shell.key(Key::Up);
     shell.key(Key::Char('d'));
-    assert_eq!(lead(&shell), "graphify is always on and can't be removed.");
+    find(
+        &render(&mut shell, 120, 36),
+        "Remove Graphify skill for agents?",
+    );
+    shell.key(Key::Char('n'));
+    assert!(jobs(&mut shell).is_empty());
 
     shell.key(Key::Down);
     shell.key(Key::Down);
@@ -481,16 +516,7 @@ fn settings_install_missing_sends_the_ticked_entries() {
     let [AppSetupJob::Run { pack, .. }] = sent.as_slice() else {
         panic!("one setup run required")
     };
-    assert_eq!(
-        pack,
-        &[
-            "graphify",
-            "superpowers",
-            "context-mode",
-            "headroom",
-            "serena"
-        ]
-    );
+    assert_eq!(pack, &["serena"]);
 }
 
 #[test]

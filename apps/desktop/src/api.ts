@@ -17,6 +17,11 @@ const ACCOUNT_PAGES_MAX = 100;
 
 const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
+  engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
+  engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
+  engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
   pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
   stale_revision: "This changed since you opened it. Review and save again.",
@@ -32,6 +37,8 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  approved_accounts_limit: "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
+  allowed_destinations_limit: "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
   model_access_duplicate: "This already exists.",
   model_access_missing: "This no longer exists.",
   invalid_model_access: "The engine didn't accept this pool. Check its accounts and save again.",
@@ -166,6 +173,26 @@ export interface ConnectionStatus {
  * change is still unconfirmed. */
 export function connect(): Promise<Result<ConnectionStatus>> {
   return call<ConnectionStatus>("desktop_connect");
+}
+
+/** The default engine's version beside this app's, and the plain message asking for a restart
+ * when they differ. `engine` is null when no engine answers. */
+export interface EngineVersions {
+  engine: string | null;
+  app: string;
+  message: string | null;
+}
+
+/** Reads the default engine's version and this app's. Output: both versions and, when they
+ * differ, the message to show, or a plain error. */
+export function engineVersions(): Promise<Result<EngineVersions>> {
+  return call<EngineVersions>("desktop_engine_versions");
+}
+
+/** Restarts the default engine on this app's own version through its login service, then
+ * reconnects this window. Output: the new connection, or a plain error. */
+export function restartEngine(): Promise<Result<ConnectionStatus>> {
+  return call<ConnectionStatus>("desktop_restart_engine");
 }
 
 /** Reads the current engine connection. Output: connection and unconfirmed-change flags. */

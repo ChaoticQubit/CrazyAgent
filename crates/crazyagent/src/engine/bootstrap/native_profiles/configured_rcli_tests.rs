@@ -162,11 +162,12 @@ fn configured_rcli_execution_uses_existing_guard_and_retained_home() {
         .acquire_configured_rcli_use(&case.host, &binding, &case.profile, &operation, 1)
         .unwrap();
     assert_eq!(guard.profile_path().unwrap(), case.home);
-    assert!(
-        case.custody
-            .acquire_configured_rcli_use(&case.host, &binding, &case.profile, &operation, 1,)
-            .is_err()
-    );
+    let concurrent = case
+        .custody
+        .acquire_configured_rcli_use(&case.host, &binding, &case.profile, &operation, 1)
+        .unwrap();
+    concurrent.revalidate_retained().unwrap();
+    drop(concurrent);
     guard
         .revalidate(
             &case.host,
@@ -180,6 +181,35 @@ fn configured_rcli_execution_uses_existing_guard_and_retained_home() {
     assert!(
         case.custody
             .acquire_configured_rcli_use(&case.host, &binding, &case.profile, &operation, 1,)
+            .is_ok()
+    );
+}
+
+#[test]
+fn configured_rcli_profile_serves_three_concurrent_executions() {
+    let mut case = ConfiguredCase::new(false, true);
+    let metadata = case.register();
+    let binding = case.binding(&metadata);
+    let guards = (1..=3)
+        .map(|index| {
+            let operation = RequestId::new(format!("configured-agent-{index}")).unwrap();
+            let guard = case
+                .custody
+                .acquire_configured_rcli_use(&case.host, &binding, &case.profile, &operation, 1)
+                .unwrap();
+            assert_eq!(guard.profile_path().unwrap(), case.home);
+            guard
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(guards.len(), 3);
+    for guard in &guards {
+        guard.revalidate_retained().unwrap();
+    }
+    drop(guards);
+    let operation = RequestId::new("configured-agent-after").unwrap();
+    assert!(
+        case.custody
+            .acquire_configured_rcli_use(&case.host, &binding, &case.profile, &operation, 1)
             .is_ok()
     );
 }
@@ -391,3 +421,6 @@ fn configured_rcli_auth_none_requires_an_explicit_local_endpoint() {
 
 #[path = "generated_configured_profile_tests.rs"]
 mod generated_configured_profile_tests;
+
+#[path = "recovery_tests.rs"]
+mod recovery_tests;

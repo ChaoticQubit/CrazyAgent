@@ -5,9 +5,13 @@ use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
 
+use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
+
 use std::ffi::{OsStr, OsString};
 
 use std::fs;
+
+use std::io::{BufRead, BufReader};
 
 use std::path::{Path, PathBuf};
 
@@ -145,7 +149,7 @@ fn landlock_holds_the_project_boundary_on_this_kernel() {
         LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
     assert!(
         matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
-        "Linux test machines need Landlock (Linux 5.13 or newer): {:?}",
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
         sandbox.backend()
     );
     assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
@@ -167,6 +171,325 @@ fn bubblewrap_holds_the_same_project_boundary() {
     )
     .unwrap();
     assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
+}
+
+const TRUNCATE: &str = "import os, sys\n\
+for path in sys.argv[1:]:\n    \
+try:\n        os.truncate(path, 0)\n        print('truncated')\n    \
+except OSError:\n        print('refused')\n";
+
+#[test]
+fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let own = case.project.join("worktrees").join("own.txt");
+    let brief = case.project.join("context").join("brief.md");
+    let fixture = case.outside.join("fixture.txt");
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    for sandbox in [&landlock as &dyn Sandbox, &bubblewrap] {
+        fs::write(&own, "own\n").unwrap();
+        let mut harness = Command::new("/usr/bin/python3");
+        harness
+            .args(["-I", "-c", TRUNCATE])
+            .arg(&own)
+            .arg(&brief)
+            .arg(&fixture)
+            .current_dir(case.project.join("worktrees"));
+        let output = crazyagent::spawn_gate::output(
+            sandbox
+                .wrap(&harness)
+                .unwrap()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "truncated\nrefused\nrefused\n"
+        );
+        assert_eq!(fs::read_to_string(&own).unwrap(), "");
+        assert_eq!(fs::read_to_string(&brief).unwrap(), "brief\n");
+        assert_eq!(fs::read_to_string(&fixture).unwrap(), "outside fixture\n");
+    }
+}
+
+const SESSION: &str = "read -r stat < /proc/$$/stat; set -- ${stat##*\") \"}; echo \"$$ $3 $4 $5\"";
+
+fn assert_own_session(command: &mut Command) {
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(fields.len(), 4, "{text}");
+    assert_eq!(
+        fields[1], fields[0],
+        "the agent leads its process group: {text}"
+    );
+    assert_eq!(
+        fields[2], fields[0],
+        "the agent leads its own session: {text}"
+    );
+    assert_eq!(
+        fields[3], "0",
+        "the agent has no controlling terminal: {text}"
+    );
+}
+
+const SIGNAL: &str = "kill -0 \"$1\" 2>/dev/null && echo delivered || echo refused";
+
+fn signal(sandbox: Option<&dyn Sandbox>, case: &Case, target: u32) -> String {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", SIGNAL, "sh"])
+        .arg(target.to_string())
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+}
+
+fn agent_stdout(sandbox: Option<&dyn Sandbox>, harness: Command) -> String {
+    let mut command = match sandbox {
+        Some(sandbox) => sandbox.wrap(&harness).unwrap(),
+        None => harness,
+    };
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
+    let case = case();
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id();
+    let scoped = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .scope(Scope::Signal)
+        .is_ok();
+    assert_eq!(
+        signal(None, &case, target),
+        "delivered\n",
+        "the unsandboxed control must reach the outside process"
+    );
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        signal(Some(&landlock), &case, target),
+        if scoped { "refused\n" } else { "delivered\n" },
+        "Landlock scopes signals from Linux 6.12; scoped here: {scoped}"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(signal(Some(&bubblewrap), &case, target), "refused\n");
+    outside.kill().unwrap();
+    outside.wait().unwrap();
+}
+
+const HOLD_TERMINAL: &str = "import os, sys
+primary, secondary = os.openpty()
+print(os.ttyname(secondary), flush=True)
+sys.stdin.read()
+";
+
+const OPEN_TERMINAL: &str = "import os, sys
+try:
+    os.close(os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY))
+    print('opened')
+except OSError:
+    print('refused')
+";
+
+fn open_terminal(sandbox: Option<&dyn Sandbox>, case: &Case, terminal: &Path) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", OPEN_TERMINAL])
+        .arg(terminal)
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+}
+
+#[test]
+fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let mut holder = crazyagent::spawn_gate::spawn(
+        Command::new("/usr/bin/python3")
+            .args(["-I", "-c", HOLD_TERMINAL])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let terminal = PathBuf::from(line.trim_end());
+    assert!(terminal.starts_with("/dev/pts"), "{line}");
+    assert_eq!(
+        open_terminal(None, &case, &terminal),
+        "opened\n",
+        "the unsandboxed control must open the held terminal"
+    );
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        open_terminal(Some(&landlock), &case, &terminal),
+        "refused\n"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        open_terminal(Some(&bubblewrap), &case, &terminal),
+        "refused\n"
+    );
+    drop(holder.stdin.take());
+    holder.wait().unwrap();
+}
+
+#[test]
+fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
+    let case = case();
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", SESSION])
+        .current_dir(case.project.join("worktrees"));
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    let wrapped = landlock.wrap(&harness).unwrap();
+    assert_own_session(&mut landlock.wrap(&harness).unwrap());
+    let mut ungrouped = Command::new(wrapped.get_program());
+    ungrouped
+        .args(wrapped.get_args())
+        .env_clear()
+        .envs(
+            wrapped
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .current_dir(wrapped.get_current_dir().unwrap());
+    assert_own_session(&mut ungrouped);
+    let setsid = Path::new("/usr/bin/setsid");
+    assert!(
+        setsid.is_file(),
+        "Linux test machines need util-linux setsid"
+    );
+    let mut leader = Command::new(setsid);
+    leader
+        .arg(wrapped.get_program())
+        .args(wrapped.get_args())
+        .env_clear()
+        .envs(
+            wrapped
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .current_dir(wrapped.get_current_dir().unwrap());
+    assert_own_session(&mut leader);
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_own_session(&mut bubblewrap.wrap(&harness).unwrap());
 }
 
 #[test]
@@ -582,7 +905,7 @@ fn a_confined_landlock_agent_writes_only_its_own_worktree() {
     let sandbox = LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)).unwrap();
     assert!(
         matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
-        "Linux test machines need Landlock (Linux 5.13 or newer): {:?}",
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
         sandbox.backend()
     );
     assert_confined(&sandbox, &checkouts);

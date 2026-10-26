@@ -265,9 +265,14 @@ fn purpose_enum_has_exactly_the_four_closed_cases() {
 }
 
 #[test]
-fn every_purpose_pair_contends_for_the_same_live_physical_lock() {
+fn every_pair_with_an_account_change_contends_for_the_same_live_physical_lock() {
     for holder in 0..4 {
         for contender in 0..4 {
+            if purpose(holder) == NativeProfileUsePurpose::Execution
+                && purpose(contender) == NativeProfileUsePurpose::Execution
+            {
+                continue;
+            }
             let mut case = UseCase::new();
             let guard = case
                 .custody
@@ -308,6 +313,71 @@ fn every_purpose_pair_contends_for_the_same_live_physical_lock() {
             assert_free(&case.manifest());
         }
     }
+}
+
+#[test]
+fn one_profile_serves_concurrent_executions_while_account_changes_stay_exclusive() {
+    let mut case = UseCase::new();
+    let execution = NativeProfileUsePurpose::Execution;
+    let custody = case.custody.as_mut().unwrap();
+    let first = custody
+        .acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("agent-1"),
+            1,
+            execution,
+        )
+        .unwrap();
+    let second = custody
+        .acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("agent-2"),
+            1,
+            execution,
+        )
+        .unwrap();
+    let third = case
+        .recapture()
+        .acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("agent-3"),
+            1,
+            execution,
+        )
+        .unwrap();
+    for (guard, name) in [
+        (&first, "agent-1"),
+        (&second, "agent-2"),
+        (&third, "agent-3"),
+    ] {
+        assert!(
+            guard
+                .revalidate(&case.host, &case.binding, &request_id(name), 1, execution)
+                .is_ok()
+        );
+    }
+    for change in 0..3 {
+        let result = case.recapture().acquire_use(
+            &case.host,
+            &case.binding,
+            &request_id("account-change"),
+            1,
+            purpose(change),
+        );
+        assert_eq!(
+            result.err().expect("account change must wait for agents").0,
+            "native_profile_in_use"
+        );
+    }
+    assert_busy(&case.manifest());
+    drop(first);
+    drop(second);
+    assert_busy(&case.manifest());
+    drop(third);
+    assert_free(&case.manifest());
 }
 
 #[test]

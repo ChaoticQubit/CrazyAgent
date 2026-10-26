@@ -35,6 +35,8 @@ pub(crate) mod setup;
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
+mod model_access_page_tests;
+#[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
 mod settings;
@@ -44,6 +46,13 @@ pub(crate) mod worker_dispatch;
 /// a Git worktree inside the storage actor, which can outlast the owner request timeout
 /// on a busy machine.
 pub(crate) const MASTER_RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Recent wire operations kept per client and kind (reads, mutations) for replay and
+/// request identity checks. Older finished rows are pruned when a newer one is stored.
+const OPERATIONS_PER_CLIENT_MAX: usize = 64;
+
+/// Recent wire operations kept across all clients; the oldest finished rows go first.
+const OPERATIONS_MAX: usize = 1024;
 
 pub(crate) enum Job {
     Accounts(
@@ -179,6 +188,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerResponse, EngineError>>,
     ),
     Apply(WireRequest, oneshot::Sender<Result<WireReply, EngineError>>),
+    RunnerRead(Command, oneshot::Sender<Result<Outcome, EngineError>>),
     Plugins(
         plugins::Command,
         oneshot::Sender<Result<plugins::ResultValue, EngineError>>,
@@ -264,6 +274,7 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
+                let mut model_access_snapshot = None;
                 let mut home_watch = if readonly {
                     None
                 } else {
@@ -662,6 +673,7 @@ impl Storage {
                                     &mut connection,
                                     &config,
                                     sources.as_ref(),
+                                    &mut model_access_snapshot,
                                     &admission,
                                     &query,
                                 ));
@@ -716,6 +728,13 @@ impl Storage {
                                 continue;
                             }
                             let _ = reply.send(apply(&mut connection, &config, &path, request));
+                        }
+                        Job::RunnerRead(command, reply) => {
+                            if let Err(e) = settings::ensure_clear(&connection) {
+                                let _ = reply.send(Err(e));
+                                continue;
+                            }
+                            let _ = reply.send(runner_read(&mut connection, &config, &path, &command));
                         }
                         Job::Plugins(command, reply) => {
                             let result = if readonly {
@@ -1141,6 +1160,32 @@ fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
 /// Applies one revision-checked operation through the storage transaction.
 /// Takes current config, storage path and an identified request.
 /// Returns a durable reply while preserving replay and sensitive input hashes.
+/// Serves one engine-internal runner read, CoordinationState or TaskContext, at the
+/// current revision without touching the caller-keyed operations ledger, so no socket
+/// peer can pre-claim, replay or conflict with it.
+/// Output: the read's outcome, or `runner_read_kind` for any other command.
+fn runner_read(
+    connection: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    command: &Command,
+) -> Result<Outcome, EngineError> {
+    if !matches!(
+        command,
+        Command::CoordinationState { .. } | Command::TaskContext { .. }
+    ) {
+        return Err(error("runner_read_kind"));
+    }
+    let transaction = connection.transaction().map_err(error)?;
+    let revision: i64 = transaction
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    let revision = u64::try_from(revision).map_err(error)?;
+    execute(&transaction, config, path, command, revision)
+}
+
 fn apply(
     connection: &mut Connection,
     config: &EffectiveConfig,
@@ -1256,13 +1301,16 @@ fn apply(
         bytes,
         reply,
         replay,
+        mutation,
         revision,
     )
 }
 
-/// Atomically records an operation reply, revision and retained event.
-/// Takes an open transaction and its bounded operation outcome.
-/// Sensitive authority reads are reevaluated rather than cached as replies.
+/// Atomically records an operation reply, revision and retained event, and prunes
+/// operation rows past the per-client and total windows in the same transaction.
+/// Takes an open transaction and its bounded operation outcome. Reads keep no reply,
+/// since only mutation replies are replayed; reads are always reevaluated.
+#[allow(clippy::too_many_arguments)]
 fn finish_operation(
     transaction: Transaction<'_>,
     config: &EffectiveConfig,
@@ -1270,6 +1318,7 @@ fn finish_operation(
     bytes: Vec<u8>,
     reply: WireReply,
     replay: bool,
+    mutation: bool,
     revision: u64,
 ) -> Result<WireReply, EngineError> {
     let next = reply.revision.value();
@@ -1279,10 +1328,7 @@ fn finish_operation(
         persist_event(&transaction, config, request, next)?;
     }
     if !replay {
-        let sensitive_read = matches!(&request.command, Command::Knowledge { action } if !crate::memory::is_mutation(action))
-            || matches!(&request.command, Command::Assets { action } if !crate::assets::is_mutation(action))
-            || matches!(&request.command, Command::OwnerVerification { .. } if !crate::verification::is_mutation(&request.command));
-        let reply_bytes = if sensitive_read { &[][..] } else { &frame[4..] };
+        let reply_bytes = if mutation { &frame[4..] } else { &[][..] };
         transaction
             .execute(
                 "INSERT INTO operations VALUES (?1,?2,?3,?4)",
@@ -1292,6 +1338,22 @@ fn finish_operation(
                     bytes,
                     reply_bytes
                 ],
+            )
+            .map_err(error)?;
+        transaction
+            .execute(
+                "DELETE FROM operations WHERE rowid IN (SELECT rowid FROM operations WHERE client=?1 AND (length(reply)>0)=?2 ORDER BY rowid DESC LIMIT -1 OFFSET ?3)",
+                params![
+                    request.client_id.as_str(),
+                    mutation,
+                    OPERATIONS_PER_CLIENT_MAX as i64
+                ],
+            )
+            .map_err(error)?;
+        transaction
+            .execute(
+                "DELETE FROM operations WHERE rowid IN (SELECT rowid FROM operations ORDER BY rowid DESC LIMIT -1 OFFSET ?1)",
+                [OPERATIONS_MAX as i64],
             )
             .map_err(error)?;
     }
@@ -2965,6 +3027,98 @@ mod owner_actor_tests {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn operation_history_keeps_a_recent_window_and_replays_recent_mutations() {
+        let (_root, path, cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let request = |client: &str, id: String, revision: u64, command: Command| WireRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: ClientId::new(client).unwrap(),
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: Cursor::new(revision),
+            command,
+        };
+        let create = |id: &str| Command::CreateProject {
+            project_id: ProjectId::new(id).unwrap(),
+            spec: ProjectSpec {
+                name: "Project".into(),
+                repositories: vec![],
+            },
+        };
+        let rows = |db: &Connection, client: &str| -> (usize, usize) {
+            db.query_row(
+                "SELECT count(*), count(*) FILTER (WHERE length(reply)>0) FROM operations WHERE client=?1",
+                [client],
+                |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)),
+            )
+            .unwrap()
+        };
+        let created = request("tui-a", "create".into(), 0, create("p"));
+        let first = apply(&mut db, &cfg, &path, created.clone()).unwrap();
+        assert_eq!(first.outcome, Outcome::Applied);
+        for n in 0..OPERATIONS_PER_CLIENT_MAX + 8 {
+            let poll = request("tui-a", format!("poll-{n}"), 1, Command::Snapshot);
+            assert!(matches!(
+                apply(&mut db, &cfg, &path, poll).unwrap().outcome,
+                Outcome::Snapshot { .. }
+            ));
+        }
+        assert_eq!(rows(&db, "tui-a"), (OPERATIONS_PER_CLIENT_MAX + 1, 1));
+        assert_eq!(apply(&mut db, &cfg, &path, created).unwrap(), first);
+        let newest = request(
+            "tui-a",
+            format!("poll-{}", OPERATIONS_PER_CLIENT_MAX + 7),
+            1,
+            create("q"),
+        );
+        assert_eq!(
+            apply(&mut db, &cfg, &path, newest).unwrap_err().0,
+            "operation_identity_conflict"
+        );
+        for n in 0..OPERATIONS_PER_CLIENT_MAX + 8 {
+            let stale = request("tui-a", format!("stale-{n}"), 0, create("r"));
+            assert_eq!(
+                apply(&mut db, &cfg, &path, stale).unwrap().outcome,
+                Outcome::Rejected {
+                    code: "stale_revision".into()
+                }
+            );
+        }
+        assert_eq!(
+            rows(&db, "tui-a"),
+            (2 * OPERATIONS_PER_CLIENT_MAX, OPERATIONS_PER_CLIENT_MAX)
+        );
+        let clients = OPERATIONS_MAX / OPERATIONS_PER_CLIENT_MAX + 1;
+        for client in 0..clients {
+            for n in 0..OPERATIONS_PER_CLIENT_MAX {
+                let poll = request(
+                    &format!("tui-{client}"),
+                    format!("poll-{n}"),
+                    1,
+                    Command::Snapshot,
+                );
+                assert!(matches!(
+                    apply(&mut db, &cfg, &path, poll).unwrap().outcome,
+                    Outcome::Snapshot { .. }
+                ));
+            }
+        }
+        let total: i64 = db
+            .query_row("SELECT count(*) FROM operations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total as usize, OPERATIONS_MAX);
+        assert_eq!(
+            rows(&db, &format!("tui-{}", clients - 1)),
+            (OPERATIONS_PER_CLIENT_MAX, 0)
+        );
+        assert_eq!(rows(&db, "tui-a"), (0, 0));
+        assert_eq!(
+            db.query_row("SELECT revision FROM state", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
             1
         );
     }
