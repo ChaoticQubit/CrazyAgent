@@ -140,11 +140,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         home,
         credential,
     } = launch;
-    let writable: Vec<PathBuf> = sandbox
-        .sandbox()
-        .writable_roots()
-        .cloned()
-        .collect();
+    let writable: Vec<PathBuf> = sandbox.sandbox().writable_roots().cloned().collect();
     let copy = home.join(".credentials.json");
     let copied_during_turn = copy.is_file();
     let mut master = ClaudeHost::spawn(

@@ -37,6 +37,8 @@ const MASTER_INSTRUCTIONS: &str = "instructions.md";
 #[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
 #[cfg(unix)]
+const MASTER_HOME: &str = "home";
+#[cfg(unix)]
 const MASTER_PROFILE: &str = "sandbox.sb";
 #[cfg(unix)]
 const HTTPS_PORT: u16 = 443;
@@ -171,21 +173,24 @@ pub(super) struct MasterTurnLaunch {
     pub(super) credential: Option<AgentCredential>,
 }
 
-/// Builds one Claude Code master turn: its startup instruction file, the tools-off command
-/// and the Seatbelt boundary, both on the account's managed home.
-/// Inputs: where the turn runs, the account lease, the registered executable, the attempt's
-/// connection, the instruction text and the turn's wall time.
-/// Output: the launch parts, or the refusal of whichever part failed.
+/// Builds one Claude Code master turn: its startup instruction file, a private home in the
+/// turn folder holding a no-refresh copy of the account's credential (DEC-090), and the
+/// tools-off command and Seatbelt boundary on that home. The keychain stays denied and the
+/// managed home is never given to the master. Inputs: where the turn runs, the account
+/// lease, the registered executable, the attempt's connection, the instruction text and the
+/// turn's wall time. Output: the launch parts with the copy, or the refusal of the part that
+/// failed, `native_profile_credential_expiring` when the token lapses within the turn.
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
     executable: &Path,
     connection: &ModelConnection,
     instructions: &str,
-    _wall_time: Duration,
+    wall_time: Duration,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
-    let home = profile.profile_path()?;
+    let home = master_turn_home(place.root, place.runtime_ref)?;
+    let credential = profile.hand_to_agent(&home, wall_time)?;
     let command = crate::engine::claude_host::launch_command(
         executable,
         place.worktree,
@@ -206,8 +211,34 @@ pub(super) fn claude_master_turn(
         command,
         sandbox,
         home,
-        credential: None,
+        credential: Some(credential),
     })
+}
+
+/// Makes the private home of one Claude master turn inside its turn folder, so everything
+/// Claude Code writes there goes with the folder. Input: the owner root and the turn's
+/// runtime reference. Output: the new 0700 home, or a refusal when the folder is not the
+/// engine's or the home already exists.
+#[cfg(unix)]
+fn master_turn_home(root: &Root, runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    rustix::fs::mkdirat(&runtime.directory, MASTER_HOME, Mode::RWXU).map_err(io_error)?;
+    let home = runtime.path.join(MASTER_HOME);
+    let made = std::fs::symlink_metadata(&home).map_err(io_error)?;
+    if !made.is_dir() || made.mode() & 0o7777 != 0o700 {
+        return Err(failure("master_home_unsafe"));
+    }
+    verify_master_runtime(root, &runtime, &name)?;
+    Ok(home)
+}
+
+/// Refuses a master turn home where the owner-only turn directory cannot be made.
+/// Takes the owner root and turn reference, both unused. Returns `master_capture_unavailable`.
+#[cfg(not(unix))]
+fn master_turn_home(_root: &Root, _runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
+    Err(failure("master_capture_unavailable"))
 }
 
 /// Owns one master turn's private folder in the owner generation, with its capture,
