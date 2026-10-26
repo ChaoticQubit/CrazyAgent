@@ -442,7 +442,8 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
     }
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR", home.clone()),
-        ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home),
+        ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.clone()),
+        ("CLAUDE_CODE_TMPDIR", home),
         ("TERM", OsString::from("dumb")),
         ("DISABLE_TELEMETRY", OsString::from("1")),
         (
