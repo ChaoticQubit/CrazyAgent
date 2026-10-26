@@ -139,14 +139,27 @@ impl MasterFixture {
         )
     }
 
-    /// Writes an executable stand-in harness script outside every sandbox writable root.
-    /// Takes its file name and body. Returns its canonical path.
+    /// Writes an executable stand-in harness script outside every sandbox writable root and
+    /// runs it once with `first-exec`, which a guard line answers with code 3 before the body,
+    /// so its first-exec assessment is over before a host launch is timed.
+    /// Takes its file name and a `#!/bin/sh` body. Returns its canonical path.
     pub(in crate::engine) fn stand_in(&self, name: &str, body: &str) -> PathBuf {
+        let rest = body.strip_prefix("#!/bin/sh\n").unwrap();
         let bin = self.root.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let script = bin.join(name);
-        fs::write(&script, body).unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\n[ \"$1\" = first-exec ] && exit 3\n{rest}"),
+        )
+        .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let first = crate::spawn_gate::first_run(
+            std::process::Command::new(&script)
+                .arg("first-exec")
+                .current_dir(&bin),
+        );
+        assert_eq!(first.code(), Some(3));
         fs::canonicalize(script).unwrap()
     }
 

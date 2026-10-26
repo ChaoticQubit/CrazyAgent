@@ -337,5 +337,37 @@ pub(crate) fn start_children_until_stopped() -> (
     (stop, starter)
 }
 
+/// How long a test waits for a freshly written executable's first run. macOS assesses each
+/// new executable once on its first exec, after spawn returns and one at a time across the
+/// machine, so this start bound stays apart from the short bounds a test then measures.
+#[cfg(all(test, unix))]
+pub(crate) const FIRST_EXEC_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs a freshly written executable once to completion through the gate, so macOS has
+/// assessed it before a test times it. Input: the command with its program and arguments.
+/// Output: its exit status; panics past [`FIRST_EXEC_TIME`] after stopping it.
+#[cfg(all(test, unix))]
+pub(crate) fn first_run(command: &mut Command) -> ExitStatus {
+    let mut child = spawn(
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + FIRST_EXEC_TIME;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("a fresh executable did not finish its first run within {FIRST_EXEC_TIME:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[cfg(test)]
 mod tests;
