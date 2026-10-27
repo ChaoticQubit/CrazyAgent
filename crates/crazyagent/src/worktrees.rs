@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
 #[cfg(unix)]
-const TREE_BOUNDS: TreeBounds = TreeBounds {
+pub(crate) const TREE_BOUNDS: TreeBounds = TreeBounds {
     files: 262_144,
     bytes: 2 * 1024 * 1024 * 1024,
     components: 64,
@@ -36,10 +36,10 @@ const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
 /// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
 /// the most content bytes across them, and the most path components in one path.
 #[cfg(unix)]
-struct TreeBounds {
-    files: usize,
-    bytes: u64,
-    components: usize,
+pub(crate) struct TreeBounds {
+    pub(crate) files: usize,
+    pub(crate) bytes: u64,
+    pub(crate) components: usize,
 }
 
 /// One tracked file or symlink of the lease commit. Fields: whether it is a file (and
@@ -1104,6 +1104,47 @@ fn load(
         .map_err(error)?;
     body.map(|body| serde_json::from_str(&body).map_err(error))
         .transpose()
+}
+
+/// Finds the Git metadata folder of a lease worktree for an engine commit, trusting the
+/// worktree's own `.git` file only as far as `worktree_metadata` checks it and only while
+/// the folder is still the one recorded when the lease was made. Inputs: the connection
+/// and the lease. Output: the folder, or `lease_missing`, `lease_changed` or the
+/// worktree refusal code.
+pub(crate) fn lease_git_dir(
+    connection: &Connection,
+    lease: &WorktreeLease,
+) -> Result<PathBuf, EngineError> {
+    let record = load(connection, &lease.task_id, &lease.repository)?
+        .ok_or_else(|| error("lease_missing"))?;
+    if record.lease.path != lease.path || record.lease.branch != lease.branch {
+        return Err(error("lease_changed"));
+    }
+    let metadata = worktree_metadata(&record)?;
+    if record.metadata.is_none() || record.metadata != Some(identity(&metadata, true)?) {
+        return Err(error("worktree_identity_changed"));
+    }
+    assert!(metadata.starts_with(Path::new(&record.lease.repository).join(".git/worktrees")));
+    Ok(metadata)
+}
+
+/// Names the branch of the lease whose worktree is at `path`, the only ref a master
+/// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
+/// the worktree path. Output: the branch, or `lease_missing`.
+pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
+    let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
+    let body: Option<String> = connection
+        .query_row(
+            "SELECT body FROM worktree_leases WHERE path=?1",
+            [path],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let record: LeaseRecord =
+        serde_json::from_str(&body.ok_or_else(|| error("lease_missing"))?).map_err(error)?;
+    assert_eq!(record.lease.path, path);
+    Ok(record.lease.branch)
 }
 
 fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError> {

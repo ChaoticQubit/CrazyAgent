@@ -298,12 +298,12 @@ pub fn origin_on_github(folder: &Path) -> Option<String> {
 }
 
 impl NativeBridge {
-    async fn owner_read(&mut self, query: OwnerRead) -> Result<OwnerData, BridgeError> {
+    async fn owner_read(&self, query: OwnerRead) -> Result<OwnerData, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
         Ok(self
-            .controller()?
+            .reader()?
             .read(query)
             .await
             .map_err(intake_failure)?
@@ -325,7 +325,7 @@ impl NativeBridge {
 
     /// Reads the projects home folder and whether the engine watches it.
     /// Input: none. Output: the folder, None before the owner picked one.
-    pub async fn projects_home(&mut self) -> Result<ProjectsHome, BridgeError> {
+    pub async fn projects_home(&self) -> Result<ProjectsHome, BridgeError> {
         match self.owner_read(OwnerRead::ProjectsHome).await? {
             OwnerData::ProjectsHome { home } => bounded(home),
             _ => Err(failure("owner_read_failed")),
@@ -347,7 +347,7 @@ impl NativeBridge {
 
     /// Lists the folders in the projects home and set-up projects whose folder vanished.
     /// Input: none. Output: at most FOUND_PROJECTS_MAX entries in engine order.
-    pub async fn found_projects(&mut self) -> Result<Vec<FoundProject>, BridgeError> {
+    pub async fn found_projects(&self) -> Result<Vec<FoundProject>, BridgeError> {
         match self.owner_read(OwnerRead::FoundProjects).await? {
             OwnerData::FoundProjects { mut projects } => {
                 projects.truncate(FOUND_PROJECTS_MAX);
@@ -531,15 +531,11 @@ impl NativeBridge {
     }
 
     /// Reads setup: each dependency, each default-pack entry and whether setup is running.
-    pub async fn setup_status(&mut self) -> Result<SetupStatus, BridgeError> {
+    pub async fn setup_status(&self) -> Result<SetupStatus, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        let status = self
-            .controller()?
-            .setup_status()
-            .await
-            .map_err(setup_failure)?;
+        let status = self.reader()?.setup_status().await.map_err(setup_failure)?;
         bounded(status)
     }
 

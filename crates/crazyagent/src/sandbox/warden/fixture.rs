@@ -15,10 +15,10 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
-/// A private project, home and temp folder under `/private/tmp` with the agent profile every
+/// A private project, home and temp folder under the canonical `/tmp` with the agent profile every
 /// project agent gets installed for them, for tests that start a detaching run in it.
 pub(crate) struct DetachingRun {
-    _root: tempfile::TempDir,
+    _root: Option<tempfile::TempDir>,
     pub(crate) project: PathBuf,
     pub(crate) profile: PathBuf,
     home: PathBuf,
@@ -30,7 +30,7 @@ impl DetachingRun {
     pub(crate) fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("crazyagent-warden-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let folder = |name: &str| {
             let folder = root.path().join(name);
@@ -50,11 +50,26 @@ impl DetachingRun {
         .install(&profile)
         .unwrap();
         Self {
-            _root: root,
+            _root: Some(root),
             project,
             profile,
             home,
             tmp,
+        }
+    }
+
+    /// A second run under this run's profile, home and temp folder, working in a new folder
+    /// `name` inside this run's project, as two agents launched from one profile file are.
+    /// Takes the folder name. Returns the run, whose folders are removed with this run's.
+    pub(crate) fn beside(&self, name: &str) -> Self {
+        let project = self.project.join(name);
+        std::fs::create_dir(&project).unwrap();
+        Self {
+            _root: None,
+            project,
+            profile: self.profile.clone(),
+            home: self.home.clone(),
+            tmp: self.tmp.clone(),
         }
     }
 
@@ -159,4 +174,110 @@ pub(crate) fn survivors(processes: [Pid; 3], wait: Duration) -> Vec<Pid> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// This user's processes whose command line contains `needle`, read with `ps`. Input: the
+/// text. Output: their ids and command lines.
+pub(crate) fn processes_naming(needle: &str) -> Vec<(i32, String)> {
+    let listing = crate::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    assert!(!listing.stdout.is_empty());
+    naming(
+        &String::from_utf8_lossy(&listing.stdout),
+        &rustix::process::getuid().as_raw().to_string(),
+        i32::try_from(std::process::id()).unwrap(),
+        needle,
+    )
+}
+
+/// Picks from a `ps -o pid=,uid=,command=` listing the processes of `user` other than `own`
+/// whose command line contains `needle`. Inputs: the listing, the user id, this process's id
+/// and the text. Output: their ids and command lines.
+pub(crate) fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(i32, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let owner = fields.next()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (owner == user && pid != own && command.contains(needle)).then_some((pid, command))
+        })
+        .collect()
+}
+
+/// Waits until `deadline` for no process of this user to name any of `needles`, then kills
+/// by id whatever still does, so a failing run leaves nothing behind. Inputs: the deadline
+/// and the texts. Output: the processes that outlived it.
+pub(crate) fn detached_survivors(
+    deadline: std::time::Instant,
+    needles: &[&str],
+) -> Vec<(i32, String)> {
+    loop {
+        let left: Vec<(i32, String)> = needles
+            .iter()
+            .flat_map(|needle| processes_naming(needle))
+            .collect();
+        if left.is_empty() || std::time::Instant::now() >= deadline {
+            for (pid, _) in &left {
+                if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Kills, by id, the warden of every running harness of this user started from `harness`:
+/// the child the session shim forked, which keeps the shim's command line naming the harness
+/// after the shim itself became the harness, as an agent that killed its own warden leaves
+/// the run. Input: the harness path, unique to the test. Output: the wardens killed.
+pub(crate) fn kill_wardens_of(harness: &str) -> Vec<i32> {
+    let listing = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(listing.status.success());
+    let shim = format!(
+        "{} {} {} setpgrp(0, getpgrp(getppid()))",
+        super::super::SESSION_SHIM[0],
+        super::super::SESSION_SHIM[1],
+        super::super::SESSION_SHIM[2]
+    );
+    let named = format!(" -- {harness}");
+    let wardens: Vec<i32> = naming(
+        &String::from_utf8_lossy(&listing.stdout),
+        &rustix::process::getuid().as_raw().to_string(),
+        i32::try_from(std::process::id()).unwrap(),
+        &named,
+    )
+    .into_iter()
+    .filter(|(_, command)| command.starts_with(&shim))
+    .map(|(pid, _)| pid)
+    .collect();
+    for warden in &wardens {
+        rustix::process::kill_process(
+            Pid::from_raw(*warden).unwrap(),
+            rustix::process::Signal::KILL,
+        )
+        .unwrap();
+    }
+    wardens
 }

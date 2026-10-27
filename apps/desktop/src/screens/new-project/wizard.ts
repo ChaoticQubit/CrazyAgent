@@ -16,6 +16,9 @@ export const NAME_CHARS_MAX = 80;
 export const ABOUT_CHARS_MAX = 4000;
 export const OTHER_PLATFORM_CHARS_MAX = 60;
 export const CUSTOM_STACK_CHARS_MAX = 40;
+export const NAME_BYTES_MAX = 256;
+export const ABOUT_BYTES_MAX = 8192;
+export const CUSTOM_STACK_BYTES_MAX = 64;
 export const STACK_MAX = 32;
 export const HARNESS_AGENTS_MAX = 15;
 export const TEAM_AGENTS_MAX = 64;
@@ -78,7 +81,20 @@ export function emptyDraft(): ProjectDraft {
 }
 
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u;
-const chars = (value: string) => [...value].length;
+const UTF8 = new TextEncoder();
+const bytes = (value: string) => UTF8.encode(value).length;
+
+/** Counts the characters the Create project form limits, as the owner sees them. Input: the text.
+ * Output: the count of Unicode characters. */
+export const chars = (value: string) => [...value].length;
+
+/** The description the engine stores for a draft: the owner's text with the "Other" platform
+ * text joined to it. Input: the draft. Output: the text, trimmed. */
+function aboutText(draft: ProjectDraft): string {
+  const other = draft.platforms.includes("other") ? draft.otherPlatform.trim() : "";
+  const about = draft.about.trim();
+  return other ? `${about}${about ? "\n\n" : ""}Other platform: ${other}` : about;
+}
 
 /** Checks the Basics step. Inputs: the draft and the names of existing projects.
  * Output: one plain message per field with a problem; empty when the step is valid. */
@@ -87,12 +103,17 @@ export function basicsErrors(draft: ProjectDraft, existing: string[]): { name?: 
   const name = draft.name.trim();
   if (!name) errors.name = "Enter a project name.";
   else if (chars(name) > NAME_CHARS_MAX) errors.name = `Use at most ${NAME_CHARS_MAX} characters.`;
+  else if (bytes(name) > NAME_BYTES_MAX) errors.name = "This name is too long to save. Shorten it.";
   else if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) errors.name = "Remove control characters from the name.";
   else {
     const same = existing.find((other) => other.trim().toLowerCase() === name.toLowerCase());
     if (same !== undefined) errors.name = `You already have a project called ${same}.`;
   }
   if (chars(draft.about) > ABOUT_CHARS_MAX) errors.about = `Use at most ${ABOUT_CHARS_MAX} characters.`;
+  else if (bytes(aboutText(draft)) > ABOUT_BYTES_MAX) {
+    errors.about = aboutText(draft) === draft.about.trim() ? "Shorten the description: it is too long to save."
+      : "Shorten the description or the Other platform text: together they are too long to save.";
+  }
   else if (CONTROL.test(draft.about)) errors.about = "Remove control characters from the description.";
   if (draft.platforms.includes("other")) {
     if (chars(draft.otherPlatform.trim()) > OTHER_PLATFORM_CHARS_MAX) errors.otherPlatform = `Use at most ${OTHER_PLATFORM_CHARS_MAX} characters.`;
@@ -107,6 +128,7 @@ export function addStack(stack: string[], entry: string): { stack: string[]; err
   const value = entry.trim();
   if (!value) return { stack, error: "Enter a name for the custom entry." };
   if (chars(value) > CUSTOM_STACK_CHARS_MAX) return { stack, error: `Custom entries can be up to ${CUSTOM_STACK_CHARS_MAX} characters.` };
+  if (bytes(value) > CUSTOM_STACK_BYTES_MAX) return { stack, error: "This custom entry is too long to save. Shorten it." };
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) return { stack, error: "Remove control characters." };
   if (stack.some((item) => item.toLowerCase() === value.toLowerCase())) return { stack };
   if (stack.length >= STACK_MAX) return { stack, error: `Pick at most ${STACK_MAX} tech stack items.` };
@@ -168,6 +190,38 @@ export function formatBytes(bytes: number): string {
 
 export function totalAgents(team: TeamPlan): number {
   return 1 + team.sub_harnesses.reduce((sum, slot) => sum + slot.agents, 0);
+}
+
+/** Tells whether the team already has `TEAM_AGENTS_MAX` agents, counting the master, so no
+ * agent or row can be added. Input: the team. Output: true when full. */
+export function teamFull(team: TeamPlan): boolean {
+  return totalAgents(team) >= TEAM_AGENTS_MAX;
+}
+
+export const TEAM_FULL_NOTE = `A team runs at most ${TEAM_AGENTS_MAX} agents, counting the master. Lower a count or remove a harness to add another.`;
+
+/** What an empty agent list means (DEC-096 addendum 3): any harness runs, up to the team maximum. */
+export const ANY_HARNESS_NOTE = "Any harness, no limit. Add a harness to limit which ones run and how many.";
+
+/** Says what an empty agent list runs: any harness, or no sub-agent under a team maximum of one.
+ * Input: the team. Output: the note shown where the agent rows would be. */
+export function anyHarnessNote(team: TeamPlan): string {
+  return team.max_agents <= 1 ? "No sub-agents run with a team maximum of 1. Raise the maximum to let any harness run." : ANY_HARNESS_NOTE;
+}
+
+/** Names the sub-agents an empty agent list allows: the team maximum less the master.
+ * Input: the team. Output: for example "Any harness, up to 63 agents". */
+export function anyHarnessTotal(team: TeamPlan): string {
+  const subs = Math.max(0, team.max_agents - 1);
+  return subs === 0 ? "No sub-agents (team maximum is 1)" : `Any harness, up to ${subs} ${subs === 1 ? "agent" : "agents"}`;
+}
+
+/** Says how many agents the team has: up to the team maximum when no harness is chosen,
+ * otherwise the exact total. Input: the team. Output: one sentence. */
+export function agentTotalText(team: TeamPlan): string {
+  const count = team.sub_harnesses.length ? totalAgents(team) : team.max_agents;
+  const noun = count === 1 ? "agent" : "agents";
+  return team.sub_harnesses.length ? `This team has ${count} ${noun}.` : `This team has up to ${count} ${noun}.`;
 }
 
 function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntry | undefined {
@@ -246,15 +300,21 @@ export function setRowHarness(team: TeamDraft, row: number, harness: string, har
   };
 }
 
+/** Sets one row's agent count, kept to 1 to `HARNESS_AGENTS_MAX` and never raised past the
+ * team's `TEAM_AGENTS_MAX` total; lowering always works. Inputs: the team, the row and the
+ * wanted count. Output: the team, with At most raised to fit when it can. */
 export function setAgents(team: TeamDraft, row: number, agents: number): TeamDraft {
-  const count = Math.min(HARNESS_AGENTS_MAX, Math.max(1, Math.round(Number.isFinite(agents) ? agents : 1)));
+  const current = team.sub_harnesses[row]?.agents ?? 1;
+  const room = Math.max(current, TEAM_AGENTS_MAX - (totalAgents(team) - current));
+  const count = Math.min(HARNESS_AGENTS_MAX, room, Math.max(1, Math.round(Number.isFinite(agents) ? agents : 1)));
   return withRoom({ ...team, sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? { ...slot, agents: count } : slot) });
 }
 
 /** Adds an agent row on the first ready harness the team does not use yet.
- * Inputs: the team and the catalog. Output: the team with one more row of one agent. */
+ * Inputs: the team and the catalog. Output: the team with one more row of one agent, or the
+ * team unchanged when it has `SUB_HARNESSES_MAX` rows or `TEAM_AGENTS_MAX` agents. */
 export function addHarnessRow(team: TeamDraft, harnesses: HarnessEntry[] | null): TeamDraft {
-  if (team.sub_harnesses.length >= SUB_HARNESSES_MAX) return team;
+  if (team.sub_harnesses.length >= SUB_HARNESSES_MAX || teamFull(team)) return team;
   const used = new Set(team.sub_harnesses.map((slot) => slot.harness));
   const ready = (harnesses ?? []).filter((harness) => harness.status.kind === "ready");
   const harness = ready.find((candidate) => !used.has(candidate.id))?.id ?? ready[0]?.id ?? team.master;
@@ -325,6 +385,7 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
   if (team.sub_harnesses.length > SUB_HARNESSES_MAX) errors.range = `Use at most ${SUB_HARNESSES_MAX} agent harnesses.`;
   else if (!Number.isInteger(team.min_agents) || !Number.isInteger(team.max_agents) || team.min_agents < 1 || team.min_agents > team.max_agents) errors.range = RANGE;
   else if (team.max_agents > TEAM_AGENTS_MAX) errors.range = `At most can be up to ${TEAM_AGENTS_MAX}.`;
+  else if (total > TEAM_AGENTS_MAX) errors.range = `This team has ${total} agents: the master and ${total - 1} more, but a team runs at most ${TEAM_AGENTS_MAX}. Remove ${total - TEAM_AGENTS_MAX} or more.`;
   else if (total > team.max_agents) errors.range = `This team has ${total} agents: the master and ${total - 1} more. Set At most to ${total} or more.`;
   else if (total < team.min_agents) errors.range = `This team has ${total} agents. Set At least to ${total} or less.`;
   return errors;
@@ -350,8 +411,7 @@ export function stepComplete(step: StepId, draft: ProjectDraft, existing: string
 /** Builds the engine request from a finished draft.
  * Input: the draft. Output: the project spec and setup; the "Other" platform text joins the description. */
 export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: ProjectSetup } {
-  const other = draft.platforms.includes("other") ? draft.otherPlatform.trim() : "";
-  const about = other ? `${draft.about.trim()}${draft.about.trim() ? "\n\n" : ""}Other platform: ${other}` : draft.about.trim();
+  const about = aboutText(draft);
   return {
     spec: { name: draft.name.trim(), repositories: [] },
     setup: {

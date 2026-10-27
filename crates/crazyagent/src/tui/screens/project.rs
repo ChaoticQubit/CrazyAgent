@@ -1,8 +1,11 @@
+use super::changes::ProjectChanges;
+use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::sessions::{Sessions, SessionsAction, SessionsReply};
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
@@ -11,6 +14,8 @@ use crate::project_setup::{
     ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::team::TeamGraph;
+use crate::tui::ctx::Load;
 use crate::tui::seam::PoolScope;
 use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -23,10 +28,11 @@ pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
 pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 256;
+const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 
-/// Names the five tabs of a project.
+/// Names the six tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
 /// The order is the tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,15 +40,17 @@ pub(in crate::tui) enum Tab {
     Overview,
     Conversation,
     Agents,
+    Changes,
     Context,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
+        Self::Changes,
         Self::Context,
         Self::Settings,
     ];
@@ -55,6 +63,7 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
+            Self::Changes => "Changes",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }
@@ -68,6 +77,7 @@ impl Tab {
             Self::Overview => "\u{25eb}",
             Self::Conversation => "\u{00bb}",
             Self::Agents => "\u{229b}",
+            Self::Changes => "\u{2213}",
             Self::Context => "\u{29c9}",
             Self::Settings => "\u{2630}",
         }
@@ -127,13 +137,37 @@ pub(in crate::tui) fn project_pool(
 }
 
 /// Who wrote one transcript message.
-/// You is the owner, Master the leading harness, Notice a plain status from CrazyAgent.
+/// You is the owner, Master the leading harness, Notice a plain status from CrazyAgent and
+/// Task the line of a task a reply handed to the team.
 /// Notices that are errors carry the error flag on the message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum Speaker {
     You,
     Master,
     Notice,
+    Task,
+}
+
+/// What the prompt's inline menu offers at the cursor: the commands matching a `/` word, or
+/// the tags completing an `@` word with how many characters that word has, `@` included.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Picks {
+    None,
+    Commands(Vec<&'static console::Command>),
+    Tags { typed: usize, tags: Vec<String> },
+}
+
+impl Picks {
+    /// Counts the menu's entries.
+    /// Takes the menu.
+    /// Returns how many entries it shows.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Commands(commands) => commands.len(),
+            Self::Tags { tags, .. } => tags.len(),
+        }
+    }
 }
 
 /// One message in the master conversation.
@@ -467,6 +501,11 @@ pub(in crate::tui) enum ProjectReply {
     EndConversation,
     Retry,
     Team,
+    Master,
+    Process,
+    Usage,
+    Session(SessionsAction),
+    AccountOrder(Option<crate::scheduling::Strategy>),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -488,8 +527,14 @@ pub(in crate::tui) struct ProjectScreen {
     pub pool_choices: Vec<PoolChoice>,
     pub pool_picker: Option<usize>,
     pub transcript: Option<Transcript>,
+    pub team: Load<Box<TeamGraph>>,
     pub input: TextInput,
     pub typing: bool,
+    pub history: console::History,
+    pub menu_cursor: usize,
+    pub console_note: Vec<String>,
+    pub cleared: Option<(usize, Message)>,
+    pub files: Option<(String, Vec<String>)>,
     pub transcript_scroll: usize,
     pub overview_cursor: usize,
     pub agents_cursor: usize,
@@ -502,15 +547,21 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
     pub adding: Option<AddFile>,
+    pub folders: Option<AddFile>,
+    pub read_paths: Option<Vec<String>>,
+    pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
     pub log: Option<JobLog>,
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
+    pub changes: ProjectChanges,
+    pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
+    read_paths_read_ms: Option<i64>,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -524,6 +575,8 @@ impl ProjectScreen {
     pub fn new(project: ProjectId, name: String, home: Option<PathBuf>) -> Self {
         Self {
             plugins: ProjectPlugins::new(project.clone()),
+            changes: ProjectChanges::new(project.clone()),
+            sessions: Sessions::default(),
             project,
             name,
             tab: Tab::Overview,
@@ -539,8 +592,14 @@ impl ProjectScreen {
             pool_choices: Vec::new(),
             pool_picker: None,
             transcript: None,
+            team: Load::Idle,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
+            history: console::History::default(),
+            menu_cursor: 0,
+            console_note: Vec::new(),
+            cleared: None,
+            files: None,
             transcript_scroll: 0,
             overview_cursor: 0,
             agents_cursor: 0,
@@ -553,6 +612,9 @@ impl ProjectScreen {
             confirm_stop: None,
             confirm_remove: false,
             adding: None,
+            folders: None,
+            read_paths: None,
+            schedule: None,
             general: None,
             removed: false,
             log: None,
@@ -561,6 +623,7 @@ impl ProjectScreen {
             offset: 0,
             jobs_read_ms: None,
             context_read_ms: None,
+            read_paths_read_ms: None,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -578,8 +641,12 @@ impl ProjectScreen {
         self.confirm_stop = None;
         self.confirm_remove = false;
         self.adding = None;
+        self.folders = None;
         self.general = None;
         self.typing = tab == Tab::Conversation;
+        if tab == Tab::Changes {
+            self.changes.refresh();
+        }
     }
 
     /// Gives the next engine read this screen needs, at most one at a time.
@@ -605,6 +672,11 @@ impl ProjectScreen {
             && (self.context.is_none() || matches!(self.tab, Tab::Context))
         {
             SetupQuery::Context { project }
+        } else if self.read_paths.is_none()
+            && self.tab == Tab::Settings
+            && due(self.read_paths_read_ms)
+        {
+            SetupQuery::ReadPaths { project }
         } else if due(self.memories_read_ms)
             && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
@@ -725,6 +797,7 @@ impl ProjectScreen {
                     }
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
+                    SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, .. } => {
                         if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
@@ -767,6 +840,10 @@ impl ProjectScreen {
                 self.memories = Some(memories);
                 self.memories_read_ms = Some(self.now_ms);
             }
+            SetupView::ReadPaths(paths) => {
+                self.read_paths = Some(paths);
+                self.read_paths_read_ms = Some(self.now_ms);
+            }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
                     preview.loaded = true;
@@ -807,6 +884,13 @@ impl ProjectScreen {
                 if let Some(adding) = self.adding.as_mut() {
                     adding.busy = false;
                     adding.error = reason;
+                }
+                true
+            }
+            SetupAction::SetReadPaths { .. } if self.folders.is_some() => {
+                if let Some(folders) = self.folders.as_mut() {
+                    folders.busy = false;
+                    folders.error = reason;
                 }
                 true
             }
@@ -858,6 +942,16 @@ impl ProjectScreen {
                 action: SetupAction::Remove { .. },
                 ..
             } => self.removed = applied,
+            SetupQuery::Change {
+                action: SetupAction::SetReadPaths { .. },
+                ..
+            } => {
+                self.read_paths = None;
+                self.read_paths_read_ms = None;
+                if applied {
+                    self.folders = None;
+                }
+            }
             SetupQuery::Change {
                 action: SetupAction::DeleteContext { path, .. },
                 ..
@@ -967,6 +1061,22 @@ impl ProjectScreen {
         })
     }
 
+    /// True while a box or question is open: `key` gives it every key before any tab or
+    /// panel, so a panel must offer keys only while this is false.
+    /// Output: whether an edit, review, add, folders or General box, or the remove, pool,
+    /// delete or stop question, is open.
+    pub fn boxed(&self) -> bool {
+        self.edit.is_some()
+            || self.review.is_some()
+            || self.adding.is_some()
+            || self.folders.is_some()
+            || self.general.is_some()
+            || self.confirm_remove
+            || self.pool_picker.is_some()
+            || self.confirm_delete.is_some()
+            || self.confirm_stop.is_some()
+    }
+
     /// Handles one key for the open tab, the edit box or the delete question.
     /// Takes the key event.
     /// Returns what the host should do next.
@@ -980,6 +1090,9 @@ impl ProjectScreen {
         }
         if self.adding.is_some() {
             return self.add_key(key);
+        }
+        if self.folders.is_some() {
+            return self.folders_key(key);
         }
         if self.general.is_some() {
             return self.general_key(key);
@@ -1039,7 +1152,9 @@ impl ProjectScreen {
         match key.code {
             KeyCode::Left if shift => return self.tab_by(-1),
             KeyCode::Right if shift => return self.tab_by(1),
-            KeyCode::Tab if self.tab == Tab::Conversation => {
+            KeyCode::Tab
+                if self.tab == Tab::Conversation && !(self.typing && self.picks().len() > 0) =>
+            {
                 self.typing = !self.typing;
                 return ProjectReply::Handled;
             }
@@ -1059,6 +1174,7 @@ impl ProjectScreen {
             Tab::Overview => self.overview_key(key),
             Tab::Conversation => self.conversation_key(key),
             Tab::Agents => self.agents_key(key),
+            Tab::Changes => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
@@ -1085,6 +1201,11 @@ impl ProjectScreen {
             adding.error = None;
             return ProjectReply::Handled;
         }
+        if let Some(folders) = self.folders.as_mut().filter(|folders| !folders.busy) {
+            folders.input.insert_str(text);
+            folders.error = None;
+            return ProjectReply::Handled;
+        }
         if let Some(general) = self.general.as_mut().filter(|general| !general.busy) {
             if let Some(field) = general.text() {
                 field.insert_str(text);
@@ -1094,6 +1215,9 @@ impl ProjectScreen {
         }
         if self.tab == Tab::Conversation && self.typing {
             self.input.insert_str(text);
+            return ProjectReply::Handled;
+        }
+        if self.tab == Tab::Changes && self.changes.paste(text) {
             return ProjectReply::Handled;
         }
         ProjectReply::Ignored
@@ -1108,17 +1232,58 @@ impl ProjectScreen {
 
     fn input_key(&mut self, key: KeyEvent) -> ProjectReply {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let picks = self.picks();
+        let shown = picks.len();
         match key.code {
-            KeyCode::Esc => {
-                self.typing = false;
+            KeyCode::Esc if !self.input.value().is_empty() => {
+                self.input.set("");
+                self.menu_cursor = 0;
+                self.console_note.clear();
                 ProjectReply::Handled
             }
+            KeyCode::Esc => {
+                self.typing = false;
+                self.console_note.clear();
+                ProjectReply::Handled
+            }
+            KeyCode::Up if shown > 0 => {
+                self.menu_cursor = self.menu_cursor.min(shown - 1).saturating_sub(1);
+                ProjectReply::Handled
+            }
+            KeyCode::Down if shown > 0 => {
+                self.menu_cursor = (self.menu_cursor + 1).min(shown - 1);
+                ProjectReply::Handled
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let older = key.code == KeyCode::Up;
+                if let Some(text) = self.history.step(older, self.input.value()) {
+                    self.input.set(&text);
+                }
+                ProjectReply::Handled
+            }
+            KeyCode::Tab if shown > 0 => self.pick(picks),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.input.insert_str("\n");
+                ProjectReply::Handled
+            }
+            KeyCode::Enter if matches!(picks, Picks::Tags { .. }) => self.pick(picks),
             KeyCode::Enter => {
+                if let Picks::Commands(commands) = &picks
+                    && let Some(command) =
+                        commands.get(self.menu_cursor.min(shown.saturating_sub(1)))
+                {
+                    return self.run(Ok(command.action));
+                }
                 let text = self.input.value().trim().to_owned();
+                if let Some(found) = console::command(&text) {
+                    return self.run(found);
+                }
                 if text.is_empty() || !self.master_usable() {
                     return ProjectReply::Handled;
                 }
+                self.history.push(&text);
                 self.input.set("");
+                self.console_note.clear();
                 self.transcript_scroll = 0;
                 ProjectReply::Send(text)
             }
@@ -1126,13 +1291,126 @@ impl ProjectScreen {
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             _ => {
-                if self.input.handle(key) || matches!(key.code, KeyCode::Char(_)) && !control {
+                if self.input.handle(key) {
+                    self.menu_cursor = 0;
+                    ProjectReply::Handled
+                } else if matches!(key.code, KeyCode::Char(_)) && !control {
                     ProjectReply::Handled
                 } else {
                     ProjectReply::Ignored
                 }
             }
         }
+    }
+
+    /// Gives the prompt's inline menu at the cursor while the owner types to the master.
+    /// Takes the screen; tags come from the team graph and the project context as read.
+    /// Returns the matching commands for a `/` word, the completing tags for an `@` word, or
+    /// None.
+    pub fn picks(&self) -> Picks {
+        if self.tab != Tab::Conversation || !self.typing {
+            return Picks::None;
+        }
+        if let Some(commands) = console::menu(self.input.value()) {
+            return Picks::Commands(commands);
+        }
+        let head = self.input.head();
+        let Some(query) = console::tag_query(head) else {
+            return Picks::None;
+        };
+        let graph = self.team.ready().map(|graph| graph.as_ref());
+        let files = self.files.as_ref().map(|(_, paths)| paths.as_slice());
+        let candidates = console::tags(graph, files, self.context.as_ref());
+        let tags: Vec<String> = console::completions(&candidates, query)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if tags.is_empty() {
+            return Picks::None;
+        }
+        Picks::Tags {
+            typed: query.chars().count() + 1,
+            tags,
+        }
+    }
+
+    /// The project file query for the `@` word the owner is typing to the master.
+    /// Takes the screen. Returns the query, or None while no tag is typed.
+    pub fn files_query(&self) -> Option<String> {
+        if self.tab != Tab::Conversation || !self.typing {
+            return None;
+        }
+        console::tag_query(self.input.head()).map(console::files_query)
+    }
+
+    fn pick(&mut self, picks: Picks) -> ProjectReply {
+        let at = self.menu_cursor.min(picks.len().saturating_sub(1));
+        match picks {
+            Picks::None => {}
+            Picks::Commands(commands) => self.input.set(&format!("/{}", commands[at].name)),
+            Picks::Tags { typed, tags } => {
+                self.input.replace_back(typed, &format!("{} ", tags[at]))
+            }
+        }
+        self.menu_cursor = 0;
+        ProjectReply::Handled
+    }
+
+    fn run(&mut self, found: Result<console::Action, String>) -> ProjectReply {
+        let typed = self.input.value().trim().to_owned();
+        self.history.push(&typed);
+        self.input.set("");
+        self.menu_cursor = 0;
+        self.console_note.clear();
+        let action = match found {
+            Ok(action) => action,
+            Err(word) => {
+                self.console_note = vec![format!(
+                    "Unknown command {word}. Type /help for the commands."
+                )];
+                return ProjectReply::Handled;
+            }
+        };
+        match action {
+            console::Action::Help => {
+                self.console_note = console::COMMANDS
+                    .iter()
+                    .map(|command| format!("/{:<8} {}", command.name, command.about))
+                    .collect();
+            }
+            console::Action::Clear => {
+                self.cleared = self.transcript.as_ref().and_then(|transcript| {
+                    let last = transcript.messages.last()?;
+                    Some((transcript.messages.len(), last.clone()))
+                });
+                self.transcript_scroll = 0;
+            }
+            console::Action::Master if self.live_master() => return ProjectReply::Master,
+            console::Action::Master => {
+                self.console_note = vec![
+                    "This master has no live terminal; its conversation is this console.".into(),
+                ];
+            }
+            console::Action::Agents => self.open(Tab::Agents),
+            console::Action::Changes => self.open(Tab::Changes),
+            console::Action::Usage => return ProjectReply::Usage,
+            console::Action::Process => return ProjectReply::Process,
+            console::Action::Stop => return ProjectReply::StopTurn,
+        }
+        ProjectReply::Handled
+    }
+
+    /// Gives the transcript messages the console shows: those after a `/clear`, or all of
+    /// them once the conversation no longer holds the message the clear ended on.
+    /// Takes the transcript.
+    /// Returns the messages to draw.
+    pub fn shown_messages<'a>(&self, transcript: &'a Transcript) -> &'a [Message] {
+        let skip = self
+            .cleared
+            .as_ref()
+            .filter(|(count, last)| transcript.messages.get(count.wrapping_sub(1)) == Some(last))
+            .map_or(0, |(count, _)| *count);
+        &transcript.messages[skip..]
     }
 
     /// Says whether the master can take a message now.
@@ -1153,8 +1431,28 @@ impl ProjectScreen {
         ProjectReply::Handled
     }
 
+    /// Says whether the project's master runs as its own app in a live terminal, which
+    /// `/master` opens from the console.
+    /// Takes the screen.
+    /// Returns true for a Codex or Claude Code master in the stored team plan.
+    pub fn live_master(&self) -> bool {
+        self.setup.as_ref().is_some_and(|setup| {
+            crate::harnesses::interactive::support(&setup.team.master)
+                == crate::harnesses::interactive::Support::Terminal
+        })
+    }
+
     fn conversation_key(&mut self, key: KeyEvent) -> ProjectReply {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let running = matches!(
+            self.transcript.as_ref().map(|t| &t.status),
+            Some(MasterStatus::Thinking { .. })
+        );
+        match self.sessions.key(key, self.master_usable(), running) {
+            SessionsReply::Ignored => {}
+            SessionsReply::Handled => return ProjectReply::Handled,
+            SessionsReply::Act(action) => return ProjectReply::Session(action),
+        }
         match key.code {
             KeyCode::Char('s') if !self.pool.as_ref().is_some_and(|p| p.assigned) => {
                 self.open(Tab::Settings);
@@ -1169,6 +1467,7 @@ impl ProjectScreen {
                 ProjectReply::Retry
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
                 ProjectReply::EndConversation
             }
@@ -1608,7 +1907,114 @@ impl ProjectScreen {
                 self.confirm_remove = true;
                 ProjectReply::Handled
             }
+            KeyCode::Char('f') => {
+                match &self.read_paths {
+                    Some(paths) => {
+                        let mut input = TextInput::single(FOLDERS_BYTES_MAX);
+                        input.set(&paths.join(":"));
+                        self.folders = Some(AddFile {
+                            input,
+                            busy: false,
+                            error: None,
+                        });
+                    }
+                    None => {
+                        self.problem =
+                            Some("Still loading the read-only folders. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
+            KeyCode::Char('i') => ProjectReply::Process,
+            KeyCode::Char('u') => match &self.schedule {
+                Some(schedule) => ProjectReply::AccountOrder(
+                    crate::tui::screens::settings::account_choice::cycle(
+                        self.own_order(schedule),
+                        true,
+                        true,
+                    ),
+                ),
+                None => {
+                    self.problem = Some("Still loading the account order. Try again.".into());
+                    ProjectReply::Handled
+                }
+            },
             _ => ProjectReply::Ignored,
+        }
+    }
+
+    fn own_order(
+        &self,
+        schedule: &crate::scheduling::Schedule,
+    ) -> Option<crate::scheduling::Strategy> {
+        schedule
+            .projects
+            .iter()
+            .find(|entry| entry.id.as_str() == self.project.as_str())
+            .map(|entry| entry.strategy)
+    }
+
+    /// The project's account order for its Settings tab: its own strategy, or the one it
+    /// follows from its pool or the app. Takes the screen. Returns the text, or none while
+    /// the schedule loads.
+    pub fn account_order(&self) -> Option<String> {
+        let schedule = self.schedule.as_ref()?;
+        if let Some(own) = self.own_order(schedule) {
+            return Some(format!("{} (this project)", own.label()));
+        }
+        let pools: Vec<&CredentialRef> = self
+            .pool
+            .iter()
+            .filter(|pool| pool.assigned)
+            .map(|pool| &pool.id)
+            .collect();
+        Some(format!(
+            "Default ({})",
+            schedule.strategy_for(None, &pools).label()
+        ))
+    }
+
+    /// Handles one key in the read-only folders box: Enter saves the folders typed between
+    /// colons, an empty box clears them, Esc closes it.
+    /// Takes the key event.
+    /// Returns the change to send, or what the box did with the key.
+    fn folders_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(folders) = self.folders.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.folders = None;
+                ProjectReply::Handled
+            }
+            _ if folders.busy => ProjectReply::Handled,
+            KeyCode::Enter => {
+                let paths: Vec<String> = folders
+                    .input
+                    .value()
+                    .split(':')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                let action = SetupAction::SetReadPaths {
+                    project_id: self.project.clone(),
+                    paths,
+                };
+                if let Err(error) = action.validate() {
+                    folders.error = Some(plain_problem(&error.0));
+                    return ProjectReply::Handled;
+                }
+                folders.busy = true;
+                folders.error = None;
+                ProjectReply::Change(Box::new(action))
+            }
+            _ => {
+                if folders.input.handle(key) {
+                    folders.error = None;
+                }
+                ProjectReply::Handled
+            }
         }
     }
 
@@ -1717,6 +2123,7 @@ impl ProjectScreen {
             self.edit.is_some(),
             self.review.is_some(),
             self.adding.is_some(),
+            self.folders.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
@@ -1730,7 +2137,7 @@ impl ProjectScreen {
         if self.adding.is_some() {
             assert_eq!(self.tab, Tab::Context);
         }
-        if self.general.is_some() || self.confirm_remove {
+        if self.general.is_some() || self.confirm_remove || self.folders.is_some() {
             assert_eq!(self.tab, Tab::Settings);
         }
         if let Some(job) = self.confirm_stop {
@@ -1796,6 +2203,20 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "This part has hidden or direction-changing characters, so it can't be saved to memory."
         }
         "context_item_protected" => "The project brief can't be deleted.",
+        "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
+        "read_path_missing" => "One of those folders doesn't exist on this computer.",
+        "read_path_not_folder" => "One of those paths is a file. Add folders only.",
+        "read_path_holds_home" => {
+            "Agents can't read your whole home folder. Add a folder inside it."
+        }
+        "read_path_credentials" => {
+            "One of those folders holds or sits in a credential location, such as .ssh or .aws."
+        }
+        "read_path_engine_data" => "One of those folders holds CrazyAgent's own data.",
+        "read_path_refused" => "One of those folders can't be shared with agents.",
+        "read_paths_too_many" | "read_paths_invalid" => {
+            "Share at most 8 folders, each one plain path of up to 1024 characters."
+        }
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {

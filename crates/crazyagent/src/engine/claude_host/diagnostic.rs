@@ -3,27 +3,24 @@ use crate::engine::EngineError;
 use std::io::Write;
 use std::path::Path;
 
-/// How many of the last raw stream bytes a Claude Code master host keeps for the engine log.
+/// How many of the last raw stream bytes a master host keeps to name its last frames for the
+/// engine log; the bytes themselves are never written there.
 pub(in crate::engine) const TAIL_BYTES: usize = 8192;
 /// How many lines after a turn's result a host names by kind; later ones are only counted.
 #[cfg(unix)]
 const LATE_KINDS_MAX: usize = 16;
-/// The longest stream type or subtype name a host copies into the engine log.
-#[cfg(unix)]
+/// The longest stream type, subtype or method name a host copies into the engine log.
 const KIND_BYTES_MAX: usize = 64;
 /// The engine log of Claude Code master stream diagnostics, in the engine logs folder.
 pub(in crate::engine) const LOG_FILE: &str = "master-stream.log";
 /// The size the log never passes: a log that a new entry would take past it is first moved
 /// to `master-stream.log.1`, replacing the older copy.
 pub(in crate::engine) const ROTATE_BYTES: u64 = 256 * 1024;
-const CREDENTIAL_PREFIX: &[u8] = b"sk-ant-";
-/// OpenAI key and token prefixes, redacted only where a word starts so `task-` stays plain.
-const WORD_CREDENTIAL_PREFIXES: [&[u8]; 2] = [b"sk-", b"eyJ"];
-const REDACTED: &[u8] = b"[redacted]";
 
 /// What a master host kept about its stream for the engine log: the fault that retired it,
 /// the line or frame that fault was found on, the kinds and count of the lines that came
-/// after a Claude Code turn's result, and the last raw stream bytes.
+/// after a Claude Code turn's result, and the last raw stream bytes, which only name the
+/// last frames by kind and size.
 #[derive(Clone, Debug, Default)]
 pub(in crate::engine) struct StreamDiagnostic {
     pub(in crate::engine) fault: Option<String>,
@@ -66,76 +63,66 @@ impl StreamDiagnostic {
         }
     }
 
-    /// The kept stream bytes as text with every Claude credential, OpenAI key (`sk-`) and
-    /// token (`eyJ`) redacted. When older bytes were dropped, the leading run of credential
-    /// characters goes with them, so a credential cut before its prefix never shows.
-    /// Input: none. Output: the text.
-    pub(in crate::engine) fn tail(&self) -> String {
-        let mut start = 0;
-        if self.cut {
-            while start < self.tail.len() && credential_byte(self.tail[start]) {
-                start += 1;
+    /// Names each line of the kept stream bytes by its kind and size, never by its content,
+    /// so tool output and credentials in the stream stay out of the engine log: `cut` for a
+    /// first line whose start was dropped, `unfinished` for a last line with no newline yet.
+    /// Input: none. Output: one `kind bytes` entry per line, oldest first.
+    pub(in crate::engine) fn frames(&self) -> Vec<String> {
+        let mut frames = Vec::new();
+        let mut lines = self.tail.split(|byte| *byte == b'\n').peekable();
+        while let Some(line) = lines.next() {
+            let last = lines.peek().is_none();
+            if last && line.is_empty() {
+                break;
             }
-        }
-        let bytes = &self.tail[start..];
-        let mut text = Vec::with_capacity(bytes.len());
-        let mut index = 0;
-        while index < bytes.len() {
-            let word = index == 0 || !credential_byte(bytes[index - 1]);
-            let prefix = if bytes[index..].starts_with(CREDENTIAL_PREFIX) {
-                Some(CREDENTIAL_PREFIX)
-            } else if word {
-                WORD_CREDENTIAL_PREFIXES
-                    .into_iter()
-                    .find(|prefix| bytes[index..].starts_with(prefix))
+            let name = if frames.is_empty() && self.cut {
+                "cut".to_owned()
+            } else if last {
+                "unfinished".to_owned()
             } else {
-                None
+                kind(line)
             };
-            if let Some(prefix) = prefix {
-                text.extend_from_slice(prefix);
-                text.extend_from_slice(REDACTED);
-                index += prefix.len();
-                while index < bytes.len() && credential_byte(bytes[index]) {
-                    index += 1;
-                }
-            } else {
-                text.push(bytes[index]);
-                index += 1;
-            }
+            frames.push(format!("{name} {}", line.len()));
         }
-        assert!(index == bytes.len());
-        String::from_utf8_lossy(&text).into_owned()
+        assert!(frames.len() <= self.tail.len() + 1);
+        frames
     }
 }
 
-fn credential_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.'
-}
-
-/// Names a stream line by its `type` and, when it has one, its `subtype`, such as
-/// `system/task_notification`. Input: the line. Output: the name, with `unreadable` for a
-/// line or field that is not a short lowercase JSON name.
-#[cfg(unix)]
+/// Names a stream line by its protocol kind: a Claude Code line by its `type` and, when it
+/// has one, its `subtype`, such as `system/task_notification`; a Codex JSON-RPC frame by its
+/// `method`, or `response` or `error`. Input: the line. Output: the name, with `unreadable`
+/// for a line or field that is not a short JSON name of letters, `_` and, in a method, `/`.
 fn kind(line: &[u8]) -> String {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return "unreadable".to_owned();
     };
-    let name = |field: &str| {
+    let name = |field: &str, method: bool| {
         value.get(field).map(|value| {
             value
                 .as_str()
                 .filter(|name| {
                     (1..=KIND_BYTES_MAX).contains(&name.len())
-                        && name
-                            .bytes()
-                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte == b'_'
+                                || (method && (byte.is_ascii_uppercase() || byte == b'/'))
+                        })
                 })
                 .unwrap_or("unreadable")
         })
     };
-    match (name("type"), name("subtype")) {
-        (Some(kind), Some(subtype)) => format!("{kind}/{subtype}"),
-        (Some(kind), None) => kind.to_owned(),
+    match (name("type", false), name("subtype", false)) {
+        (Some(kind), Some(subtype)) => return format!("{kind}/{subtype}"),
+        (Some(kind), None) => return kind.to_owned(),
+        (None, _) => {}
+    }
+    if let Some(method) = name("method", true) {
+        return method.to_owned();
+    }
+    match (value.get("id"), value.get("error")) {
+        (Some(_), Some(_)) => "error".to_owned(),
+        (Some(_), None) => "response".to_owned(),
         (None, _) => "unreadable".to_owned(),
     }
 }

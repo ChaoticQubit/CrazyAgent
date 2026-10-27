@@ -48,7 +48,7 @@ impl NativeBridge {
             return Err(failure("not_connected"));
         }
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         validate_inputs(provider, label, endpoint, model)?;
@@ -140,8 +140,15 @@ impl NativeBridge {
             .ok_or_else(|| failure("account_profile_operation_missing"))?
             .request
             .clone();
-        let result = self.controller()?.read_account_profile(request).await;
-        self.finish_account_profile(result)
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.controller()?.read_account_profile(request),
+        )
+        .await;
+        match result {
+            Ok(result) => self.finish_account_profile(result),
+            Err(_) => Err(failure("account_profile_outcome_unknown_read_same_request")),
+        }
     }
 
     pub(super) fn profile_pending(&self) -> bool {

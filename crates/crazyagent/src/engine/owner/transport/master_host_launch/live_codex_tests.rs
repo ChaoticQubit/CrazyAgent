@@ -195,9 +195,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
                 message,
                 will_retry: false,
             } => errors.push(message),
-            EventKind::AssistantDelta { item_id, text } => {
-                reply.push(Some(&item_id), &text, true).unwrap()
-            }
+            EventKind::AssistantDelta { item_id, text } => reply.push(Some(&item_id), &text, true),
             EventKind::ApprovalRequired { approval, .. } => steps.push(format!("{approval:?}")),
             EventKind::UnsupportedRequest { method, .. } => steps.push(method),
             EventKind::Unsupported {
@@ -290,7 +288,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         "# Browsky\n\n{}\n{}",
         setup.about,
         if tools_section {
-            crate::launch_context::master_tools_section(&setup)
+            crate::launch_context::master_tools_section(&setup, &[])
         } else {
             String::new()
         }
@@ -407,11 +405,11 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
             Err(error) => {
                 let diagnostic = master.diagnostic();
                 println!(
-                    "real codex sub-agents master turn failed: {} fault={:?} message={:?} steps={steps:?}\ntail:\n{}",
+                    "real codex sub-agents master turn failed: {} fault={:?} message={:?} steps={steps:?} frames={:?}",
                     error.0,
                     diagnostic.fault,
                     diagnostic.message,
-                    diagnostic.tail()
+                    diagnostic.frames()
                 );
                 let _ = master.close().await;
                 panic!("{}", error.0);
@@ -423,9 +421,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
                 message,
                 will_retry: false,
             } => errors.push(message),
-            EventKind::AssistantDelta { item_id, text } => {
-                reply.push(Some(&item_id), &text, true).unwrap()
-            }
+            EventKind::AssistantDelta { item_id, text } => reply.push(Some(&item_id), &text, true),
             EventKind::ApprovalRequired { approval, .. } => steps.push(format!("{approval:?}")),
             EventKind::UnsupportedRequest { method, .. } => steps.push(method),
             EventKind::Unsupported {
@@ -447,7 +443,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         reply.text
     );
     if native > 0 {
-        println!("tail:\n{}", master.diagnostic().tail());
+        println!("frames={:?}", master.diagnostic().frames());
     }
     drop(credential);
     drop(folder);

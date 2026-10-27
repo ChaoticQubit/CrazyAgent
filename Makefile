@@ -7,6 +7,8 @@ DESKTOP_TESTS := $(filter-out $(DESKTOP_TESTS_EXCLUDE),$(basename $(notdir $(wil
 BUN ?= $(shell command -v bun)
 RCLI_SDK ?= $(CURDIR)/.local-state/tools/rcli-source
 
+test test-rust-selected: export CRAZYAGENT_TEST_NATIVE_AUTH_HOST = $(or $(CARGO_TARGET_DIR),$(CURDIR)/target)/debug/crazyagent
+
 help:
 	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust, Node and Bun test suites' 'make test-rust-selected  Run the engine and desktop unit tests and test targets minus ENGINE_TESTS_EXCLUDE and DESKTOP_TESTS_EXCLUDE' 'make test-node  Run every first-party node:test file' 'make test-bun   Run the rcli host bun:test files' 'make build      Build the Rust workspace offline' 'make desktop-dist  Build the desktop frontend the desktop crate embeds' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
 
@@ -21,13 +23,13 @@ lint: desktop-dist
 
 test: desktop-dist
 	cargo build -p crazyagent --bin crazyagent --locked --offline
-	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test --workspace --locked --offline
+	cargo test --workspace --locked --offline
 	$(MAKE) test-node
 	$(MAKE) test-bun
 
 test-rust-selected: desktop-dist
 	cargo build -p crazyagent --bin crazyagent --locked --offline
-	CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$${CARGO_TARGET_DIR:-$(CURDIR)/target}/debug/crazyagent" cargo test -p crazyagent --locked --offline --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))
+	cargo test -p crazyagent --locked --offline --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))
 	cargo test -p crazyagent-desktop --locked --offline --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test))
 
 test-node:

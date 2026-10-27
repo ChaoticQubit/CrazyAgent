@@ -14,8 +14,10 @@ use crate::master_session::{
     MasterSessionPhase, MasterSessionView, MasterTurnPhase, MasterTurnView,
     RcliProfileRegistration, RcliProfileRegistrationMetadata,
 };
-use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
+use crate::master_sessions::MasterSessionSummary;
+use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
 use crate::routing::{ResourceBudget, RouteRequest};
+use crate::tui::screens::project_master::TURNS_SHOWN_MAX as INPUTS_SHOWN_MAX;
 use std::time::{Duration, Instant};
 
 const DIMENSIONS: [&str; 7] = [
@@ -56,6 +58,8 @@ pub(super) enum Job {
     Read {
         context: Context,
         confirmation: Option<Box<Confirmation>>,
+        sessions: bool,
+        known: Vec<Cursor>,
     },
     Mutation {
         submission: Submission,
@@ -98,6 +102,8 @@ pub(super) struct View {
     turns: Vec<MasterTurnView>,
     revision: Cursor,
     input: Option<ConversationEntry>,
+    inputs: Vec<ConversationEntry>,
+    sessions: Option<Vec<MasterSessionSummary>>,
 }
 
 struct Form {
@@ -145,6 +151,7 @@ pub(super) struct State {
     job: Option<Job>,
     home_confirmation: Option<RcliProfileRegistration>,
     registered_home: Option<RegisteredHome>,
+    sessions_shown: bool,
     pub notice: String,
 }
 
@@ -165,6 +172,7 @@ impl Default for State {
             job: None,
             home_confirmation: None,
             registered_home: None,
+            sessions_shown: false,
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
         }
@@ -685,6 +693,81 @@ impl State {
         self.enqueue(action, self.generation)
     }
 
+    /// Parks the live session and opens a fresh one in one engine step, with the backend,
+    /// pool, account, sandbox and allowance of the session the view shows. Input: whether a
+    /// running reply may be stopped, set only after the owner confirms a
+    /// `master_turn_running` refusal. Output: the intent is queued, or why it cannot be.
+    pub fn new_session(&mut self, cancel_running: bool) -> Result<(), String> {
+        let session = self
+            .view
+            .as_ref()
+            .filter(|_| self.ready)
+            .and_then(|view| view.session.as_ref())
+            .ok_or("No master session yet; send a message to start one")?;
+        let (config_id, source_hash) = match &self.catalog {
+            Some(catalog) => (catalog.config_id.clone(), catalog.source_hash.clone()),
+            None => {
+                let (config_id, source_hash) = session.binding();
+                (config_id.clone(), source_hash.to_owned())
+            }
+        };
+        let action = MasterOwnerAction::NewSession {
+            project_id: session.project_id.clone(),
+            expected_config_id: config_id,
+            expected_source_hash: source_hash,
+            selection: Box::new(session.selection.clone()),
+            cancel_running,
+        };
+        self.enqueue(action, self.generation)
+    }
+
+    /// Makes a parked session live again, parking the live one, in one engine step.
+    /// Inputs: a session from the Sessions list and whether a running reply may be stopped,
+    /// set only after the owner confirms. Output: the intent is queued, or why it cannot be.
+    pub fn resume(&mut self, session_id: &SessionId, cancel_running: bool) -> Result<(), String> {
+        let project = self
+            .project
+            .clone()
+            .filter(|_| self.ready)
+            .ok_or("Waiting for actual master state; Ctrl-R reconnects")?;
+        let listed = self
+            .sessions()
+            .and_then(|sessions| sessions.iter().find(|item| &item.session_id == session_id))
+            .ok_or("That session is not in the Sessions list")?;
+        if listed.phase != MasterSessionPhase::Parked {
+            return Err("Only a parked session can be resumed".into());
+        }
+        let action = MasterOwnerAction::Resume {
+            project_id: project,
+            session_id: session_id.clone(),
+            cancel_running,
+        };
+        self.enqueue(action, self.generation)
+    }
+
+    /// Shows or hides the Sessions list. While shown, each master read also reads the
+    /// project's sessions. Input: whether the list is shown.
+    pub fn show_sessions(&mut self, shown: bool) {
+        if shown && !self.sessions_shown {
+            self.next_read = Instant::now();
+        }
+        self.sessions_shown = shown;
+    }
+
+    /// The owner's messages of the shown turns of the session in view, oldest first, so a
+    /// resumed or parked session shows its whole history. Output: empty before a read.
+    pub fn inputs(&self) -> &[ConversationEntry] {
+        self.view
+            .as_ref()
+            .map_or(&[], |view| view.inputs.as_slice())
+    }
+
+    /// The project's sessions as last read, live one included, newest activity first.
+    /// Output: None while the list is hidden or before its first read.
+    pub fn sessions(&self) -> Option<&[MasterSessionSummary]> {
+        self.view.as_ref()?.sessions.as_deref()
+    }
+
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -755,9 +838,16 @@ impl State {
             return None;
         }
         self.flight = Some(context.clone());
+        let known = self
+            .inputs()
+            .iter()
+            .map(|entry| entry.event_cursor.clone())
+            .collect();
         Some(Job::Read {
             context,
             confirmation: confirmation.map(Box::new),
+            sessions: self.sessions_shown,
+            known,
         })
     }
 
@@ -836,7 +926,9 @@ impl State {
                     }
                 };
                 if current {
-                    self.view = Some(*view);
+                    let mut view = *view;
+                    view.inputs = shown_inputs(&view.turns, self.inputs(), view.inputs);
+                    self.view = Some(view);
                 }
                 if let Some(submission) = completed {
                     self.finish_read(&submission);
@@ -1300,6 +1392,21 @@ impl View {
                     && session.phase == MasterSessionPhase::Configured
                     && session.owner == *receipt
             }
+            MasterOwnerAction::NewSession {
+                selection,
+                expected_config_id,
+                expected_source_hash,
+                ..
+            } => {
+                session.selection == **selection
+                    && session.config_id == *expected_config_id
+                    && session.source_hash == *expected_source_hash
+                    && session.phase == MasterSessionPhase::Configured
+                    && session.owner == *receipt
+            }
+            MasterOwnerAction::Resume { session_id, .. } => {
+                session.session_id == *session_id && session.phase == MasterSessionPhase::Configured
+            }
             MasterOwnerAction::Submit {
                 session_id, text, ..
             } => {
@@ -1330,8 +1437,22 @@ impl View {
             }
             MasterOwnerAction::Close { session_id, .. } => {
                 session.session_id == *session_id
-                    && session.phase == MasterSessionPhase::Closed
+                    && session.phase == MasterSessionPhase::Parked
                     && session.current_turn.is_none()
+            }
+            MasterOwnerAction::Resolve {
+                session_id,
+                change_set,
+                ..
+            } => {
+                session.session_id == *session_id
+                    && self.turns.iter().any(|turn| {
+                        turn.id == receipt.operation_id
+                            && turn
+                                .engine_request
+                                .as_ref()
+                                .is_some_and(|request| request.change_set == *change_set)
+                    })
             }
             MasterOwnerAction::RegisterRcliProfile { registration } => {
                 session == &registration.expected_session
@@ -1709,7 +1830,7 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
             reply.provenance.runtime_ref.as_str(),
             reply.provenance.capture_ref.as_str(),
             reply.provenance.capture_sequence,
-            super::views::safe_text(&reply.text, 8192)
+            super::views::safe_text(&reply.text, crate::master_session::REPLY_BYTES_MAX)
         ));
     }
 }
@@ -1717,9 +1838,12 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
 pub(super) fn action_project(action: &MasterOwnerAction) -> &ProjectId {
     match action {
         MasterOwnerAction::Open { project_id, .. }
+        | MasterOwnerAction::NewSession { project_id, .. }
+        | MasterOwnerAction::Resume { project_id, .. }
         | MasterOwnerAction::Submit { project_id, .. }
         | MasterOwnerAction::Cancel { project_id, .. }
-        | MasterOwnerAction::Close { project_id, .. } => project_id,
+        | MasterOwnerAction::Close { project_id, .. }
+        | MasterOwnerAction::Resolve { project_id, .. } => project_id,
         MasterOwnerAction::RegisterRcliProfile { registration } => {
             &registration.expected_session.project_id
         }
@@ -2018,6 +2142,8 @@ pub(super) async fn read_view(
     controller: &mut OwnerController,
     context: &Context,
     confirmation: Option<&Confirmation>,
+    sessions: bool,
+    known: &[Cursor],
 ) -> Result<View, String> {
     let state = controller
         .read(OwnerRead::ProjectMaster {
@@ -2034,6 +2160,8 @@ pub(super) async fn read_view(
         turns: Vec::new(),
         revision: state.revision,
         input: None,
+        inputs: Vec::new(),
+        sessions: None,
     };
     if let Some(session) = &view.session {
         if session.project_id != context.project
@@ -2050,6 +2178,15 @@ pub(super) async fn read_view(
             &state.config_id,
         )
         .await?;
+        view.inputs = read_inputs(
+            controller,
+            context,
+            session,
+            &view.turns,
+            known,
+            (&view.revision, &state.config_id),
+        )
+        .await?;
     }
     if let Some(confirmation) = confirmation
         && let MasterOwnerAction::Submit { .. } = confirmation.submission.action
@@ -2063,7 +2200,107 @@ pub(super) async fn read_view(
         )
         .await?;
     }
+    if sessions {
+        view.sessions = Some(read_sessions(controller, &context.project).await?);
+    }
     Ok(view)
+}
+
+/// Reads the owner's messages of the shown turns the client does not hold yet, so a
+/// resumed session shows its earlier lines. Inputs: the controller, context, session,
+/// its turns, the input cursors already held and the read basis. Output: the newly read
+/// entries; empty when every shown turn's message is held.
+async fn read_inputs(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &MasterSessionView,
+    turns: &[MasterTurnView],
+    known: &[Cursor],
+    basis: (&Cursor, &ConfigId),
+) -> Result<Vec<ConversationEntry>, String> {
+    let shown = &turns[turns.len().saturating_sub(INPUTS_SHOWN_MAX)..];
+    let missing: Vec<Cursor> = shown
+        .iter()
+        .map(|turn| turn.input_cursor.clone())
+        .filter(|cursor| !known.contains(cursor))
+        .collect();
+    let mut entries = Vec::new();
+    for chunk in missing.chunks(usize::from(crate::conversation::PAGE_ITEMS_MAX)) {
+        let reply = controller
+            .read(OwnerRead::ProjectMasterInputs {
+                project_id: context.project.clone(),
+                session_id: session.session_id.clone(),
+                cursors: chunk.to_vec(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        same_basis(&reply, basis.0, basis.1)?;
+        let OwnerData::ProjectMasterInputs { entries: found } = reply.data else {
+            return Err("master_inputs_read_required".into());
+        };
+        if found.len() > chunk.len()
+            || found
+                .iter()
+                .any(|entry| !chunk.contains(&entry.event_cursor))
+        {
+            return Err("master_inputs_read_context".into());
+        }
+        entries.extend(found);
+    }
+    assert!(entries.len() <= missing.len());
+    Ok(entries)
+}
+
+/// The owner's messages a view keeps: the held and newly read entries of its shown turns,
+/// oldest first, one per turn. Inputs: the turns, the held entries and the new ones.
+/// Output: at most one entry per shown turn.
+fn shown_inputs(
+    turns: &[MasterTurnView],
+    held: &[ConversationEntry],
+    fresh: Vec<ConversationEntry>,
+) -> Vec<ConversationEntry> {
+    let shown: Vec<&Cursor> = turns[turns.len().saturating_sub(INPUTS_SHOWN_MAX)..]
+        .iter()
+        .map(|turn| &turn.input_cursor)
+        .collect();
+    let mut kept: Vec<ConversationEntry> = held
+        .iter()
+        .cloned()
+        .chain(fresh)
+        .filter(|entry| shown.contains(&&entry.event_cursor))
+        .collect();
+    kept.sort_by_key(|entry| entry.event_cursor.value());
+    kept.dedup_by_key(|entry| entry.event_cursor.value());
+    assert!(kept.len() <= shown.len());
+    kept
+}
+
+/// Reads the project's master sessions for the Sessions list: the live one and the
+/// parked ones, newest activity first, at most fifty. Inputs: a connected owner
+/// controller and the project. Output: the engine's list, or the read's problem.
+pub(super) async fn read_sessions(
+    controller: &mut OwnerController,
+    project: &ProjectId,
+) -> Result<Vec<MasterSessionSummary>, String> {
+    let state = controller
+        .read(OwnerRead::ProjectMasterSessions {
+            project_id: project.clone(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let OwnerData::ProjectMasterSessions { sessions } = state.data else {
+        return Err("master_sessions_read_required".into());
+    };
+    if sessions.len() > crate::master_sessions::SESSIONS_LISTED_MAX
+        || sessions
+            .iter()
+            .filter(|session| session.phase == MasterSessionPhase::Configured)
+            .count()
+            > 1
+    {
+        return Err("master_sessions_read_context".into());
+    }
+    Ok(sessions)
 }
 
 async fn read_turns(
@@ -2219,21 +2456,29 @@ fn input_cursor(
 
 /// Wall time a default master turn asks for: ten minutes, before capacity clipping.
 const MASTER_TURN_WALL_MS: u64 = 600_000;
+/// The harness output one master turn may read in all. Codex keeps about 1 MiB of a
+/// command's output and sends it twice, as deltas and in the finished item, so 64 MiB, the
+/// default capacity, holds a turn of about thirty such commands.
+const MASTER_TURN_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Default allowance for one master turn: the unit budget with ten minutes of wall time,
-/// clipped to the tightest configured capacity so a slow local model can finish a reply.
+/// Default allowance for one master turn: the unit budget with ten minutes of wall time and
+/// 64 MiB of harness output, each clipped to the tightest configured capacity so a slow local
+/// model or a turn of large command results can finish a reply.
 /// Input: the global, project and task capacities. Output: a budget that fits all three.
 fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
-    let ceiling = capacities
-        .iter()
-        .map(|capacity| capacity.wall_time_ms)
-        .min()
-        .unwrap_or(0);
+    let ceiling =
+        |dimension: fn(&ResourceBudget) -> u64| capacities.iter().map(dimension).min().unwrap_or(0);
     let budget = ResourceBudget {
-        wall_time_ms: MASTER_TURN_WALL_MS.min(ceiling).max(1),
+        wall_time_ms: MASTER_TURN_WALL_MS
+            .min(ceiling(|capacity| capacity.wall_time_ms))
+            .max(1),
+        output_bytes: MASTER_TURN_OUTPUT_BYTES
+            .min(ceiling(|capacity| capacity.output_bytes))
+            .max(1),
         ..ResourceBudget::unit()
     };
     assert!(budget.wall_time_ms <= MASTER_TURN_WALL_MS);
+    assert!(budget.output_bytes <= MASTER_TURN_OUTPUT_BYTES);
     budget
 }
 
@@ -2347,6 +2592,7 @@ mod default_budget_tests {
         state.defaults();
         let mut expected = ResourceBudget::unit();
         expected.wall_time_ms = 120_000;
+        expected.output_bytes = 2_097_152;
         assert_eq!(
             state.forms[index].values,
             budget_values(&expected).map(|value| value.to_string()),
@@ -2548,6 +2794,34 @@ pools = [
         assert_eq!(clipped.wall_time_ms, 90_000);
         assert!(clipped.fits(&tight));
     }
+
+    #[test]
+    fn default_master_budget_holds_a_turn_of_large_command_results_within_policy() {
+        let policy = crate::routing::RoutingPolicy::default();
+        let budget = default_master_budget(&[
+            policy.global_capacity.clone(),
+            policy.project_capacity.clone(),
+            policy.task_capacity.clone(),
+        ]);
+        let command = 2 * 1_049_335;
+        assert!(budget.output_bytes >= 16 * command);
+        assert_eq!(budget.output_bytes, MASTER_TURN_OUTPUT_BYTES);
+        assert!(budget.fits(&policy.task_capacity));
+        assert_eq!(budget.validate(), Ok(()));
+        let tight = ResourceBudget {
+            output_bytes: 4_194_304,
+            wall_time_ms: 86_400_000,
+            ..ResourceBudget::unit()
+        };
+        let roomy = ResourceBudget {
+            output_bytes: 1 << 40,
+            wall_time_ms: 86_400_000,
+            ..ResourceBudget::unit()
+        };
+        let clipped = default_master_budget(&[roomy.clone(), roomy, tight.clone()]);
+        assert_eq!(clipped.output_bytes, 4_194_304);
+        assert!(clipped.fits(&tight));
+    }
 }
 
 /// Explains why a master turn stopped, in words the owner can act on.
@@ -2567,6 +2841,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::QuotaExhausted => "Usage limit reached for this account",
         MasterReason::RateLimited => "Rate limited; try again shortly",
         MasterReason::CooldownActive => "Account is cooling down; try again shortly",
+        MasterReason::TransientFailure => "Account is unavailable for a moment; try again shortly",
         MasterReason::ConnectionChanged => concat!(
             "Settings or engine changed since this master opened: ",
             "close it (F4), open it again (F2, Enter), then send again"
@@ -2593,9 +2868,44 @@ fn reason_text(reason: &MasterReason) -> &'static str {
 mod turn_line_tests {
     use super::{turn_holds, turn_lines};
     use crate::master_session::{
-        MasterAccountState, MasterReason, MasterTurnPhase, MasterTurnView,
+        MasterAccountState, MasterReason, MasterReply, MasterReplyProvenance, MasterTurnPhase,
+        MasterTurnView,
     };
     use crate::protocol::{CredentialRef, Cursor, RequestId, SessionId};
+
+    #[test]
+    fn a_long_reply_shows_whole_in_its_turn() {
+        let text = "The README now covers setup, tests and the release steps.\n".repeat(190);
+        assert!(text.len() > 8192);
+        let turn = MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Succeeded,
+            reason: None,
+            attempt: None,
+            runtime: None,
+            reply: Some(MasterReply {
+                text: text.clone(),
+                provenance: MasterReplyProvenance {
+                    attempt_id: RequestId::new("attempt-1").unwrap(),
+                    runtime_ref: RequestId::new("runtime-1").unwrap(),
+                    capture_ref: RequestId::new("capture-1").unwrap(),
+                    capture_sequence: 1,
+                },
+            }),
+            accounts: Vec::new(),
+            tasks: Vec::new(),
+            detail: None,
+            cause: None,
+            changes: None,
+            engine_request: None,
+        };
+        let mut lines = Vec::new();
+        turn_lines(&turn, &mut lines);
+        assert!(lines.last().unwrap().ends_with(&text), "{lines:?}");
+    }
 
     #[test]
     fn only_a_live_current_turn_holds_the_conversation() {
@@ -2613,6 +2923,8 @@ mod turn_line_tests {
             reply: None,
             accounts: Vec::new(),
             tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -2660,6 +2972,8 @@ mod turn_line_tests {
             reply: None,
             accounts: Vec::new(),
             tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
         };
         for (reason, cause, expected) in [
             (
@@ -2693,6 +3007,8 @@ mod turn_line_tests {
             reply: None,
             accounts: Vec::new(),
             tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
             detail: None,
             cause: None,
         };
@@ -2769,6 +3085,8 @@ mod turn_line_tests {
             reply: None,
             accounts: Vec::new(),
             tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
             detail: None,
             cause: None,
         };

@@ -2,11 +2,12 @@ use super::events::{
     Capability, EventKind, HarnessEvent, Provenance, RateLimitStatus, Support, TokenUsage,
     TurnOutcome,
 };
-use super::{NativeAction, NativeHarness};
+use super::{LINE_BYTES_MAX, NativeAction, NativeHarness, summarize};
 use crate::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId};
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value, json};
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -14,7 +15,15 @@ const EVENTS_MAX: usize = 128;
 const NATIVE_IDS_MAX: usize = 4096;
 const REQUESTS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;
-const OUTPUT_BYTES_MAX: usize = 262_144;
+/// What the events of one decode may serialize to. They copy text once from the lines it
+/// completes, the buffered line and one chunk, under two longest lines, and each of at most
+/// `EVENTS_MAX` events adds an envelope of identifiers under 8 KiB.
+const OUTPUT_BYTES_MAX: usize = 2 * LINE_BYTES_MAX + EVENTS_MAX * 8 * 1024;
+
+/// The most JSON values one stream line may hold: one per 16 bytes of the longest line. A
+/// patch or file list spends over 20 bytes on a value, so any real line fits, and building
+/// the bound's values takes tens of MiB at most.
+pub const NODES_MAX: usize = LINE_BYTES_MAX / 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
@@ -328,7 +337,7 @@ impl ClaudeProtocol {
     }
 
     fn assert_consistent(&self) {
-        assert!(self.buffer.len() <= FRAME_BYTES_MAX);
+        assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_events.len() <= NATIVE_IDS_MAX);
         assert!(self.seen_requests.len() <= REQUESTS_MAX);
         assert_eq!(self.provenance.harness, NativeHarness::Claude);
@@ -350,7 +359,7 @@ impl ClaudeProtocol {
     }
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Vec<HarnessEvent>, ProtocolError> {
-        if bytes.len() > FRAME_BYTES_MAX {
+        if bytes.len() > LINE_BYTES_MAX + 1 {
             return Err(ProtocolError::FrameTooLarge);
         }
         let mut events = Vec::new();
@@ -358,7 +367,7 @@ impl ClaudeProtocol {
         let mut output_bytes = 0_usize;
         for byte in bytes {
             if *byte != b'\n' {
-                if self.buffer.len() == FRAME_BYTES_MAX {
+                if self.buffer.len() == LINE_BYTES_MAX {
                     return Err(ProtocolError::FrameTooLarge);
                 }
                 self.buffer.push(*byte);
@@ -368,11 +377,8 @@ impl ClaudeProtocol {
                 return Err(ProtocolError::Capacity);
             }
             frames += 1;
-            let StrictValue(value) =
-                serde_json::from_slice(&self.buffer).map_err(|_| ProtocolError::InvalidMessage)?;
+            let value = parse_line(&self.buffer)?;
             self.buffer.clear();
-            let mut nodes = 0;
-            validate_shape(&value, 0, &mut nodes)?;
             for event in self.message(&value)? {
                 if events.len() == EVENTS_MAX {
                     return Err(ProtocolError::Capacity);
@@ -534,7 +540,7 @@ fn assistant(value: &Value) -> Result<Vec<EventKind>, ProtocolError> {
                     parent_tool_use_id: parent.clone(),
                     tool_use_id: identifier(field(block, "id")?)?.to_owned(),
                     name: identifier(field(block, "name")?)?.to_owned(),
-                    input: input.clone(),
+                    input: summarize(input, &[]),
                 }
             }
             subtype => EventKind::Unsupported {
@@ -749,17 +755,56 @@ fn validate_shape(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), 
     Ok(())
 }
 
+/// Parses one stream line, refusing duplicate object keys and counting each JSON value
+/// before it is built, so a line of more than `NODES_MAX` values is refused before it is
+/// kept. Input: the line. Output: its value, invalid JSON, or capacity past the bound.
+fn parse_line(line: &[u8]) -> Result<Value, ProtocolError> {
+    let nodes = Cell::new(0);
+    let mut deserializer = serde_json::Deserializer::from_slice(line);
+    let parsed = StrictSeed { nodes: &nodes }
+        .deserialize(&mut deserializer)
+        .and_then(|parsed| deserializer.end().map(|()| parsed));
+    match parsed {
+        Ok(StrictValue(value)) => Ok(value),
+        Err(_) if nodes.get() > NODES_MAX => Err(ProtocolError::Capacity),
+        Err(_) => Err(ProtocolError::InvalidMessage),
+    }
+}
+
 struct StrictValue(Value);
 
 impl<'de> Deserialize<'de> for StrictValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(StrictVisitor)
+        let nodes = Cell::new(0);
+        StrictSeed { nodes: &nodes }.deserialize(deserializer)
     }
 }
 
-struct StrictVisitor;
+/// Builds one JSON value of a document, counting it and every value inside it in `nodes`;
+/// past `NODES_MAX` it refuses the document instead of building more.
+#[derive(Clone, Copy)]
+struct StrictSeed<'a> {
+    nodes: &'a Cell<usize>,
+}
 
-impl<'de> Visitor<'de> for StrictVisitor {
+impl<'de> DeserializeSeed<'de> for StrictSeed<'_> {
+    type Value = StrictValue;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<StrictValue, D::Error> {
+        let nodes = self.nodes.get() + 1;
+        self.nodes.set(nodes);
+        if nodes > NODES_MAX {
+            return Err(de::Error::custom("too many JSON values"));
+        }
+        deserializer.deserialize_any(StrictVisitor { seed: self })
+    }
+}
+
+struct StrictVisitor<'a> {
+    seed: StrictSeed<'a>,
+}
+
+impl<'de> Visitor<'de> for StrictVisitor<'_> {
     type Value = StrictValue;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -794,7 +839,7 @@ impl<'de> Visitor<'de> for StrictVisitor {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
-        while let Some(StrictValue(value)) = seq.next_element()? {
+        while let Some(StrictValue(value)) = seq.next_element_seed(self.seed)? {
             values.push(value);
         }
         Ok(StrictValue(Value::Array(values)))
@@ -802,7 +847,8 @@ impl<'de> Visitor<'de> for StrictVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut values = Map::new();
-        while let Some((key, StrictValue(value))) = map.next_entry::<String, StrictValue>()? {
+        while let Some(key) = map.next_key::<String>()? {
+            let StrictValue(value) = map.next_value_seed(self.seed)?;
             if values.insert(key, value).is_some() {
                 return Err(de::Error::custom("duplicate object key"));
             }
@@ -849,7 +895,7 @@ mod tests {
     #[should_panic]
     fn buffer_invariant_detects_overflow() {
         let mut p = protocol();
-        p.buffer = vec![0; FRAME_BYTES_MAX + 1];
+        p.buffer = vec![0; LINE_BYTES_MAX + 1];
         p.state();
     }
 }

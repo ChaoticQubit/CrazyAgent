@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod adapters;
+pub mod agent_home;
 pub mod agents;
 pub mod assets;
 pub mod client_controller;
@@ -14,8 +15,11 @@ pub mod github;
 pub mod harnesses;
 #[cfg(unix)]
 pub mod isolation;
+pub mod landing;
+pub(crate) mod landing_turns;
 pub mod launch_context;
 pub mod master_session;
+pub mod master_sessions;
 pub mod memory;
 pub mod model_gateway;
 pub mod onboarding;
@@ -24,6 +28,7 @@ pub mod paths;
 pub mod platform;
 pub mod plugins;
 pub mod pools;
+pub mod project_files;
 pub mod project_setup;
 pub mod projects_home;
 pub mod protocol;
@@ -32,8 +37,10 @@ pub mod rcli_host;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod scheduling;
 pub mod service;
 pub mod setup;
+pub mod skills;
 /// The short address a Unix socket is bound and reached at when its own path is too long
 /// for a socket address.
 #[cfg(unix)]
@@ -47,6 +54,7 @@ pub mod terminal;
 pub mod tui;
 /// `crazyagent update`: release channel, signed download, verification and executable swap.
 pub mod update;
+pub mod usage;
 pub mod verification;
 pub mod version;
 pub mod worker_dispatch;

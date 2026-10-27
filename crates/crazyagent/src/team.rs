@@ -1,13 +1,17 @@
 use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
-use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
+use crate::project_setup::{HarnessSlot, StoredSetup, TEAM_AGENTS_MAX, TeamPlan};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod cleanup;
 pub mod direct;
+pub mod events;
 pub mod graph;
+pub mod master;
+pub mod names;
 pub mod runtime;
 pub mod tool;
 
@@ -65,6 +69,16 @@ impl AgentRole {
             "master" => Some(Self::Master),
             "sub" => Some(Self::Sub),
             _ => None,
+        }
+    }
+
+    /// Names one team agent the same way in the team list and the team graph of every client.
+    /// Takes the role and the agent's id.
+    /// Returns "Master", or "Sub-agent" and the id.
+    pub fn agent_label(self, id: i64) -> String {
+        match self {
+            Self::Master => "Master".into(),
+            Self::Sub => format!("Sub-agent {id}"),
         }
     }
 }
@@ -342,6 +356,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    LiveMaster {
+        project_id: ProjectId,
+        on: bool,
+    },
     Pause {
         project_id: ProjectId,
     },
@@ -352,6 +370,19 @@ pub enum TeamAction {
         project_id: ProjectId,
         reply: i64,
         step: u8,
+    },
+    Wake {
+        target: events::RuleTarget,
+        rule: Option<events::WakeRule>,
+    },
+    Seen {
+        project_id: ProjectId,
+        upto: i64,
+    },
+    Rename {
+        project_id: ProjectId,
+        agent: i64,
+        handle: String,
     },
 }
 
@@ -389,22 +420,54 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
+            Self::Wake { target, rule } => {
+                if rule.is_some_and(|rule| rule.hourly_cap > events::HOURLY_CAP_MAX) {
+                    return Err(failure("team_wake_cap_invalid"));
+                }
+                if matches!(target, events::RuleTarget::Agent { agent, .. } if *agent <= 0) {
+                    return Err(failure("team_agent_not_found"));
+                }
+                Ok(())
+            }
+            Self::Seen { upto, .. } => {
+                if *upto <= 0 {
+                    return Err(failure("team_notification_missing"));
+                }
+                Ok(())
+            }
+            Self::Rename { agent, handle, .. } => {
+                if *agent <= 0 || handle.len() > names::HANDLE_CHARS_MAX + 1 {
+                    return Err(failure("team_handle_invalid"));
+                }
+                Ok(())
+            }
+            Self::KeepWarm { .. }
+            | Self::LiveMaster { .. }
+            | Self::Pause { .. }
+            | Self::Resume { .. } => Ok(()),
         }
     }
 
     /// Names the project the action is for.
     /// Takes the action.
-    /// Returns its project id.
-    pub fn project(&self) -> &ProjectId {
+    /// Returns its project id, or none for the app-wide wake rule.
+    pub fn project(&self) -> Option<&ProjectId> {
         match self {
             Self::Message { project_id, .. }
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
-            | Self::HandOff { project_id, .. } => project_id,
+            | Self::HandOff { project_id, .. }
+            | Self::Seen { project_id, .. } => Some(project_id),
+            Self::Wake { target, .. } => match target {
+                events::RuleTarget::App => None,
+                events::RuleTarget::Project { project_id }
+                | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
+            },
+            Self::Rename { project_id, .. } => Some(project_id),
         }
     }
 }
@@ -530,27 +593,43 @@ pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &st
     Accounts::Usable(usable)
 }
 
-/// Picks the least loaded usable account that is not paused for a rate limit.
-/// Takes the usable accounts in pool order, live agents per connection and paused connections.
-/// Returns the chosen account, or none when every account is paused.
+/// Picks the usable account the owner's schedule puts first among those not paused for a
+/// rate limit; with no limits or ranks that is the least loaded, then pool order.
+/// Takes the usable accounts in pool order, live agents per connection, paused connections
+/// and the scheduling choice. Returns the chosen account, or none when every account is
+/// paused or left out by the schedule.
 pub fn pick_account<'a>(
     accounts: &'a [TeamAccount],
     load: &dyn Fn(&CredentialRef) -> usize,
     paused: &BTreeSet<CredentialRef>,
+    choice: &crate::scheduling::Choice,
 ) -> Option<&'a TeamAccount> {
-    accounts
+    let open: Vec<&TeamAccount> = accounts
         .iter()
         .filter(|account| !paused.contains(&account.connection))
-        .enumerate()
-        .min_by_key(|(order, account)| (load(&account.connection), *order))
-        .map(|(_, account)| account)
+        .collect();
+    let candidates: Vec<crate::scheduling::Candidate> = open
+        .iter()
+        .map(|account| crate::scheduling::Candidate {
+            connection: account.connection.clone(),
+            load: load(&account.connection),
+            current: false,
+        })
+        .collect();
+    choice
+        .order(&candidates)
+        .ready
+        .first()
+        .map(|index| open[*index])
 }
 
-/// One task the master asked for in its reply.
+/// One task the master asked for in its reply, with the role handle it gave the job, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
     pub harness: Option<String>,
     pub prompt: String,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Reads delegation lines from a master reply: `DELEGATE: task` or `DELEGATE harness: task`.
@@ -599,6 +678,7 @@ fn delegation(target: &str, task: &str) -> Option<Delegation> {
     Some(Delegation {
         harness: (!target.is_empty()).then_some(target),
         prompt: task.to_owned(),
+        role: None,
     })
 }
 
@@ -623,7 +703,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 error TEXT,
                 created_ms INTEGER NOT NULL,
                 heartbeat_ms INTEGER NOT NULL,
-                stopped_ms INTEGER
+                stopped_ms INTEGER,
+                session TEXT
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -644,7 +725,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 output_bytes INTEGER NOT NULL DEFAULT 0,
                 created_ms INTEGER NOT NULL,
                 started_ms INTEGER,
-                finished_ms INTEGER
+                finished_ms INTEGER,
+                session TEXT
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
@@ -681,6 +763,18 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 record TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_task_pins (
+                task INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_worktrees (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                worktree TEXT NOT NULL,
+                git_dir TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -693,14 +787,89 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
+    events::initialize(connection)?;
+    master::initialize(connection)?;
+    names::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
-fn slot<'a>(plan: &'a TeamPlan, harness: &str) -> Option<&'a HarnessSlot> {
+/// Finds the plan slot a sub-agent on this harness runs under. An empty plan means any
+/// harness (DEC-096 addendum 3): each harness that can run team agents gets a slot whose
+/// count never binds before the team maximum, with tools following the master's switch.
+/// Takes the plan and a harness id. Returns the slot, or none when the plan does not allow it.
+fn slot(plan: &TeamPlan, harness: &str) -> Option<HarnessSlot> {
     let wanted = launch_harness(harness);
-    plan.sub_harnesses.iter().find(|slot| {
-        slot.harness == harness || (wanted.is_some() && launch_harness(&slot.harness) == wanted)
-    })
+    if plan.sub_harnesses.is_empty() {
+        return wanted.map(|id| HarnessSlot {
+            harness: id.to_owned(),
+            agents: TEAM_AGENTS_MAX,
+            tools: plan.master_tools,
+        });
+    }
+    plan.sub_harnesses
+        .iter()
+        .find(|slot| {
+            slot.harness == harness || (wanted.is_some() && launch_harness(&slot.harness) == wanted)
+        })
+        .cloned()
+}
+
+/// Lists every harness that can run team agents, in catalog order.
+fn runnable_harnesses() -> impl Iterator<Item = &'static str> {
+    crate::harnesses::specs()
+        .iter()
+        .filter_map(|spec| launch_harness(spec.id))
+}
+
+/// Lists the harnesses an empty team plan can use now: those that run team agents and have
+/// an eligible account in the project's pool. Takes the live model access and the project.
+/// Returns the launch harness ids in catalog order, empty without a pool or fitting account.
+pub fn available_harnesses(access: &ModelAccess, project: &ProjectId) -> Vec<&'static str> {
+    runnable_harnesses()
+        .filter(|id| {
+            matches!(eligible_accounts(access, project, id),
+                Accounts::Usable(accounts) if !accounts.is_empty())
+        })
+        .collect()
+}
+
+/// Lists the harnesses a plan hands work to: its own slots, or for an empty plan every
+/// harness that can run team agents. Takes the plan. Returns the harness ids.
+fn plan_harnesses(plan: &TeamPlan) -> Vec<String> {
+    if plan.sub_harnesses.is_empty() {
+        return runnable_harnesses().map(str::to_owned).collect();
+    }
+    plan.sub_harnesses
+        .iter()
+        .map(|slot| slot.harness.clone())
+        .collect()
+}
+
+/// Tells a master leading an empty team plan which harnesses it can use and that only the
+/// team maximum limits them, or that a maximum of one agent leaves no room for sub-agents.
+/// Takes the plan and the harnesses with an eligible account now. Returns plain lines, each
+/// ending in a newline.
+pub fn any_harness_text(plan: &TeamPlan, available: &[&str]) -> String {
+    assert!(plan.sub_harnesses.is_empty());
+    if plan.max_agents <= 1 {
+        return "The team maximum is 1 agent, you, so CrazyAgent refuses every task you hand over. Do the work yourself, or tell the owner to raise the team maximum in the project's Team settings.\n".to_owned();
+    }
+    let mut text = if available.is_empty() {
+        "The team plan names no harness, so any harness that can run sub-agents may take your tasks, but no harness has an account in the project's pool yet. Tasks you hand over wait until the owner adds one.\n".to_owned()
+    } else {
+        let mut list =
+            "The team plan names no harness, so you may use any harness that can run now:\n"
+                .to_owned();
+        for harness in available {
+            list.push_str(&format!("- {harness}\n"));
+        }
+        list
+    };
+    text.push_str(&format!(
+        "There is no per-harness limit, only the team maximum of {} agents, counting you.\n",
+        plan.max_agents
+    ));
+    text
 }
 
 fn active_tasks(
@@ -714,6 +883,63 @@ fn active_tasks(
         |row| row.get(0),
     )
     .map_err(error)
+}
+
+/// Picks the slot for a task under an empty team plan (DEC-096 addendum 3); a team maximum
+/// of one agent leaves no room. A named harness must run team agents and, while any harness
+/// has an eligible account, be one of those.
+/// Without a name the least loaded of those wins, the master's harness on a tie. With no
+/// eligible account anywhere the task parks on the named harness, or the master's.
+/// Takes the transaction, live access, the setup and the named harness. Returns the slot,
+/// or a plain refusal code.
+fn any_slot(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    harness: Option<&str>,
+) -> Result<Result<HarnessSlot, &'static str>, EngineError> {
+    let plan = &stored.team;
+    assert!(plan.sub_harnesses.is_empty());
+    if plan.max_agents <= 1 {
+        return Ok(Err("team_has_no_sub_agents"));
+    }
+    let available = available_harnesses(access, &stored.project_id);
+    if let Some(harness) = harness {
+        let Some(chosen) = slot(plan, harness) else {
+            return Ok(Err(if crate::harnesses::spec(harness).is_some() {
+                "team_harness_cannot_run"
+            } else {
+                "team_harness_not_in_plan"
+            }));
+        };
+        if !available.is_empty() && !available.contains(&chosen.harness.as_str()) {
+            return Ok(Err("team_harness_cannot_run"));
+        }
+        return Ok(Ok(chosen));
+    }
+    let master = launch_harness(&plan.master);
+    let mut candidates = if available.is_empty() {
+        master
+            .or_else(|| runnable_harnesses().next())
+            .into_iter()
+            .collect()
+    } else {
+        available
+    };
+    candidates.sort_by_key(|id| Some(*id) != master);
+    let mut best: Option<(&str, i64)> = None;
+    for candidate in candidates {
+        let load = active_tasks(tx, &stored.project_id, Some(candidate))?;
+        if best.is_none_or(|(_, seen)| load < seen) {
+            best = Some((candidate, load));
+        }
+    }
+    let Some((chosen, _)) = best else {
+        return Ok(Err("team_harness_cannot_run"));
+    };
+    Ok(Ok(slot(plan, chosen).expect(
+        "a harness that runs team agents has a slot in an empty plan",
+    )))
 }
 
 /// Admits one task for a sub-agent against the project's team plan and pool.
@@ -734,25 +960,29 @@ pub fn admit(
         return Ok(Err("team_task_invalid"));
     }
     let plan = &stored.team;
-    if plan.sub_harnesses.is_empty() {
-        return Ok(Err("team_has_no_sub_agents"));
-    }
-    let chosen = match harness {
-        Some(harness) => match slot(plan, harness) {
-            Some(chosen) => chosen,
-            None => return Ok(Err("team_harness_not_in_plan")),
-        },
-        None => {
-            let mut best: Option<(&HarnessSlot, i64)> = None;
-            for candidate in &plan.sub_harnesses {
-                let load = active_tasks(tx, &stored.project_id, Some(&candidate.harness))? * 64
-                    / i64::from(candidate.agents.max(1));
-                if best.is_none_or(|(_, seen)| load < seen) {
-                    best = Some((candidate, load));
+    let chosen = if plan.sub_harnesses.is_empty() {
+        match any_slot(tx, access, stored, harness)? {
+            Ok(chosen) => chosen,
+            Err(code) => return Ok(Err(code)),
+        }
+    } else {
+        match harness {
+            Some(harness) => match slot(plan, harness) {
+                Some(chosen) => chosen,
+                None => return Ok(Err("team_harness_not_in_plan")),
+            },
+            None => {
+                let mut best: Option<(&HarnessSlot, i64)> = None;
+                for candidate in &plan.sub_harnesses {
+                    let load = active_tasks(tx, &stored.project_id, Some(&candidate.harness))? * 64
+                        / i64::from(candidate.agents.max(1));
+                    if best.is_none_or(|(_, seen)| load < seen) {
+                        best = Some((candidate, load));
+                    }
                 }
+                best.map(|(chosen, _)| chosen.clone())
+                    .ok_or_else(|| failure("team_has_no_sub_agents"))?
             }
-            best.map(|(chosen, _)| chosen)
-                .ok_or_else(|| failure("team_has_no_sub_agents"))?
         }
     };
     let Some(launch) = launch_harness(&chosen.harness) else {
@@ -798,7 +1028,109 @@ pub fn admit(
     .map_err(error)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
+    if let Some(session) = crate::master_sessions::live_session(tx, &stored.project_id)? {
+        tx.execute(
+            "UPDATE team_tasks SET session=?2 WHERE id=?1",
+            params![id, session],
+        )
+        .map_err(error)?;
+    }
     Ok(Ok(id))
+}
+
+/// Starts the work that resolves what an Ask agent to update merged into a team agent's
+/// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
+/// worktree and lands in the same change set; the team master gets an engine message. A
+/// sub-agent holds at most one queued resolve task, whose prompt the newest update
+/// replaces, so the global task cap never refuses a merge already made. Takes the
+/// transaction, project, agent, prompt and time. Returns Ok, or a plain refusal code.
+pub fn admit_resolve(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    prompt: &str,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if !text_valid(prompt, TASK_PROMPT_BYTES_MAX) {
+        return Ok(Err("team_task_invalid"));
+    }
+    let found: Option<(String, String, bool)> = tx
+        .query_row(
+            "SELECT a.role,a.harness,a.tools FROM team_agents a JOIN team_worktrees w ON w.agent=a.id
+             WHERE a.id=?1 AND a.project=?2 AND w.project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((role, harness, tools)) = found else {
+        return Ok(Err("team_agent_not_found"));
+    };
+    match AgentRole::parse(&role) {
+        Some(AgentRole::Sub) => {}
+        Some(AgentRole::Master) => {
+            return append_message(
+                tx,
+                project,
+                MessageAuthor::Engine,
+                prompt,
+                MessageState::Pending,
+                now,
+            )
+            .map(|sent| sent.map(|_| ()));
+        }
+        None => return Ok(Err("team_agent_not_found")),
+    }
+    let queued: Option<i64> = tx
+        .query_row(
+            "SELECT t.id FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+             WHERE p.project=?1 AND p.agent=?2 AND t.status=?3",
+            params![project.as_str(), agent, TaskStatus::Queued.name()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(task) = queued {
+        tx.execute(
+            "UPDATE team_tasks SET prompt=?2 WHERE id=?1",
+            params![task, prompt],
+        )
+        .map_err(error)?;
+        return Ok(Ok(()));
+    }
+    make_room(
+        tx,
+        "team_tasks",
+        TASK_HISTORY,
+        project,
+        TASKS_PER_PROJECT_MAX,
+    )?;
+    tx.execute(
+        "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,NULL,?3,?4,?5,?6,?7)",
+        params![
+            project.as_str(),
+            TaskSource::Owner.name(),
+            harness,
+            tools,
+            prompt,
+            TaskStatus::Queued.name(),
+            now
+        ],
+    )
+    .map_err(error)?;
+    let task = tx.last_insert_rowid();
+    assert!(task > 0);
+    tx.execute(
+        "DELETE FROM team_task_pins WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        params![task, project.as_str(), agent],
+    )
+    .map_err(error)?;
+    Ok(Ok(()))
 }
 
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
@@ -976,12 +1308,19 @@ pub fn execute(
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
     action.validate()?;
-    let project = action.project();
+    let Some(project) = action.project() else {
+        return wake(tx, action);
+    };
     let Some(stored) = crate::project_setup::load_setup(tx, project)? else {
         return Ok(rejected("project_setup_missing"));
     };
     let now = now_ms();
     match action {
+        TeamAction::Wake { .. } => wake(tx, action),
+        TeamAction::Seen { upto, .. } => {
+            events::seen(tx, Some(project), *upto, now)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::Message { text, .. } => Ok(
             match append_message(
                 tx,
@@ -1046,6 +1385,16 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::LiveMaster { on, .. } => {
+            if *on
+                && crate::harnesses::interactive::support(&stored.team.master)
+                    != crate::harnesses::interactive::Support::Terminal
+            {
+                return Ok(rejected("team_master_no_terminal"));
+            }
+            master::set_live(tx, project, *on)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::Pause { .. } => {
             tx.execute(
                 "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
@@ -1090,7 +1439,23 @@ pub fn execute(
                 },
             )
         }
+        TeamAction::Rename { agent, handle, .. } => {
+            Ok(match names::rename(tx, project, *agent, handle)? {
+                Ok(_) => Outcome::Applied,
+                Err(code) => rejected(code),
+            })
+        }
     }
+}
+
+fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
+    let TeamAction::Wake { target, rule } = action else {
+        unreachable!("only a wake rule action has no project");
+    };
+    Ok(match events::set_rule(tx, target, rule.as_ref())? {
+        Ok(()) => Outcome::Applied,
+        Err(code) => rejected(code),
+    })
 }
 
 fn master_reply(
@@ -1164,6 +1529,7 @@ pub fn plan_steps(
 pub struct TeamAgent {
     pub id: i64,
     pub role: AgentRole,
+    pub label: String,
     pub harness: String,
     pub tools: bool,
     pub account: Option<String>,
@@ -1177,6 +1543,10 @@ pub struct TeamAgent {
     pub created_ms: i64,
     pub heartbeat_ms: i64,
     pub stopped_ms: Option<i64>,
+    #[serde(default)]
+    pub persona: Option<String>,
+    #[serde(default)]
+    pub handle: Option<String>,
 }
 
 /// One sub-agent task as the clients poll it.
@@ -1239,6 +1609,10 @@ pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
     pub paused: bool,
+    #[serde(default)]
+    pub live_master: Option<bool>,
+    #[serde(default)]
+    pub live_problem: Option<String>,
     pub min_agents: u8,
     pub max_agents: u8,
     pub harnesses: Vec<TeamHarness>,
@@ -1246,6 +1620,7 @@ pub struct TeamStatus {
     pub tasks: Vec<TeamTask>,
     pub messages: Vec<TeamMessage>,
     pub plan: Vec<PlanStep>,
+    pub events: events::EventsView,
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -1256,9 +1631,18 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
     let role: String = row.get(1)?;
     let status: String = row.get(6)?;
     let status = AgentStatus::parse(&status).ok_or_else(|| invalid_row("status"))?;
+    let id: i64 = row.get(0)?;
+    let role = AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?;
+    let persona: Option<String> = row.get(14)?;
+    let handle: Option<String> = row.get(15)?;
+    let kept = persona.clone().map(|persona| names::AgentName {
+        persona,
+        handle: handle.clone(),
+    });
     Ok(TeamAgent {
-        id: row.get(0)?,
-        role: AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?,
+        id,
+        role,
+        label: names::label(role, id, kept.as_ref()),
         harness: row.get(2)?,
         tools: row.get(3)?,
         account: row.get(4)?,
@@ -1272,10 +1656,12 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         created_ms: row.get(11)?,
         heartbeat_ms: row.get(12)?,
         stopped_ms: row.get(13)?,
+        persona,
+        handle,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id)";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
@@ -1442,25 +1828,41 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         delegation_label: Some(master_path.label().into()),
         runnable: launch_harness(&plan.master).is_some(),
     }];
-    harnesses.extend(plan.sub_harnesses.iter().map(|slot| TeamHarness {
-        harness: slot.harness.clone(),
+    let slots = if plan.sub_harnesses.is_empty() {
+        let subs_max = plan.max_agents.saturating_sub(1);
+        runnable_harnesses()
+            .filter(|_| subs_max > 0)
+            .map(|harness| HarnessSlot {
+                harness: harness.to_owned(),
+                agents: subs_max,
+                tools: plan.master_tools,
+            })
+            .collect()
+    } else {
+        plan.sub_harnesses.clone()
+    };
+    harnesses.extend(slots.into_iter().map(|slot| TeamHarness {
+        live: live(AgentRole::Sub, &slot.harness),
+        runnable: launch_harness(&slot.harness).is_some(),
+        harness: slot.harness,
         role: AgentRole::Sub,
         agents_max: slot.agents,
         tools: slot.tools,
-        live: live(AgentRole::Sub, &slot.harness),
         delegation: None,
         delegation_label: None,
-        runnable: launch_harness(&slot.harness).is_some(),
     }));
     let steps = match master_reply(connection, project, None)? {
         Some((reply, text)) => plan_steps(connection, project, reply, &text)?,
         None => Vec::new(),
     };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
+    let (live_master, live_problem) = master::switch(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
         paused: paused(connection, project)?,
+        live_master,
+        live_problem,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
         harnesses,
@@ -1468,6 +1870,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         tasks,
         messages,
         plan: steps,
+        events: events::view(connection, project)?,
     })
 }
 

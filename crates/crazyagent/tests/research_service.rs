@@ -7,13 +7,18 @@ use crazyagent::research::accounts::AccountPick;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
 use crazyagent::research::service::{ResearchService, progress};
-use research_support::{EngineRuntime, codex, hanging_endpoint, processes_with};
+use research_support::codex;
+#[cfg(target_os = "macos")]
+use research_support::{EngineRuntime, hanging_endpoint, processes_with};
+#[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 fn ollama() -> AccountPick {
     AccountPick::Account {
         connection: CredentialRef::new("local-connection").unwrap(),
@@ -35,6 +40,7 @@ fn wait_for(deadline: Duration, mut done: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let runtime = EngineRuntime::with_projects(&[(
@@ -126,6 +132,7 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     assert!(report.starts_with("# Market research\n"));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
     const MID_RUN: &str = "the test fails while the service's research agent runs";
@@ -181,6 +188,7 @@ fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
     assert_eq!(job.attempts, 0);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
     let runtime = EngineRuntime::with_projects(&[("project-b", "A site for a flower shop.")]);
@@ -342,4 +350,51 @@ fn research_waits_with_the_rate_limit_code_and_its_end_while_every_pool_account_
         jobs.get(design).unwrap().unwrap().error.as_deref(),
         Some("This harness is not installed on this computer")
     );
+}
+
+/// On Linux, which runs no agent confined to its own worktree in V1 (DEC-094), a research job
+/// that has its harness and an account fails once, before any agent folder or worktree,
+/// with the owner's plain line instead of a sandbox error that is retried.
+#[cfg(target_os = "linux")]
+#[test]
+fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let project = root.join("project");
+    let state = root.join("state");
+    fs::create_dir_all(project.join("context")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    let database = state.join("research.sqlite3");
+    let jobs = ResearchJobs::open(&database).unwrap();
+    let id = jobs
+        .enqueue("project-l", "design_research", "codex", true)
+        .unwrap();
+    let limits = ResearchLimits {
+        attempts_max: 3,
+        ..ResearchLimits::default()
+    };
+    let runner =
+        ResearchRunner::new(&database, &state, std::path::Path::new("/bin/sh"), limits).unwrap();
+    let run = runner
+        .run_once(&crazyagent::research::runner::ResearchProject {
+            id: "project-l",
+            root: &project,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "unreached-model".into(),
+            }),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, ResearchStatus::Failed);
+    assert_eq!(run.process_group, None);
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.status, ResearchStatus::Failed);
+    assert_eq!(job.attempts, 1);
+    assert_eq!(
+        job.error.as_deref(),
+        Some("Team agents and research are not available on Linux in this version.")
+    );
+    assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
+    assert!(!project.join(".git").exists());
 }

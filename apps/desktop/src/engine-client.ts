@@ -19,7 +19,25 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
 
 export type SettledCall = { ok: true; value: unknown } | { ok: false; failure: unknown };
 
-const unconfirmedWatchers = new Set<() => void>();
+const unconfirmedWatchers = new Set<(settled: SettledCall) => void>();
+const PROFILE_UNCONFIRMED_CODES = new Set(["account_profile_outcome_unknown_read_same_request", "account_profile_recovery_required"]);
+
+function failureCode(failure: unknown): string | null {
+  return typeof failure === "object" && failure !== null && "code" in failure && typeof failure.code === "string" ? failure.code : null;
+}
+
+/** Whether a bridge reply leaves an account set-up for agents unconfirmed: the set-up or its
+ * read timed out, a change was refused until it is checked, or a read of it is still
+ * unanswered. Input: the settled call. Output: true when the app should read it again. */
+export function leavesProfileUnconfirmed(settled: SettledCall): boolean {
+  if (settled.ok) {
+    const value = settled.value;
+    return typeof value === "object" && value !== null && !Array.isArray(value) && "ticket" in value && "reply" in value &&
+      "pending" in value && value.pending === true;
+  }
+  const code = failureCode(settled.failure);
+  return code !== null && PROFILE_UNCONFIRMED_CODES.has(code);
+}
 
 /** Whether a bridge reply leaves an owner change unconfirmed: a reply the bridge still marks
  * pending, or a refusal because an earlier change is still pending.
@@ -29,13 +47,13 @@ export function leavesUnconfirmed(settled: SettledCall): boolean {
     const value = settled.value;
     return typeof value === "object" && value !== null && !Array.isArray(value) && "pending" in value && value.pending === true;
   }
-  const failure = settled.failure;
-  return typeof failure === "object" && failure !== null && "code" in failure && failure.code === "pending_intent";
+  return failureCode(settled.failure) === "pending_intent" || leavesProfileUnconfirmed(settled);
 }
 
 /** Subscribes to bridge replies that leave an owner change unconfirmed, so the app can name
- * the change and check it. Input: the listener. Output: a function that unsubscribes it. */
-export function watchUnconfirmed(listener: () => void): () => void {
+ * the change and check it. Input: the listener, which gets the reply. Output: a function
+ * that unsubscribes it. */
+export function watchUnconfirmed(listener: (settled: SettledCall) => void): () => void {
   unconfirmedWatchers.add(listener);
   return () => { unconfirmedWatchers.delete(listener); };
 }
@@ -44,7 +62,7 @@ export function watchUnconfirmed(listener: () => void): () => void {
  * Input: the settled call. Output: none. */
 export function reportReply(settled: SettledCall): void {
   if (!leavesUnconfirmed(settled)) return;
-  for (const listener of [...unconfirmedWatchers]) listener();
+  for (const listener of [...unconfirmedWatchers]) listener(settled);
 }
 
 /** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal, and
@@ -234,6 +252,11 @@ export function errorMessage(error: unknown): string {
     skill_name_taken: "A skill with this name already exists here.",
     skill_limit: "You can add up to 100 skills here.",
     skill_not_found: "This skill was removed.",
+    skill_text_too_large: "This SKILL.md is too large to show here.",
+    skill_page_invalid: "This skill changed while it was read. Open it again.",
+    skill_import_too_large: "A skill brought in from your skills folders can be up to 2 MB.",
+    skill_import_name_changed: "This folder now holds a different skill. Look for your skills again.",
+    skill_import_home_unknown: "Your home folder is unknown, so your skills can't be found.",
     server_name_invalid: "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
     server_name_taken: "An MCP server with this name already exists here.",
     server_limit: "You can add up to 50 MCP servers here.",
@@ -341,6 +364,13 @@ export interface ProjectPage {
   fresh: boolean;
 }
 
+/** The projects Home, the sidebar, Go to and the name checks list: at most the bridge's
+ * PROJECT_LIST_MAX in engine order, and whether the engine holds more. */
+export interface ProjectList {
+  items: ProjectPage["items"];
+  more: boolean;
+}
+
 export interface ConversationRow {
   kind: "message" | "brief";
   version: string | null;
@@ -367,7 +397,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -384,6 +414,12 @@ export interface IntentReceipt extends PendingIntent {
 
 export function projects(next = false): Promise<ProjectPage> {
   return invoke<ProjectPage>("desktop_projects", { next });
+}
+
+/** Reads every project in one bridge call that pages with its own cursor, so overlapping
+ * reads never disturb each other. Input: none. Output: the projects, at most the bound. */
+export function projectList(): Promise<ProjectList> {
+  return invoke<ProjectList>("desktop_project_list");
 }
 
 export interface ProjectSpec {
@@ -637,6 +673,14 @@ export function deleteProjectContext(id: string, path: string, generation: numbe
   return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
+export function projectReadPaths(id: string): Promise<string[]> {
+  return invoke<string[]>("desktop_project_read_paths", { id });
+}
+
+export function setProjectReadPaths(id: string, paths: string[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
 export type TeamRole = "master" | "sub";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
@@ -657,6 +701,7 @@ export interface TeamHarness {
 export interface TeamAgent {
   id: number;
   role: TeamRole;
+  label: string;
   harness: string;
   tools: boolean;
   account: string | null;
@@ -670,6 +715,8 @@ export interface TeamAgent {
   created_ms: number;
   heartbeat_ms: number;
   stopped_ms: number | null;
+  persona?: string | null;
+  handle?: string | null;
 }
 
 export interface TeamTask {
@@ -703,6 +750,8 @@ export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
   paused: boolean;
+  live_master?: boolean | null;
+  live_problem?: string | null;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];
@@ -710,6 +759,69 @@ export interface TeamStatus {
   tasks: TeamTask[];
   messages: TeamMessage[];
   plan: TeamPlanStep[];
+  events: TeamEventsView;
+}
+
+export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
+export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped";
+export type WakeRuleLevel = "shipped" | "app" | "project" | "agent";
+
+export interface TeamEvent {
+  id: number;
+  agent: number;
+  label: string;
+  task: number | null;
+  kind: TeamEventKind;
+  text: string;
+  state: TeamEventState;
+  created_ms: number;
+  delivered_ms: number | null;
+}
+
+export interface WakeRule {
+  question: boolean;
+  finished: boolean;
+  failed: boolean;
+  change_set_ready: boolean;
+  progress: boolean;
+  hourly_cap: number;
+}
+
+export type WakeRuleTarget =
+  | { level: "app" }
+  | { level: "project"; project_id: string }
+  | { level: "agent"; project_id: string; agent: number };
+
+export interface TeamNotification {
+  id: number;
+  project_id: string;
+  kind: "escalation" | "wake_paused" | "queue_full";
+  text: string;
+  created_ms: number;
+  seen_ms: number | null;
+}
+
+export interface TeamEventsView {
+  recent: TeamEvent[];
+  waiting: { agent: number; text: string }[];
+  notifications: TeamNotification[];
+  paused: boolean;
+  questions: { agent: number; count: number }[];
+  wake: {
+    app: WakeRule | null;
+    project: WakeRule | null;
+    agents: { agent: number; rule: WakeRule }[];
+    effective: WakeRule;
+    level: WakeRuleLevel;
+  };
+}
+
+export interface AppTeamEvents {
+  rule: WakeRule | null;
+  effective: WakeRule;
+  notifications: TeamNotification[];
+  unseen: number;
+  projects: { project_id: string; unseen: number }[];
 }
 
 export interface TeamPlanStep {
@@ -745,12 +857,24 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
 }
 
+/** Turns the project's live master on or off. Inputs: the project id, the switch and a
+ * generation. Output: the commit receipt; a master with no terminal app is rejected. */
+export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, generation });
+}
+
 export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
 }
 
 export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
+}
+
+/** Renames a live sub-agent's role handle. Inputs: project id, team agent id, the new handle
+ * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
+export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.
@@ -1016,7 +1140,8 @@ export type GraphEdgeState = "sent" | "running" | "done" | "failed";
 
 /** One node of a project's team graph, as the engine's TeamGraph read returns it. `parent`
  * links an agent to its harness group and a group to the master; `terminal` is the name the
- * terminal commands take, for the master and agents that have one. */
+ * terminal commands take, for the master and agents that have one. `questions` counts the
+ * questions an agent waits on, once the engine reports them. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1028,6 +1153,7 @@ export interface GraphNode {
   account: string | null;
   agents: number | null;
   terminal: string | null;
+  questions?: number | null;
 }
 
 /** One task edge from the master to the agent running it, or to its harness group before
@@ -1067,9 +1193,9 @@ export function teamGraph(id: string): Promise<TeamGraph> {
 
 /** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
  * and then live output until the terminal closes or the view detaches. Inputs: the terminal
- * name and the channel. Output: resolves once the engine accepted the attach. */
-export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<void> {
-  return invoke<void>("desktop_terminal_attach", { agent, output });
+ * name and the channel. Output: the view's serial once the engine accepted the attach. */
+export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<number> {
+  return invoke<number>("desktop_terminal_attach", { agent, output });
 }
 
 /** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name
@@ -1091,10 +1217,11 @@ export function terminalResize(agent: string, cols: number, rows: number): Promi
   return invoke<void>("desktop_terminal_resize", { agent, cols, rows });
 }
 
-/** Closes this window's view of an agent terminal; the agent keeps running. Input: the
- * terminal name. Output: resolves once the view is gone. */
-export function terminalDetach(agent: string): Promise<void> {
-  return invoke<void>("desktop_terminal_detach", { agent });
+/** Closes this window's view of an agent terminal; the agent keeps running and a newer view
+ * of it stays open. Inputs: the terminal name and the serial its attach returned. Output:
+ * resolves once the view is gone. */
+export function terminalDetach(agent: string, serial: number): Promise<void> {
+  return invoke<void>("desktop_terminal_detach", { agent, serial });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {
@@ -1300,12 +1427,52 @@ export interface SkillView {
   id: string;
   name: string;
   description: string;
+  line: string;
   scope: PluginScope;
   scope_label: string;
   enabled: boolean;
   on_here: boolean | null;
   source: string;
   folder: string;
+}
+
+export interface SkillFile {
+  path: string;
+  bytes: number;
+}
+
+export interface SkillDetail {
+  skill: SkillView;
+  text: string;
+  files: SkillFile[];
+  files_more: number;
+}
+
+export type ImportFrom = "claude" | "codex";
+
+export type ImportState =
+  | { kind: "new" }
+  | { kind: "added"; id: string }
+  | { kind: "differs"; id: string }
+  | { kind: "unusable"; code: string };
+
+export interface ImportCandidate {
+  from: ImportFrom;
+  folder: string;
+  name: string;
+  line: string;
+  state: ImportState;
+}
+
+export interface ImportList {
+  found: ImportCandidate[];
+  more: number;
+}
+
+export interface ImportedSkill {
+  skill: SkillView;
+  skipped: string[];
+  skipped_total: number;
 }
 
 export interface McpServerView {
@@ -1353,6 +1520,21 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView
 /** Removes a skill and the engine's copy of its folder. */
 export function removeSkill(id: string): Promise<void> {
   return invoke<void>("desktop_remove_skill", { id });
+}
+
+/** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
+export function skillDetail(id: string, projectId?: string): Promise<SkillDetail> {
+  return invoke<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
+}
+
+/** Looks for skills in the owner's Claude Code and Codex skills folders, only when asked. */
+export function skillImportScan(): Promise<ImportList> {
+  return invoke<ImportList>("desktop_skill_import_scan", {});
+}
+
+/** Imports one found skill, turned on for every project; `replace` is the id of an added skill whose files differ. */
+export function importSkill(folder: string, replace: string | null): Promise<ImportedSkill> {
+  return invoke<ImportedSkill>("desktop_import_skill", { folder, replace });
 }
 
 /** Adds an MCP server that waits for approval. Secret values go to the engine and are never returned. */
@@ -1484,6 +1666,17 @@ export interface MasterTurn {
   detail?: string | null;
   cause?: string | null;
   tasks?: MasterTask[];
+  changes?: string | null;
+  engine_request?: MasterEngineRequest | null;
+  input_cursor?: string;
+}
+
+/** What the engine asked the master in a turn Ask agent to update started: the change set,
+ * the plain line shown in the chat and the text the master receives. */
+export interface MasterEngineRequest {
+  change_set: string;
+  line: string;
+  text: string;
 }
 
 /** One task a master turn handed to the project's team, with the engine's note once it ended. */
@@ -1495,7 +1688,70 @@ export interface MasterTask {
 export interface MasterState {
   project_id: string;
   ticket: string;
-  session: { session_id: string; phase: "configured" | "closing" | "closed"; current_turn: string | null } | null;
+  session: { session_id: string; phase: MasterPhase; current_turn: string | null } | null;
+}
+
+/** Where a master session stands: live ("configured"), parked and resumable, or closed with its project. */
+export type MasterPhase = "configured" | "parked" | "closing" | "closed";
+
+/** One master session in the Sessions list. `created` and `last_activity` are engine revisions;
+ * the `_ms` times are absent for sessions older than the marks. `agents` names its own sub-agents. */
+export interface MasterSessionSummary {
+  session_id: string;
+  phase: MasterPhase;
+  created: string;
+  last_activity: string;
+  started_ms: number | null;
+  active_ms: number | null;
+  turns: number;
+  first_line: string | null;
+  last_line: string | null;
+  agents: string[];
+  results_waiting: number;
+}
+
+export interface MasterSessions {
+  ticket: string;
+  revision: string;
+  sessions: MasterSessionSummary[];
+}
+
+/** Lists the selected project's master sessions, the live one first, then newest activity first. */
+export function masterSessions(ticket: string): Promise<MasterSessions> {
+  return invoke<MasterSessions>("desktop_master_sessions", { ticket });
+}
+
+/** One owner message behind a master turn, keyed by the turn's input cursor. */
+export interface OwnerLine {
+  input_cursor: string;
+  text: string;
+}
+
+/** The owner messages read for some turns of a session. */
+export interface MasterInputs {
+  ticket: string;
+  revision: string;
+  entries: OwnerLine[];
+}
+
+/** Reads the owner messages behind at most 32 turns of a session of the selected project. */
+export function masterInputs(ticket: string, sessionId: string, cursors: string[]): Promise<MasterInputs> {
+  return invoke<MasterInputs>("desktop_master_inputs", { ticket, sessionId, cursors });
+}
+
+/** Reads one page of any session of the selected project, live or parked. */
+export function sessionTurns(ticket: string, sessionId: string, cursor: unknown = null): Promise<MasterTurns> {
+  return invoke<MasterTurns>("desktop_master_session_turns", { ticket, sessionId, cursor });
+}
+
+/** Parks the live session and opens a fresh one in one engine action; a running turn needs `cancelRunning`. */
+export function newMasterSession(ticket: string, cancelRunning: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_new_master_session", { ticket, cancelRunning, generation });
+}
+
+/** Makes a parked session live again, parking the live one; a running turn needs `cancelRunning`. */
+export function resumeMasterSession(ticket: string, sessionId: string, cancelRunning: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_resume_master_session", { ticket, sessionId, cancelRunning, generation });
 }
 
 export interface MasterTurns {

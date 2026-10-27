@@ -35,6 +35,24 @@ async fn flow(root: &Path) -> Result<(), String> {
         "skill_missing_skill_md"
     );
     assert_eq!(bridge.plugin_skills(None).await.map_err(code)?.len(), 1);
+    let detail = bridge
+        .skill_detail(skill.id.clone(), None)
+        .await
+        .map_err(code)?;
+    assert_eq!(
+        detail.text,
+        "---\nname: release-notes\ndescription: Writes release notes.\n---\n"
+    );
+    assert_eq!(detail.skill.line, "Writes release notes.");
+    assert_eq!(detail.files[0].path, "SKILL.md");
+    assert_eq!(
+        bridge
+            .skill_detail("Not An Id".into(), None)
+            .await
+            .unwrap_err()
+            .code,
+        "plugin_not_found"
+    );
     assert!(
         !bridge
             .set_skill_enabled(skill.id.clone(), false)
@@ -42,6 +60,31 @@ async fn flow(root: &Path) -> Result<(), String> {
             .map_err(code)?
             .enabled
     );
+
+    let found = root.join("home/.claude/skills/style");
+    std::fs::create_dir_all(&found).unwrap();
+    std::fs::write(
+        found.join("SKILL.md"),
+        "---\nname: style\ndescription: House style.\n---\n",
+    )
+    .unwrap();
+    std::fs::write(found.join(".env"), "TOKEN=dummy-value").unwrap();
+    let imported = bridge
+        .import_skill(found.display().to_string(), None)
+        .await
+        .map_err(code)?;
+    assert_eq!(imported.skill.name, "style");
+    assert!(imported.skill.enabled);
+    assert_eq!(imported.skipped, vec![".env"]);
+    assert_eq!(
+        bridge
+            .import_skill(found.display().to_string(), None)
+            .await
+            .unwrap_err()
+            .code,
+        "skill_name_taken"
+    );
+    bridge.remove_skill(imported.skill.id).await.map_err(code)?;
 
     let server_path = root.join("servers").join("mcp_fixture.py");
     std::fs::create_dir_all(root.join("servers")).unwrap();
@@ -146,6 +189,9 @@ fn plugins_commands_use_the_local_main_window_acl() {
         "desktop_remove_mcp_secret",
         "desktop_check_mcp_server",
         "desktop_project_plugins",
+        "desktop_skill_detail",
+        "desktop_skill_import_scan",
+        "desktop_import_skill",
     ] {
         assert!(
             authority

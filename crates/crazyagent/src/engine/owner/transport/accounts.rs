@@ -410,12 +410,13 @@ async fn handle(
                 return Err(failure("account_key_not_allowed"));
             };
             replace_key(root, credential_ref, key)?;
-            let listed = match actor(engine, admission, Command::Get(id)).await {
+            let listed = match actor(engine, admission, Command::KeyReplaced(id)).await {
                 Ok(ResultValue::Account(current)) => current,
-                gone => {
+                Err(gone) if gone.0 == "account_not_found" => {
                     remove_key(root, credential_ref)?;
-                    return Err(gone.err().unwrap_or_else(unknown));
+                    return Err(gone);
                 }
+                _ => return Err(unknown()),
             };
             Reply::Account {
                 account: views(root, vec![*listed]).await?.remove(0),
@@ -761,12 +762,13 @@ fn base_status(root: &Root, listed: &Listed) -> Result<AccountStatus, EngineErro
             }
         }
         ModelAuthentication::ApiKey { credential_ref } => {
-            if open_key(root, credential_ref)?.is_some() {
+            if !listed.rejected && open_key(root, credential_ref)?.is_some() {
                 AccountStatus::KeySaved
             } else {
                 AccountStatus::NotSignedIn
             }
         }
+        ModelAuthentication::None {} if listed.rejected => AccountStatus::NotSignedIn,
         ModelAuthentication::None {} => AccountStatus::SignedIn,
     })
 }

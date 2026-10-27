@@ -22,6 +22,7 @@ crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
 crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE\n\
+crazyagent team-mcp-live MAILBOX_DIR\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -102,6 +103,28 @@ fn main() -> ExitCode {
             Err("usage: crazyagent team-mcp DROP_FILE".to_owned())
         } else {
             crazyagent::team::tool::serve(
+                io::stdin().lock(),
+                io::stdout().lock(),
+                Path::new(&args[1]),
+            )
+            .map_err(|e| e.to_string())
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::team::tool::LIVE_SERVER_COMMAND)
+    {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent team-mcp-live MAILBOX_DIR".to_owned())
+        } else {
+            crazyagent::team::tool::serve_live(
                 io::stdin().lock(),
                 io::stdout().lock(),
                 Path::new(&args[1]),
@@ -672,10 +695,36 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     };
                 }
             };
+            let usage_upkeep = if team.is_some() {
+                let mut executables = std::collections::BTreeMap::new();
+                if let Some(executable) = harnesses.codex.as_deref() {
+                    executables.insert("codex", executable.to_path_buf());
+                }
+                if let Some(executable) = harnesses.claude.as_deref() {
+                    executables.insert("claude-code", executable.to_path_buf());
+                }
+                match crazyagent::usage::service::start_for_engine(
+                    runtime_dir,
+                    &global,
+                    &project,
+                    executables,
+                ) {
+                    Ok(usage) => Some(usage),
+                    Err(problem) => {
+                        eprintln!("usage is not counted ({problem})");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let terminal = service
                 .owner_runtime()
                 .and_then(|runtime| runtime.terminal().ok());
             let result = service.run(stopped).await.map_err(|e| e.to_string());
+            if let Some(upkeep) = usage_upkeep {
+                let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
+            }
             if research.is_some() || onboarding.is_some() {
                 let _ = tokio::task::spawn_blocking(move || stop_background(research, onboarding))
                     .await;

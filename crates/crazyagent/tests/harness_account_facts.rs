@@ -2,15 +2,14 @@ use crazyagent::adapters::claude::{
     ClaudeProtocol, ProtocolError as ClaudeError, State as ClaudeState,
 };
 use crazyagent::adapters::codex::{
-    CodexProtocol, Event, FRAME_BYTES_MAX, ProtocolError as CodexError, State as CodexState,
-    TurnStatus,
+    CodexProtocol, Event, ProtocolError as CodexError, State as CodexState, TurnStatus,
 };
-use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge};
+use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge, OUTPUT_BYTES_MAX};
 use crazyagent::adapters::events::{
     Capability, EventKind, HarnessEvent, NativeRequestId, ObservedEvent, RateLimitStatus, Support,
     TurnOutcome,
 };
-use crazyagent::adapters::{NativeAction, NativeHarness};
+use crazyagent::adapters::{LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -493,7 +492,7 @@ fn codex_account_reply_is_bounded_before_fact_emission() {
     let mut protocol = codex_ready();
     let request = protocol.read_account_rate_limits().unwrap();
     let bytes = wire(json!({"id":request_id(&request),"result":{
-        "rateLimits":{},"accountId":"a".repeat(FRAME_BYTES_MAX)
+        "rateLimits":{},"accountId":"a".repeat(LINE_BYTES_MAX)
     }}));
     assert_eq!(protocol.receive(&bytes), Err(CodexError::FrameTooLarge));
     assert_eq!(protocol.state(), CodexState::Failed);
@@ -506,7 +505,7 @@ fn codex_bridge_rejects_oversized_typed_account_fact() {
         bridge.translate(
             Event::AccountRateLimitsRead {
                 id: 17,
-                account_id: Some("a".repeat(262_145)),
+                account_id: Some("a".repeat(OUTPUT_BYTES_MAX + 1)),
                 ordinary_usage_allowed: Some(true)
             },
             None
@@ -752,7 +751,7 @@ fn claude_rate_fact_frame_is_bounded_before_emission() {
     let value = rate_frame(
         "rate-large",
         json!({
-            "status":"allowed","overageDisabledReason":"x".repeat(1_048_576)
+            "status":"allowed","overageDisabledReason":"x".repeat(LINE_BYTES_MAX)
         }),
     );
     assert_eq!(

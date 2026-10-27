@@ -461,7 +461,10 @@ pub struct Engine {
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
     terminal: Mutex<Option<(bool, std::sync::Arc<dyn crate::terminal::Host>)>>,
+    harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
 }
+
+const HARNESS_PROBE_FRESH: Duration = Duration::from_secs(10);
 
 impl Engine {
     async fn native_auth_job<T>(
@@ -532,6 +535,7 @@ impl Engine {
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
                 terminal: Mutex::default(),
+                harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             },
             config,
         ))
@@ -548,6 +552,7 @@ impl Engine {
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
             terminal: Mutex::default(),
+            harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
         })
     }
 
@@ -562,6 +567,7 @@ impl Engine {
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
             terminal: Mutex::default(),
+            harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
         })
     }
 

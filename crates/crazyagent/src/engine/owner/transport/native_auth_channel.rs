@@ -3034,6 +3034,49 @@ fallback_allowed = false
     }
 
     #[tokio::test]
+    async fn a_signed_in_master_rebound_by_a_settings_edit_after_open_passes_its_launch_binding() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_with(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+            )
+            .await;
+            case.complete_sign_in().await;
+            case.open_master().await;
+            case.edit_settings(
+                "add-account-outside-the-master",
+                crate::config::ModelAccessEdit::AddAccount {
+                    account_ref: CredentialRef::new("account-b").unwrap(),
+                },
+            )
+            .await;
+            let prepared = admitted(case.prepare_next_turn("turn-after-rebind").await);
+            assert_eq!(prepared.session.rebound.len(), 1);
+            assert_ne!(prepared.attempt.config_id, prepared.session.config_id);
+            assert_eq!(&prepared.attempt.config_id, prepared.session.binding().0);
+            let host = case.service.owner_runtime().unwrap();
+            let (profile, _) = host
+                .acquire_master_profile(&prepared, &id("turn-after-rebind"))
+                .await
+                .unwrap();
+            let launch = host.prepare_master_host(&prepared, &profile).map(|_| ());
+            drop(profile);
+            case.close().await;
+            assert_eq!(
+                launch,
+                Err(crate::engine::EngineError(
+                    "native_auth_host_unavailable".into()
+                )),
+                "the rebound turn passes its binding and stops only at the unregistered harness"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn signed_in_master_is_refused_after_its_connection_changes() {
         tokio::time::timeout(Duration::from_secs(120), async {
             let mut case = Case::open_with(

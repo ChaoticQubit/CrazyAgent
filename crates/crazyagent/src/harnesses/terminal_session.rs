@@ -43,6 +43,8 @@ pub struct TerminalSession {
     events: usize,
     ready: bool,
     turn: bool,
+    live: bool,
+    facts: VecDeque<TranscriptEvent>,
     exited: bool,
     stopped: bool,
     record: Option<PaneRecord>,
@@ -51,12 +53,36 @@ pub struct TerminalSession {
     _relay: Option<Relay>,
 }
 
-struct KeyFile(PathBuf);
+/// An account's key file, removed when the agent session holding it ends.
+pub(super) struct KeyFile(pub(super) PathBuf);
 
 impl Drop for KeyFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// A harness conversation an agent continues: the id the harness resumes it by and the
+/// record the harness keeps it in, as a transcript reader named them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resume {
+    pub id: String,
+    pub record: PathBuf,
+}
+
+/// Writes a routed launch's relay token to the 0600 key file in its account home, the only
+/// place its harness reads it from, so the token is in no argument or variable of any agent
+/// process. Input: the request after [`route`]. Output: the file's guard, none for a
+/// keyless launch, or a plain refusal code.
+pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>, LaunchError> {
+    request
+        .account
+        .key()
+        .map(|key| {
+            assert!(is_placeholder(key.reveal()));
+            interactive::write_key(request.account.home(), key).map(KeyFile)
+        })
+        .transpose()
 }
 
 fn host_failure(error: HostError) -> LaunchError {
@@ -74,12 +100,28 @@ impl TerminalSession {
         request: LaunchRequest,
         context: Option<AgentContext>,
     ) -> Result<Self, LaunchError> {
+        Self::start_resuming(host, agent, request, context, None)
+    }
+
+    /// Starts an agent's interactive app as `start` does, continuing the harness
+    /// conversation `resume` names when given: the app resumes it by its id and the session
+    /// reads only the turns added from now on. Inputs: as for `start`, and the conversation.
+    /// Output: the running session, or a plain refusal code such as
+    /// `launch_resume_unavailable` when the record cannot be followed; nothing is left
+    /// behind on refusal.
+    pub fn start_resuming(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        request: LaunchRequest,
+        context: Option<AgentContext>,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
         validate(&request)?;
         let installed = context
             .as_ref()
             .map(|context| context.install(&request.harness, request.account.home(), request.tools))
             .transpose()?;
-        Self::open(host, agent, request, installed, context.as_ref())
+        Self::open(host, agent, request, installed, context.as_ref(), resume)
     }
 
     /// Starts an agent whose caller already installed the project context into its home,
@@ -92,7 +134,7 @@ impl TerminalSession {
         installed: Installed,
         context: &AgentContext,
     ) -> Result<Self, LaunchError> {
-        Self::open(host, agent, request, Some(installed), Some(context))
+        Self::open(host, agent, request, Some(installed), Some(context), None)
     }
 
     fn open(
@@ -101,24 +143,15 @@ impl TerminalSession {
         request: LaunchRequest,
         installed: Option<Installed>,
         context: Option<&AgentContext>,
+        resume: Option<&Resume>,
     ) -> Result<Self, LaunchError> {
         validate(&request)?;
         if interactive::support(&request.harness) != Support::Terminal {
             return Err(failure("launch_terminal_unsupported"));
         }
         let (request, relay) = route(request)?;
-        assert!(
-            request
-                .account
-                .key()
-                .is_none_or(|key| is_placeholder(key.reveal()))
-        );
         let home = request.account.home().to_path_buf();
-        let key = request
-            .account
-            .key()
-            .map(|key| interactive::write_key(&home, key).map(KeyFile))
-            .transpose()?;
+        let key = write_key_file(&request)?;
         let cwd = request
             .working_dir
             .canonicalize()
@@ -127,13 +160,17 @@ impl TerminalSession {
         if claude {
             interactive::prepare_claude_home(&home, &cwd)?;
         }
-        let session_id = interactive::session_id()?;
+        let session_id = match resume {
+            Some(resume) => resume.id.clone(),
+            None => interactive::session_id()?,
+        };
         let command = interactive::command(
             &request,
             installed.as_ref(),
             &Run {
                 session_id: &session_id,
                 key_file: key.as_ref().map(|key| key.0.as_path()),
+                resume: resume.is_some(),
             },
         )?;
         if command.transcript == Transcript::Unavailable {
@@ -152,7 +189,16 @@ impl TerminalSession {
             }));
         }
         let since = SystemTime::now();
-        let reader = TranscriptReader::new(command.transcript.clone(), &command.cwd, since);
+        let reader = match resume {
+            Some(resume) => TranscriptReader::resumed(
+                command.transcript.clone(),
+                &command.cwd,
+                &resume.record,
+                None,
+            )?,
+            None => TranscriptReader::new(command.transcript.clone(), &command.cwd, since),
+        };
+        let resumed = resume.map(|resume| (resume.record.clone(), reader.start()));
         let pane = host.spawn(&agent, &command).map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
         let ready = LaunchEvent::Ready {
@@ -170,6 +216,8 @@ impl TerminalSession {
             events: 0,
             ready: false,
             turn: false,
+            live: false,
+            facts: VecDeque::new(),
             exited: false,
             stopped: false,
             record: PaneRecord::new(
@@ -178,11 +226,20 @@ impl TerminalSession {
                 since,
                 pane.pid,
                 key.as_ref().map(|key| key.0.as_path()),
-            ),
+            )
+            .map(|record| PaneRecord { resumed, ..record }),
             _key: key,
             _context: installed,
             _relay: relay,
         })
+    }
+
+    /// Names the harness conversation this pane records, once its record exists: the id
+    /// the harness resumes it by and the record's path. Output: none before that.
+    pub fn conversation(&self) -> Option<Resume> {
+        self.reader
+            .conversation()
+            .map(|(id, record)| Resume { id, record })
     }
 
     /// Returns the pane's first process, which leads the process group of the harness.
@@ -267,6 +324,47 @@ impl TerminalSession {
         }
     }
 
+    /// Follows every turn in the pane from now on, the ones the owner types included, as a
+    /// live master needs: turn facts then come from [`Self::next_fact`] and `next_event`
+    /// reports nothing more. Takes the session. Returns nothing.
+    pub fn follow_every_turn(&mut self) {
+        self.live = true;
+        self.queue
+            .retain(|event| matches!(event, LaunchEvent::Ready { .. }));
+    }
+
+    /// Waits up to `wait` for the next turn fact of a session that follows every turn: a
+    /// turn started, said text, ended, hit an error, was interrupted or waits for an
+    /// answer. Tool use is not kept. Output: Some(fact), None on timeout, or an error once the
+    /// pane ended or past a limit, as for `next_event`.
+    pub fn next_fact(&mut self, wait: Duration) -> Result<Option<TranscriptEvent>, LaunchError> {
+        assert!(self.live);
+        let until = Instant::now() + wait;
+        loop {
+            if let Some(fact) = self.facts.pop_front() {
+                return Ok(Some(fact));
+            }
+            if self.exited {
+                return Err(failure("launch_closed"));
+            }
+            if Instant::now() >= self.deadline {
+                self.halt();
+                return Err(failure("launch_deadline"));
+            }
+            self.poll()?;
+            if !self.facts.is_empty() {
+                continue;
+            }
+            let left = until
+                .min(self.deadline)
+                .saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            std::thread::sleep(left.min(POLL));
+        }
+    }
+
     /// Ends the pane and every process in it, then removes the key file and the
     /// generated context. Output: none, since a pane reports no exit code.
     pub fn stop(mut self) -> Option<i32> {
@@ -333,6 +431,21 @@ impl TerminalSession {
             return Err(failure("launch_output_limit"));
         }
         for fact in facts {
+            if self.live {
+                match fact {
+                    TranscriptEvent::ToolUse { .. } => {}
+                    TranscriptEvent::TurnStarted => {
+                        self.turn = true;
+                        self.facts.push_back(fact);
+                    }
+                    TranscriptEvent::TurnFinished { .. } => {
+                        self.turn = false;
+                        self.facts.push_back(fact);
+                    }
+                    other => self.facts.push_back(other),
+                }
+                continue;
+            }
             if !self.turn {
                 continue;
             }
@@ -427,9 +540,21 @@ impl AgentSession {
         context: AgentContext,
         pane: Option<(Arc<dyn Host>, AgentId)>,
     ) -> Result<Self, LaunchError> {
+        Self::start_resuming(request, context, pane, None)
+    }
+
+    /// Starts an agent as `start` does, a pane app continuing the harness conversation
+    /// `resume` names when given; a headless agent on pipes never resumes one.
+    /// Inputs: as for `start`, and the conversation. Output: the session.
+    pub fn start_resuming(
+        request: LaunchRequest,
+        context: AgentContext,
+        pane: Option<(Arc<dyn Host>, AgentId)>,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
         match pane {
             Some((host, agent)) if interactive::support(&request.harness) == Support::Terminal => {
-                TerminalSession::start(host, agent, request, Some(context))
+                TerminalSession::start_resuming(host, agent, request, Some(context), resume)
                     .map(|session| Self::Terminal(Box::new(session)))
             }
             _ => Session::start_with_context(request, context)
@@ -480,11 +605,12 @@ impl AgentSession {
         }
     }
 
-    /// Stops the agent and every process it started. Output: the exit code when known.
-    pub fn stop(self) -> Option<i32> {
+    /// Stops the agent and every process it started. Output: the exit code when known, or
+    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it.
+    pub fn stop(self) -> Result<Option<i32>, LaunchError> {
         match self {
             Self::Piped(session) => session.stop(),
-            Self::Terminal(session) => session.stop(),
+            Self::Terminal(session) => Ok(session.stop()),
         }
     }
 }

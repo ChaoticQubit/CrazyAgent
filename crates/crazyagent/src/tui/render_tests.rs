@@ -480,15 +480,32 @@ fn a_home_card_whose_research_waits_out_a_rate_limit_says_so_not_needs_a_pool() 
 }
 
 #[test]
+fn a_project_name_with_a_direction_override_is_drawn_without_it() {
+    let mut cards = projects();
+    cards[0].name = "Ada\u{202e}txt.exe".into();
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(cards);
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    let shown = render(&mut shell, 80, 24).join("\n");
+    assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    assert!(shown.contains("Ada"), "{shown}");
+    assert!(shown.contains("txt.exe"), "{shown}");
+}
+
+#[test]
 fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
     let mut cards = projects();
     cards[0].activity = Activity {
         working: Some(1),
         suggestions: 3,
+        notifications: 0,
     };
     cards[1].activity = Activity {
         working: Some(0),
         suggestions: 1,
+        notifications: 0,
     };
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(cards);
@@ -511,6 +528,33 @@ fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
         shell.place(),
         Some(Place::Settings(SettingsSection::Memory))
     );
+}
+
+#[test]
+fn home_cards_put_new_team_notifications_before_suggested_memories() {
+    let mut cards = projects();
+    cards[0].activity = Activity {
+        working: Some(0),
+        suggestions: 3,
+        notifications: 2,
+    };
+    cards[1].activity = Activity {
+        working: Some(0),
+        suggestions: 0,
+        notifications: 1,
+    };
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut ctx = ready(width, height);
+        ctx.store.projects = Load::Ready(cards.clone());
+        ctx.store.pools = Load::Ready(pools());
+        let mut shell = shell_at(ctx, Place::Home);
+        shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+        let shown = render(&mut shell, width, height).join("\n");
+        assert!(shown.contains("2 new team notifications"), "{shown}");
+        assert_eq!(shown.matches("new team notification").count(), 2, "{shown}");
+        assert!(!shown.contains("1 new team notifications"), "{shown}");
+        assert!(!shown.contains("3 suggested memories"), "{shown}");
+    }
 }
 
 #[test]
@@ -575,8 +619,8 @@ fn home_shows_a_kept_draft_instead_of_the_empty_state() {
 
 const UNCOUNTED: [(&str, &str); 2] = [
     (
-        "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
-        "@ Accounts   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   ⁂ Memory   ◉ Profile",
+        "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile",
+        "@ Accounts   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   § Process   ⁂ Memory   ◉ Profile",
     ),
     (
         "───────────────────━━━━━━━━━",
@@ -618,8 +662,8 @@ fn settings_frames_match_the_design() {
             ctx.say(Message::success("Saved.", ""));
         }
         let mut shell = shell_at(ctx, Place::Settings(SettingsSection::Profile));
-        let from = format!("{}{}", "─".repeat(89), "━".repeat(9));
-        let to = format!("{}{}{}", "─".repeat(75), "━".repeat(9), "─".repeat(14));
+        let from = format!("{}{}", "─".repeat(101), "━".repeat(9));
+        let to = format!("{}{}{}", "─".repeat(87), "━".repeat(9), "─".repeat(14));
         let swaps = [
             UNCOUNTED[0],
             (from.as_str(), to.as_str()),

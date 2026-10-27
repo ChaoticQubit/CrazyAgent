@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { PackSettingsView, packConfirm, TOOLS_BUSY } = await import("../src/screens/settings/pack.tsx");
+const { PackConfirmDialogs, PackSettingsView, packConfirm, TOOLS_BUSY } = await import("../src/screens/settings/pack.tsx");
 const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine } = await import("../src/screens/settings/projects-home.tsx");
 const { GitHubSettingsView, GitHubAccountView } = await import("../src/screens/settings/github.tsx");
 const { GitHubSignIn } = await import("../src/screens/intake/clone.tsx");
@@ -26,7 +26,7 @@ const pack = [
   entry("linear", "mcp_server", "optional", { state: "failed", reason: "Checksum didn't match." }),
 ];
 const setup = (extra = {}) => ({ dependencies: [], pack, running: false, ...extra });
-const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
+const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", skills: [], onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
 
 const rowOf = (markup, id) => {
   const start = markup.indexOf(`<strong>${id}</strong>`);
@@ -104,6 +104,31 @@ test("pack confirms say what removing deletes and that installing an MCP server 
     body: "Installing it lets your agents run this MCP server in every project. It comes from github.com/example/serena." });
   assert.equal(packConfirm({ kind: "install", entry: entry("coderabbit", "skill", "optional", { state: "available" }) }).body,
     "Agents in every project can use this skill. It comes from github.com/example/coderabbit.");
+});
+
+test("a pack confirm can't be closed or cancelled while its change is in flight", () => {
+  const install = { kind: "install", entry: pack[3] };
+  const remove = { kind: "remove", entry: pack[1] };
+  const confirm = (ask, pending) => html(PackConfirmDialogs, { ask, pending, onCancel: forbidden, onConfirm: forbidden });
+
+  const idle = confirm(install, false);
+  assert.match(idle, /Install serena\?[\s\S]*Installing it lets your agents run this MCP server in every project\./);
+  assert.doesNotMatch(idle, /aria-busy/);
+  assert.match(idle, /<button(?![^>]*disabled)[^>]*aria-label="Close"/);
+  assert.match(idle, /<button(?![^>]*disabled)[^>]*>Cancel<\/button>/);
+
+  const starting = confirm(install, true);
+  assert.match(starting, /<dialog[^>]*aria-busy="true"/);
+  assert.match(starting, /<button[^>]*disabled=""[^>]*aria-label="Close"/);
+  assert.match(starting, /<button[^>]*disabled=""[^>]*>Cancel<\/button>/);
+  assert.match(starting, /<button type="button" class="btn primary"[^>]*disabled=""[^>]*aria-busy="true"[^>]*>[\s\S]*?Starting\.\.\.<\/button>/);
+
+  const removing = confirm(remove, true);
+  assert.match(removing, /Remove superpowers\?/);
+  assert.match(removing, /<dialog[^>]*aria-busy="true"/);
+  assert.match(removing, /<button[^>]*disabled=""[^>]*>Cancel<\/button>/);
+
+  assert.equal(confirm(null, false), "");
 });
 
 test("a new projects folder must differ from the current one and sit outside it", () => {

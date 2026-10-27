@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +36,17 @@ pub(super) fn since_epoch() -> Result<Duration, EngineError> {
 /// agents keep their shared leases. Inputs: the profile folder and the wait. Output: the
 /// held lock, or `native_profile_renewal_busy` when another renewal or check holds it.
 pub(super) fn hold(profile: &File, wait: Duration) -> Result<HeldLock, EngineError> {
+    hold_unless(profile, wait, &|| false)
+}
+
+/// Takes a profile's renewal lock like [`hold`], giving up as soon as `halted` tells the
+/// caller stopped. Inputs: the profile folder, the wait and the stop test. Output: the
+/// held lock, `native_profile_renewal_busy`, or `native_profile_renewal_stopped`.
+fn hold_unless(
+    profile: &File,
+    wait: Duration,
+    halted: &dyn Fn() -> bool,
+) -> Result<HeldLock, EngineError> {
     let folder = File::from(
         rustix::fs::openat(
             profile,
@@ -52,6 +63,9 @@ pub(super) fn hold(profile: &File, wait: Duration) -> Result<HeldLock, EngineErr
             Err(error)
                 if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN =>
             {
+                if halted() {
+                    return Err(failure("native_profile_renewal_stopped"));
+                }
                 if Instant::now() >= deadline {
                     return Err(failure("native_profile_renewal_busy"));
                 }
@@ -75,8 +89,8 @@ pub(super) struct Renewal {
 impl NativeProfileUse {
     /// Takes this account's renewal lock. Input: the longest wait. Output: the lock, or
     /// `native_profile_renewal_busy`.
-    #[cfg(all(test, target_os = "macos"))]
-    pub(super) fn hold_renewal(&self, wait: Duration) -> Result<HeldLock, EngineError> {
+    #[cfg(test)]
+    pub(crate) fn hold_renewal(&self, wait: Duration) -> Result<HeldLock, EngineError> {
         hold(&self.profile.file, wait)
     }
 
@@ -142,17 +156,28 @@ impl Renewal {
     /// error here: the record read afterwards decides. Input: the expiry the caller saw.
     /// Output: the record after renewal, or `native_profile_sign_in_revoked`.
     pub(super) fn renew(&self, stale: Duration) -> Result<Record, EngineError> {
-        let _lock = hold(&self.profile, LOCK_WAIT)?;
+        self.renew_unless(stale, &|| false)
+    }
+
+    /// Renews like [`Self::renew`], stopping the lock wait and killing the harness run as
+    /// soon as `halted` tells the caller stopped. Inputs: the expiry the caller saw and
+    /// the stop test. Output: the record after renewal, or the refusal.
+    fn renew_unless(
+        &self,
+        stale: Duration,
+        halted: &dyn Fn() -> bool,
+    ) -> Result<Record, EngineError> {
+        let _lock = hold_unless(&self.profile, LOCK_WAIT, halted)?;
         let current = self.record()?;
         if current.expires > stale {
             return Ok(current);
         }
         let _ = match self.harness {
-            Harness::Codex => codex_refresh(&self.executable, &self.managed),
+            Harness::Codex => codex_refresh(&self.executable, &self.managed, halted),
             Harness::Claude if current.expires > since_epoch()? + REFRESH_WINDOW => {
                 return Ok(current);
             }
-            Harness::Claude => claude_turn(&self.executable, &self.managed),
+            Harness::Claude => claude_turn(&self.executable, &self.managed, halted),
         };
         self.record()
     }
@@ -178,13 +203,14 @@ fn managed_command(executable: &Path, managed: &Path) -> Command {
     command
 }
 
-/// Waits for a renewal child until the deadline, then stops its whole process group.
-/// Inputs: the child and the deadline. Output: whether it exited successfully in time.
-fn settle(child: &mut Child, deadline: Instant) -> bool {
+/// Waits for a renewal child until the deadline or until `halted` tells the caller
+/// stopped, then stops its whole process group. Inputs: the child, the deadline and the
+/// stop test. Output: whether it exited successfully in time.
+fn settle(child: &mut Child, deadline: Instant, halted: &dyn Fn() -> bool) -> bool {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(None) if Instant::now() < deadline && !halted() => std::thread::sleep(POLL),
             _ => {
                 if let Some(group) = i32::try_from(child.id())
                     .ok()
@@ -203,21 +229,30 @@ fn settle(child: &mut Child, deadline: Instant) -> bool {
 
 /// Runs the Claude Code renewal turn in the managed home: Claude Code renews the account's
 /// OAuth token in place, and waits for the refresh, before the turn's one Haiku request.
-/// Its output is discarded. Inputs: the executable and the managed home. Output: whether
-/// it succeeded within a minute, which outlasts Claude Code's own refresh request bound.
-fn claude_turn(executable: &Path, managed: &Path) -> Result<bool, EngineError> {
+/// Its output is discarded. Inputs: the executable, the managed home and the stop test.
+/// Output: whether it succeeded within a minute, which outlasts Claude Code's own refresh
+/// request bound.
+fn claude_turn(
+    executable: &Path,
+    managed: &Path,
+    halted: &dyn Fn() -> bool,
+) -> Result<bool, EngineError> {
     let mut command = managed_command(executable, managed);
     command.args(RENEWAL_TURN).env("CLAUDE_CONFIG_DIR", managed);
     let mut child = crate::spawn_gate::spawn(&mut command)
         .map_err(|_| failure("native_profile_renewal_failed"))?;
-    Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME))
+    Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME, halted))
 }
 
 /// Asks the managed home's Codex app-server to refresh its ChatGPT tokens with
 /// `account/read {refreshToken: true}`, then stops it. The reply is matched by id and
-/// otherwise ignored. Inputs: the executable and the managed home. Output: whether the
-/// reply arrived in time.
-fn codex_refresh(executable: &Path, managed: &Path) -> Result<bool, EngineError> {
+/// otherwise ignored. Inputs: the executable, the managed home and the stop test.
+/// Output: whether the reply arrived in time.
+fn codex_refresh(
+    executable: &Path,
+    managed: &Path,
+    halted: &dyn Fn() -> bool,
+) -> Result<bool, EngineError> {
     let refused = |_| failure("native_profile_renewal_failed");
     let mut command = managed_command(executable, managed);
     command
@@ -240,27 +275,29 @@ fn codex_refresh(executable: &Path, managed: &Path) -> Result<bool, EngineError>
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(refused)?;
     let deadline = Instant::now() + RUN_TIME;
     let answered = match (child.stdin.take(), child.stdout.take()) {
-        (Some(input), Some(output)) => converse(input, output, deadline),
+        (Some(input), Some(output)) => converse(input, output, deadline, halted),
         _ => false,
     };
-    settle(&mut child, Instant::now() + EXIT_GRACE);
+    settle(&mut child, Instant::now() + EXIT_GRACE, halted);
     Ok(answered)
 }
 
 /// Speaks just enough app-server protocol to request a token refresh: initialize,
-/// initialized, then account/read with refreshToken. Inputs: the child's pipes and the
-/// deadline. Output: whether the account/read reply arrived before the deadline.
+/// initialized, then account/read with refreshToken. Inputs: the child's pipes, the
+/// deadline and the stop test. Output: whether the account/read reply arrived before the
+/// deadline.
 fn converse(
     mut input: std::process::ChildStdin,
     output: std::process::ChildStdout,
     deadline: Instant,
+    halted: &dyn Fn() -> bool,
 ) -> bool {
     let lines = read_lines(output);
     let mut protocol = CodexProtocol::new();
     let Ok(request) = protocol.initialize() else {
         return false;
     };
-    let Some(reply) = exchange(&mut input, &lines, &request, deadline) else {
+    let Some(reply) = exchange(&mut input, &lines, &request, deadline, halted) else {
         return false;
     };
     if protocol.receive(&reply).is_err() {
@@ -275,7 +312,7 @@ fn converse(
     let Ok(request) = protocol.read_account(true) else {
         return false;
     };
-    exchange(&mut input, &lines, &request, deadline).is_some()
+    exchange(&mut input, &lines, &request, deadline, halted).is_some()
 }
 
 /// Reads the child's output lines on their own thread, at most 4 MiB in all, so a
@@ -310,19 +347,24 @@ fn send(input: &mut std::process::ChildStdin, bytes: &[u8]) -> std::io::Result<(
 }
 
 /// Sends a request and waits for the reply line with its id. Inputs: stdin, the line
-/// channel, the request and the deadline. Output: the reply line, or nothing on timeout.
+/// channel, the request, the deadline and the stop test. Output: the reply line, or
+/// nothing on timeout, a closed output or a stop.
 fn exchange(
     input: &mut std::process::ChildStdin,
     lines: &Receiver<Vec<u8>>,
     request: &[u8],
     deadline: Instant,
+    halted: &dyn Fn() -> bool,
 ) -> Option<Vec<u8>> {
     let id = serde_json::from_slice::<Value>(request).ok()?["id"].as_i64()?;
     send(input, request).ok()?;
     loop {
-        let line = lines
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .ok()?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = match lines.recv_timeout(left.min(POLL)) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) if !left.is_zero() && !halted() => continue,
+            Err(_) => return None,
+        };
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
@@ -362,11 +404,13 @@ impl Keeper {
 }
 
 impl Drop for Keeper {
-    /// Stops the keeper and waits for it, so no copy is written after the turn.
+    /// Stops the keeper and waits for it, so no copy is written after the turn. A stopped
+    /// keeper leaves its lock wait and kills its harness run within one poll, and the wait
+    /// runs off the async workers. Input: the keeper. Output: none.
     fn drop(&mut self) {
         drop(self.stop.take());
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let _ = super::agent_copy::off_worker(|| thread.join());
         }
     }
 }
@@ -385,13 +429,18 @@ fn keep(
     mut expires: Duration,
     stopped: &Receiver<()>,
 ) {
+    let halted = || matches!(stopped.try_recv(), Err(TryRecvError::Disconnected));
     loop {
         let now = since_epoch().unwrap_or(expires);
         let wake = expires.saturating_sub(RENEW_AHEAD).saturating_sub(now);
         if !idle(stopped, wake) {
             return;
         }
-        if let Ok(record) = renewal.renew(expires)
+        let renewed = renewal.renew_unless(expires, &halted);
+        if halted() {
+            return;
+        }
+        if let Ok(record) = renewed
             && record.expires > expires
             && place(agent, name, &record.copy).is_ok()
         {

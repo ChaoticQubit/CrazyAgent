@@ -10,23 +10,24 @@ use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
-use super::settings_plugins::{AddPlugin, EditServer};
+use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
-use crate::tui::ctx::{Ctx, Link};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
     Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
     Submission as MasterSubmission,
 };
-use crate::tui::seam::{Arrival, PoolChange, Request};
+use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -35,6 +36,8 @@ use std::path::PathBuf;
 
 const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
+const TEAM_READ_MS: i64 = 3_000;
+const TEAM_WAIT_MS: i64 = 15_000;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -182,6 +185,10 @@ pub(in crate::tui) struct ProjectPage {
     waiting: Option<Waiting>,
     retried: bool,
     renewed: bool,
+    schedule_asked: bool,
+    team_asked: Option<(i64, bool)>,
+    files_asked: Option<String>,
+    covered: bool,
 }
 
 impl ProjectPage {
@@ -205,12 +212,63 @@ impl ProjectPage {
             waiting: None,
             retried: false,
             renewed: false,
+            schedule_asked: false,
+            team_asked: None,
+            files_asked: None,
+            covered: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
         page.screen.transcript = page.transcript();
         page.redraw(ctx);
         page
+    }
+
+    /// Reads the team graph for the panel beside the master, while this page is on top on
+    /// the Conversation tab: at most one read out at a time, at most one every
+    /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
+    fn ask_team(&mut self, ctx: &mut Ctx) {
+        if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
+            return;
+        }
+        let now = now_ms();
+        if let Some((at, waiting)) = self.team_asked
+            && now - at < if waiting { TEAM_WAIT_MS } else { TEAM_READ_MS }
+        {
+            return;
+        }
+        self.team_asked = Some((now, true));
+        ctx.request(Request::TeamGraph {
+            project: self.screen.project.clone(),
+        });
+    }
+
+    /// Lists the project files for the `@` word the owner is typing: one read out at a time,
+    /// and only when the word differs from the last listed one. A read the full request
+    /// queue drops is not counted as out, so the next key asks again. Takes the context.
+    fn ask_files(&mut self, ctx: &mut Ctx) {
+        if self.covered || self.files_asked.is_some() || ctx.link != Link::Ready {
+            return;
+        }
+        let Some(query) = self.screen.files_query() else {
+            return;
+        };
+        if self
+            .screen
+            .files
+            .as_ref()
+            .is_some_and(|(listed, _)| *listed == query)
+        {
+            return;
+        }
+        let queued = ctx.queued();
+        ctx.request(Request::ProjectFiles {
+            project: self.screen.project.clone(),
+            query: query.clone(),
+        });
+        if ctx.queued() > queued {
+            self.files_asked = Some(query);
+        }
     }
 
     fn select_master(&mut self, ctx: &Ctx) {
@@ -226,6 +284,8 @@ impl ProjectPage {
 
     fn sync_master(&mut self, ctx: &mut Ctx) {
         self.select_master(ctx);
+        self.master
+            .show_sessions(self.screen.tab == Tab::Conversation);
         if self.master_sent.len() < MASTER_SENT_MAX
             && let Some(job) = self.master.request(self.screen.tab == Tab::Conversation)
         {
@@ -233,14 +293,17 @@ impl ProjectPage {
             ctx.request(Request::Master(Box::new(job)));
         }
         self.screen.transcript = self.transcript();
+        if let Some(listed) = self.master.sessions() {
+            self.screen.sessions.set(super::sessions::rows_of(listed));
+        }
     }
 
     fn transcript(&self) -> Option<Transcript> {
-        let (session, turns, input) = self.master.transcript()?;
+        let (session, turns, _) = self.master.transcript()?;
         let read = MasterRead {
             session: session.map(|session| session.phase),
             turns,
-            inputs: input.map_or(&[][..], std::slice::from_ref),
+            inputs: self.master.inputs(),
         };
         let harness = match session {
             Some(session) => backend_name(session.selection.backend),
@@ -394,6 +457,11 @@ impl ProjectPage {
         let MasterEvent::Mutation { submission, .. } = event else {
             return;
         };
+        if code == "master_turn_running"
+            && self.screen.sessions.turn_was_running(&submission.action)
+        {
+            return;
+        }
         let lead = match &submission.action {
             MasterOwnerAction::Submit { text, .. } => {
                 if self.screen.input.value().is_empty() {
@@ -401,11 +469,13 @@ impl ProjectPage {
                 }
                 "The master did not take that message."
             }
-            MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
-                "The master could not start."
-            }
+            MasterOwnerAction::Open { .. }
+            | MasterOwnerAction::NewSession { .. }
+            | MasterOwnerAction::RegisterRcliProfile { .. } => "The master could not start.",
+            MasterOwnerAction::Resume { .. } => "The session did not resume.",
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
+            MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
         };
         let problem = master_problem(code);
         if self.waiting.is_some() {
@@ -673,10 +743,19 @@ impl ProjectPage {
     }
 
     fn pump(&mut self, ctx: &mut Ctx) {
+        if self.screen.tab == Tab::Changes
+            && let Some(query) = self.screen.changes.next_query(now_ms())
+        {
+            ctx.request(Request::Changes(Box::new(query)));
+        }
         if self.screen.tab == Tab::Settings
             && let Some(job) = self.screen.plugins.next_job()
         {
             send_settings(ctx, job);
+        }
+        if self.screen.tab == Tab::Settings && !self.schedule_asked {
+            self.schedule_asked = true;
+            send_settings(ctx, SettingsJob::Schedule);
         }
         if self.sent.len() >= SENT_MAX {
             return;
@@ -763,6 +842,12 @@ impl ProjectPage {
                 self.end_master(ctx);
                 Flow::Handled
             }
+            ProjectReply::Session(action) => {
+                if let Err(problem) = super::sessions::act(&mut self.master, &action) {
+                    ctx.say(Message::error("The session did not switch.", &problem));
+                }
+                Flow::Handled
+            }
             ProjectReply::Retry => {
                 self.retry_master(ctx);
                 Flow::Handled
@@ -771,6 +856,19 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Master => Flow::Open(Place::Master {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
+            ProjectReply::Process => Flow::Open(Place::ProjectProcess {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
+            ProjectReply::Usage => Flow::Open(Place::Usage),
+            ProjectReply::AccountOrder(strategy) => {
+                self.set_order(strategy, ctx);
+                Flow::Handled
+            }
         };
         self.sync_master(ctx);
         self.pump(ctx);
@@ -779,13 +877,48 @@ impl ProjectPage {
         flow
     }
 
+    fn set_order(&mut self, strategy: Option<crate::scheduling::Strategy>, ctx: &mut Ctx) {
+        let Ok(project) = CredentialRef::new(self.screen.project.as_str()) else {
+            self.screen.problem = Some("This project can't keep its own account order.".into());
+            return;
+        };
+        let generation = ctx.next_generation();
+        send_settings(
+            ctx,
+            SettingsJob::SetSchedule {
+                change: crate::scheduling::ScheduleChange::ProjectStrategy { project, strategy },
+                generation,
+            },
+        );
+    }
+
+    fn schedule_arrived(&mut self, event: &SettingsEvent, ctx: &mut Ctx) {
+        let failed = |code: &str, fallback: &'static str| {
+            crate::config::plain_problem(code)
+                .unwrap_or(fallback)
+                .to_owned()
+        };
+        match event {
+            SettingsEvent::Schedule(Ok(schedule)) => self.screen.schedule = Some(schedule.clone()),
+            SettingsEvent::Schedule(Err(code)) => {
+                self.screen.problem = Some(failed(code, "Could not read the account order."));
+            }
+            SettingsEvent::ScheduleSet(result) => {
+                if let Err(code) = result {
+                    self.screen.problem = Some(failed(code, "Could not save the account order."));
+                }
+                send_settings(ctx, SettingsJob::Schedule);
+            }
+            _ => {}
+        }
+    }
+
+    fn changes_have_keys(&self) -> bool {
+        self.screen.tab == Tab::Changes && !self.screen.boxed()
+    }
+
     fn plugins_have_keys(&self) -> bool {
-        self.screen.tab == Tab::Settings
-            && self.screen.pool_picker.is_none()
-            && self.screen.edit.is_none()
-            && self.screen.confirm_delete.is_none()
-            && self.screen.general.is_none()
-            && !self.screen.confirm_remove
+        self.screen.tab == Tab::Settings && !self.screen.boxed()
     }
 
     fn plugins_reply(&mut self, reply: PluginsReply, ctx: &mut Ctx) -> Flow {
@@ -803,6 +936,11 @@ impl ProjectPage {
             }
             PluginsReply::AddServer => {
                 return Flow::Replace(Box::new(AddPlugin::server().for_project(project, name)));
+            }
+            PluginsReply::OpenSkill { id, name: skill } => {
+                return Flow::Replace(Box::new(
+                    SkillDetailPage::new(id, skill).for_project(project, name),
+                ));
             }
             PluginsReply::Edit(server) => {
                 return Flow::Replace(Box::new(
@@ -832,12 +970,22 @@ impl Screen for ProjectPage {
     fn typing(&self) -> bool {
         self.screen.edit.is_some()
             || self.screen.adding.is_some()
+            || self.screen.folders.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
+            || (self.changes_have_keys() && self.screen.changes.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         self.screen.width = ctx.width;
+        if self.changes_have_keys()
+            && let Some(event) = key_event(key)
+            && self.screen.changes.key(event, now_ms())
+        {
+            self.pump(ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
         if self.plugins_have_keys()
             && let Some(event) = key_event(key)
         {
@@ -853,7 +1001,11 @@ impl Screen for ProjectPage {
                 None => ProjectReply::Ignored,
             },
         };
-        self.reply(reply, ctx)
+        let flow = self.reply(reply, ctx);
+        self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
+        self.ask_team(ctx);
+        self.ask_files(ctx);
+        flow
     }
 
     fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
@@ -868,10 +1020,37 @@ impl Screen for ProjectPage {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
+            Arrival::TeamGraph { project, result } if *project == self.screen.project => {
+                self.team_asked = self.team_asked.map(|(at, _)| (at, false));
+                self.screen.team = match result {
+                    Ok(graph) => Load::Ready(graph.clone()),
+                    Err(code) if code == NOT_READY => Load::NotReady,
+                    Err(_) if self.screen.team.ready().is_some() => self.screen.team.clone(),
+                    Err(code) => Load::Failed(code.clone()),
+                };
+                self.redraw(ctx);
+                return Flow::Handled;
+            }
+            Arrival::ProjectFiles {
+                project,
+                query,
+                result,
+            } if *project == self.screen.project => {
+                self.files_asked = None;
+                let paths = result.as_ref().map_or_else(|_| Vec::new(), Clone::clone);
+                self.screen.files = Some((query.clone(), paths));
+                self.ask_files(ctx);
+                self.redraw(ctx);
+                return Flow::Handled;
+            }
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Setup(event) => self.setup_arrived(event, ctx),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
-                OwnerEvent::Settings(event) => self.screen.plugins.apply(event),
+                OwnerEvent::Settings(event) => {
+                    self.schedule_arrived(event, ctx);
+                    self.screen.plugins.apply(event);
+                }
+                OwnerEvent::Changes(event) => self.screen.changes.apply(event),
                 _ => return Flow::Handled,
             },
             Arrival::PoolEdited(result) => self.assigned(result, ctx),
@@ -882,8 +1061,14 @@ impl Screen for ProjectPage {
             }
             Arrival::Disconnected(_) => {
                 self.sent.clear();
+                self.screen.schedule = None;
+                self.schedule_asked = false;
+                self.team_asked = None;
+                self.files_asked = None;
+                self.screen.files = None;
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
+                self.screen.changes.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
             }
@@ -896,6 +1081,7 @@ impl Screen for ProjectPage {
         self.sync_master(ctx);
         self.pump(ctx);
         self.say_problem(ctx);
+        self.ask_team(ctx);
         self.redraw(ctx);
         Flow::Handled
     }
@@ -903,6 +1089,9 @@ impl Screen for ProjectPage {
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Pools);
         ctx.request(Request::PoolProjects);
+        self.schedule_asked = false;
+        self.covered = false;
+        self.ask_team(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
@@ -927,11 +1116,13 @@ impl Screen for ProjectPage {
             || self.master.has_pending()
             || self.waiting.is_some()
             || self.screen.plugins.busy()
+            || self.screen.changes.busy()
     }
 
     fn draft(&self) -> bool {
         self.screen.edit.is_some()
             || self.screen.general.is_some()
+            || self.screen.folders.is_some()
             || !self.screen.input.value().trim().is_empty()
     }
 
@@ -940,6 +1131,8 @@ impl Screen for ProjectPage {
             "Your memory edit will be lost."
         } else if self.screen.general.is_some() {
             "Your project changes will be lost."
+        } else if self.screen.folders.is_some() {
+            "Your read-only folders will not be saved."
         } else {
             "Your unsent message will be lost."
         }

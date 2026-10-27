@@ -3,6 +3,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
+use super::{LINE_BYTES_MAX, clip_text};
+
 pub const FRAME_BYTES_MAX: usize = 65_536;
 const EVENTS_MAX: usize = 128;
 const APPROVALS_MAX: usize = 16;
@@ -626,7 +628,7 @@ impl CodexProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.next_id > 0);
-        assert!(self.buffer.len() <= FRAME_BYTES_MAX);
+        assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_turns.len() <= TURNS_MAX);
         assert!(self.seen_server_ids.len() <= SERVER_IDS_MAX);
         assert!(self.server_requests.len() <= APPROVALS_MAX);
@@ -748,14 +750,14 @@ impl CodexProtocol {
     }
 
     fn decode(&mut self, bytes: &[u8]) -> Result<Vec<Event>, ProtocolError> {
-        if bytes.len() > FRAME_BYTES_MAX {
+        if bytes.len() > LINE_BYTES_MAX + 1 {
             return Err(ProtocolError::FrameTooLarge);
         }
         let mut events = Vec::new();
         let mut frames = 0;
         for byte in bytes {
             if *byte != b'\n' {
-                if self.buffer.len() == FRAME_BYTES_MAX {
+                if self.buffer.len() == LINE_BYTES_MAX {
                     return Err(ProtocolError::FrameTooLarge);
                 }
                 self.buffer.push(*byte);
@@ -780,7 +782,7 @@ impl CodexProtocol {
             assert!(events.len() <= frames);
         }
         assert!(events.len() <= EVENTS_MAX);
-        assert!(self.buffer.len() <= FRAME_BYTES_MAX);
+        assert!(self.buffer.len() <= LINE_BYTES_MAX);
         Ok(events)
     }
 
@@ -1565,12 +1567,15 @@ fn frame_name(frame: &[u8]) -> String {
     )
 }
 
+/// Reads a message, delta or error text from Codex, clipped past `FIELD_BYTES_MAX` so that
+/// one large message never fails the turn. Input: the JSON value. Output: the text, or
+/// invalid for a value that is not text or holds a NUL.
 fn message_text(value: &Value) -> Result<String, ProtocolError> {
     let text = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
-    if text.len() > FRAME_BYTES_MAX || text.contains('\0') {
+    if text.contains('\0') {
         return Err(ProtocolError::InvalidMessage);
     }
-    Ok(text.into())
+    Ok(clip_text(text))
 }
 
 fn wire_id(value: Value) -> Result<WireId, ProtocolError> {

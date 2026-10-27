@@ -100,7 +100,8 @@ async fn served_again(client: &OwnerClient, id: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_third_owner_client_is_refused_plainly_while_two_hold_the_server() {
+async fn an_owner_client_past_the_client_slots_is_refused_plainly_while_the_others_hold_the_server()
+{
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let before = client
@@ -112,13 +113,15 @@ async fn a_third_owner_client_is_refused_plainly_while_two_hold_the_server() {
         "{before:?}"
     );
 
-    let first = admitted(&client).await;
-    let second = admitted(&client).await;
+    let mut held = Vec::new();
+    for _ in 0..CLIENTS_MAX {
+        held.push(admitted(&client).await);
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
     let refused = client
         .request(read_capabilities("while-busy"))
         .await
-        .unwrap_or_else(|error| panic!("the third owner request answered {}", error.0));
+        .unwrap_or_else(|error| panic!("the owner request past the slots answered {}", error.0));
     assert_eq!(refused.request_id, RequestId::new("while-busy").unwrap());
     assert_eq!(
         refused.response,
@@ -132,10 +135,55 @@ async fn a_third_owner_client_is_refused_plainly_while_two_hold_the_server() {
         "owner_busy"
     );
 
-    drop(first);
-    drop(second);
+    drop(held);
     served_again(&client, "after-busy").await;
     fixture.stop().await;
+}
+
+/// Sends a GitHub token request that says a token follows and never sends it, so the
+/// engine serves it past the owner exchange while it waits for the token frame.
+/// Input: the owner client. Output: the open connection.
+async fn awaiting_a_token(client: &OwnerClient) -> UnixStream {
+    let mut stream = admitted(client).await;
+    let frame =
+        encode_frame(&json!({"github": {"kind": "token"}, "secret_present": true})).unwrap();
+    stream.write_all(&frame).await.unwrap();
+    stream
+}
+
+const _: () = assert!(DEFERRED_MAX < CLIENTS_MAX);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_requests_served_past_their_exchange_leave_the_client_slots_to_others() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let mut waiting = Vec::new();
+    for _ in 0..DEFERRED_MAX {
+        waiting.push(awaiting_a_token(&client).await);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for _ in 1..CLIENTS_MAX {
+        waiting.push(admitted(&client).await);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let served = client
+        .request(read_capabilities("while-tokens-are-awaited"))
+        .await
+        .unwrap();
+    let past_the_bound = client.github_status().await;
+
+    drop(waiting);
+    served_again(&client, "after-tokens").await;
+    fixture.stop().await;
+    assert!(
+        matches!(served.response, OwnerResponse::Read { .. }),
+        "{served:?}"
+    );
+    assert_eq!(
+        past_the_bound.map(|_| ()).unwrap_err().0,
+        "owner_busy",
+        "at most DEFERRED_MAX requests are served past their exchange at once"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -143,7 +191,7 @@ async fn an_owner_client_past_the_handshake_queue_is_refused_plainly() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let mut silent = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..HANDSHAKES_MAX {
         silent.push(connected(&client).await);
     }
     tokio::time::sleep(Duration::from_millis(300)).await;

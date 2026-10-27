@@ -1,3 +1,4 @@
+use crazyagent::adapters::LINE_BYTES_MAX;
 use crazyagent::adapters::codex::{
     AuthAccount, AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginCancelStatus,
     LoginChallenge, ProtocolError, SensitiveAuthText, State, WireId,
@@ -1238,7 +1239,7 @@ fn auth_receive_preserves_existing_frame_output_and_buffer_bounds() {
     let mut protocol = ready();
     protocol.start_chatgpt_login().unwrap();
     assert_eq!(
-        protocol.receive(&vec![b'x'; FRAME_BYTES_MAX + 1]),
+        protocol.receive(&vec![b'x'; LINE_BYTES_MAX + 1]),
         Err(ProtocolError::FrameTooLarge)
     );
     assert_eq!(protocol.state(), State::Failed);

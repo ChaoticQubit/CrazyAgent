@@ -99,8 +99,8 @@ pub(crate) fn check(name: &str, actual: &[String], swaps: &[(&str, &str)], rows:
 }
 
 pub(crate) const STRIP: (&str, &str) = (
-    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
-    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
+    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile",
+    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile",
 );
 
 fn id(text: &str) -> CredentialRef {
@@ -975,7 +975,7 @@ mod replace_key {
     async fn replace_key_rotates_the_same_account_and_deletes_the_old_key() {
         let root = tempfile::Builder::new()
             .prefix("ca-tacc-key-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = crate::tui::test_home::engine_config();

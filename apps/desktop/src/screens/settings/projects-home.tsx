@@ -79,7 +79,7 @@ export function ProjectsHomeSettingsView({ home, picked, busy, problem, onChoose
  * switches to it without moving anything or, after showing the size, moves every project there. */
 export function ProjectsHomeSettings() {
   const session = useAppSession();
-  const [home, reload] = useLoad(loadProjectsHome);
+  const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
   const [picked, setPicked] = useState<string | null>(null);
   const [ask, setAsk] = useState<HomeAsk | null>(null);
   const [busy, setBusy] = useState(false);
@@ -88,7 +88,7 @@ export function ProjectsHomeSettings() {
 
   const choose = async () => {
     setProblem("");
-    const result = await pickFolder();
+    const result = await pickFolder("projects_home");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
     if (result.value === null) return;
     const issue = homePickProblem(result.value, current);

@@ -3,8 +3,8 @@ import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
 import type { PoolChoice, ResearchKind } from "../../api-projects";
 import {
-  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, harnessChoices, harnessLabel, poolFits, poolName,
-  removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes, totalAgents,
+  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TEAM_FULL_NOTE, addHarnessRow, agentTotalText, anyHarnessNote, harnessChoices, harnessLabel,
+  poolFits, poolName, removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamFull, teamNotes,
 } from "./wizard";
 import type { TeamDraft } from "./wizard";
 
@@ -63,6 +63,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
 }) {
   const errors = teamErrors(team, harnesses);
   const notes = teamNotes(team, harnesses);
+  const full = teamFull(team);
   const master = harnesses?.find((harness) => harness.id === team.master);
   const fixed = (id: string) => harnesses?.find((harness) => harness.id === id)?.tools.kind === "limited";
   const researchHarnesses = [...new Set((team.sub_harnesses.length ? team.sub_harnesses.map((slot) => slot.harness) : [team.master]).map((id) => harnessName(harnesses, id)))];
@@ -98,7 +99,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
             <span role="cell" className="pj-stepper" aria-label={`Agents for ${name}`}>
               <button type="button" aria-label={`Fewer ${name} agents`} disabled={slot.agents <= 1} onClick={() => onChange(setAgents(team, index, slot.agents - 1))}>-</button>
               <output aria-live="polite">{slot.agents}</output>
-              <button type="button" aria-label={`More ${name} agents`} disabled={slot.agents >= HARNESS_AGENTS_MAX} onClick={() => onChange(setAgents(team, index, slot.agents + 1))}>+</button>
+              <button type="button" aria-label={`More ${name} agents`} disabled={slot.agents >= HARNESS_AGENTS_MAX || full} onClick={() => onChange(setAgents(team, index, slot.agents + 1))}>+</button>
             </span>
             <span role="cell"><Switch id={`${prefix}-tools-${index}`} checked={slot.tools} fixed={fixed(slot.harness)} label={`Tools for ${name}`} onChange={(value) => onChange(setTools(team, index, value, harnesses))} /></span>
             <span role="cell"><button type="button" className="btn quiet danger-text" onClick={() => onChange(removeHarnessRow(team, index))}>Remove</button></span>
@@ -106,8 +107,9 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
           </div>;
         })}
       </div>}
-      {team.sub_harnesses.length === 0 && <p className="pj-help">Only the master. Add a harness to run agents beside it.</p>}
-      <div><button type="button" className="btn" disabled={team.sub_harnesses.length >= SUB_HARNESSES_MAX} onClick={() => onChange(addHarnessRow(team, harnesses))}>+ Add harness</button></div>
+      {team.sub_harnesses.length === 0 && <p className="pj-help">{anyHarnessNote(team)}</p>}
+      {full && !errors.range && <p className="pj-help">{TEAM_FULL_NOTE}</p>}
+      <div><button type="button" className="btn" disabled={team.sub_harnesses.length >= SUB_HARNESSES_MAX || full} onClick={() => onChange(addHarnessRow(team, harnesses))}>+ Add harness</button></div>
     </section>
     <section className="pj-stack-s" aria-labelledby={`${prefix}-range`}>
       <h3 id={`${prefix}-range`}>How many at once</h3>
@@ -122,7 +124,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
         <span>agents, counting the master.</span>
       </div>
       {errors.range && <p className="pj-error" id={`${prefix}-range-error`} role="alert">{errors.range}</p>}
-      <p className="pj-help">This team has {totalAgents(team)} {totalAgents(team) === 1 ? "agent" : "agents"}.</p>
+      <p className="pj-help">{agentTotalText(team)}</p>
     </section>
     {research.length > 0 && <section className="pj-stack-s"><h3>Research</h3>
       <p>Research uses {researchHarnesses.join(" and ")}: {research.map((kind) => RESEARCH_LABELS[kind]).join(", ")}.</p></section>}

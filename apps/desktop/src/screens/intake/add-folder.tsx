@@ -89,7 +89,7 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
  * folder shows on Home as found. */
 export function AddFolder() {
   const session = useAppSession();
-  const [home, reload] = useLoad(loadProjectsHome);
+  const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
   const picks = useRef(0);
   const [source, setSource] = useState<string | null>(null);
   const [size, setSize] = useState<Loaded<FolderSize> | null>(null);
@@ -102,7 +102,7 @@ export function AddFolder() {
 
   const choose = async () => {
     setProblem("");
-    const result = await pickFolder();
+    const result = await pickFolder("project");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
     if (result.value === null) return;
     const issue = pickedFolderProblem(result.value, root);

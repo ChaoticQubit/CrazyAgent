@@ -21,7 +21,7 @@ impl Case {
     async fn start() -> TestResult<Self> {
         let root = tempfile::Builder::new()
             .prefix("ca-dpc-")
-            .tempdir_in("/private/tmp")?;
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())?;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
         let global = root.path().join("global.toml");
         std::fs::write(&global, "version = 1\ntimeout_ms = 1000\n")?;
@@ -138,12 +138,10 @@ async fn desktop_change_the_engine_never_recorded_is_kept_for_retry_and_the_next
             case.bridge.pending_intent()?.map(|intent| intent.kind),
             Some("owner_profile")
         );
-        let blocked = case.create_pool("while-kept", 2).await.err().unwrap();
-        assert!(blocked.to_string().contains("pending_intent"));
         let retried = case.bridge.retry_intent().await?;
         assert_eq!(retried.outcome, ActionOutcome::Applied);
         assert!(!retried.pending);
-        let pool = case.create_pool("after-retry", 3).await?;
+        let pool = case.create_pool("after-retry", 2).await?;
         assert_eq!(pool.outcome, ActionOutcome::Applied);
         assert!(!pool.pending);
         assert_eq!(
@@ -158,11 +156,117 @@ async fn desktop_change_the_engine_never_recorded_is_kept_for_retry_and_the_next
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_change_the_engine_never_recorded_twice_does_not_block_the_next_change() {
+    let mut case = Case::start().await.unwrap();
+    let result: TestResult<()> = async {
+        case.sqlite(
+            "CREATE TRIGGER lb9_abort BEFORE INSERT ON owner_operations \
+             BEGIN SELECT RAISE(ABORT, 'lb9_abort'); END;",
+        )?;
+        let sent = case
+            .bridge
+            .save_owner_profile(profile("Never recorded"), 1)
+            .await?;
+        assert_eq!(sent.outcome, ActionOutcome::NotRecordedAtBarrier);
+        let retried = case.bridge.retry_intent().await?;
+        assert_eq!(retried.outcome, ActionOutcome::NotRecordedAtBarrier);
+        assert!(retried.pending, "the banner still offers the change");
+        case.sqlite("DROP TRIGGER lb9_abort;")?;
+        let pool = case.create_pool("after-unrecorded", 2).await?;
+        assert_eq!(
+            pool.outcome,
+            ActionOutcome::Applied,
+            "a change the engine never recorded does not hold up the next one"
+        );
+        assert!(!pool.pending);
+        assert!(case.bridge.pending_intent()?.is_none());
+        assert!(!case.bridge.status().pending);
+        assert!(case.bridge.owner_profile().await?.is_none());
+        Ok(())
+    }
+    .await;
+    case.close().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_owner_drops_a_change_the_engine_never_recorded() {
+    let mut case = Case::start().await.unwrap();
+    let result: TestResult<()> = async {
+        case.sqlite(
+            "CREATE TRIGGER lb9_abort BEFORE INSERT ON owner_operations \
+             BEGIN SELECT RAISE(ABORT, 'lb9_abort'); END;",
+        )?;
+        let sent = case
+            .bridge
+            .save_owner_profile(profile("Dropped"), 1)
+            .await?;
+        assert_eq!(sent.outcome, ActionOutcome::NotRecordedAtBarrier);
+        assert!(sent.pending);
+        let dropped = case.bridge.drop_intent()?;
+        assert!(dropped.connected);
+        assert!(!dropped.pending);
+        assert!(case.bridge.pending_intent()?.is_none());
+        assert_eq!(
+            case.bridge
+                .drop_intent()
+                .err()
+                .map(|error| error.to_string()),
+            Some("no_pending_intent".to_owned())
+        );
+        case.sqlite("DROP TRIGGER lb9_abort;")?;
+        assert!(case.bridge.owner_profile().await?.is_none());
+        let pool = case.create_pool("after-drop", 2).await?;
+        assert_eq!(pool.outcome, ActionOutcome::Applied);
+        assert!(!pool.pending);
+        Ok(())
+    }
+    .await;
+    case.close().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_owner_cannot_drop_a_change_whose_send_may_have_landed() {
+    let mut case = Case::start().await.unwrap();
+    case.sqlite(
+        "CREATE TRIGGER lb9_abort BEFORE INSERT ON owner_operations \
+         BEGIN SELECT RAISE(ABORT, 'lb9_abort'); END;",
+    )
+    .unwrap();
+    let sent = case
+        .bridge
+        .save_owner_profile(profile("Maybe landed"), 1)
+        .await
+        .unwrap();
+    assert_eq!(sent.outcome, ActionOutcome::NotRecordedAtBarrier);
+    let stopped = tokio::time::timeout(Duration::from_secs(5), case.service.shutdown()).await;
+    assert!(matches!(stopped, Ok(Ok(()))), "actual engine cleanup");
+    let retried = case.bridge.retry_intent().await.unwrap();
+    assert_eq!(retried.outcome, ActionOutcome::Uncertain);
+    assert!(retried.pending);
+    assert_eq!(
+        case.bridge
+            .drop_intent()
+            .err()
+            .map(|error| error.to_string()),
+        Some("change_may_be_recorded".to_owned())
+    );
+    assert_eq!(
+        case.bridge
+            .pending_intent()
+            .unwrap()
+            .map(|intent| intent.kind),
+        Some("owner_profile")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_projects_home_answered_outcome_unknown_is_checked_once_without_the_owner_asking() {
     let mut case = Case::start().await.unwrap();
     let home = tempfile::Builder::new()
         .prefix("ca-dpc-home-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let result: TestResult<()> = async {

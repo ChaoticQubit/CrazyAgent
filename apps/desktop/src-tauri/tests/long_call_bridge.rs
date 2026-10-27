@@ -31,7 +31,7 @@ async fn flow(root: &std::path::Path) -> TestResult<()> {
         free.is_ok(),
         "a long engine call leaves the bridge free for other commands"
     );
-    let mut free = free.unwrap();
+    let free = free.unwrap();
     assert!(free.status().connected);
     assert!(free.pending_intent()?.is_none());
     assert_eq!(free.plugin_servers(None).await?.len(), 1);
@@ -46,7 +46,7 @@ async fn flow(root: &std::path::Path) -> TestResult<()> {
 async fn a_long_engine_call_leaves_the_bridge_free_for_other_commands() {
     let root = tempfile::Builder::new()
         .prefix("ca-dlc-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let global = root.path().join("g.toml");

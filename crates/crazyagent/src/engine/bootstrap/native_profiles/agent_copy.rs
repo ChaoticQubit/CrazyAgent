@@ -26,6 +26,10 @@ fn expiring() -> EngineError {
     failure("native_profile_credential_expiring")
 }
 
+fn renewal_failed() -> EngineError {
+    failure("native_profile_renewal_failed")
+}
+
 fn revoked() -> EngineError {
     failure("native_profile_sign_in_revoked")
 }
@@ -64,6 +68,18 @@ pub(crate) struct AgentCredential {
     home: File,
     name: &'static str,
     keeper: Option<Keeper>,
+}
+
+impl AgentCredential {
+    /// Leaves the copy in the agent's home for an agent whose processes may still run, as
+    /// when its sandbox could not be confirmed empty: stops the keeper, so no renewed token
+    /// reaches the copy, and keeps the copy and the home's descriptor for the engine's life.
+    /// Takes the credential. Returns nothing.
+    pub(crate) fn retain(mut self) {
+        drop(self.keeper.take());
+        assert!(self.keeper.is_none());
+        std::mem::forget(self);
+    }
 }
 
 impl Drop for AgentCredential {
@@ -106,9 +122,10 @@ impl NativeProfileUse {
     /// access token lapses within the turn, the harness first renews the account in the
     /// managed home, and a keeper renews it again and replaces the copy while the turn runs.
     /// Inputs: the agent's private home, the turn's time bound and the harness executable.
-    /// Output: the copy, removed when dropped; `native_profile_credential_expiring` when the
-    /// token still lapses within a minute; `native_profile_sign_in_revoked` when Claude Code
-    /// ended the sign-in after its provider refused a refresh;
+    /// Output: the copy, removed when dropped; `native_profile_renewal_failed`, a transient
+    /// refusal, when the token still lapses within a minute after a renewal that ended
+    /// without a fresh token (no network, a timeout); `native_profile_sign_in_revoked` when
+    /// Claude Code ended the sign-in after its provider refused a refresh;
     /// `native_profile_credential_unavailable`, `native_profile_renewal_busy` or
     /// `native_profile_agent_home_unsafe`.
     pub(crate) fn hand_to_agent(
@@ -131,17 +148,18 @@ impl NativeProfileUse {
         };
         let path = self.profile_path()?;
         let mut record = account_record(harness, &self.home.file, &path)?;
-        let turn_end = since_epoch()?.checked_add(turn).ok_or_else(expiring)?;
-        let renewal = if record.expires <= turn_end {
+        let now = since_epoch()?;
+        let turn_end = now.checked_add(turn).ok_or_else(expiring)?;
+        let renewal = if record.expires <= turn_end.max(now + USABLE_MIN) {
             let renewal = self.renewal(harness, executable)?;
-            record = renewal.renew(record.expires)?;
+            record = off_worker(|| renewal.renew(record.expires))?;
+            if record.expires <= since_epoch()? + USABLE_MIN {
+                return Err(renewal_failed());
+            }
             Some(renewal)
         } else {
             None
         };
-        if record.expires <= since_epoch()? + USABLE_MIN {
-            return Err(expiring());
-        }
         let name = harness.copy_name();
         place(&home, name, &record.copy)?;
         let mut credential = AgentCredential {
@@ -158,6 +176,42 @@ impl NativeProfileUse {
         Ok(credential)
     }
 
+    /// Reads this account's OAuth access token for one usage poll by the engine itself,
+    /// first renewing it through the harness when it lapses within a minute, as an agent
+    /// handoff does. The token is read from the same refresh-free copy an agent gets and
+    /// never leaves the returned value. Input: the harness executable. Output: the token,
+    /// the ChatGPT account id Codex sends with it and the plan Claude Code recorded;
+    /// `native_profile_renewal_failed` or the unavailable refusal.
+    pub(crate) fn usage_credential(
+        &self,
+        executable: &Path,
+    ) -> Result<crate::usage::poll::PollCredential, EngineError> {
+        self.revalidate_retained()?;
+        if self.configured.is_some() {
+            return Err(unavailable());
+        }
+        let harness = match crate::harnesses::spec(self.binding.connection.harness.as_str())
+            .map(|spec| spec.id)
+        {
+            Some("codex") => Harness::Codex,
+            Some("claude-code") => Harness::Claude,
+            _ => return Err(unavailable()),
+        };
+        let path = self.profile_path()?;
+        let mut record = account_record(harness, &self.home.file, &path)?;
+        if record.expires <= since_epoch()? + USABLE_MIN {
+            let renewal = self.renewal(harness, executable)?;
+            record = off_worker(|| renewal.renew(record.expires))?;
+            if record.expires <= since_epoch()? + USABLE_MIN {
+                record.copy.fill(0);
+                return Err(renewal_failed());
+            }
+        }
+        let credential = poll_credential(harness, &record.copy);
+        record.copy.fill(0);
+        credential
+    }
+
     /// When this Claude Code account's access token lapses, read from the record exactly as
     /// the agent handoff reads it, for the sign-in check to renew a lapsing token first.
     /// Input: none. Output: the expiry since the epoch; `native_profile_sign_in_revoked`
@@ -165,6 +219,19 @@ impl NativeProfileUse {
     pub(crate) fn claude_expiry(&self) -> Result<Duration, EngineError> {
         account_record(Harness::Claude, &self.home.file, &self.profile_path()?)
             .map(|record| record.expires)
+    }
+}
+
+/// Runs blocking account work, such as a renewal of up to two minutes or a keeper's join,
+/// so it never stalls the async runtime: on a multi-thread tokio runtime the worker first
+/// hands its other tasks to another thread; anywhere else the work runs in place.
+/// Input: the work. Output: its result.
+pub(super) fn off_worker<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
     }
 }
 
@@ -278,6 +345,43 @@ fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let copy = serde_json::to_vec(&copy).map_err(|_| unavailable())?;
     assert!(!copy.is_empty());
     Ok(Record { copy, expires })
+}
+
+/// Takes what a usage poll sends from an agent's copy of the account's credential: the
+/// access token, the ChatGPT account id for Codex, and the plan for Claude Code.
+/// Inputs: the harness and the copy. Output: the poll credential, or unavailable.
+fn poll_credential(
+    harness: Harness,
+    copy: &[u8],
+) -> Result<crate::usage::poll::PollCredential, EngineError> {
+    let record: Value = serde_json::from_slice(copy).map_err(|_| unavailable())?;
+    let (token, account_id, plan) = match harness {
+        Harness::Codex => {
+            let tokens = &record["tokens"];
+            (
+                tokens["access_token"].as_str(),
+                tokens["account_id"].as_str(),
+                None,
+            )
+        }
+        Harness::Claude => {
+            let oauth = &record["claudeAiOauth"];
+            (
+                oauth["accessToken"].as_str(),
+                None,
+                oauth["subscriptionType"].as_str(),
+            )
+        }
+    };
+    let token = token
+        .filter(|token| !token.is_empty())
+        .ok_or_else(unavailable)?;
+    Ok(crate::usage::poll::PollCredential {
+        token: crate::credentials::SecretString::new(token.as_bytes().to_vec())
+            .map_err(|_| unavailable())?,
+        account_id: account_id.map(str::to_owned),
+        plan: plan.map(str::to_owned),
+    })
 }
 
 /// Reads the `exp` claim of a ChatGPT access token without checking its signature, which

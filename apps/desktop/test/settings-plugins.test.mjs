@@ -6,17 +6,22 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
 const plugins = await import("../src/screens/settings/plugins.tsx");
-const { SkillsView, ServersView, serverSpecInput, serverNameError, secretNameError, skillFolderError, serverWord, pluginSwitch, serverFacts, secretsInput } = plugins;
+const { SkillsView, SkillDetailView, ServersView, serverSpecInput, serverNameError, secretNameError, skillFolderError, serverWord, pluginSwitch, serverFacts, secretsInput,
+  skillBody, fileSize, ImportSkillsView, importable, importWord, importSentence } = plugins;
+const router = await import("../src/ui/router.ts");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
-const skill = (patch = {}) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", scope: { kind: "global" },
+const skill = (patch = {}) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", line: "Builds polished front ends.", scope: { kind: "global" },
   scope_label: "For every project", enabled: true, on_here: null, source: "/Users/owner/skills/frontend-design",
   folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", ...patch });
 const server = (patch = {}) => ({ id: "server-1", name: "github", scope: { kind: "global" }, scope_label: "For every project",
   spec: { kind: "stdio", command: "/opt/homebrew/bin/npx", args: ["-y", "@modelcontextprotocol/server-github"] },
   runs: "/opt/homebrew/bin/npx -y @modelcontextprotocol/server-github", enabled: true, status: "approved", status_label: "Approved",
   problem: null, tools: [], checks: 0, secrets: [{ name: "GITHUB_TOKEN", saved: true }], on_here: null, ...patch });
-const skillsProps = (skills, patch = {}) => ({ skills, failure: "", onAdd: forbidden, onToggle: forbidden, onRemove: forbidden, onRetry: forbidden, ...patch });
+const skillsProps = (skills, patch = {}) => ({ skills, failure: "", onAdd: forbidden, onOpen: forbidden, onToggle: forbidden, onRemove: forbidden, onRetry: forbidden, ...patch });
+const detail = (patch = {}) => ({ skill: skill(), text: "---\nname: frontend-design\ndescription: Builds polished front ends.\n---\n\n# Steps\n\n- Read the brief\n- Ship `npm run build`\n",
+  files: [{ path: "SKILL.md", bytes: 812 }, { path: "references/tokens.md", bytes: 4300 }], files_more: 0, ...patch });
+const detailProps = (value, patch = {}) => ({ detail: value, failure: "", onToggle: forbidden, onOpenLink: forbidden, onRetry: forbidden, ...patch });
 const serversProps = (servers, patch = {}) => ({ servers, failure: "", busy: null, onAdd: forbidden, onToggle: forbidden, onApprove: forbidden,
   onCheck: forbidden, onSecrets: forbidden, onRemove: forbidden, onRetry: forbidden, ...patch });
 
@@ -38,7 +43,66 @@ test("the skills list shows each skill from the engine with its folder, switch a
   assert.match(markup, /aria-checked="true"/);
   assert.match(markup, /aria-checked="false"/);
   assert.match(markup, /Add skill/);
-  assert.doesNotMatch(markup, /skill-1|skill-2/);
+  assert.match(markup, /aria-label="Open frontend-design"/);
+  assert.match(markup, /aria-label="Open pdf"/);
+  assert.doesNotMatch(markup.replace(/ href="[^"]*"/g, ""), /skill-1|skill-2/);
+});
+
+test("a skill's detail renders its SKILL.md without the frontmatter, its files and its switch", () => {
+  const markup = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail() })));
+  assert.match(markup, /<h2>Steps<\/h2>/);
+  assert.match(markup, /<li>Read the brief<\/li>/);
+  assert.match(markup, /<code>npm run build<\/code>/);
+  assert.doesNotMatch(markup, /name: frontend-design/);
+  assert.match(markup, /Builds polished front ends\./);
+  assert.match(markup, /For every project/);
+  assert.match(markup, /~\/skills\/frontend-design/);
+  assert.match(markup, /Files \(2\)/);
+  assert.match(markup, /references\/tokens\.md/);
+  assert.match(markup, /4\.2 KB/);
+  assert.match(markup, /812 B/);
+  assert.match(markup, /id="skill-detail-on"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="skill-detail-on"/);
+  assert.match(markup, /On for every project/);
+  assert.doesNotMatch(markup, /skill-1/);
+});
+
+test("a skill's detail in a project uses the project switch and says when Settings turned it off", () => {
+  const off = detail({ skill: skill({ enabled: false, on_here: true }), files_more: 3 });
+  const markup = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: off }, { projectId: "project-1" })));
+  assert.match(markup, /On in this project/);
+  assert.match(markup, /Turned off for every project in Settings\./);
+  assert.match(markup, /Files \(5\)/);
+  assert.match(markup, /And 3 more/);
+  const html = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail({ text: "<script>alert(1)</script>" }) })));
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;/);
+});
+
+test("a skill's detail shows plain loading, not ready and error states", () => {
+  assert.match(renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "loading" }))), /skeleton/);
+  assert.match(renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "not_ready" }))), /Not ready yet/);
+  const failed = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "error", code: "skill_not_found", message: "This skill was removed." })));
+  assert.match(failed, /role="alert"/);
+  assert.match(failed, /This skill was removed\./);
+  assert.equal(api.plainError("skill_text_too_large"), "This SKILL.md is too large to show here.");
+  assert.equal(api.plainError("skill_page_invalid"), "This skill changed while it was read. Open it again.");
+});
+
+test("the SKILL.md body drops only a closed frontmatter block, and sizes read plainly", () => {
+  assert.equal(skillBody("---\nname: a\ndescription: b\n---\n\n\nBody\n"), "Body\n");
+  assert.equal(skillBody("\uFEFF---\nname: a\n---\nBody"), "Body");
+  assert.equal(skillBody("No frontmatter\n---\nrule"), "No frontmatter\n---\nrule");
+  assert.equal(skillBody("---\nnever closed"), "---\nnever closed");
+  assert.deepEqual([0, 1023, 1024, 4300, 1048576, 3 * 1048576 + 1].map(fileSize), ["0 B", "1023 B", "1.0 KB", "4.2 KB", "1.0 MB", "3.0 MB"]);
+});
+
+test("an open skill is part of the Plugins and skills route, so Settings links can open it", () => {
+  const route = { name: "settings", tab: "plugins", skill: "skill-0a1b" };
+  assert.equal(router.formatRoute(route), "#/settings/plugins?skill=skill-0a1b");
+  assert.deepEqual(router.parseRoute("#/settings/plugins?skill=skill-0a1b"), route);
+  assert.deepEqual(router.parseRoute("#/settings/plugins?skill=BAD%20id"), { name: "settings", tab: "plugins" });
+  assert.deepEqual(router.parseRoute("#/settings/pools?skill=skill-0a1b"), { name: "settings", tab: "pools" });
+  assert.equal(router.formatRoute({ name: "settings", tab: "pools", skill: "skill-0a1b" }), "#/settings/pools");
 });
 
 test("skills show plain empty, not ready and error states and never sample data", () => {
@@ -133,8 +197,9 @@ test("every plugins and folder chooser command the settings call is registered i
   const lib = read("src-tauri/src/lib.rs");
   const handler = lib.slice(lib.indexOf("generate_handler!["));
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions;
-  const commands = [...source.matchAll(/call<[^(]*>\("(desktop_(?:plugin|add_skill|set_skill|remove_skill|add_mcp|approve_mcp|set_mcp|remove_mcp|check_mcp|switch_plugin|pick)[a-z_]*)"/g)].map((match) => match[1]);
-  assert.equal(new Set(commands).size, 14);
+  const commands = [...source.matchAll(/call<[^(]*>\("(desktop_(?:plugin|add_skill|set_skill|remove_skill|skill_detail|skill_import|import_skill|add_mcp|approve_mcp|set_mcp|remove_mcp|check_mcp|switch_plugin|pick)[a-z_]*)"/g)].map((match) => match[1]);
+  assert.equal(new Set(commands).size, 17);
+  assert.ok(commands.includes("desktop_skill_import_scan") && commands.includes("desktop_import_skill"));
   for (const command of commands) {
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
     assert.ok(allowed.includes(`allow-${command.replaceAll("_", "-")}`), `${command} missing from main-window.json`);
@@ -148,4 +213,69 @@ test("refusals from the native open commands read as plain sentences", () => {
     assert.doesNotMatch(api.plainError(code), / \([a-z0-9_]+\)$/, code);
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
+});
+
+const found = (patch = {}) => ({ from: "claude", folder: "/Users/owner/.claude/skills/notes", name: "notes", line: "Writes release notes.", state: { kind: "new" }, ...patch });
+const importProps = (list, patch = {}) => ({ list, ticked: new Set(), outcomes: [], onTick: forbidden, onRetry: forbidden, ...patch });
+
+test("Import my skills is offered in global settings only, next to Add skill", () => {
+  const global = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill()] }, { onImport: forbidden })));
+  assert.match(global, /Import my skills/);
+  assert.match(global, /Add skill/);
+  const empty = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [] }, { onImport: forbidden })));
+  assert.match(empty, /Import my skills/);
+  const project = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill()] }, { projectId: "app" })));
+  assert.doesNotMatch(project, /Import my skills/);
+});
+
+test("found skills show their source and state, and only new or differing ones can be ticked", () => {
+  const value = { found: [
+    found(),
+    found({ from: "codex", folder: "/Users/owner/.codex/skills/graph", name: "graph", line: "Builds a code graph.", state: { kind: "added", id: "skill-9" } }),
+    found({ folder: "/Users/owner/.claude/skills/style", name: "style", line: "House style.", state: { kind: "differs", id: "skill-3" } }),
+    found({ folder: "/Users/owner/.claude/skills/heavy", name: "heavy", line: "", state: { kind: "unusable", code: "skill_import_too_large" } }),
+  ], more: 2 };
+  const markup = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "ok", value }, { ticked: new Set(["/Users/owner/.claude/skills/notes"]) })));
+  assert.match(markup, /From ~\/\.claude\/skills and ~\/\.codex\/skills/);
+  assert.match(markup, /Claude Code: ~\/\.claude\/skills\/notes/);
+  assert.match(markup, /Codex: ~\/\.codex\/skills\/graph/);
+  assert.match(markup, /Writes release notes\./);
+  assert.match(markup, /Already added/);
+  assert.match(markup, /Differs/);
+  assert.match(markup, /Importing replaces the added copy and keeps its project switches\./);
+  assert.match(markup, /Can&#x27;t import/);
+  assert.match(markup, /A skill brought in from your skills folders can be up to 2 MB\./);
+  assert.match(markup, /And 2 more not shown/);
+  const boxes = [...markup.matchAll(/<input type="checkbox"([^>]*)\/>/g)].map((match) => match[1]);
+  assert.equal(boxes.length, 4);
+  assert.match(boxes[0], /checked=""/);
+  assert.doesNotMatch(boxes[0], /disabled/);
+  assert.match(boxes[1], /disabled=""/);
+  assert.doesNotMatch(boxes[2], /disabled/);
+  assert.match(boxes[3], /disabled=""/);
+  assert.doesNotMatch(markup, /skill-9|skill-3/);
+  assert.deepEqual([{ kind: "new" }, { kind: "differs", id: "a" }, { kind: "added", id: "a" }, { kind: "unusable", code: "x" }].map(importable), [true, true, false, false]);
+  assert.deepEqual([{ kind: "new" }, { kind: "added", id: "a" }].map(importWord), ["", "Already added"]);
+});
+
+test("the import's outcomes say what was left out and why a skill was not imported", () => {
+  const imported = (skipped, total) => ({ kind: "ok", value: { skill: skill({ name: "notes" }), skipped, skipped_total: total } });
+  assert.equal(importSentence({ name: "notes", result: imported([], 0) }), "Imported notes.");
+  assert.equal(importSentence({ name: "notes", result: imported([".env", "api_key.txt"], 2) }), "Imported notes. Left out .env, api_key.txt.");
+  assert.equal(importSentence({ name: "notes", result: imported([".env"], 3) }), "Imported notes. Left out .env and 2 more.");
+  const refused = { kind: "error", code: "skill_link_outside", message: api.plainError("skill_link_outside") };
+  assert.equal(importSentence({ name: "leaky", result: refused }), "Couldn't import leaky: This folder links to files outside it.");
+  const markup = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "ok", value: { found: [], more: 0 } },
+    { outcomes: [{ name: "notes", result: imported([".env"], 1) }, { name: "leaky", result: refused }] })));
+  assert.match(markup, /Imported notes\. Left out \.env\./);
+  assert.match(markup, /Couldn&#x27;t import leaky/);
+  assert.match(markup, /No skills found in those folders/);
+  assert.equal(api.plainError("skill_import_name_changed"), "This folder now holds a different skill. Look for your skills again.");
+});
+
+test("the import list shows plain loading, not ready and error states", () => {
+  assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "loading" }))), /skeleton/);
+  assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "not_ready" }))), /Importing skills/);
+  const failed = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "error", code: "skill_import_home_unknown", message: api.plainError("skill_import_home_unknown") })));
+  assert.match(failed, /Your home folder is unknown, so your skills can&#x27;t be found\./);
 });

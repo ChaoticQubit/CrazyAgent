@@ -829,6 +829,12 @@ pub fn swap(install: &Path, staged: &Path, version: &str) -> Result<(), UpdateEr
 /// Output: its trimmed stdout, or `update_service_failed` with one plain sentence for the
 /// action that never quotes the command's output.
 pub fn service_command(executable: &Path, action: &str) -> Result<String, UpdateError> {
+    service_step(Command::new(executable).arg("service").arg(action), action)
+}
+
+/// Runs one prepared `crazyagent service <action>` command with the update's time limit.
+/// Inputs: the command and its action. Output: as `service_command`.
+fn service_step(command: &mut Command, action: &str) -> Result<String, UpdateError> {
     let failed = || {
         fail(
             "update_service_failed",
@@ -841,12 +847,8 @@ pub fn service_command(executable: &Path, action: &str) -> Result<String, Update
             },
         )
     };
-    let output = run_bounded(
-        Command::new(executable).arg("service").arg(action),
-        SERVICE_TIMEOUT,
-        "update_service_failed",
-    )
-    .map_err(|_| failed())?;
+    let output =
+        run_bounded(command, SERVICE_TIMEOUT, "update_service_failed").map_err(|_| failed())?;
     if !output.status.success() {
         return Err(failed());
     }
@@ -907,24 +909,106 @@ fn install_release(manifest: &Manifest, install: &Path, key: &str) -> Result<Str
         &manifest.version,
     )?;
     let unpacked = unpack(&archive, &staging.path.join("unpacked"))?;
+    let layout = crate::paths::Layout::current().map_err(|_| {
+        fail(
+            "update_no_data_root",
+            "Can't find CrazyAgent's data folder. Set CRAZYAGENT_HOME to an absolute path.",
+        )
+    })?;
+    swap_around_engine(&layout, install, &unpacked, &manifest.version)
+}
+
+/// Swaps the unpacked release into the install folder with the engine stopped around it.
+/// An installed engine service is stopped and started through `crazyagent service`. An
+/// engine that runs without it is stopped here and started again, detached, from the new
+/// binary. With no service and no engine running, only the files change. A failure that
+/// says nothing changed is only returned before the swap.
+/// Inputs: the engine layout, the install folder, the unpacked folder and the version.
+/// Output: the sentence for the user, or the failure.
+pub fn swap_around_engine(
+    layout: &crate::paths::Layout,
+    install: &Path,
+    unpacked: &Path,
+    version: &str,
+) -> Result<String, UpdateError> {
     let current = install.join(format!("crazyagent{EXE_SUFFIX}"));
-    service_command(&current, "stop")?;
-    if let Err(error) = swap(install, &unpacked, &manifest.version) {
-        return Err(match service_command(&current, "start") {
-            Ok(_) => error,
-            Err(start) => fail(error.code, format!("{} {}", error.message, start.message)),
+    let stop_failed = |detail: String| {
+        fail(
+            "update_service_failed",
+            format!("Couldn't stop the engine for the update, so nothing changed. {detail}")
+                .trim_end()
+                .to_owned(),
+        )
+    };
+    let engine = crate::service::Service::current_user(
+        crate::paths::Platform::CURRENT,
+        current.clone(),
+        layout,
+    )
+    .map_err(|error| stop_failed(error.0))?;
+    if engine.definition.is_file() {
+        let service = |action: &str| {
+            service_step(
+                Command::new(&current)
+                    .arg("service")
+                    .arg(action)
+                    .env("CRAZYAGENT_HOME", layout.root()),
+                action,
+            )
+        };
+        service("stop")?;
+        if let Err(error) = swap(install, unpacked, version) {
+            return Err(match service("start") {
+                Ok(_) => error,
+                Err(start) => fail(error.code, format!("{} {}", error.message, start.message)),
+            });
+        }
+        return Ok(match service("start") {
+            Ok(_) => format!("Updated crazyagent to {version}. The engine service restarted."),
+            Err(start) => format!("Updated crazyagent to {version}. {}", start.message),
         });
     }
-    Ok(match service_command(&current, "start") {
-        Ok(_) => format!(
-            "Updated crazyagent to {}. The engine service restarted.",
-            manifest.version
-        ),
-        Err(start) => format!(
-            "Updated crazyagent to {}. {}",
-            manifest.version, start.message
-        ),
+    let stopped = crate::service::stop_detached(layout).map_err(|error| stop_failed(error.0))?;
+    let swapped = swap(install, unpacked, version);
+    if stopped.is_none() {
+        return swapped.map(|()| format!("Updated crazyagent to {version}."));
+    }
+    let restart = || restart_detached(layout, &engine, &current);
+    if let Err(error) = swapped {
+        return Err(match restart() {
+            Ok(()) => error,
+            Err(start) => fail(error.code, format!("{} {start}", error.message)),
+        });
+    }
+    Ok(match restart() {
+        Ok(()) => format!("Updated crazyagent to {version}. The engine restarted."),
+        Err(start) => format!("Updated crazyagent to {version}. {start}"),
     })
+}
+
+/// Starts the engine again without the service from the installed `crazyagent`, as a client
+/// does when no engine answers. Inputs: the layout, the uninstalled service and the
+/// executable. Output: Ok once it answers, or the sentence that says how to start it.
+fn restart_detached(
+    layout: &crate::paths::Layout,
+    service: &crate::service::Service,
+    executable: &Path,
+) -> Result<(), String> {
+    let again = "The engine didn't start again. Open CrazyAgent to start it: crazyagent tui";
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| again.to_owned())?;
+    runtime
+        .block_on(crate::service::ensure_running(
+            layout,
+            service,
+            executable,
+            std::env::var_os("PATH").as_deref(),
+            crate::service::READY_TIMEOUT,
+        ))
+        .map(|_| ())
+        .map_err(|error| format!("{again} ({})", error.0))
 }
 
 /// The failure for a channel that has no published release yet. Input: the channel.

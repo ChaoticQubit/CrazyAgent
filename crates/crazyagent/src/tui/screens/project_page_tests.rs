@@ -8,8 +8,11 @@ use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
+use crate::engine::owner::OwnerMutation;
 use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
-use crate::master_session::{MasterSessionPhase, MasterSessionView, MasterTurnView};
+use crate::master_session::{
+    MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
+};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
@@ -136,8 +139,21 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::TeamChange { .. } => "team change",
                         SetupQuery::Library(_) => "library",
                         SetupQuery::Log { .. } => "log",
+                        SetupQuery::ReadPaths { .. } => "read paths",
                     });
                     connection.project_setup(query).unwrap();
+                }
+                Request::Changes(query) => {
+                    sent.push("changes");
+                    connection.changes(*query).unwrap();
+                }
+                Request::TeamGraph { project } => {
+                    sent.push("team graph");
+                    connection.team_graph(project).unwrap();
+                }
+                Request::ProjectFiles { project, query } => {
+                    sent.push("project files");
+                    connection.project_files(project, query).unwrap();
                 }
                 other => panic!("project pages never send {other:?}"),
             }
@@ -362,7 +378,7 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
 fn a_project_folder_is_revealed_and_only_documents_inside_it_open() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-open-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let home = root.path().canonicalize().unwrap();
     let bundle = home.join("notes.app");
@@ -488,6 +504,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
     assert_eq!(
         shell.place(),
         Some(Place::Project {
@@ -501,6 +518,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     assert!(shown.contains("brief.md"), "{shown}");
     assert!(shown.contains("Home  /  Notes CLI  /  Context"), "{shown}");
 
+    shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
@@ -517,6 +535,8 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                 Request::Pools
                     | Request::PoolProjects
                     | Request::Master(_)
+                    | Request::Changes(_)
+                    | Request::TeamGraph { .. }
                     | Request::Setup(
                         SetupQuery::Jobs { .. }
                             | SetupQuery::Context { .. }
@@ -607,6 +627,62 @@ fn t_on_the_agents_tab_opens_the_project_team() {
         })
     );
     assert_eq!(shell.depth(), 2);
+}
+
+#[test]
+fn an_at_file_read_dropped_on_a_full_queue_is_asked_again_on_the_next_key() {
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let files = |shell: &mut Shell| {
+        let mut asked = Vec::new();
+        while let Some(request) = shell.ctx.next_request() {
+            if let Request::ProjectFiles { project, query } = request {
+                assert_eq!(project, notes);
+                asked.push(query);
+            }
+        }
+        asked
+    };
+    files(&mut shell);
+    let mut filled = 0;
+    while filled < 64 && {
+        let queued = shell.ctx.queued();
+        shell.ctx.request(Request::TeamGraph {
+            project: notes.clone(),
+        });
+        shell.ctx.queued() > queued
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+    shell.key(Key::Char('@'));
+    assert_eq!(
+        files(&mut shell),
+        Vec::<String>::new(),
+        "the full queue dropped it"
+    );
+    shell.key(Key::Char('p'));
+    assert_eq!(
+        files(&mut shell),
+        ["p"],
+        "the dropped read is not counted as out"
+    );
+    shell.key(Key::Char('l'));
+    assert_eq!(
+        files(&mut shell),
+        Vec::<String>::new(),
+        "one read out at a time"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -764,6 +840,7 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Main is assigned."), "{shown}");
 
+    shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
@@ -933,6 +1010,7 @@ async fn conversation_with_a_settled_turn(
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Plan the first slice").await;
     let first = settled_master(engine, &notes, &mut shell, &mut connection, 1).await;
@@ -953,6 +1031,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
     pump(&mut shell, &mut connection).await;
     shell.key(Key::Enter);
     shell.key(Key::Down);
@@ -965,6 +1044,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     assert_eq!(open.as_ref(), Some(&first));
     assert_ne!(first.config_id, changed);
 
+    shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
@@ -1018,14 +1098,14 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
     assert!(shown.contains("e End conversation"), "{shown}");
     shell.key(Key::Char('e'));
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("The master conversation is closed.")
+        shown.contains("This session is parked.")
     })
     .await;
     assert!(!shown.contains("e End conversation"), "{shown}");
     let (closed, _) = latest_master(&mut engine, &notes).await;
     let closed = closed.unwrap();
     assert_eq!(closed.session_id, first.session_id);
-    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert_eq!(closed.phase, MasterSessionPhase::Parked);
     assert_eq!(closed.current_turn, None);
 
     say(&mut shell, &mut connection, "Add a dark theme").await;
@@ -1043,6 +1123,107 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
     .await;
     assert!(!shown.contains("is closed"), "{shown}");
     assert!(!shown.contains("Settings changed"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_session_shows_the_owner_s_earlier_messages() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    shell.key(Key::Char('e'));
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("This session is parked.")
+    })
+    .await;
+    say(&mut shell, &mut connection, "Add a dark theme").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Add a dark theme") && !shown.contains("Thinking")
+    })
+    .await;
+    assert!(!shown.contains("Plan the first slice"), "{shown}");
+
+    latest_master(&mut engine, &notes).await;
+    engine
+        .controller
+        .begin_mutation(
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Resume {
+                    project_id: notes.clone(),
+                    session_id: first.session_id.clone(),
+                    cancel_running: false,
+                },
+            },
+            1,
+        )
+        .unwrap();
+    let resumed = engine.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(
+            resumed,
+            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ),
+        "{resumed:?}"
+    );
+    let (live, _) = latest_master(&mut engine, &notes).await;
+    assert_eq!(live.unwrap().session_id, first.session_id);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Plan the first slice")
+    })
+    .await;
+    assert!(!shown.contains("Add a dark theme"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    assert!(shown.contains("n New session"), "{shown}");
+    assert!(!shown.contains("earlier"), "{shown}");
+
+    shell.key(Key::Char('n'));
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("1 earlier") && shown.contains("No messages yet.")
+    })
+    .await;
+    assert!(!shown.contains("RCLI stopped"), "{shown}");
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    let fresh = fresh.unwrap();
+    assert_ne!(fresh.session_id, first.session_id);
+    assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+
+    shell.key(Key::Char('l'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Sessions  2"), "{shown}");
+    assert!(shown.contains("Enter Resume"), "{shown}");
+    let parked = shown
+        .lines()
+        .find(|line| line.contains("Parked"))
+        .unwrap_or_else(|| panic!("no parked row:\n{shown}"));
+    assert!(parked.contains("Plan the first slice"), "{shown}");
+    if !parked.contains("> Parked") {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("RCLI stopped") && !shown.contains("Sessions  2")
+    })
+    .await;
+    assert!(shown.contains("1 earlier"), "{shown}");
+    assert!(!shown.contains("No messages yet."), "{shown}");
+    assert!(shown.contains("Plan the first slice"), "{shown}");
+    let (resumed, _) = latest_master(&mut engine, &notes).await;
+    let resumed = resumed.unwrap();
+    assert_eq!(resumed.session_id, first.session_id);
+    assert_eq!(resumed.phase, MasterSessionPhase::Configured);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1071,7 +1252,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     shell.key(Key::Enter);
     shell.key(Key::Enter);
     pump(&mut shell, &mut connection).await;
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::ShiftLeft);
     }
     pump(&mut shell, &mut connection).await;
@@ -1089,7 +1270,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     let open = open.expect("the first message opened a master conversation");
     assert_eq!(open.phase, MasterSessionPhase::Configured);
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::ShiftRight);
     }
     shell.key(Key::Char('x'));
@@ -1521,4 +1702,103 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
         "{shown}"
     );
     assert!(!engine.home.path().join("tidepool").exists(), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let setup = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let folder = std::path::PathBuf::from(&setup.folder);
+    let status = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q", "--template="])
+            .current_dir(&folder)
+            .env_clear()
+            .env("HOME", engine.root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1"),
+    )
+    .unwrap()
+    .status;
+    assert!(status.success());
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(folder.join("src/planner.rs"), "fn plan() {}\n").unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    for _ in 0..4 {
+        shell.key(Key::ShiftLeft);
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"project files"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("Home  /  Notes CLI  /  Conversation")
+            && !shown.contains("This project has no pool"),
+        "{shown}"
+    );
+    for typed in "ask @pl".chars() {
+        shell.key(Key::Char(typed));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter().filter(|name| **name == "project files").count(),
+        2,
+        "one read for the bare @, then one for the word typed while it was out: {sent:?}"
+    );
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("@src/planner.rs"), "{shown}");
+    shell.key(Key::Tab);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("> ask @src/planner.rs"), "{shown}");
+    for typed in "now".chars() {
+        shell.key(Key::Char(typed));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        !sent.contains(&"project files"),
+        "no read while no @ word is typed: {sent:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Changes,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"changes"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
+    assert!(shown.contains("No changes yet."), "{shown}");
 }

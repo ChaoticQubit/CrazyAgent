@@ -259,6 +259,39 @@ impl CustodyCase {
         )
     }
 
+    fn agent(
+        &self,
+        fact: &NativeAuthFact,
+        name: &str,
+    ) -> crate::engine::bootstrap::NativeProfileUse {
+        NativeProfileCustody::capture(&self.path, &std::fs::metadata(&self.path).unwrap())
+            .unwrap()
+            .acquire_use(
+                &self.started.host,
+                &fact.binding,
+                &request(name),
+                1,
+                NativeProfileUsePurpose::Execution,
+            )
+            .unwrap()
+    }
+
+    fn recover(&mut self, ended: Option<&NativeAuthFact>) -> Option<NativeAuthFact> {
+        native_auth::recover_native_auth(&mut self.db, &mut self.custody, &self.started.host, ended)
+            .unwrap()
+    }
+
+    fn end_custody(&mut self, dispatch: &NativeAuthDispatch) -> Option<NativeAuthFact> {
+        native_auth::lose_native_auth_custody(
+            &mut self.db,
+            &self.config,
+            Some(&self.sources),
+            dispatch,
+        )
+        .unwrap();
+        self.recover(Some(dispatch.fact()))
+    }
+
     fn revoke_origin(&mut self) {
         let control = OwnerControl {
             operation_id: request("revoke-custody-origin"),
@@ -718,4 +751,132 @@ async fn native_auth_custody_dropped_dispatch_ack_keeps_real_actor_fence() {
     assert_eq!(after.fences, before.fences);
     assert_eq!(after.operations.len(), 1);
     assert_eq!(after.operations[0].1, before.operations[0].1);
+}
+
+fn interrupted(settled: Option<NativeAuthFact>) -> Option<(NativeAuthPhase, Option<String>)> {
+    settled.map(|fact| (fact.phase, fact.code))
+}
+
+#[test]
+fn native_auth_custody_that_ended_while_an_agent_uses_the_account_is_settled_at_once() {
+    let mut case = CustodyCase::new();
+    let (fact, work) = case.work("ended-beside-agent");
+    let dispatch = case.dispatch(work).unwrap();
+    let agent = case.agent(&fact, "agent-beside-ended-custody");
+    assert_eq!(
+        interrupted(case.end_custody(&dispatch)),
+        Some((
+            NativeAuthPhase::Failed,
+            Some("native_auth_interrupted".to_owned())
+        ))
+    );
+    assert!(case.snapshot().fences.is_empty());
+    drop(agent);
+}
+
+async fn ask<T>(storage: &Storage, job: impl FnOnce(oneshot::Sender<T>) -> Job) -> T {
+    let (send, receive) = oneshot::channel();
+    storage
+        .sender
+        .try_send(job(send))
+        .unwrap_or_else(|_| panic!("storage queue"));
+    tokio::time::timeout(Duration::from_secs(3), receive)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn native_auth_custody_that_ended_during_a_renewal_is_settled_by_a_later_read_once_it_ends() {
+    let root = private_root();
+    let global = catalog(root.path());
+    let path = root.path().join("engine.db");
+    let (storage, config) =
+        Storage::open_with_settings_sources(&path, &global, &root.path().join("p.toml"))
+            .await
+            .unwrap();
+    let started = ask(&storage, Job::OwnerStart).await.unwrap();
+    let admission = started.owners[0].admission.clone();
+    let state = ask(&storage, |send| {
+        Job::OwnerRead(
+            admission.clone(),
+            OwnerRead::ModelAccessRecord {
+                collection: ModelAccessCollection::Connections,
+                id: reference("connection-a"),
+            },
+            send,
+        )
+    })
+    .await
+    .unwrap();
+    let OwnerData::ModelAccessRecord { source_hash, .. } = state.data else {
+        panic!("actual actor did not return source identity")
+    };
+    let scope = scope(&config, &started.host, source_hash);
+    let begun = ask(&storage, |send| {
+        Job::NativeAuth(
+            admission.clone(),
+            start(scope.clone(), "ended-during-renewal"),
+            send,
+        )
+    })
+    .await
+    .unwrap();
+    let fact = begun.reply.fact.clone();
+    let dispatch = Arc::new(
+        ask(&storage, |send| {
+            Job::NativeAuthDispatch(Box::new(begun.work.unwrap()), send)
+        })
+        .await
+        .unwrap(),
+    );
+    let agent = NativeProfileCustody::capture(&path, &std::fs::metadata(&path).unwrap())
+        .unwrap()
+        .acquire_use(
+            &started.host,
+            &fact.binding,
+            &request("agent-renewing"),
+            1,
+            NativeProfileUsePurpose::Execution,
+        )
+        .unwrap();
+    let renewal = agent.hold_renewal(Duration::ZERO).unwrap();
+    let lost = ask(&storage, |send| {
+        Job::NativeAuthCustodyLost(dispatch.clone(), send)
+    })
+    .await
+    .unwrap();
+    assert_eq!(lost.phase, NativeAuthPhase::Uncertain);
+    let released = ask(&storage, |send| {
+        Job::NativeAuthCustodyReleased(dispatch.clone(), send)
+    })
+    .await
+    .unwrap();
+    assert_eq!(released, None);
+    let read = |name: &str| {
+        let query = NativeAuthQuery {
+            request_id: request(name),
+            scope: scope.clone(),
+            operation_id: fact.operation_id.clone(),
+        };
+        let admission = admission.clone();
+        move |send: oneshot::Sender<Result<NativeAuthBegin, EngineError>>| {
+            Job::NativeAuth(admission, Command::Read(query), send)
+        }
+    };
+    let during = ask(&storage, read("read-during-renewal")).await.unwrap();
+    assert_eq!(during.reply.fact.phase, NativeAuthPhase::Uncertain);
+    assert_eq!(snapshot(&path).fences.len(), 1);
+    drop(renewal);
+    let after = ask(&storage, read("read-after-renewal")).await.unwrap();
+    assert_eq!(
+        (after.reply.fact.phase, after.reply.fact.code),
+        (
+            NativeAuthPhase::Failed,
+            Some("native_auth_interrupted".to_owned())
+        )
+    );
+    assert!(snapshot(&path).fences.is_empty());
+    drop(agent);
+    ask(&storage, Job::Close).await.unwrap();
 }

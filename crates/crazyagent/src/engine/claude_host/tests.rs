@@ -292,7 +292,7 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
             ..valid
         },
         ClaudeHostLimits {
-            stdout_bytes: 1_048_577,
+            stdout_bytes: STDOUT_BYTES_MAX + 1,
             ..valid
         },
         ClaudeHostLimits {
@@ -1169,10 +1169,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             "unreadable"
         ]
     );
-    assert_eq!(
-        diagnostic.tail(),
-        "\n{\"type\":\"system\",\"subtype\":\"task_"
-    );
+    assert_eq!(diagnostic.frames(), ["cut 8158", "unfinished 33"]);
     assert!(
         matches!(
             kinds.last(),
@@ -1203,7 +1200,7 @@ exit 0
 "#;
 
 #[tokio::test]
-async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_a_redacted_tail() {
+async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_frames_without_content() {
     use crate::engine::master_host_fixture::MasterFixture;
 
     let mut fixture = MasterFixture::new("claude");
@@ -1230,31 +1227,23 @@ async fn a_claude_master_protocol_failure_keeps_the_failing_line_kind_and_a_reda
     );
     assert_eq!(diagnostic.message.as_deref(), Some("assistant"));
     assert_eq!(diagnostic.late_lines, 0);
-    let tail = diagnostic.tail();
-    assert!(tail.contains("\"uuid\":\"early-1\""), "{tail}");
-    assert!(tail.contains("sk-ant-[redacted]"), "{tail}");
-    assert!(!tail.contains("notarealtoken"), "{tail}");
+    assert_eq!(diagnostic.frames(), ["assistant 247"]);
 }
 
 #[test]
-fn a_stream_tail_keeps_its_last_bytes_without_a_cut_credential() {
+fn a_stream_diagnostic_names_its_last_frames_by_kind_and_size_after_a_cut() {
     let mut diagnostic = diagnostic::StreamDiagnostic::default();
-    let mut stream = b"{\"text\":\"sk-ant-oat01-SECRETPART\"}\n".to_vec();
-    let cut = stream.len() - "PART\"}\n".len();
-    stream.extend(std::iter::repeat_n(
-        b'b',
-        diagnostic::TAIL_BYTES - (stream.len() - cut),
-    ));
+    let stream = b"{\"type\":\"assistant\"}\n".repeat(400);
     for chunk in stream.chunks(4096) {
         diagnostic.keep(chunk);
     }
-    let tail = diagnostic.tail();
-    assert!(!tail.contains("SECRET") && !tail.contains("PART"), "{tail}");
-    assert!(tail.starts_with("\"}\n"), "{tail}");
-    assert_eq!(tail.len(), diagnostic::TAIL_BYTES - "PART".len());
+    let frames = diagnostic.frames();
+    assert_eq!(frames.len(), 391);
+    assert_eq!(frames[0], "cut 1");
+    assert!(frames[1..].iter().all(|frame| frame == "assistant 20"));
     let mut whole = diagnostic::StreamDiagnostic::default();
     whole.keep(b"{\"text\":\"sk-ant-ort01-SECRET_PART-2\"}\n");
-    assert_eq!(whole.tail(), "{\"text\":\"sk-ant-[redacted]\"}\n");
+    assert_eq!(whole.frames(), ["unreadable 37"]);
     whole.late(b"{\"type\":\"sk-ant-oat01-SECRET\"}");
     whole.late(b"{\"type\":\"system\",\"subtype\":\"Task Notification\"}");
     for _ in 0..20 {
@@ -1269,16 +1258,23 @@ fn a_stream_tail_keeps_its_last_bytes_without_a_cut_credential() {
 }
 
 #[test]
-fn a_stream_tail_redacts_openai_keys_and_tokens_but_keeps_plain_words() {
+fn a_stream_frame_is_named_by_its_protocol_kind_and_never_by_free_text() {
     let mut diagnostic = diagnostic::StreamDiagnostic::default();
     diagnostic.keep(
-        b"{\"key\":\"sk-proj-AbC_12-x\",\"access_token\":\"eyJhbGci.eyJzdWIi.c2ln-_x\",\
-\"method\":\"item/task-notification\",\"text\":\"risk-free eyJ\"}\n",
+        b"{\"method\":\"item/agentMessage/delta\",\"params\":{}}\n{\"id\":3,\"result\":{}}\n\
+{\"id\":3,\"error\":{\"code\":1}}\n{\"method\":\"ghp_0123456789abcdef\",\"params\":{}}\n\
+{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"sk-ant-oat01-SECRET\"}\n",
     );
     assert_eq!(
-        diagnostic.tail(),
-        "{\"key\":\"sk-[redacted]\",\"access_token\":\"eyJ[redacted]\",\
-\"method\":\"item/task-notification\",\"text\":\"risk-free eyJ[redacted]\"}\n"
+        diagnostic.frames(),
+        [
+            "item/agentMessage/delta 48",
+            "response 20",
+            "error 27",
+            "unreadable 45",
+            "system/init 34",
+            "unreadable 30"
+        ]
     );
 }
 
@@ -1321,4 +1317,79 @@ fn a_stream_diagnostic_is_appended_private_rotated_and_never_through_a_link() {
         Err("master_stream_log_unsafe".to_owned())
     );
     assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
+}
+
+const LARGE_RESULT_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+long=aaaaaaaaaa
+for step in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do long=$long$long; done
+printf '%s' '{"type":"user","uuid":"step-1","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"read"}]},"tool_use_result":{"stdout":"'
+printf '%s' "$long"
+printf '%s\n' '","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+#[tokio::test]
+async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_allowance() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-large-result", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("claude", LARGE_RESULT_HARNESS);
+    let command =
+        launch_command(&harness, &fixture.project, &home, "native-default", None).unwrap();
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut claude = ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: crate::protocol::SessionId::new("claude-large-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: CredentialRef::new("large-master-profile").unwrap(),
+            worktree_lease: RequestId::new("claude-large-lease").unwrap(),
+        },
+        fixture.connection.account_ref.clone(),
+        ResourceBudget {
+            output_bytes: 64 * 1024 * 1024,
+            ..ResourceBudget::unit()
+        },
+    )
+    .await
+    .unwrap();
+    claude
+        .start_turn(RequestId::new("claude-large-turn").unwrap(), "Read the log")
+        .await
+        .unwrap();
+    let mut kinds = Vec::new();
+    let error = loop {
+        match claude.next_event().await {
+            Ok(event) => {
+                let finished = matches!(event.kind, EventKind::TurnFinished { .. });
+                kinds.push(event.kind);
+                if finished {
+                    break None;
+                }
+            }
+            Err(error) => break Some(error.0),
+        }
+    };
+    let _ = claude.close().await;
+    assert_eq!(error, None, "{kinds:?}");
+    assert!(
+        matches!(
+            kinds.last(),
+            Some(EventKind::TurnFinished {
+                outcome: TurnOutcome::Success,
+                ..
+            })
+        ),
+        "{kinds:?}"
+    );
 }

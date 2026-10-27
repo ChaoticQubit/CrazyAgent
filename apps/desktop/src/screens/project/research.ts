@@ -89,6 +89,7 @@ export interface TeamAgentRow {
   word: string;
   task: string;
   folder: string;
+  rename: { agent: number; handle: string } | null;
 }
 
 export interface TeamTaskRow {
@@ -104,6 +105,7 @@ export interface TeamTaskRow {
 }
 
 const WAITING: TeamTaskStatus[] = ["queued", "needs_pool"];
+const LIVE_AGENT: TeamAgentStatus[] = ["starting", "idle", "working"];
 const SUMMARY_MAX = 200;
 const MARKER = /^(?:#{1,6}|[-*+]|>|\d+\.)\s+/u;
 
@@ -115,34 +117,38 @@ export function resultSummary(text: string): string {
   return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
 }
 
-/** Builds the Team panel: each agent with its role, plain name, harness, account, current task and
- * the folder it works in (the master in the project folder, a sub-agent in its own worktree),
- * then the tasks handed from the master or the owner to a sub-agent. "running" hides stopped agents
- * and finished tasks. Sub-agents are named by harness and order, such as "Codex 2", never by id.
+/** Names a team agent's account as the owner sees it in Accounts, never by its id. Inputs: the
+ * owner's account names and the account id. Output: the name, "An account in the pool" for an id
+ * not listed, or "No account yet". */
+export function accountName(accounts: { id: string; name: string }[], id: string | null): string {
+  return id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+}
+
+/** Builds the Team panel: each agent with its role, plain name, harness, account, current task
+ * (between tasks, its last one) and the folder it works in (the master in the project folder, a
+ * sub-agent in its own worktree), then the tasks handed from the master or the owner to a
+ * sub-agent. "running" hides stopped agents and finished tasks. Each agent keeps the engine's
+ * name, such as "Ada (@onboarding-fix)" or "Sub-agent 3", as in the graph.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
  * Output: the agent rows and task rows in engine order. */
 export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
   filter: TeamFilter, now: number): { agents: TeamAgentRow[]; tasks: TeamTaskRow[] } {
-  const names = new Map<number, string>();
-  const counts = new Map<string, number>();
-  for (const agent of status.agents) {
-    if (agent.role === "master") { names.set(agent.id, "Master"); continue; }
-    const count = (counts.get(agent.harness) ?? 0) + 1;
-    counts.set(agent.harness, count);
-    names.set(agent.id, `${harnessLabel(agent.harness)} ${count}`);
-  }
-  const account = (id: string | null) => id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+  const names = new Map(status.agents.map((agent) => [agent.id, agent.label]));
+  const account = (id: string | null) => accountName(accounts, id);
   const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
     const held = status.tasks.find((item) => item.id === agent.task);
+    const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>
+      item.agent === agent.id && (newest === undefined || item.id > newest.id) ? item : newest, undefined);
     return {
       key: `agent-${agent.id}`,
       role: agent.role === "master" ? "Master" : "Sub-agent",
-      name: names.get(agent.id) ?? harnessLabel(agent.harness),
+      name: agent.label,
       harness: harnessLabel(agent.harness),
       account: account(agent.account),
       word: teamAgentWord(agent.status),
-      task: agent.problem ?? (held ? firstLine(held.prompt) : agent.status === "idle" ? "Waiting for work" : ""),
+      task: agent.problem ?? (held ? firstLine(held.prompt) : last ? `Last task: ${firstLine(last.prompt)}` : agent.status === "idle" ? "Waiting for work" : ""),
       folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
+      rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
@@ -306,6 +312,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["budget_exhausted", "the account hit its usage limit. Add an account to the pool, or wait for its limit to reset"],
   ["rate_limited", "the account is resting after too many requests"],
   ["cooldown_active", "the account is resting after too many requests"],
+  ["transient_failure", "the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute"],
   ["capacity_unavailable", "another turn is still running"],
   ["profile_busy", "its account is busy signing in or out"],
   ["scope_revoked", "it no longer has access to this project"],
@@ -353,6 +360,7 @@ const accountReasons: Record<string, string> = {
   quota_exhausted: "usage limit reached",
   rate_limited: "rate limited, paused for a few minutes",
   cooldown_active: "paused for a few minutes",
+  transient_failure: "sign-in could not be renewed just now, available again in a minute",
   profile_busy: "busy with a sign-in or sign-out",
   scope_revoked: "not allowed by settings",
   connection_changed: "settings changed",
@@ -362,6 +370,19 @@ const accountReasons: Record<string, string> = {
  * that ended, otherwise that it is still with a sub-agent. Input: the turn. Output: the lines. */
 export function taskLines(turn: MasterTurn): string[] {
   return (turn.tasks ?? []).map((task) => task.note ?? `Task ${task.task} is still with a sub-agent.`);
+}
+
+/** The engine's note when a master turn's edits wait for the owner in Changes. Input: the turn.
+ * Output: the note, or null when the turn left nothing to review. */
+export function changesLine(turn: MasterTurn): string | null {
+  return turn.changes?.trim() ? turn.changes : null;
+}
+
+/** The engine's line for a turn it asked the master for after Ask agent to update, shown
+ * where the owner's message would be. Input: the turn. Output: the line, or null for a turn
+ * the owner started. */
+export function engineLine(turn: MasterTurn): string | null {
+  return turn.engine_request?.line.trim() ? turn.engine_request.line : null;
 }
 
 /** Tells whether a task some turn handed to the team has not ended yet, so the conversation
@@ -462,7 +483,7 @@ export function restartForSettings(receipt: IntentReceipt): boolean {
 /** The most bytes one message to the master may hold; the bridge refuses more. */
 export const MESSAGE_BYTES_MAX = 8192;
 
-/** Whether the composer may send its draft now, the one rule for the Send button and Cmd+Enter.
+/** Whether the composer may send its draft now, the one rule for the Send button and Enter.
  * Inputs: the draft and whether sending is blocked (an action running, no ticket, a reply in
  * progress or the master unreachable). Output: true for a non-blank draft within the byte limit. */
 export function canSend(text: string, blocked: boolean): boolean {

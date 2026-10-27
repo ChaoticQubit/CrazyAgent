@@ -12,6 +12,8 @@ use crate::master_session::MasterBackend;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
+use crate::sandbox::toolchains::{ToolHomes, Toolchains};
+#[cfg(unix)]
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
@@ -124,13 +126,16 @@ impl OwnerRuntimeHandle {
         let wall_time =
             Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms);
         let delegate = engine.as_deref().map(delegate_engine).transpose()?;
-        let turn = if prepared.session.selection.backend == MasterBackend::Claude {
+        let process = crate::agent_home::text(&prepared.agent_project)
+            .map_err(|problem| EngineError(problem.0))?;
+        let claude = prepared.session.selection.backend == MasterBackend::Claude;
+        let turn = if claude {
             claude_master_turn(
                 &place,
                 profile,
                 executable.verified_path()?,
                 &prepared.attempt.connection,
-                &prepared.instructions,
+                &master_prompt(&prepared.instructions, &process),
                 wall_time,
                 delegate,
             )?
@@ -145,6 +150,13 @@ impl OwnerRuntimeHandle {
             )?
         };
         require_master_delegate(prepared.session.selection.backend, &turn, engine.as_deref())?;
+        let harness = if claude {
+            crate::agent_home::Harness::Claude
+        } else {
+            crate::agent_home::Harness::Codex
+        };
+        crate::agent_home::prepare(&turn.home, harness, &prepared.agent_project, &process)
+            .map_err(|problem| EngineError(problem.0))?;
         let MasterTurnLaunch {
             command,
             sandbox,
@@ -170,6 +182,17 @@ impl OwnerRuntimeHandle {
     }
 }
 
+/// Joins a Claude Code master's startup instruction with the owner's app and project
+/// instructions. Claude Code runs with setting sources off, which skips the `CLAUDE.md` in
+/// its home, so its prompt file carries the same text. Input: both texts. Output: the prompt.
+fn master_prompt(instructions: &str, process: &str) -> String {
+    assert!(process.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+    if process.is_empty() {
+        return instructions.to_owned();
+    }
+    format!("{instructions}\n{process}")
+}
+
 /// Where one master turn runs: the owner root, the turn's runtime reference from
 /// `allocate_master_capture`, and the project repository and leased worktree it works in.
 pub(super) struct MasterTurnPlace<'a> {
@@ -186,7 +209,7 @@ pub(super) struct MasterTurnLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
     pub(super) home: PathBuf,
-    pub(super) credential: Option<AgentCredential>,
+    pub(super) credential: AgentCredential,
     pub(super) tool_record: Option<PathBuf>,
 }
 
@@ -197,8 +220,8 @@ pub(super) struct MasterTurnLaunch {
 /// denied and the managed home is never given to the master. Inputs: where the turn runs, the
 /// account lease, the registered executable, the attempt's connection, the instruction text,
 /// the turn's wall time and the engine executable for tools on. Output: the launch parts with
-/// the copy, or the refusal of the part that failed, `native_profile_credential_expiring`
-/// when the token lapses within the turn.
+/// the copy, or the refusal of the part that failed, `native_profile_renewal_failed`, a
+/// transient refusal, when the token still lapses within a minute after a renewal.
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -264,19 +287,21 @@ pub(super) fn claude_master_turn(
         command,
         sandbox,
         home,
-        credential: Some(credential),
+        credential,
         tool_record,
     })
 }
 
-/// Builds one Codex master turn. With tools off it is today's read-only app-server on the
-/// account's managed home. With `engine` its tools are on (DEC-093): a private home in the
-/// turn folder holding a no-refresh copy of the account's credential (DEC-090), shell and
-/// patch tools with Codex's own sandbox off because macOS refuses a Seatbelt profile inside
-/// the master's, which keeps writes to the leased worktree and the turn's own folders, and
-/// only the engine's `delegate` server. Inputs: where the turn runs, the account lease, the
+/// Builds one Codex master turn in a private home in the turn folder holding a no-refresh
+/// copy of the account's credential (DEC-090), so a master never refreshes the managed
+/// home beside other holders of its shared lease (CR2-17). With tools off it is the
+/// read-only app-server. With `engine` its tools are on (DEC-093): shell and patch tools
+/// with Codex's own sandbox off because macOS refuses a Seatbelt profile inside the
+/// master's, which keeps writes to the leased worktree and the turn's own folders, and only
+/// the engine's `delegate` server. Inputs: where the turn runs, the account lease, the
 /// registered executable, the attempt's connection, the turn's wall time and the engine
-/// executable for tools on. Output: the launch parts, or the refusal of the part that failed.
+/// executable for tools on. Output: the launch parts with the copy, or the refusal of the
+/// part that failed.
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -286,8 +311,9 @@ pub(super) fn codex_master_turn(
     engine: Option<&Path>,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let model = &connection.model.id;
+    let home = master_turn_home(place.root, place.runtime_ref)?;
+    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
     let Some(engine) = engine else {
-        let home = profile.profile_path()?;
         return Ok(MasterTurnLaunch {
             command: master_command(executable, &home, place.worktree, model, None)?,
             sandbox: master_sandbox(
@@ -300,12 +326,10 @@ pub(super) fn codex_master_turn(
                 &connection.endpoint,
             )?,
             home,
-            credential: None,
+            credential,
             tool_record: None,
         });
     };
-    let home = master_turn_home(place.root, place.runtime_ref)?;
-    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
     let sandbox = master_tools_sandbox(
         place.root,
         place.runtime_ref,
@@ -334,7 +358,7 @@ pub(super) fn codex_master_turn(
         command,
         sandbox,
         home,
-        credential: Some(credential),
+        credential,
         tool_record: Some(drop),
     })
 }
@@ -574,7 +598,9 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
         || prepared.attempt.completion.is_some()
         || prepared.attempt.request.project_id != prepared.session.project_id
         || !prepared.attempt_on_current_turn()
-        || prepared.attempt.config_id != prepared.session.config_id
+        || !prepared
+            .session
+            .admits_attempt(&prepared.attempt.config_id, true)
         || binding.connection != prepared.attempt.connection
         || lease.state != LeaseState::Ready
         || lease.project_id != prepared.session.project_id
@@ -784,6 +810,7 @@ fn turn_sandbox(
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
     let network = SandboxNetwork::Only(vec![remote]);
+    let tools = Toolchains::detect(repository, &ToolHomes::owner().map_err(refused)?);
     let sandbox = match engine {
         None => ProjectSandbox::new(repository, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_worktree(worktree)),
@@ -800,6 +827,7 @@ fn turn_sandbox(
     }
     .and_then(|sandbox| sandbox.allow_read(&install))
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+    .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .map_err(refused)?;
     let installed =
@@ -910,7 +938,11 @@ fn write_master_instructions(
     runtime_ref: &RequestId,
     text: &str,
 ) -> Result<PathBuf, EngineError> {
-    if text.len() > crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX {
+    if text.len()
+        > crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+            + 1
+            + crate::agent_home::PROCESS_BYTES_MAX
+    {
         return Err(failure("master_instructions_too_large"));
     }
     let name = format!("master-runtime-{}", runtime_ref.as_str());
@@ -1136,6 +1168,27 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_master_prompt_carries_the_owner_instructions_after_its_context() {
+        let process = crate::agent_home::render("APP-RULE\n", "PROJECT-RULE\n");
+        let prompt = master_prompt("# Project context from CrazyAgent\n", &process);
+        assert_eq!(
+            prompt,
+            format!("# Project context from CrazyAgent\n\n{process}")
+        );
+        assert!(prompt.find("APP-RULE").unwrap() < prompt.find("PROJECT-RULE").unwrap());
+        assert_eq!(master_prompt("context\n", ""), "context\n");
+        let temporary = private_root();
+        let root = Root::open(temporary.path()).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let full = "a".repeat(crate::agent_home::TEXT_BYTES_MAX);
+        let largest = master_prompt(
+            &"x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX),
+            &crate::agent_home::render(&full, &full),
+        );
+        assert!(write_master_instructions(&root, &runtime_ref, &largest).is_ok());
+    }
+
+    #[test]
     fn master_instructions_are_one_private_file_in_the_turn_directory() {
         let temporary = private_root();
         let root = Root::open(temporary.path()).unwrap();
@@ -1158,7 +1211,11 @@ mod tests {
         assert!(write_master_instructions(&root, &runtime_ref, "replacement").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let (other, _, _) = allocate_master_capture(&root).unwrap();
-        let oversized = "x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1);
+        let oversized = "x".repeat(
+            crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+                + crate::agent_home::PROCESS_BYTES_MAX
+                + 2,
+        );
         assert!(write_master_instructions(&root, &other, &oversized).is_err());
         assert!(
             !temporary
@@ -1328,6 +1385,12 @@ mod tests {
         ]);
         expected.extend(crate::sandbox::AGENT_GIT_ENV);
         expected.extend(crate::sandbox::AGENT_TLS_ENV);
+        let tools = crate::sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
+        expected.extend(
+            tools
+                .iter()
+                .map(|(name, value)| (*name, value.to_str().unwrap())),
+        );
         assert_eq!(environment, expected);
 
         let claude = crate::engine::claude_host::launch_command(
@@ -1354,21 +1417,27 @@ mod tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
             .collect::<BTreeMap<_, _>>();
+        let claude_path = crate::sandbox::toolchains::agent_path(
+            &ToolHomes::owner().unwrap(),
+            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+        );
         let mut expected_claude = BTreeMap::from([
             ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
             ("HOME", home.to_str().unwrap()),
             ("LANG", "C"),
             ("LC_ALL", "C"),
-            (
-                "PATH",
-                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
-            ),
+            ("PATH", claude_path.as_str()),
             ("TERM", "dumb"),
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
         expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
         expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
+        expected_claude.extend(
+            tools
+                .iter()
+                .map(|(name, value)| (*name, value.to_str().unwrap())),
+        );
         assert_eq!(claude_environment, expected_claude);
 
         let run = |target: &Path| {

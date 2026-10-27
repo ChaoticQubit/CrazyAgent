@@ -38,7 +38,7 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -61,12 +61,12 @@ impl NativeBridge {
     /// Reads the plain pool list with each member's status.
     /// Input: none. Output: every pool's name, counts such as "2 ChatGPT, 1 Claude"
     /// and member status words.
-    pub async fn pool_summaries(&mut self) -> Result<Vec<PoolSummary>, BridgeError> {
+    pub async fn pool_summaries(&self) -> Result<Vec<PoolSummary>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
         let pools = self
-            .controller()?
+            .reader()?
             .pool_summaries()
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))?;

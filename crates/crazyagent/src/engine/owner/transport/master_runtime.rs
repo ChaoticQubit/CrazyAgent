@@ -10,13 +10,14 @@ use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::engine::codex_host::CodexHost;
 use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
-    MasterTurnPhase, MasterTurnView,
+    MasterTurnPhase, MasterTurnView, REPLY_BYTES_MAX, fitted_reply,
 };
 use crate::protocol::{ProjectId, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
+use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_turn};
 use std::fs::File;
 #[cfg(unix)]
 use std::io::Seek;
@@ -26,7 +27,6 @@ use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::time::Duration;
 
-const REPLY_BYTES_MAX: usize = 8192;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
@@ -35,12 +35,18 @@ const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 const STORAGE_BUSY: &str = "database is locked";
 const BUSY_ATTEMPTS: u32 = 5;
 const BUSY_PAUSE: Duration = Duration::from_millis(250);
+/// The note under a tools-on master turn whose edits now wait for the owner in Changes.
+pub(super) const CHANGES_WAITING: &str = "The edits from this turn are waiting for you in Changes.";
+/// How the note under a tools-on master turn starts when its edits could not be kept for
+/// review; the refusal code follows in brackets.
+pub(super) const CHANGES_NOT_KEPT: &str =
+    "The edits from this turn could not be kept for review and stay only in the master's worktree.";
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
     pub(super) sandbox: InstalledSandbox,
     pub(super) home: std::path::PathBuf,
-    pub(super) credential: Option<crate::engine::bootstrap::AgentCredential>,
+    pub(super) credential: crate::engine::bootstrap::AgentCredential,
     pub(super) artifact_sha256: String,
     pub(super) runtime_ref: RequestId,
     pub(super) capture_ref: RequestId,
@@ -67,6 +73,7 @@ struct ActiveMaster {
     runtime: MasterRuntimeView,
     capture_ref: RequestId,
     provenance: Provenance,
+    reported: Tokens,
 }
 
 impl MasterHost {
@@ -205,7 +212,7 @@ mod routing_tests;
 /// Runs one master turn step again while another engine connection holds the database
 /// write lock past the storage wait, which rolls the step's write back (LB-28). Input: the
 /// step. Output: its result, or `storage_busy` when the lock never freed.
-async fn when_storage_frees<T, F, Fut>(mut step: F) -> Result<T, EngineError>
+pub(super) async fn when_storage_frees<T, F, Fut>(mut step: F) -> Result<T, EngineError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, EngineError>>,
@@ -229,7 +236,7 @@ impl OwnerRuntimeHandle {
     /// conversation worktree checks it out on a blocking thread without the owner barrier,
     /// so owner reads and the database keep serving, then stores it and prepares again
     /// (LB-28). Input: the command. Output: the storage result, never a checkout.
-    async fn master_runtime_command(
+    pub(super) async fn master_runtime_command(
         &self,
         command: MasterRuntimeCommand,
     ) -> Result<MasterRuntimeResult, EngineError> {
@@ -380,25 +387,116 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Stores what a running master turn did, writing the same observation again while
+    /// another engine connection holds the database, so a reply already in hand is never
+    /// lost to a busy write (CR2-22). Inputs: the prepared turn, its id and the observation.
+    /// Output: the stored turn, or `storage_busy` when the lock never freed.
     pub(super) async fn observe_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         observation: MasterRuntimeObservation,
     ) -> Result<MasterTurnView, EngineError> {
-        match self
-            .master_runtime_command(MasterRuntimeCommand::Observe {
+        let observed = when_storage_frees(|| {
+            self.master_runtime_command(MasterRuntimeCommand::Observe {
                 host: self.identity(),
                 project_id: prepared.session.project_id.clone(),
                 session_id: prepared.session.session_id.clone(),
                 turn_id: turn_id.clone(),
                 attempt_id: prepared.attempt.request.id.clone(),
-                observation,
+                observation: observation.clone(),
             })
-            .await?
-        {
+        })
+        .await?;
+        match observed {
+            MasterRuntimeResult::Turn(turn) if prepared.tools && !turn.phase.outstanding() => {
+                Ok(self.land_master_turn(prepared, *turn).await)
+            }
             MasterRuntimeResult::Turn(turn) => Ok(*turn),
             _ => Err(failure("master_runtime_result")),
+        }
+    }
+
+    /// Lands what an ended tools-on master turn changed in its worktree (DEC-095): the
+    /// engine commits it into that worktree's change set and the turn gets a note for the
+    /// owner. Landing never fails the turn; when it fails the note says why. Inputs: the
+    /// prepared turn and the ended turn as stored. Output: the turn as stored now.
+    async fn land_master_turn(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn: MasterTurnView,
+    ) -> MasterTurnView {
+        assert!(prepared.tools && !turn.phase.outstanding());
+        assert_eq!(prepared.session.current_turn.as_ref(), Some(&turn.id));
+        let project = prepared.session.project_id.clone();
+        let agent = crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: prepared.session.session_id.as_str().to_owned(),
+            label: "Master".into(),
+        };
+        let repository = prepared.repository.clone();
+        let worktree = prepared.cwd.clone();
+        let end = crate::landing::TurnEnd {
+            outcome: match turn.phase {
+                MasterTurnPhase::Succeeded => crate::landing::TurnOutcome::Succeeded,
+                MasterTurnPhase::Cancelled => crate::landing::TurnOutcome::Cancelled,
+                _ => crate::landing::TurnOutcome::Failed,
+            },
+            turn: turn.id.as_str().to_owned(),
+            prompt_line: prepared
+                .message
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        let root = self.authority.root.verify().ok().and_then(|()| {
+            self.authority
+                .root
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+        let lease = prepared.lease.clone();
+        let landed = tokio::task::spawn_blocking(move || {
+            let root = root.ok_or_else(|| failure("changes_unavailable"))?;
+            let db = crate::landing::open(&root)?;
+            let workspace = crate::landing::Workspace {
+                project,
+                agent,
+                repository,
+                worktree,
+                git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
+            };
+            crate::landing_turns::record(&db, &workspace, &end)
+        })
+        .await
+        .unwrap_or_else(|_| Err(failure("changes_unavailable")));
+        let note = match landed {
+            Ok(
+                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
+            ) => {
+                return turn;
+            }
+            Ok(crate::landing_turns::Landed::Added(_)) => CHANGES_WAITING.to_owned(),
+            Err(error) => format!(
+                "{CHANGES_NOT_KEPT} ({})",
+                crate::protocol::plain_code(&error.0)
+            ),
+        };
+        let noted = when_storage_frees(|| {
+            self.master_runtime_command(MasterRuntimeCommand::Changes {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn.id.clone(),
+                note: note.clone(),
+            })
+        })
+        .await;
+        match noted {
+            Ok(MasterRuntimeResult::Turn(noted)) => *noted,
+            _ => turn,
         }
     }
 
@@ -479,7 +577,9 @@ impl OwnerRuntimeHandle {
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::Checkout(_) => {
+            MasterRuntimeResult::Profile(_)
+            | MasterRuntimeResult::Checkout(_)
+            | MasterRuntimeResult::Waiting => {
                 return Err(failure("master_runtime_result"));
             }
             #[cfg(all(test, unix))]
@@ -563,6 +663,7 @@ impl OwnerRuntimeHandle {
         };
         let account_ref = prepared.profile.binding().connection.account_ref.clone();
         let resources = prepared.attempt.request.route.resources.clone();
+        let home = launch.home.clone();
         let host = if harness == NativeHarness::Claude {
             MasterHost::Claude(Box::new(
                 ClaudeHost::spawn(
@@ -603,6 +704,7 @@ impl OwnerRuntimeHandle {
                 profile_ref,
                 worktree_lease: prepared.worktree_lease.clone(),
             },
+            reported: Tokens::default(),
         };
         let observed = self
             .collect_master_turn(prepared, turn_id, &mut active)
@@ -611,6 +713,8 @@ impl OwnerRuntimeHandle {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
+        self.count_master_usage(prepared, home, active.reported)
+            .await;
         if let Some(diagnostic) = active.host.diagnostic()
             && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
             && self.authority.root.verify().is_ok()
@@ -645,6 +749,53 @@ impl OwnerRuntimeHandle {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Counts one finished master turn under its project's master row before its home is
+    /// removed: the usage Claude Code reported for the turn, or the Codex records in the
+    /// home. A store that cannot be written leaves the turn uncounted and logs only the
+    /// failure code. Inputs: the prepared turn, its home and the reported usage.
+    async fn count_master_usage(
+        &self,
+        prepared: &PreparedMasterTurn,
+        home: std::path::PathBuf,
+        reported: Tokens,
+    ) {
+        let connection = &prepared.profile.binding().connection;
+        let (format, harness) = match prepared.session.selection.backend {
+            MasterBackend::Claude => (Format::Claude, "claude-code"),
+            MasterBackend::Codex => (Format::Codex, "codex"),
+            MasterBackend::Rcli => return,
+        };
+        let attribution = Attribution {
+            kind: RunKind::Master,
+            project: Some(prepared.session.project_id.clone()),
+            pool: Some(prepared.session.selection.pool_ref.clone()),
+            account: Some(connection.id.clone()),
+            agent: crate::usage::service::master_agent(Some(&prepared.session.project_id)),
+            harness: harness.to_owned(),
+        };
+        let session = prepared.session.session_id.as_str().to_owned();
+        let root = super::changes::engine_root(&self.authority);
+        let counted = tokio::task::spawn_blocking(move || {
+            let db = crate::usage::open(&root?)?;
+            count_turn(
+                &db,
+                &home,
+                format,
+                &attribution,
+                reported,
+                &session,
+                crate::team::now_ms(),
+            )
+        })
+        .await;
+        let problem = match counted {
+            Ok(Ok(_)) => return,
+            Ok(Err(problem)) => crate::usage::service::failure_code(&problem),
+            Err(_) => "usage_unavailable".to_owned(),
+        };
+        eprintln!("master usage not counted: {problem}");
     }
 
     async fn collect_master_turn(
@@ -718,6 +869,9 @@ impl OwnerRuntimeHandle {
             };
             validate_event(&active.provenance, turn_id, &event)?;
             active.capture.record(&event)?;
+            if let EventKind::TurnFinished { usage, .. } = &event.kind {
+                active.reported = Tokens::reported(usage);
+            }
             if let Some(native) = event
                 .native_session_id
                 .as_ref()
@@ -759,24 +913,25 @@ impl OwnerRuntimeHandle {
                     item_id,
                     text: delta,
                 } => {
-                    reply.push(Some(&item_id), &delta, prepared.tools)?;
+                    reply.push(Some(&item_id), &delta, prepared.tools);
                     assert!(active.capture.sequence > 0);
                 }
                 EventKind::AssistantText { text: delta, .. } => {
-                    reply.push(None, &delta, prepared.tools)?;
+                    reply.push(None, &delta, prepared.tools);
                     assert!(active.capture.sequence > 0);
                 }
                 EventKind::TurnFinished {
                     outcome: TurnOutcome::Success,
                     ..
                 } => {
-                    if reply.text.trim().is_empty() || active.runtime.native_session_id.is_none() {
+                    let text = std::mem::take(&mut reply).finish();
+                    if text.trim().is_empty() || active.runtime.native_session_id.is_none() {
                         return Err(failure("master_capture_incomplete"));
                     }
                     active.capture.finish()?;
                     return Ok(MasterRuntimeObservation::Response {
                         reply: MasterReply {
-                            text: reply.text,
+                            text,
                             provenance: MasterReplyProvenance {
                                 attempt_id: prepared.attempt.request.id.clone(),
                                 runtime_ref: active.runtime.runtime_ref.clone(),
@@ -810,8 +965,9 @@ impl OwnerRuntimeHandle {
 }
 
 /// Appends a master turn's stream diagnostic to the engine log
-/// `logs/master-stream.log` (0600, rotated, credentials redacted) so a failed turn or one
-/// whose harness kept talking after its result can be explained later. Input: the engine
+/// `logs/master-stream.log` (0600, rotated; frame kinds and sizes, never stream content) so a
+/// failed turn or one whose harness kept talking after its result can be explained later
+/// without copying tool output or credentials into the log (CR2-24). Input: the engine
 /// root, the conversation, turn, runtime, diagnostic and the turn's error code when it
 /// failed. Output: an error code when the log could not be written safely.
 fn keep_stream_diagnostic(
@@ -836,7 +992,7 @@ fn keep_stream_diagnostic(
         "message": diagnostic.message,
         "late_lines": diagnostic.late_lines,
         "late": diagnostic.late,
-        "tail": diagnostic.tail(),
+        "frames": diagnostic.frames(),
     });
     crate::engine::claude_host::diagnostic::append(
         &crate::paths::Layout::new(root.to_path_buf())
@@ -852,41 +1008,43 @@ fn keep_stream_diagnostic(
 #[derive(Default)]
 pub(super) struct ReplyText {
     pub(super) text: String,
+    dropped: usize,
     message: Option<String>,
 }
 
 impl ReplyText {
+    /// Ends the reply as its turn stores it, fitted by `fitted_reply`. Input: none.
+    /// Output: the reply text.
+    pub(super) fn finish(self) -> String {
+        fitted_reply(&self.text, self.dropped)
+    }
+
     /// Starts the reply over after a top-level tool step of a tools-on master.
     pub(super) fn tool_step(&mut self) {
         self.text.clear();
+        self.dropped = 0;
         self.message = None;
     }
 
     /// Adds streamed reply text. With tools on, text of a new agent message replaces what an
     /// earlier message said; with tools off every message adds to the reply, as before.
+    /// Past `REPLY_BYTES_MAX` the rest is only counted, for the note `finish` adds.
     /// Inputs: the agent message the text belongs to when the harness names one, the text and
-    /// the tools switch. Output: Ok, or `codex_host_output_limit` past `REPLY_BYTES_MAX`.
-    pub(super) fn push(
-        &mut self,
-        message: Option<&str>,
-        part: &str,
-        tools: bool,
-    ) -> Result<(), EngineError> {
+    /// the tools switch. Output: none.
+    pub(super) fn push(&mut self, message: Option<&str>, part: &str, tools: bool) {
         if tools && message.is_some() && message != self.message.as_deref() {
             self.text.clear();
+            self.dropped = 0;
             self.message = message.map(str::to_owned);
         }
-        if self
-            .text
-            .len()
-            .checked_add(part.len())
-            .is_none_or(|length| length > REPLY_BYTES_MAX)
-        {
-            return Err(failure("codex_host_output_limit"));
-        }
-        self.text.push_str(part);
+        let keep = if self.dropped == 0 {
+            part.floor_char_boundary(REPLY_BYTES_MAX - self.text.len())
+        } else {
+            0
+        };
+        self.text.push_str(&part[..keep]);
+        self.dropped = self.dropped.saturating_add(part.len() - keep);
         assert!(self.text.len() <= REPLY_BYTES_MAX);
-        Ok(())
     }
 }
 
@@ -957,6 +1115,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
         "gateway_rate_limited" => MasterReason::RateLimited,
         "gateway_cooldown" => MasterReason::CooldownActive,
+        "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit" => MasterReason::OutputLimit,
         "codex_host_capture_incomplete"
@@ -992,34 +1151,60 @@ mod tests {
     #[test]
     fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {
         let mut reply = ReplyText::default();
-        reply
-            .push(Some("message-1"), "I will write ", true)
-            .unwrap();
-        reply.push(Some("message-1"), "the note.", true).unwrap();
-        reply.push(Some("message-2"), "DO", true).unwrap();
-        reply.push(Some("message-2"), "NE", true).unwrap();
+        reply.push(Some("message-1"), "I will write ", true);
+        reply.push(Some("message-1"), "the note.", true);
+        reply.push(Some("message-2"), "DO", true);
+        reply.push(Some("message-2"), "NE", true);
         assert_eq!(reply.text, "DONE");
-        reply.push(None, " more", true).unwrap();
+        reply.push(None, " more", true);
         assert_eq!(reply.text, "DONE more");
         reply.tool_step();
         assert_eq!(reply.text, "");
-        reply.push(None, "After the step.", true).unwrap();
+        reply.push(None, "After the step.", true);
         assert_eq!(reply.text, "After the step.");
 
         let mut reply = ReplyText::default();
-        reply.push(Some("message-1"), "First. ", false).unwrap();
-        reply.push(Some("message-2"), "Second.", false).unwrap();
+        reply.push(Some("message-1"), "First. ", false);
+        reply.push(Some("message-2"), "Second.", false);
         assert_eq!(reply.text, "First. Second.");
+    }
 
+    #[test]
+    fn a_master_reply_past_its_stored_room_keeps_its_start_and_says_what_it_left_out() {
+        use crate::master_session::reply_bytes;
+        let part = "A long plan line that the master keeps on writing.\n";
+        let whole = part.repeat(400);
+        let quotes = "\"".repeat(7000);
+        for (parts, tools) in [
+            (vec![part; 400], true),
+            (vec![part; 400], false),
+            (vec![quotes.as_str()], false),
+        ] {
+            let said = parts.concat();
+            let mut reply = ReplyText::default();
+            for part in parts {
+                reply.push(Some("message-1"), part, tools);
+            }
+            let text = reply.finish();
+            assert!(
+                reply_bytes(&text) <= REPLY_BYTES_MAX,
+                "{}",
+                reply_bytes(&text)
+            );
+            let (kept, note) = text.rsplit_once("\n\n").unwrap();
+            assert!(said.starts_with(kept));
+            assert_eq!(
+                note,
+                format!(
+                    "[{} more bytes of this reply were left out.]",
+                    said.len() - kept.len()
+                )
+            );
+        }
         let mut reply = ReplyText::default();
-        let long = "x".repeat(REPLY_BYTES_MAX);
-        reply.push(Some("message-1"), &long, true).unwrap();
-        assert_eq!(
-            reply.push(Some("message-1"), "y", true),
-            Err(failure("codex_host_output_limit"))
-        );
-        reply.push(Some("message-2"), "z", true).unwrap();
-        assert_eq!(reply.text, "z");
+        reply.push(Some("message-1"), &whole, true);
+        reply.push(Some("message-2"), "DONE", true);
+        assert_eq!(reply.finish(), "DONE");
     }
 
     fn protocol_input() -> ObservedEvent {
@@ -1168,11 +1353,66 @@ mod tests {
             entry["late"],
             serde_json::json!(["system/task_notification"])
         );
-        assert_eq!(
-            entry["tail"],
-            "{\"type\":\"result\",\"subtype\":\"success\"}\n"
-        );
+        assert_eq!(entry["frames"], serde_json::json!(["result/success 37"]));
         assert!(entry["at_ms"].as_u64().is_some_and(|at| at > 0));
+    }
+
+    #[test]
+    fn a_master_stream_diagnostic_logs_frame_kinds_and_sizes_and_never_stream_content() {
+        let root = tempfile::Builder::new()
+            .prefix("crazyagent-stream-log")
+            .tempdir()
+            .unwrap();
+        let secrets = [
+            "ghp_0123456789abcdefABCDEF0123456789abcd",
+            "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+            "AKIAIOSFODNN7EXAMPLE",
+            "sk-proj-AbC_12-x",
+        ];
+        let claude = format!(
+            "{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\
+\"content\":\"GITHUB_TOKEN=x\\n{}\\t{}\\n{}\\n{}\"}}]}}}}\n",
+            secrets[0], secrets[1], secrets[2], secrets[3]
+        );
+        let codex = format!(
+            "{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\
+\"aggregatedOutput\":\"\\n{}\"}}}}}}\n",
+            secrets[0]
+        );
+        let mut diagnostic = StreamDiagnostic::default();
+        diagnostic.keep(claude.as_bytes());
+        diagnostic.keep(codex.as_bytes());
+        diagnostic.keep(b"{\"id\":7,\"result\":{}}\n{\"type\":\"assistant\"");
+        let runtime = MasterRuntimeView {
+            runtime_ref: RequestId::new("runtime-1").unwrap(),
+            artifact_sha256: "a".repeat(64),
+            native_session_id: None,
+        };
+        keep_stream_diagnostic(
+            root.path(),
+            &SessionId::new("session-1").unwrap(),
+            &RequestId::new("turn-1").unwrap(),
+            &runtime,
+            &diagnostic,
+            Some("claude_host_protocol_invalid_state"),
+        )
+        .unwrap();
+        let text =
+            std::fs::read_to_string(root.path().join("logs").join("master-stream.log")).unwrap();
+        for secret in secrets {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert!(!text.contains("GITHUB_TOKEN"), "{text}");
+        let entry: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(
+            entry["frames"],
+            serde_json::json!([
+                format!("user {}", claude.len() - 1),
+                format!("item/completed {}", codex.len() - 1),
+                "response 20",
+                "unfinished 19"
+            ])
+        );
     }
 
     struct RuntimeFixture {

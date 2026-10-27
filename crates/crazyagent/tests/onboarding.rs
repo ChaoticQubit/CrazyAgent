@@ -18,13 +18,22 @@ use crazyagent::research::runner::{
     ResearchAccount, ResearchHarness, ResearchLimits, ResearchRunner,
 };
 use crazyagent::setup::PackState;
-use research_support::{claude, codex, hanging_endpoint, processes_with};
+#[cfg(target_os = "macos")]
+use research_support::hanging_endpoint;
+use research_support::{claude, codex, processes_with};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+#[cfg(target_os = "macos")]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -33,8 +42,11 @@ const PROJECT: &str = "demo-app";
 const GRAPHIFY_MISSING: &str = "graphify not installed";
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MODEL: &str = "qwen2.5:7b";
+#[cfg(target_os = "macos")]
 const OLLAMA: &str = "127.0.0.1:11434";
+#[cfg(target_os = "macos")]
 const OLLAMA_TIME: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
 const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"demo-app\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 const SAVED_DRAFT: &str = r#"{"name":"Demo Tool","draft":{"about":"Kept by the owner.","tech_stack":["Postgres"],"platforms":["cli"],"research":[],"pool":null,"team":null,"documents":[]},"facts":{"languages":[],"build_commands":[],"test_commands":[],"entry_points":[]}}"#;
@@ -45,6 +57,7 @@ const FORGED_BRIEF: &str = "# Forged brief\n\nWritten by a project agent.\n";
 
 /// Fails the test with the command that fixes it unless the local Ollama serves the pool
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
+#[cfg(target_os = "macos")]
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
     let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
@@ -148,10 +161,12 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
 
 /// The real `crazyagent engine` binary on a runtime folder, started with
 /// writable settings and no `--codex-executable` or `--claude-executable`.
+#[cfg(target_os = "macos")]
 struct EngineProcess {
     child: Child,
 }
 
+#[cfg(target_os = "macos")]
 impl EngineProcess {
     /// Starts the binary and waits up to 20 s for its `ready` line.
     fn start(root: &Path, global: &Path, project_settings: &Path) -> Self {
@@ -210,6 +225,7 @@ impl EngineProcess {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for EngineProcess {
     /// Stops an engine a failed test left running, so no step process
     /// outlives the test.
@@ -221,6 +237,7 @@ impl Drop for EngineProcess {
 /// The engine a bench drives: in this test process, or the real binary.
 enum Engine {
     InProcess(Box<EngineService>, watch::Sender<bool>),
+    #[cfg(target_os = "macos")]
     Binary(EngineProcess),
 }
 
@@ -353,6 +370,7 @@ impl Bench {
 
     /// Starts the real engine binary without Codex or Claude Code and
     /// attaches the owner client, retrying for up to 20 s.
+    #[cfg(target_os = "macos")]
     async fn start_binary() -> Self {
         let folders = Folders::new(|_| {});
         let process =
@@ -504,8 +522,10 @@ impl Bench {
             generation,
         } = self;
         drop(owner);
-        let Engine::InProcess(mut service, _stop) = engine else {
-            panic!("a restart needs the in-process engine");
+        let (mut service, _stop) = match engine {
+            Engine::InProcess(service, stop) => (service, stop),
+            #[cfg(target_os = "macos")]
+            Engine::Binary(_) => panic!("a restart needs the in-process engine"),
         };
         service.shutdown().await.unwrap();
         between(&root);
@@ -555,6 +575,40 @@ impl Bench {
         serde_json::from_value(body["spec"]["repositories"].clone()).unwrap()
     }
 
+    /// The draft text the engine keeps on the project's onboarding row, read
+    /// from its database.
+    fn drafted(&self, project: &ProjectId) -> String {
+        let db = rusqlite::Connection::open_with_flags(
+            self.root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT drafted FROM onboarding WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The bytes, inode and modified time of the draft file in the repo,
+    /// read without following a link.
+    fn draft_file(&self) -> (Vec<u8>, u64, std::time::SystemTime) {
+        use std::os::unix::fs::MetadataExt;
+        let file = self
+            .repo
+            .join(".crazyagent")
+            .join("setup")
+            .join("draft.json");
+        let metadata = fs::symlink_metadata(&file).unwrap();
+        assert!(metadata.file_type().is_file());
+        (
+            fs::read(&file).unwrap(),
+            metadata.ino(),
+            metadata.modified().unwrap(),
+        )
+    }
+
     /// Saves the owner's setup for `project` from the review form: the
     /// onboarding draft with the owner's name, about text and platforms.
     async fn save_setup(&mut self, project: &ProjectId, draft: &ProjectSetup) {
@@ -587,6 +641,7 @@ impl Bench {
         drop(owner);
         match engine {
             Engine::InProcess(mut service, _stop) => service.shutdown().await.unwrap(),
+            #[cfg(target_os = "macos")]
             Engine::Binary(mut process) => {
                 let clean = tokio::task::spawn_blocking(move || process.terminate())
                     .await
@@ -615,6 +670,7 @@ async fn stop_service(service: OnboardingService) {
 /// A local model endpoint that answers every request with HTTP 400 and an
 /// OpenAI-style error naming the missing model, so a real Codex run fails at
 /// once. Returns the port; the serving thread ends with the test process.
+#[cfg(target_os = "macos")]
 fn rejecting_endpoint() -> u16 {
     let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -659,6 +715,7 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     require_model();
@@ -921,6 +978,7 @@ async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let mut bench = Bench::start(|_| {}).await;
@@ -950,6 +1008,7 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1092,10 +1151,12 @@ async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
 }
 
 /// The installed graphify, or a BLOCKED panic naming the missing tool.
+#[cfg(target_os = "macos")]
 fn graphify() -> PathBuf {
     installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_engine_started_without_codex_builds_the_graph_and_reports_codex_missing() {
     graphify();
@@ -1120,6 +1181,7 @@ async fn an_engine_started_without_codex_builds_the_graph_and_reports_codex_miss
     assert!(processes_with(&onboarding_state).is_empty());
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
     let graphify = graphify();
@@ -1302,6 +1364,76 @@ fn project_rows(root: &Path, table: &str) -> i64 {
         .unwrap()
 }
 
+/// Leaves an onboarding row for `PROJECT` at `folder` with no project row, as a
+/// project removal made before removals took the onboarding with them.
+fn leftover_onboarding(root: &Path, folder: &Path) {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES (?1,?2,?3,'done','done','{}',1,1)",
+            [PROJECT, folder.to_str().unwrap(), POOL],
+        )
+        .unwrap();
+}
+
+fn onboarding_repo(root: &Path) -> String {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .query_row(
+            "SELECT repo FROM onboarding WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_onboarding_of_a_vanished_folder_with_the_same_name_is_replaced() {
+    let mut bench = Bench::start(|_| {}).await;
+    let gone = bench
+        .repo
+        .parent()
+        .unwrap()
+        .join("moved-away")
+        .join(PROJECT);
+    assert!(!gone.exists());
+    leftover_onboarding(&bench.root, &gone);
+    assert_eq!(project_rows(&bench.root, "project_setups"), 0);
+
+    let project = bench.start_onboarding().await;
+    assert_eq!(onboarding_repo(&bench.root), bench.repo.to_str().unwrap());
+    assert_eq!(project_rows(&bench.root, "onboarding"), 1);
+    let setup = bench.owner.project_setup(project.clone()).await.unwrap();
+    assert_eq!(setup.map(|setup| setup.project_id), Some(project.clone()));
+    let view = bench.view(&project).await;
+    assert_eq!(view.project_id, project);
+    assert!(!view.finished, "{view:?}");
+    assert!(bench.repo.join(".crazyagent/context/brief.md").is_file());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_onboarding_of_another_folder_still_there_refuses_with_a_plain_code() {
+    let mut bench = Bench::start(|_| {}).await;
+    let other = bench.repo.parent().unwrap().join("elsewhere").join(PROJECT);
+    fs::create_dir_all(&other).unwrap();
+    leftover_onboarding(&bench.root, &other);
+
+    let repo = bench.repo.clone();
+    let response = bench.start_onboarding_at(&repo).await;
+    assert_eq!(
+        rejection(&response).as_deref(),
+        Some("onboarding_project_mismatch"),
+        "{response:?}"
+    );
+    assert_eq!(onboarding_repo(&bench.root), other.to_str().unwrap());
+    assert_eq!(project_rows(&bench.root, "project_setups"), 0);
+    assert!(!bench.repo.join(".crazyagent").exists());
+    assert!(other.is_dir());
+    bench.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_working_project() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1441,6 +1573,7 @@ async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_runnin
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_mapping_agent_reports_its_own_reason() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1472,6 +1605,170 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     );
     assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
     assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+/// Makes the agent state folder `name` under `agents` with a file in it, as an
+/// earlier onboarding of a project with the same id left it.
+fn leftover_agent(agents: &Path, name: &str) {
+    fs::create_dir_all(agents.join(name).join("home")).unwrap();
+    fs::write(agents.join(name).join("stdout.log"), "earlier run\n").unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a_new_onboarding() {
+    let graphify = graphify();
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let port = rejecting_endpoint();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "closed-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let earlier = [
+        format!("onboard-g-{PROJECT}-1"),
+        format!("onboard-m-{PROJECT}-2"),
+    ];
+    for name in &earlier {
+        leftover_agent(&agents, name);
+    }
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move || Some(graphify.clone()),
+        OnboardingLimits {
+            graph_time: Duration::from_secs(240),
+            mapping_time: Duration::from_secs(240),
+        },
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(540)).await;
+    stop_service(service).await;
+    assert_eq!(view.graph, Step::Done, "{view:?}");
+    assert_eq!(
+        view.mapping,
+        failed("Agent stopped: The model closed-model does not exist"),
+        "{view:?}"
+    );
+    for name in &earlier {
+        assert_eq!(
+            fs::read_to_string(agents.join(name).join("stdout.log")).unwrap(),
+            "earlier run\n"
+        );
+    }
+    assert_eq!(agent_runs(&agents, "onboard-g-"), 2);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 2);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+fn onboarding_created_ms(root: &Path) -> i64 {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .query_row(
+            "SELECT created_ms FROM onboarding WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_step_that_cannot_start_records_its_cause_code() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let account = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "never-asked-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let created = onboarding_created_ms(&bench.root);
+    let taken = [
+        format!("onboard-g-{PROJECT}-{created}-1"),
+        format!("onboard-m-{PROJECT}-{created}-2"),
+    ];
+    for name in &taken {
+        leftover_agent(&agents, name);
+    }
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        || Some(PathBuf::from("/usr/bin/true")),
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.graph,
+        failed("Graph build could not start (run_name_used)"),
+        "{view:?}"
+    );
+    assert_eq!(
+        view.mapping,
+        failed("Mapping agent could not start (run_name_used)"),
+        "{view:?}"
+    );
+    assert_eq!(agent_runs(&agents, "onboard-"), 2);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let account = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "linux-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        || None,
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed("Team agents and research are not available on Linux in this version."),
+        "{view:?}"
+    );
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_graph_build_on_linux_stops_with_the_plain_unavailable_line() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (runner, agents) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        || Some(PathBuf::from("/usr/bin/true")),
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.graph,
+        failed("Graph build is not available on Linux in this version."),
+        "{view:?}"
+    );
+    assert_eq!(view.mapping, failed(NO_ACCOUNT), "{view:?}");
+    assert!(!bench.repo.join("graphify-out").exists());
+    assert_eq!(agent_runs(&agents, "onboard-g-"), 0);
     bench.stop().await;
 }
 
@@ -1532,7 +1829,8 @@ async fn an_added_folder_is_its_project_repository_and_older_projects_are_repair
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_pick_changes() {
+async fn a_paused_mapping_rechecks_without_rewriting_its_draft_and_moves_on_once_the_pick_changes()
+{
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
     let pick = Arc::new(Mutex::new(AccountPick::Paused { until_ms: i64::MAX }));
@@ -1553,15 +1851,24 @@ async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_
         )
     };
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut first = None;
     while *asked.lock().unwrap() < 3 {
         assert!(
             Instant::now() < deadline,
             "mapping never asked for an account"
         );
+        if first.is_none() && *asked.lock().unwrap() >= 1 {
+            first = Some((bench.draft_file(), bench.drafted(&project)));
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let (file, drafted) = first.unwrap();
+    assert!(String::from_utf8(file.0.clone()).unwrap().contains("Rust"));
     let view = bench.view(&project).await;
     assert!(!settled(&view.mapping), "{view:?}");
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert_eq!(bench.draft_file(), file);
+    assert_eq!(bench.drafted(&project), drafted);
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     *pick.lock().unwrap() = AccountPick::NoUsableAccount;
     let view = bench.settle(&project, Duration::from_secs(60)).await;
@@ -1573,7 +1880,7 @@ async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
-    const UNTIL_MS: i64 = 1_792_729_920_000;
+    const UNTIL_MS: i64 = 4_102_444_800_000;
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
     let asked = Arc::new(Mutex::new(0_usize));

@@ -36,7 +36,7 @@ defaults:
 jobs:
   linux:
     name: Linux format, typecheck, lint and tests
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: >-
@@ -119,19 +119,22 @@ jobs:
         run: |
           set -euo pipefail
           prefix="$RUNNER_TOOL_CACHE/claude-code/$CLAUDE_CODE_VERSION/x64"
-          if [ ! -f "$prefix.complete" ]; then
-            work="$RUNNER_TEMP/claude-code"
-            rm -rf "$work" "$prefix"
-            mkdir -p "$work" "$prefix/bin"
+          work="$RUNNER_TEMP/claude-code"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/claude.tgz" ]; then
+            cp "$prefix/claude.tgz" "$work/claude.tgz"
+          fi
+          if ! echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | sha256sum -c --status - 2>/dev/null; then
             curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
             echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | sha256sum -c -
-            tar -xzf "$work/claude.tgz" -C "$work" package/claude
-            install -m 0755 "$work/package/claude" "$prefix/bin/claude"
-            rm -rf "$work"
-            touch "$prefix.complete"
+            cp "$work/claude.tgz" "$prefix/claude.tgz.$$"
+            mv "$prefix/claude.tgz.$$" "$prefix/claude.tgz"
           fi
-          test "$("$prefix/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
-          echo "$prefix/bin" >> "$GITHUB_PATH"
+          tar -xzf "$work/claude.tgz" -C "$work" package/claude
+          install -m 0755 "$work/package/claude" "$work/bin/claude"
+          test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -174,7 +177,7 @@ jobs:
 
   macos:
     name: macOS lint and tests
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal
@@ -244,19 +247,22 @@ jobs:
         run: |
           set -euo pipefail
           prefix="$RUNNER_TOOL_CACHE/claude-code/$CLAUDE_CODE_VERSION/arm64"
-          if [ ! -f "$prefix.complete" ]; then
-            work="$RUNNER_TEMP/claude-code"
-            rm -rf "$work" "$prefix"
-            mkdir -p "$work" "$prefix/bin"
+          work="$RUNNER_TEMP/claude-code"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/claude.tgz" ]; then
+            cp "$prefix/claude.tgz" "$work/claude.tgz"
+          fi
+          if ! echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
             curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
             echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | shasum -a 256 -c -
-            tar -xzf "$work/claude.tgz" -C "$work" package/claude
-            install -m 0755 "$work/package/claude" "$prefix/bin/claude"
-            rm -rf "$work"
-            touch "$prefix.complete"
+            cp "$work/claude.tgz" "$prefix/claude.tgz.$$"
+            mv "$prefix/claude.tgz.$$" "$prefix/claude.tgz"
           fi
-          test "$("$prefix/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
-          echo "$prefix/bin" >> "$GITHUB_PATH"
+          tar -xzf "$work/claude.tgz" -C "$work" package/claude
+          install -m 0755 "$work/package/claude" "$work/bin/claude"
+          test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:

@@ -6,7 +6,7 @@ import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
-import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, gitHubPage, repoMatches, repoMeta } from "./intake";
+import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, devicePolling, gitHubPage, repoMatches, repoMeta } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -107,11 +107,16 @@ export function GitHubSignIn({ status, reloadStatus }: { status: GitHubStatus; r
   const [tokenOpen, setTokenOpen] = useState(false);
   const tokenRef = useRef<HTMLInputElement>(null);
 
+  const polling = devicePolling(device, status.signed_in, now);
   useEffect(() => {
-    if (!device || status.signed_in) return;
-    const timer = window.setInterval(() => { setNow(Date.now()); reloadStatus(); }, GITHUB_POLL_MS);
+    if (!polling) return;
+    const timer = window.setInterval(() => {
+      const at = Date.now();
+      setNow(at);
+      if (devicePolling(device, false, at)) reloadStatus();
+    }, GITHUB_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [device, status.signed_in]);
+  }, [device, polling]);
 
   const failed = (result: { kind: "not_ready" } | { kind: "error"; code: string }, what: string) =>
     setProblem(result.kind === "not_ready" ? `${what} isn't in this build.` : intakeCopy(result));
@@ -155,7 +160,7 @@ export function GitHubSignIn({ status, reloadStatus }: { status: GitHubStatus; r
  * account's repositories page by page and clones one into the projects folder. */
 export function CloneFromGitHub() {
   const session = useAppSession();
-  const [status, reloadStatus] = useLoad(loadGitHubStatus);
+  const [status, reloadStatus] = useLoad(loadGitHubStatus, [], "github-status");
   const [problem, setProblem] = useState("");
   const [repos, setRepos] = useState<Loaded<GitHubRepo[]>>({ kind: "loading" });
   const [next, setNext] = useState<number | null>(null);

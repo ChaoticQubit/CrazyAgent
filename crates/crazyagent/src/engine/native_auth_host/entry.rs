@@ -13,6 +13,7 @@ use tokio::io::unix::AsyncFd;
 
 const TOKEN_BYTES: usize = 32;
 const BOOTSTRAP_TIME_MAX: Duration = Duration::from_secs(10);
+const CHECK_RENEWAL_WAIT: Duration = Duration::from_secs(90);
 
 pub(super) async fn read_bootstrap(
     input: &OwnedFd,
@@ -126,12 +127,13 @@ async fn run_inner(
     };
     let purpose = fact.action.profile_purpose();
     let mut custody = binding.capture_native_profile_custody()?;
-    let guard = custody.acquire_use(
+    let guard = custody.acquire_use_within(
         &host,
         &fact.binding,
         &fact.operation_id,
         fact.generation,
         purpose,
+        Some(CHECK_RENEWAL_WAIT),
     )?;
     let session = CustodySession::new(guard);
     session.check(&mut channel).await?;

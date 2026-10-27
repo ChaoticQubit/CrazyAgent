@@ -1,4 +1,4 @@
-use crazyagent::client_controller::OwnerController;
+use crazyagent::client_controller::{ControllerView, OwnerController};
 use crazyagent::conversation::{
     ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
     TEXT_BYTES_MAX,
@@ -11,13 +11,17 @@ use crazyagent::engine::owner::{
 use crazyagent::protocol::{BaselineId, ProjectId, ProjectSpec};
 use crazyagent::verification::BaselineDraft;
 use serde::Serialize;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 mod account_profile;
 mod account_setup;
 mod accounts;
 mod agents;
+mod changes;
+mod cleanup;
 mod harnesses;
 pub mod intake;
 pub mod master;
@@ -28,10 +32,13 @@ pub mod open;
 mod owner_setup;
 pub mod picker;
 mod plugins;
+mod process;
 pub mod project_setup;
 mod queue;
+mod scheduling;
 mod team;
 pub mod terminal;
+mod usage;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -60,6 +67,26 @@ impl std::error::Error for BridgeError {}
 /// other commands run while it waits on the engine. Output: the call's result.
 pub type Unlocked<T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, BridgeError>> + Send>>;
+
+/// Shows the owner's unseen team notifications on the app icon: the count as the badge, removed
+/// at zero, and one attention request when a new notification arrived.
+/// Takes the main window, the unseen count and whether one is new.
+/// Returns a plain failure where the platform has no app badge.
+pub fn attention(
+    window: &tauri::WebviewWindow,
+    unseen: u32,
+    alert: bool,
+) -> Result<(), BridgeError> {
+    window
+        .set_badge_count((unseen > 0).then_some(i64::from(unseen)))
+        .map_err(|_| failure("attention_unavailable"))?;
+    if alert && unseen > 0 {
+        window
+            .request_user_attention(Some(tauri::UserAttentionType::Informational))
+            .map_err(|_| failure("attention_unavailable"))?;
+    }
+    Ok(())
+}
 
 fn failure(code: &'static str) -> BridgeError {
     BridgeError { code, cause: None }
@@ -169,6 +196,23 @@ pub struct ProjectPage {
     pub fresh: bool,
 }
 
+/// The projects Home, the sidebar, Go to and the desktop's name checks list: at most
+/// `PROJECT_LIST_MAX` in engine order, and whether the engine holds more than that.
+#[derive(Debug, Serialize)]
+pub struct ProjectList {
+    pub items: Vec<ProjectRow>,
+    pub more: bool,
+}
+
+/// The most projects one `project_list` read returns, the terminal app's bound.
+pub const PROJECT_LIST_MAX: usize = 200;
+
+/// The JSON size of one project row at most: a 128-byte id, a 256-byte name whose every
+/// byte may escape to two, a 20-digit repository count and the field names.
+const PROJECT_ROW_BYTES_MAX: usize = 704;
+
+const PROJECT_LIST_BYTES_MAX: usize = PROJECT_LIST_MAX * PROJECT_ROW_BYTES_MAX + 64;
+
 #[derive(Debug, Serialize)]
 pub struct ConversationRow {
     pub kind: &'static str,
@@ -246,6 +290,40 @@ pub struct NativeBridge {
     model_access_next: Option<crazyagent::engine::owner::ModelAccessCursor>,
     native_auth: Option<native_auth::Operation>,
     account_profile: Option<account_profile::Operation>,
+    reads: Mutex<Option<ControllerView>>,
+}
+
+/// One plain read's controller: a copy on the same connection that starts from the bridge
+/// controller's view and, once the read is done, leaves the view it ended with for the bridge
+/// controller to take before its next use, as if the read had run on it.
+struct Reader<'a> {
+    controller: OwnerController,
+    before: Option<ControllerView>,
+    reads: &'a Mutex<Option<ControllerView>>,
+}
+
+impl Deref for Reader<'_> {
+    type Target = OwnerController;
+
+    fn deref(&self) -> &OwnerController {
+        &self.controller
+    }
+}
+
+impl DerefMut for Reader<'_> {
+    fn deref_mut(&mut self) -> &mut OwnerController {
+        &mut self.controller
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        if let Some(view) = self.controller.view()
+            && self.before.as_ref() != Some(view)
+        {
+            *self.reads.lock().unwrap_or_else(PoisonError::into_inner) = Some(view.clone());
+        }
+    }
 }
 
 impl NativeBridge {
@@ -263,10 +341,12 @@ impl NativeBridge {
             model_access_next: None,
             native_auth: None,
             account_profile: None,
+            reads: Mutex::new(None),
         }
     }
 
     pub async fn connect(&mut self) -> Result<ConnectionStatus, BridgeError> {
+        self.settle_reads();
         self.model_access = None;
         self.model_access_next = None;
         self.next = None;
@@ -311,9 +391,54 @@ impl NativeBridge {
     }
 
     fn controller(&mut self) -> Result<&mut OwnerController, BridgeError> {
+        self.settle_reads();
         self.controller
             .as_mut()
             .ok_or_else(|| failure("not_connected"))
+    }
+
+    fn reader(&self) -> Result<Reader<'_>, BridgeError> {
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| failure("not_connected"))?;
+        let before = controller.view().cloned();
+        let controller = controller.reader().map_err(|_| failure("not_connected"))?;
+        assert_eq!(controller.view(), before.as_ref());
+        Ok(Reader {
+            controller,
+            before,
+            reads: &self.reads,
+        })
+    }
+
+    /// Gives the bridge controller the view the last plain read ended with, so a change or
+    /// a ticket check sees what it would have seen had that read run on the controller.
+    /// Output: none; nothing changes when no read finished since the last call.
+    fn settle_reads(&mut self) {
+        let read = self
+            .reads
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let (Some(view), Some(controller)) = (read, self.controller.as_mut()) {
+            controller.adopt_view(view);
+        }
+    }
+
+    /// The view the bridge controller has, or will have once it takes the last plain read's.
+    /// Output: that view, or None before any read.
+    fn current_view(&self) -> Option<ControllerView> {
+        let read = self
+            .reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        read.or_else(|| {
+            self.controller
+                .as_ref()
+                .and_then(|controller| controller.view().cloned())
+        })
     }
 
     pub async fn baselines(&mut self, next: bool) -> Result<BaselinePage, BridgeError> {
@@ -397,7 +522,7 @@ impl NativeBridge {
 
     fn prepare(&mut self, ticket: &str, revoke: bool) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         let selected = self
@@ -497,9 +622,17 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
-            OwnerMutation::Team { action } => {
-                ("team", Some(action.project().as_str().to_owned()), None)
-            }
+            OwnerMutation::SetProjectReadPaths { project_id, .. } => (
+                "project_read_paths",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
+            OwnerMutation::Team { action } => (
+                "team",
+                action.project().map(|project| project.as_str().to_owned()),
+                None,
+            ),
+            OwnerMutation::AccountSchedule { .. } => ("account_schedule", None, None),
             OwnerMutation::UpdateProjectSetup { project_id, .. } => (
                 "project_setup_update",
                 Some(project_id.as_str().to_owned()),
@@ -563,12 +696,17 @@ impl NativeBridge {
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::NewSession {
+                    project_id, ..
+                }
+                | crazyagent::master_session::MasterOwnerAction::Resume { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Cancel { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
                     ("master", Some(project_id.as_str().to_owned()), None)
                 }
-                crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
+                crazyagent::master_session::MasterOwnerAction::Resolve { .. }
+                | crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
                     return Err(failure("unexpected_pending_intent"));
                 }
             },
@@ -598,6 +736,39 @@ impl NativeBridge {
 
     pub async fn retry_intent(&mut self) -> Result<IntentReceipt, BridgeError> {
         self.deliver_intent(false).await
+    }
+
+    /// Drops the kept change when no copy of it can be recorded: it was never sent, or the
+    /// engine's last answer was that it never recorded it. Output: the connection after the
+    /// drop, `change_may_be_recorded` while a send of it may still land, or `no_pending_intent`.
+    pub fn drop_intent(&mut self) -> Result<ConnectionStatus, BridgeError> {
+        self.controller
+            .as_mut()
+            .ok_or_else(|| failure("no_pending_intent"))?
+            .discard_refused()
+            .map_err(|error| match error.0.as_str() {
+                "controller_no_pending_intent" => failure("no_pending_intent"),
+                other => caused("change_may_be_recorded", other),
+            })?;
+        self.selected = None;
+        self.next = None;
+        assert!(self.pending_intent()?.is_none());
+        Ok(self.status())
+    }
+
+    /// Reports whether a kept change still holds up a new one, first dropping a change the
+    /// engine answered it never recorded, so that answer never blocks the next change.
+    /// Output: true while a kept change may still be recorded or is unsent.
+    pub(crate) fn blocked(&mut self) -> bool {
+        if let Some(controller) = self.controller.as_mut()
+            && controller
+                .pending()
+                .is_some_and(|pending| pending.unrecorded())
+        {
+            let dropped = controller.discard_refused();
+            assert!(dropped.is_ok(), "an unrecorded change can be dropped");
+        }
+        self.status().pending
     }
 
     /// Sends or reconciles the kept owner change and reports what the engine settled.
@@ -676,6 +847,38 @@ impl NativeBridge {
             self.projects_next = None;
             None
         };
+        let (rows, next) = self.project_page(cursor).await?;
+        let page = bounded(ProjectPage {
+            items: rows,
+            has_more: next.is_some(),
+            fresh: true,
+        })?;
+        self.projects_next = next;
+        Ok(page)
+    }
+
+    /// Reads every project page by page inside this one call, with a cursor of its own, so
+    /// list reads that overlap never share paging state with each other or with `projects`.
+    /// Input: none. Output: at most `PROJECT_LIST_MAX` projects in engine order and whether the
+    /// engine holds more, after at most `PROJECT_LIST_MAX + 1` page reads.
+    pub async fn project_list(&mut self) -> Result<ProjectList, BridgeError> {
+        let mut items = Vec::new();
+        let mut cursor = None;
+        for _ in 0..=PROJECT_LIST_MAX {
+            let (rows, next) = self.project_page(cursor.take()).await?;
+            items.extend(rows);
+            match next {
+                Some(next) if items.len() < PROJECT_LIST_MAX => cursor = Some(next),
+                next => return cut_projects(items, next.is_some()),
+            }
+        }
+        cut_projects(items, true)
+    }
+
+    async fn project_page(
+        &mut self,
+        cursor: Option<OwnerPageCursor>,
+    ) -> Result<(Vec<ProjectRow>, Option<OwnerPageCursor>), BridgeError> {
         let state = self
             .controller()?
             .read_page(OwnerView::Projects, cursor, Some(PAGE_SIZE))
@@ -702,13 +905,7 @@ impl NativeBridge {
                 _ => Err(failure("unexpected_reply")),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let page = bounded(ProjectPage {
-            items: rows,
-            has_more: next.is_some(),
-            fresh: true,
-        })?;
-        self.projects_next = next;
-        Ok(page)
+        Ok((rows, next))
     }
 
     pub async fn create_project(
@@ -717,7 +914,7 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -880,7 +1077,7 @@ impl NativeBridge {
         brief: bool,
     ) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -1037,18 +1234,64 @@ fn display_content(bytes: Vec<u8>) -> (String, &'static str) {
 }
 
 fn bounded<T: Serialize>(value: T) -> Result<T, BridgeError> {
+    bounded_by(value, PROJECTION_BYTES_MAX)
+}
+
+fn bounded_by<T: Serialize>(value: T, maximum: usize) -> Result<T, BridgeError> {
     let bytes = serde_json::to_vec(&value).map_err(|_| failure("projection_failed"))?;
-    if bytes.len() > PROJECTION_BYTES_MAX {
+    if bytes.len() > maximum {
         return Err(failure("projection_limit"));
     }
     assert!(!bytes.is_empty());
-    assert!(bytes.len() <= PROJECTION_BYTES_MAX);
+    assert!(bytes.len() <= maximum);
     Ok(value)
+}
+
+fn cut_projects(mut items: Vec<ProjectRow>, more: bool) -> Result<ProjectList, BridgeError> {
+    let more = more || items.len() > PROJECT_LIST_MAX;
+    items.truncate(PROJECT_LIST_MAX);
+    bounded_by(ProjectList { items, more }, PROJECT_LIST_BYTES_MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_list_stops_at_its_bound_says_so_and_fits_the_worst_rows() {
+        let rows = |count: usize| -> Vec<ProjectRow> {
+            (1..=count)
+                .map(|at| ProjectRow {
+                    id: format!("p-{at}"),
+                    name: format!("Project {at}"),
+                    repository_count: 0,
+                })
+                .collect()
+        };
+        let all = cut_projects(rows(20), false).unwrap();
+        assert_eq!((all.items.len(), all.more), (20, false));
+        let full = cut_projects(rows(PROJECT_LIST_MAX), false).unwrap();
+        assert_eq!((full.items.len(), full.more), (PROJECT_LIST_MAX, false));
+        let over = cut_projects(rows(PROJECT_LIST_MAX + 5), false).unwrap();
+        assert_eq!((over.items.len(), over.more), (PROJECT_LIST_MAX, true));
+        assert_eq!(
+            over.items.last().unwrap().id,
+            format!("p-{PROJECT_LIST_MAX}")
+        );
+        let cut_short = cut_projects(rows(16), true).unwrap();
+        assert_eq!((cut_short.items.len(), cut_short.more), (16, true));
+
+        let worst = (0..PROJECT_LIST_MAX)
+            .map(|at| ProjectRow {
+                id: format!("{at:0>128}"),
+                name: "\"".repeat(256),
+                repository_count: usize::MAX,
+            })
+            .collect();
+        let worst = cut_projects(worst, true).unwrap();
+        assert!(serde_json::to_vec(&worst).unwrap().len() <= PROJECT_LIST_BYTES_MAX);
+        assert!(serde_json::to_vec(&worst.items[0]).unwrap().len() <= PROJECT_ROW_BYTES_MAX);
+    }
 
     #[test]
     fn random_ids_are_64_hex_characters_and_differ() {

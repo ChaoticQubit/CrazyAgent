@@ -542,6 +542,7 @@ fallback_allowed = false
     fn copy_prepared(prepared: &PreparedMasterTurn) -> PreparedMasterTurn {
         PreparedMasterTurn {
             text: prepared.text.clone(),
+            message: prepared.message.clone(),
             instructions: prepared.instructions.clone(),
             tools: prepared.tools,
             session: prepared.session.clone(),
@@ -551,6 +552,7 @@ fallback_allowed = false
             cwd: prepared.cwd.clone(),
             worktree_lease: prepared.worktree_lease.clone(),
             lease: prepared.lease.clone(),
+            agent_project: prepared.agent_project.clone(),
         }
     }
 

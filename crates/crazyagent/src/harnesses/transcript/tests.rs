@@ -374,3 +374,202 @@ fn a_rollout_a_sandboxed_agent_forged_before_the_launch_never_becomes_its_transc
         vec![TranscriptEvent::TurnStarted, text("genuine\n")]
     );
 }
+
+/// A reader names the conversation it follows once its record exists: a Codex rollout by
+/// the id in its first `session_meta` line, a Claude Code transcript by its file name. A
+/// resumed reader follows a known record from its end, so earlier turns are not read
+/// again, and refuses a record that is missing, a link, outside the harness's own folder
+/// or started in another working folder.
+#[test]
+fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let source = Transcript::CodexRollouts {
+        sessions: sessions.clone(),
+    };
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let done =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Done"}}"#;
+    let turn = vec![
+        TranscriptEvent::TurnStarted,
+        TranscriptEvent::TurnFinished { success: true },
+    ];
+    let mut reader = TranscriptReader::new(source.clone(), &case.work(), SystemTime::now());
+    assert_eq!(reader.conversation(), None);
+    let path = rollout(
+        &sessions,
+        "2026/10/23",
+        "rollout-mine.jsonl",
+        &case.work(),
+        &[started, done],
+    );
+    assert_eq!(reader.read().unwrap(), turn);
+    assert_eq!(reader.conversation(), Some(("s".to_owned(), path.clone())));
+
+    let mut resumed = TranscriptReader::resumed(source.clone(), &case.work(), &path, None).unwrap();
+    assert_eq!(resumed.conversation(), Some(("s".to_owned(), path.clone())));
+    assert_eq!(resumed.read().unwrap(), Vec::new());
+    append(&path, &format!("{started}\n{done}\n"));
+    assert_eq!(resumed.read().unwrap(), turn);
+
+    let other = rollout(
+        &sessions,
+        "2026/10/23",
+        "rollout-other.jsonl",
+        &case.path().join("other"),
+        &[started],
+    );
+    let outside = case.path().join("rollout-copy.jsonl");
+    std::fs::copy(&path, &outside).unwrap();
+    let link = sessions.join("2026/10/23/rollout-link.jsonl");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    std::os::unix::fs::symlink(sessions.join("2026/10/23"), sessions.join("2026/10/24")).unwrap();
+    for refused in [
+        other,
+        outside,
+        link,
+        sessions.join("2026/10/24/rollout-mine.jsonl"),
+        sessions.join("2026/10/23/../23/rollout-mine.jsonl"),
+        sessions.join("2026/10/23/rollout-gone.jsonl"),
+    ] {
+        assert_eq!(
+            TranscriptReader::resumed(source.clone(), &case.work(), &refused, None).err(),
+            Some(LaunchError("launch_resume_unavailable".to_owned())),
+            "{}",
+            refused.display()
+        );
+    }
+
+    let (file, mut reader) = case.claude();
+    assert_eq!(reader.conversation(), None);
+    let asked = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    append(&file, &format!("{asked}\n"));
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    assert_eq!(
+        reader.conversation(),
+        Some(("session".to_owned(), file.clone()))
+    );
+    let claude = Transcript::ClaudeSession { file: file.clone() };
+    let mut resumed = TranscriptReader::resumed(claude.clone(), &case.work(), &file, None).unwrap();
+    assert_eq!(resumed.read().unwrap(), Vec::new());
+    append(&file, &format!("{asked}\n"));
+    assert_eq!(resumed.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    assert_eq!(
+        TranscriptReader::resumed(
+            claude.clone(),
+            &case.work(),
+            &case.path().join("other.jsonl"),
+            None
+        )
+        .err(),
+        Some(LaunchError("launch_resume_unavailable".to_owned()))
+    );
+    let middle = resumed.start();
+    assert!(middle > 0);
+    let mut again =
+        TranscriptReader::resumed(claude.clone(), &case.work(), &file, Some(middle)).unwrap();
+    assert_eq!(again.start(), middle);
+    assert_eq!(again.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    let past = std::fs::metadata(&file).unwrap().len() + 1;
+    assert_eq!(
+        TranscriptReader::resumed(claude, &case.work(), &file, Some(past)).err(),
+        Some(LaunchError("launch_resume_unavailable".to_owned()))
+    );
+}
+
+/// The typed messages and replies of a conversation are read from its record for a fresh
+/// conversation to carry on, without tool output, interrupts, meta lines or the harness's
+/// own context blocks, and nothing is read through a link.
+#[test]
+fn a_conversation_record_gives_its_typed_messages_and_replies() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let path = rollout(
+        &sessions,
+        "2026/10/23",
+        "rollout-mine.jsonl",
+        &case.work(),
+        &[
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd</environment_context>"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Write the release notes"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Notes drafted"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]}}"#,
+        ],
+    );
+    assert_eq!(
+        conversation_messages("codex", &path),
+        vec![
+            (Speaker::Input, "Write the release notes".to_owned()),
+            (Speaker::Agent, "Notes drafted".to_owned()),
+        ]
+    );
+    let (file, _) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","isMeta":true,"message":{"content":"meta"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking"},{"type":"tool_use","name":"Bash"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        conversation_messages("claude-code", &file),
+        vec![
+            (Speaker::Input, "Fix the build".to_owned()),
+            (Speaker::Agent, "Looking".to_owned()),
+        ]
+    );
+    let link = case.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    assert!(conversation_messages("claude-code", &link).is_empty());
+    assert!(conversation_messages("codex", &case.path().join("gone.jsonl")).is_empty());
+}
+
+/// A FIFO where a transcript is expected is never opened for a blocking read: a pane's
+/// reader, a resumed reader and the excerpt reader all return at once and take nothing.
+#[test]
+fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
+    let case = Case::new();
+    let (file, reader) = case.claude();
+    let made = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&file)
+            .env_clear()
+            .stdin(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(made.success());
+    let work = case.work();
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let read = reader.read();
+        let resumed = TranscriptReader::resumed(
+            Transcript::ClaudeSession { file: file.clone() },
+            &work,
+            &file,
+            None,
+        )
+        .err();
+        let messages = conversation_messages("claude-code", &file);
+        let _ = sent.send((read, reader.conversation(), resumed, messages));
+    });
+    let (read, named, resumed, messages) = got
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a FIFO must not block a transcript reader");
+    assert_eq!(read, Ok(Vec::new()));
+    assert_eq!(named, None);
+    assert_eq!(
+        resumed,
+        Some(LaunchError("launch_resume_unavailable".to_owned()))
+    );
+    assert!(messages.is_empty());
+}

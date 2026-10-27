@@ -3,20 +3,29 @@ pub mod launch;
 pub mod terminal_session;
 pub mod transcript;
 
+#[cfg(test)]
+mod probe_tests;
+
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 const SEARCH_DIRECTORIES_MAX: usize = 128;
 const PATH_BYTES_MAX: usize = 1024;
+#[cfg(target_os = "linux")]
 const SYSTEM_DIRECTORIES: [&str; 4] = [
     "/opt/homebrew/bin",
     "/home/linuxbrew/.linuxbrew/bin",
     "/usr/local/bin",
     "/usr/bin",
 ];
+#[cfg(not(target_os = "linux"))]
+const SYSTEM_DIRECTORIES: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
 const HOME_DIRECTORIES: [&str; 6] = [
     ".local/bin",
     ".npm-global/bin",
@@ -115,7 +124,7 @@ pub struct HarnessEntry {
 /// Where the catalog looks for harness executables.
 /// Inputs are explicit so the engine and tests choose the search space; only
 /// absolute directories are kept and nothing found is ever executed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Search {
     directories: Vec<PathBuf>,
     home: Option<PathBuf>,
@@ -266,6 +275,100 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
         .collect();
     assert_eq!(entries.len(), specs().len());
     entries
+}
+
+/// The engine's last harness probe and the search it ran with, so a catalog read answers at
+/// once instead of waiting on the filesystem. A read older than `fresh_for` is still served and
+/// starts one background re-probe; a changed search or an owner's check probes before answering.
+pub struct ProbeCache {
+    fresh_for: Duration,
+    last: Mutex<Option<Probe>>,
+    probing: AtomicBool,
+}
+
+struct Probe {
+    search: Search,
+    entries: Vec<HarnessEntry>,
+    started: Instant,
+}
+
+impl ProbeCache {
+    /// Builds an empty cache. Input: how long a probe counts as fresh. Output: the shared cache.
+    pub fn new(fresh_for: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            fresh_for,
+            last: Mutex::new(None),
+            probing: AtomicBool::new(false),
+        })
+    }
+
+    /// Answers one catalog read: the cached probe for the same search at once, starting a
+    /// background re-probe when it is older than `fresh_for`, or a new probe when nothing is
+    /// cached for this search or the owner asked to check now. Inputs: the search and whether to
+    /// probe now. Output: the catalog, or an error when the probe task failed.
+    pub async fn entries(
+        self: &Arc<Self>,
+        search: Search,
+        check: bool,
+    ) -> Result<Vec<HarnessEntry>, tokio::task::JoinError> {
+        if !check && let Some((entries, stale)) = self.cached(&search) {
+            if stale {
+                self.refresh(search);
+            }
+            return Ok(entries);
+        }
+        let started = Instant::now();
+        let probed = probe(search.clone()).await?;
+        self.store(search, probed.clone(), started);
+        Ok(probed)
+    }
+
+    /// Reports whether a background re-probe is running. Output: true while one runs.
+    pub fn probing(&self) -> bool {
+        self.probing.load(Ordering::SeqCst)
+    }
+
+    fn cached(&self, search: &Search) -> Option<(Vec<HarnessEntry>, bool)> {
+        let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        last.as_ref()
+            .filter(|probe| probe.search == *search)
+            .map(|probe| {
+                (
+                    probe.entries.clone(),
+                    probe.started.elapsed() >= self.fresh_for,
+                )
+            })
+    }
+
+    fn refresh(self: &Arc<Self>, search: Search) {
+        if self.probing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cache = self.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            if let Ok(entries) = probe(search.clone()).await {
+                cache.store(search, entries, started);
+            }
+            cache.probing.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn store(&self, search: Search, entries: Vec<HarnessEntry>, started: Instant) {
+        assert_eq!(entries.len(), specs().len());
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.as_ref().is_none_or(|probe| probe.started <= started) {
+            *last = Some(Probe {
+                search,
+                entries,
+                started,
+            });
+        }
+    }
+}
+
+async fn probe(search: Search) -> Result<Vec<HarnessEntry>, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || catalog(&search)).await
 }
 
 /// Finds a harness spec by its catalog id or by the harness name stored on a

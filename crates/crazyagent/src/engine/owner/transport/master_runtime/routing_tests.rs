@@ -271,6 +271,20 @@ fn git(repository: &Path, home: &Path, arguments: &[&str]) {
     }
 }
 
+fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<fs::File> {
+    let manifest = root
+        .join("native-profiles")
+        .join(format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(profile_ref.as_str().as_bytes())
+        ))
+        .join("identity.json");
+    let file = fs::File::open(manifest).unwrap();
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .ok()
+        .map(|()| file)
+}
+
 fn rows(tx: &Transaction<'_>, table: &str) -> Vec<Vec<Value>> {
     let mut statement = tx
         .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
@@ -928,6 +942,27 @@ impl Fixture {
         crate::model_gateway::sign_in_rejected(&self.db(), &model).unwrap()
     }
 
+    fn gateway_state(
+        &self,
+        connection: &str,
+        now_ms: u64,
+    ) -> crate::model_gateway::ConnectionState {
+        let config = crate::config::resolve_config(
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+        )
+        .unwrap();
+        let model = config
+            .settings
+            .model_access
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|item| item.id == reference(connection))
+            .unwrap();
+        crate::model_gateway::connection_state(&self.db(), &model, now_ms).unwrap()
+    }
+
     fn db(&self) -> Connection {
         let db = Connection::open_with_flags(
             self.root.path().join("engine.db"),
@@ -1400,13 +1435,7 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     let database = case.root.path().join("engine.db");
     let mut custody =
         NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
-    let key = format!(
-        "{:x}",
-        <sha2::Sha256 as sha2::Digest>::digest(proof.profile_ref.as_str().as_bytes())
-    );
-    let account_change = custody
-        .hold_released_profile(&case.runtime().identity(), &key)
-        .unwrap()
+    let account_change = exclusive_profile_hold(case.root.path(), &proof.profile_ref)
         .expect("no agent holds the configured profile yet");
     let before = case.snapshot();
     assert_eq!(case.persisted_turn().await.phase, MasterTurnPhase::Prepared);
@@ -1697,18 +1726,8 @@ async fn a_repository_whose_config_runs_a_command_is_refused_with_the_key_and_no
             let tx = db.transaction().unwrap();
             assert!(rows(&tx, "native_auth_fences").is_empty(), "{key}");
         }
-        let database = case.root.path().join("engine.db");
-        let custody =
-            NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
-        let profile = format!(
-            "{:x}",
-            <sha2::Sha256 as sha2::Digest>::digest(proof.profile_ref.as_str().as_bytes())
-        );
         assert!(
-            custody
-                .hold_released_profile(&case.runtime().identity(), &profile)
-                .unwrap()
-                .is_some(),
+            exclusive_profile_hold(case.root.path(), &proof.profile_ref).is_some(),
             "the refused turn left the profile held: {key}"
         );
         let session = Fixture::read_session(&case.owner, &case.session.project_id).await;
@@ -1872,6 +1891,63 @@ async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_nex
     assert_eq!(case.paused_until("claude-a"), None);
     assert!(!case.rejected("claude-a"));
     assert_eq!(case.stale().await, vec![reference("claude-a")]);
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-b"));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_turn_whose_sign_in_renewal_fails_holds_the_account_briefly_and_hands_the_next_turn_on() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-a"));
+    let renewal = EngineError("native_profile_renewal_failed".into());
+    let result = case
+        .command(MasterRuntimeCommand::Observe {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: first.attempt.request.id.clone(),
+            observation: MasterRuntimeObservation::Failed {
+                reason: reason_for_error(&renewal),
+                cause: renewal.0.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let observed = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let MasterRuntimeResult::Turn(failed) = result else {
+        panic!("the turn whose sign-in renewal failed did not settle");
+    };
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(failed.reason, Some(MasterReason::TransientFailure));
+    assert_eq!(
+        failed.cause.as_deref(),
+        Some("native_profile_renewal_failed")
+    );
+    drop(first);
+    let held = case.gateway_state("claude-a", observed);
+    assert_eq!(held.health, crate::model_gateway::Health::TransientFailure);
+    let retry = held
+        .cooldown_until_ms
+        .expect("a failed renewal holds the account until a retry time");
+    assert!(
+        retry > observed && retry <= observed + 60_000,
+        "retry {retry} is not within a minute of {observed}"
+    );
+    assert_eq!(case.paused_until("claude-a"), None);
+    assert!(!case.rejected("claude-a"));
     let second = case.submit("Summarize what we discussed so far.").await;
     let next = case.prepared(&second).await;
     assert_eq!(next.attempt.connection.id, reference("claude-b"));
@@ -2152,5 +2228,755 @@ async fn a_codex_master_turn_is_prepared_with_the_project_s_master_tools_switch(
         prepared.instructions
     );
     drop(prepared);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_master_reply_observed_while_another_connection_holds_the_database_is_kept() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let runtime = MasterRuntimeView {
+        runtime_ref: RequestId::new("busy-runtime").unwrap(),
+        artifact_sha256: "a".repeat(64),
+        native_session_id: None,
+    };
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Running {
+                runtime: runtime.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    let reply = MasterReply {
+        text: "The project is a routing fixture with one README.".into(),
+        provenance: MasterReplyProvenance {
+            attempt_id: prepared.attempt.request.id.clone(),
+            runtime_ref: runtime.runtime_ref.clone(),
+            capture_ref: RequestId::new("busy-capture").unwrap(),
+            capture_sequence: 2,
+        },
+    };
+    let holder = case.hold_write_lock(Duration::from_millis(600));
+    let observed = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Response {
+                reply: reply.clone(),
+                delegations: vec![],
+            },
+        )
+        .await
+        .map(|turn| turn.phase);
+    holder.join().unwrap();
+    drop(hold);
+    drop(profile);
+    let persisted = case.persisted_turn().await;
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(observed, Ok(MasterTurnPhase::Succeeded));
+    assert_eq!(persisted.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(persisted.reply, Some(reply));
+}
+
+async fn end_tools_turn(
+    case: &Fixture,
+    prepared: &PreparedMasterTurn,
+    turn: &RequestId,
+    edit: impl FnOnce(&Path),
+    ending: MasterRuntimeObservation,
+) -> MasterTurnView {
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(prepared, turn)
+        .await
+        .unwrap();
+    let runtime = MasterRuntimeView {
+        runtime_ref: RequestId::new("landing-runtime").unwrap(),
+        artifact_sha256: "a".repeat(64),
+        native_session_id: None,
+    };
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            prepared,
+            turn,
+            MasterRuntimeObservation::Running { runtime },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    assert_eq!(running.changes, None);
+    edit(&prepared.cwd);
+    let ended = case
+        .runtime()
+        .observe_master_turn(prepared, turn, ending)
+        .await
+        .unwrap();
+    drop(hold);
+    drop(profile);
+    ended
+}
+
+fn landing_reply(prepared: &PreparedMasterTurn) -> MasterRuntimeObservation {
+    MasterRuntimeObservation::Response {
+        reply: MasterReply {
+            text: "I wrote the notes.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: prepared.attempt.request.id.clone(),
+                runtime_ref: RequestId::new("landing-runtime").unwrap(),
+                capture_ref: RequestId::new("landing-capture").unwrap(),
+                capture_sequence: 2,
+            },
+        },
+        delegations: vec![],
+    }
+}
+
+async fn tools_case(tools: bool) -> (Fixture, Box<PreparedMasterTurn>) {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, tools);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.tools, tools);
+    assert!(prepared.cwd.join(".git").is_file());
+    (case, prepared)
+}
+
+#[tokio::test]
+async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set_and_a_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    let persisted = case.persisted_turn().await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    let session = case.session.session_id.clone();
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: session.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: prepared.repository.clone(),
+        worktree: prepared.cwd.clone(),
+        git_dir: crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap(),
+    };
+    let end = |turn: &str| crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: turn.into(),
+        prompt_line: "Another turn".into(),
+    };
+    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn")).unwrap();
+    fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn")).unwrap();
+    drop(db);
+    drop(prepared);
+    case.finish().await;
+    use crate::landing_turns::Landed;
+    assert_eq!(
+        quiet,
+        Landed::Waiting(sets[0].id.clone()),
+        "a turn that added nothing"
+    );
+    assert_eq!(
+        more,
+        Landed::Added(sets[0].id.clone()),
+        "a later turn adds to the same set"
+    );
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Master);
+    assert_eq!(sets[0].agent.id, session.as_str());
+    assert_eq!(sets[0].files, 1);
+    assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+}
+
+#[tokio::test]
+async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_no_branch() {
+    let (case, prepared) = tools_case(true).await;
+    let read = |args: &[&str]| -> String {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&prepared.repository)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let owner = read(&["symbolic-ref", "HEAD"]).trim().to_owned();
+    let branches = || {
+        read(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/",
+        ])
+    };
+    let before = branches();
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let git_dir = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    let lease = format!("ref: refs/heads/{}\n", prepared.lease.branch);
+    assert_eq!(fs::read_to_string(git_dir.join("HEAD")).unwrap(), lease);
+    assert_ne!(owner, format!("refs/heads/{}", prepared.lease.branch));
+    fs::write(git_dir.join("HEAD"), format!("ref: {owner}\n")).unwrap();
+    fs::write(prepared.cwd.join("NOTES.md"), "Written past the lease.\n").unwrap();
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: case.session.session_id.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: prepared.repository.clone(),
+        worktree: prepared.cwd.clone(),
+        git_dir: git_dir.clone(),
+    };
+    let end = crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: "away-turn".into(),
+        prompt_line: "Write past the lease".into(),
+    };
+    let refused = crate::landing_turns::record(&db, &workspace, &end).unwrap_err();
+    assert_eq!(refused.0, "changes_workspace_invalid");
+    assert_eq!(branches(), before);
+    assert!(
+        crate::landing::list(&db, &case.session.project_id)
+            .unwrap()
+            .is_empty()
+    );
+    fs::write(git_dir.join("HEAD"), &lease).unwrap();
+    fs::remove_file(prepared.cwd.join("NOTES.md")).unwrap();
+    drop(db);
+    drop(prepared);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_failed_tools_on_master_turn_still_keeps_its_edits_for_review() {
+    let (case, prepared) = tools_case(true).await;
+    let failed = MasterRuntimeObservation::Failed {
+        reason: MasterReason::CaptureIncomplete,
+        cause: "master_capture_incomplete".into(),
+    };
+    let write = |cwd: &Path| fs::write(cwd.join("half.txt"), "Half done.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, write, failed).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Failed);
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Failed);
+}
+
+#[tokio::test]
+async fn a_tools_on_master_turn_that_changed_nothing_and_a_tools_off_turn_leave_no_change_set() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, |_| {}, reply).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes, None);
+    assert!(sets.is_empty(), "{sets:?}");
+
+    let (case, prepared) = tools_case(false).await;
+    let reply = landing_reply(&prepared);
+    let stray =
+        |cwd: &Path| fs::write(cwd.join("stray.txt"), "Not from a tools-on master.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, stray, reply).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes, None);
+    assert!(sets.is_empty(), "{sets:?}");
+}
+
+#[tokio::test]
+async fn a_master_worktree_commits_only_into_the_git_folder_its_lease_recorded() {
+    let (case, prepared) = tools_case(true).await;
+    let db = case.db();
+    let recorded = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    let pointer = fs::read(prepared.cwd.join(".git")).unwrap();
+    let elsewhere = case.root.path().join("elsewhere-git");
+    private_directory(&elsewhere);
+    fs::write(
+        prepared.cwd.join(".git"),
+        format!("gitdir: {}\n", elsewhere.display()),
+    )
+    .unwrap();
+    let repointed = crate::worktrees::lease_git_dir(&db, &prepared.lease);
+    let sibling = recorded.with_file_name("sibling-lease");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        sibling.join("gitdir"),
+        format!("{}/.git\n", prepared.lease.path),
+    )
+    .unwrap();
+    fs::write(
+        prepared.cwd.join(".git"),
+        format!("gitdir: {}\n", sibling.display()),
+    )
+    .unwrap();
+    let swapped = crate::worktrees::lease_git_dir(&db, &prepared.lease);
+    fs::write(prepared.cwd.join(".git"), pointer).unwrap();
+    let restored = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    drop(db);
+    let repository = prepared.repository.clone();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(
+        recorded.parent(),
+        Some(repository.join(".git/worktrees").as_path())
+    );
+    assert_eq!(
+        repointed.unwrap_err().0,
+        "worktree_metadata_escape",
+        "a folder outside the repository's worktrees is refused"
+    );
+    assert_eq!(
+        swapped.unwrap_err().0,
+        "worktree_identity_changed",
+        "another folder that links back is still not the one the lease recorded"
+    );
+    assert_eq!(restored, recorded);
+}
+
+const RESOLVE_LINE: &str = "CrazyAgent asked the master to resolve the conflicts in NOTES.md.";
+
+/// Ends the first tools-on turn with an edit to NOTES.md, so its change set is pending,
+/// then commits a conflicting NOTES.md on the owner's branch. Output: the fixture, the
+/// pending change set and the master's worktree.
+async fn conflicting_case() -> (Fixture, crate::landing::ChangeSetView, PathBuf) {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    let (repository, worktree) = (prepared.repository.clone(), prepared.cwd.clone());
+    drop(prepared);
+    private_file(&repository.join("NOTES.md"), b"Written by the owner.\n");
+    git(&repository, case.root.path(), &["add", "NOTES.md"]);
+    git(
+        &repository,
+        case.root.path(),
+        &["commit", "-qm", "Owner notes"],
+    );
+    let mut pending = case.change_sets().await;
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0].state, crate::landing::ChangeState::Pending);
+    (case, pending.remove(0), worktree)
+}
+
+impl Fixture {
+    async fn change_sets(&self) -> Vec<crate::landing::ChangeSetView> {
+        self.owner
+            .change_sets(self.session.project_id.clone())
+            .await
+            .unwrap()
+    }
+
+    fn entries(&self) -> i64 {
+        self.db()
+            .query_row("SELECT COUNT(*) FROM conversation_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Reads the session's turns until `count` exist and none is outstanding, within
+    /// TEST_BOUND. Input: the count. Output: the settled turns, oldest first.
+    async fn settled_turns(&self, count: usize) -> Vec<MasterTurnView> {
+        let deadline = Instant::now() + TEST_BOUND;
+        loop {
+            let mut turns = self.turns().await;
+            turns.sort_by_key(|turn| turn.ordinal);
+            if turns.len() == count && turns.iter().all(|turn| !turn.phase.outstanding()) {
+                return turns;
+            }
+            assert!(Instant::now() < deadline, "turns never settled: {turns:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn asking_a_master_to_update_starts_its_resolve_turn_at_once_with_a_line_the_owner_sees() {
+    let (case, pending, worktree) = conflicting_case().await;
+    let entries = case.entries();
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
+    let mut started = case.turns().await;
+    started.sort_by_key(|turn| turn.ordinal);
+    let merged = fs::read_to_string(worktree.join("NOTES.md")).unwrap();
+    let settled = case.settled_turns(2).await;
+    let after = case.entries();
+    case.finish().await;
+    assert_eq!(started.len(), 2, "{started:?}");
+    let resolve = &started[1];
+    let request = resolve.engine_request.as_ref().expect("engine request");
+    assert_eq!(request.change_set, pending.id);
+    assert_eq!(request.line, RESOLVE_LINE);
+    assert!(
+        request
+            .text
+            .contains("CrazyAgent merged it into your worktree"),
+        "{}",
+        request.text
+    );
+    assert!(request.text.contains("\n- NOTES.md\n"), "{}", request.text);
+    assert_eq!(resolve.ordinal, started[0].ordinal + 1);
+    assert!(started[0].engine_request.is_none());
+    assert!(merged.contains("<<<<<<<"), "{merged}");
+    assert_eq!(
+        after, entries,
+        "the engine's request is not an owner message"
+    );
+    assert_eq!(settled[1].id, resolve.id);
+    assert_eq!(settled[1].engine_request.as_ref(), Some(request));
+    assert_eq!(settled[1].phase, MasterTurnPhase::Failed);
+    assert!(
+        settled[1].attempt.is_some(),
+        "the driver prepared the engine's turn"
+    );
+}
+
+#[tokio::test]
+async fn an_update_asked_while_the_master_works_starts_its_resolve_turn_right_after() {
+    let (case, pending, _) = conflicting_case().await;
+    let second = case.submit("Keep going.").await;
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
+    let waiting = case.turns().await;
+    let updating = case.change_sets().await;
+    let runtime = OwnerRuntimeHandle {
+        engine: case.runtime().engine.clone(),
+        authority: case.runtime().authority.clone(),
+    };
+    let started = case
+        .runtime()
+        .authority
+        .master_dispatch
+        .lock()
+        .await
+        .start(
+            runtime,
+            &case.session.project_id,
+            &case.session.session_id,
+            &second,
+        )
+        .unwrap();
+    let settled = case.settled_turns(3).await;
+    case.finish().await;
+    assert_eq!(waiting.len(), 2, "{waiting:?}");
+    assert!(waiting.iter().all(|turn| turn.engine_request.is_none()));
+    assert_eq!(updating[0].state, crate::landing::ChangeState::Updating);
+    assert!(started);
+    assert_eq!(settled[1].id, second);
+    let resolve = &settled[2];
+    assert_eq!(resolve.ordinal, settled[1].ordinal + 1);
+    let request = resolve.engine_request.as_ref().expect("engine request");
+    assert_eq!(request.line, RESOLVE_LINE);
+    assert_eq!(request.change_set, pending.id);
+}
+
+#[tokio::test]
+async fn the_master_gets_the_resolve_prompt_and_later_turns_show_the_engine_line() {
+    let (case, pending, _) = conflicting_case().await;
+    let second = case.submit("Keep going.").await;
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
+    let busy = case
+        .runtime()
+        .start_waiting_resolve(&case.session.project_id, &case.session.session_id)
+        .await
+        .unwrap();
+    let next = case.prepared(&second).await;
+    end_tools_turn(&case, &next, &second, |_| {}, landing_reply(&next)).await;
+    drop(next);
+    let resolve = case
+        .runtime()
+        .start_waiting_resolve(&case.session.project_id, &case.session.session_id)
+        .await
+        .unwrap()
+        .expect("the waiting resolve turn starts once the turn before it ended");
+    let again = case
+        .runtime()
+        .start_waiting_resolve(&case.session.project_id, &case.session.session_id)
+        .await
+        .unwrap();
+    let asked = case.prepared(&resolve).await;
+    let fix = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Both notes.\n").unwrap();
+    let ended = end_tools_turn(&case, &asked, &resolve, fix, landing_reply(&asked)).await;
+    let text = asked.text.clone();
+    drop(asked);
+    let reviewed = case.change_sets().await;
+    let third = case.submit("Thanks.").await;
+    let later = case.prepared(&third).await;
+    let history = later.text.clone();
+    drop(later);
+    case.finish().await;
+    assert_eq!(busy, None);
+    assert_eq!(again, None);
+    assert!(
+        text.contains("CrazyAgent merged it into your worktree"),
+        "{text}"
+    );
+    assert!(text.contains("\n- NOTES.md\n"), "{text}");
+    assert!(
+        text.trim_end()
+            .ends_with("Do not run git commit; CrazyAgent records your changes when you finish."),
+        "{text}"
+    );
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(reviewed.len(), 1, "{reviewed:?}");
+    assert_eq!(reviewed[0].id, pending.id);
+    assert_eq!(reviewed[0].state, crate::landing::ChangeState::Pending);
+    assert!(
+        history.contains(&format!("Engine: {RESOLVE_LINE}")),
+        "{history}"
+    );
+    assert!(history.ends_with("Thanks."), "{history}");
+}
+
+#[tokio::test]
+async fn an_engine_turn_whose_change_set_was_changed_after_it_was_recorded_is_refused() {
+    let (case, pending, _) = conflicting_case().await;
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
+    let settled = case.settled_turns(2).await;
+    let resolve = settled[1].id.clone();
+    let other = format!(
+        "{}{}",
+        if pending.id.as_str().starts_with('0') {
+            '1'
+        } else {
+            '0'
+        },
+        &pending.id.as_str()[1..]
+    );
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer.busy_timeout(Duration::from_secs(10)).unwrap();
+    let body: String = writer
+        .query_row(
+            "SELECT body FROM master_turns WHERE session=?1 AND id=?2",
+            params![case.session.session_id.as_str(), resolve.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let changed = writer
+        .execute(
+            "UPDATE master_turns SET body=?1 WHERE session=?2 AND id=?3",
+            params![
+                body.replace(pending.id.as_str(), &other),
+                case.session.session_id.as_str(),
+                resolve.as_str()
+            ],
+        )
+        .unwrap();
+    drop(writer);
+    let read = case
+        .owner
+        .request(request(
+            "tampered-read",
+            0,
+            OwnerOperation::Read {
+                query: OwnerRead::ProjectMasterTurns {
+                    project_id: case.session.project_id.clone(),
+                    session_id: case.session.session_id.clone(),
+                    cursor: None,
+                    limit: 16,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    case.finish().await;
+    assert_eq!(changed, 1);
+    assert!(body.contains(pending.id.as_str()), "{body}");
+    assert_eq!(
+        read.response,
+        OwnerResponse::Rejected {
+            code: "master_input_provenance".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_master_with_tools_off_refuses_ask_agent_to_update_and_keeps_its_change_set() {
+    let (case, pending, worktree) = conflicting_case().await;
+    store_master_tools(&case, false);
+    let refused = case.owner.update_changes(pending.id.clone()).await;
+    let kept = case.change_sets().await;
+    let notes = fs::read_to_string(worktree.join("NOTES.md")).unwrap();
+    let turns = case.turns().await;
+    case.finish().await;
+    assert_eq!(refused.unwrap_err().0, "changes_master_tools_off");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(kept[0].head, pending.head);
+    assert_eq!(notes, "Written by the master.\n");
+    assert_eq!(turns.len(), 1, "{turns:?}");
+}
+
+/// Records synthetic usage through the usage store the poll writes and owner account
+/// plans into the scheduling table, through a writable engine connection.
+/// Takes the case, limits rows of connection, weekly used and weekly reset, and plans of
+/// connection, reserve and pin.
+fn schedule_rows(case: &Fixture, limits: &[(&str, f64, i64)], plans: &[(&str, u8, Option<&str>)]) {
+    let db = Connection::open_with_flags(
+        case.root.path().join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    crate::usage::initialize(&db).unwrap();
+    for (connection, weekly, resets) in limits {
+        crate::usage::record_observation(
+            &db,
+            &reference(connection),
+            &crate::usage::Observation {
+                plan: None,
+                five_hour: Some(crate::usage::LimitWindow {
+                    used_percent: 10.0,
+                    resets_at_ms: None,
+                }),
+                weekly: Some(crate::usage::LimitWindow {
+                    used_percent: *weekly,
+                    resets_at_ms: Some(*resets),
+                }),
+            },
+            crate::usage::LimitSource::Poll,
+            clock_ms(),
+        )
+        .unwrap();
+    }
+    for (connection, reserve, pin) in plans {
+        db.execute(
+            "INSERT INTO account_plans(connection,rank,reserve_percent,pin) VALUES (?1,NULL,?2,?3)",
+            params![connection, reserve, pin],
+        )
+        .unwrap();
+    }
+}
+
+fn clock_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_master_turn_starts_on_the_account_whose_weekly_window_resets_first_and_still_fails_over()
+{
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let now = clock_ms();
+    schedule_rows(
+        &case,
+        &[
+            ("claude-a", 30.0, now + 72 * 3_600_000),
+            ("claude-b", 30.0, now + 3_600_000),
+        ],
+        &[],
+    );
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-b"));
+    case.fail(
+        &case.turn.id,
+        &first.attempt.request.id,
+        MasterReason::RateLimited,
+    )
+    .await;
+    drop(first);
+    assert!(case.paused_until("claude-b").is_some());
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-a"));
+    assert!(next.text.ends_with("Summarize what we discussed so far."));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_reserve_and_a_never_use_pin_block_the_master_turn_naming_each_account() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let now = clock_ms();
+    schedule_rows(
+        &case,
+        &[("claude-b", 95.0, now + 3_600_000)],
+        &[("claude-a", 0, Some("never_use")), ("claude-b", 10, None)],
+    );
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Turn(blocked) = result else {
+        panic!("a pool the schedule leaves empty must not prepare a turn");
+    };
+    assert_eq!(blocked.phase, MasterTurnPhase::Blocked);
+    assert_eq!(blocked.reason, Some(MasterReason::ScopeRevoked));
+    assert_eq!(blocked.cause.as_deref(), Some("account_never_use"));
+    let named: Vec<(&str, Option<MasterReason>)> = blocked
+        .accounts
+        .iter()
+        .map(|account| (account.connection.as_str(), account.reason))
+        .collect();
+    assert!(named.contains(&("claude-a", Some(MasterReason::ScopeRevoked))));
+    assert!(named.contains(&("claude-b", Some(MasterReason::QuotaExhausted))));
+    assert_eq!(case.paused_until("claude-b"), None);
     case.finish().await;
 }

@@ -94,7 +94,7 @@ fn the_attach_screen_first_turns_on_the_input_modes_the_app_set() {
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).unwrap();
+    let found = located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -112,10 +112,60 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
             cursor_keys: false
         }
     );
+    assert_eq!(found.history, 312);
+    let full = format!("%2 @2 8 0 80 24 1 0 {}", u64::from(SCROLLBACK_LINES) * 3);
+    assert_eq!(
+        located(&[full.into_bytes()]).unwrap().history,
+        HISTORY_ROWS_MAX,
+        "history past what the capture asks for is clamped to it"
+    );
     assert!(located(&[b"%2 @2 8 0 80 24".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 x".to_vec()]).is_none());
-    assert!(located(&[b"  0 0 80 24 0 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4".to_vec()]).is_none());
+    assert!(located(&[b"  0 0 80 24 0 0 0".to_vec()]).is_none());
     assert!(located(&[]).is_none());
+}
+
+#[test]
+fn the_attach_history_fills_a_fresh_view_scrollback_and_leaves_the_screen_to_redraw() {
+    assert!(scrollback(&[], 24).is_empty());
+    let history = scrollback(&[b"one".to_vec(), b"\x1b[1mtwo".to_vec()], 3);
+    assert_eq!(
+        history,
+        b"\x1b[0m\x1b[H\x1b[2Jone\r\n\x1b[1mtwo\r\n\x1b[0m\n\n".to_vec()
+    );
+    for count in [1_usize, 2, 3, 4, 40] {
+        let lines: Vec<Vec<u8>> = (1..=count)
+            .map(|line| format!("old {line}").into_bytes())
+            .collect();
+        let screen = render(
+            &[b"now 1".to_vec(), b"now 2".to_vec(), b"now 3".to_vec()],
+            20,
+            3,
+            (5, 2),
+            Modes::default(),
+        );
+        let mut parser = vt100::Parser::new(3, 20, 100);
+        parser.process(&scrollback(&lines, 3));
+        parser.process(&screen);
+        let shown: Vec<String> = parser.screen().rows(0, 20).collect();
+        assert_eq!(shown, ["now 1", "now 2", "now 3"], "{count} history rows");
+        parser.set_scrollback(usize::MAX);
+        assert_eq!(
+            parser.screen().scrollback(),
+            count,
+            "every history row and nothing else is in the scrollback"
+        );
+        let window = count.min(3);
+        parser.set_scrollback(window);
+        let top = format!("old {}", count - window + 1);
+        assert_eq!(
+            parser.screen().rows(0, 20).next().unwrap(),
+            top,
+            "{count} history rows"
+        );
+    }
 }
 
 #[test]
@@ -186,4 +236,166 @@ fn show_environment_replies_name_only_the_variables_still_set() {
     .collect();
     assert_eq!(variable_names(&reply), ["PATH", "GH_TOKEN", "EMPTY"]);
     assert!(variable_names(&[b"-REMOVED".to_vec()]).is_empty());
+}
+
+#[cfg(target_os = "macos")]
+struct Server {
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = crate::spawn_gate::status(
+            Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let config = home.path().join("owner.conf");
+    std::fs::write(&config, "set-option -g default-shell /bin/csh\n").unwrap();
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let started = crate::spawn_gate::status(
+        Command::new(&tmux)
+            .args(["-u", "-f"])
+            .arg(&config)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["new-session", "-d", "-s", "owner", "/bin/sleep", "60"])
+            .env_clear()
+            .env("PATH", SERVER_PATH)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(started.success());
+    let shell = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["show-options", "-gv", "default-shell"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&shell.stdout).trim(), "/bin/csh");
+
+    assert_eq!(host.alive().unwrap(), Vec::<AgentId>::new());
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "30".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let windows = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["list-windows", "-t", SESSION, "-F", "#{window_name}"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&windows.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec![HOLDER, "team-1"]
+    );
+    assert_eq!(host.alive().unwrap(), vec![agent]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "/usr/bin/seq 1 300; exec /bin/sleep 30".into(),
+        ],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let stream = loop {
+        let stream = host.attach(&agent).unwrap();
+        if String::from_utf8_lossy(&stream.screen).contains("300") {
+            break stream;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane printed its lines in time"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (cols, rows) = (stream.cols, stream.rows);
+    let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK_LINES as usize);
+    parser.process(&stream.history);
+    parser.process(&stream.screen);
+    let shown: Vec<String> = parser.screen().rows(0, cols).collect();
+    let last = usize::from(rows) - 2;
+    assert_eq!(shown[last], "300", "the screen ends with the newest line");
+    assert_eq!(shown[0], (301 - usize::from(rows) + 1).to_string());
+    let history = 301 - usize::from(rows);
+    parser.set_scrollback(usize::MAX);
+    assert_eq!(parser.screen().scrollback(), history);
+    parser.set_scrollback(usize::from(rows));
+    let window: Vec<String> = parser.screen().rows(0, cols).collect();
+    let expected: Vec<String> = (history - usize::from(rows) + 1..=history)
+        .map(|line| line.to_string())
+        .collect();
+    assert_eq!(
+        window, expected,
+        "the scrollback ends where the screen begins"
+    );
+    assert!(
+        stream
+            .history
+            .starts_with(b"\x1b[0m\x1b[H\x1b[2J1\r\n2\r\n3\r\n"),
+        "the history starts at the pane's first line"
+    );
 }

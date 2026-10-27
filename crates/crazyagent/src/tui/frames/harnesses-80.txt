@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Harnesses                                   
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-───────────────────────━━━━━━━━━━━──────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+─────────────────────━━━━━━━━━──────────────────────────────────────────────────
   Harnesses                                                   2 of 9 installed  
     Harness       Status           Control            Works with                
   > Codex         ✓ Ready          Full control       ChatGPT, OpenAI API       

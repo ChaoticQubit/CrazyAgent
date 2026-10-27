@@ -52,14 +52,14 @@ export function HomeFolderView({ home, picked, busy, problem, onChoose, onSave, 
  * on disk moves. Inputs: what to do once a folder is saved and an optional Continue for first run.
  * Output: the chooser. */
 export function HomeFolderPicker({ onSaved, onContinue }: { onSaved?: () => void; onContinue?: () => void }) {
-  const [home, reload] = useLoad(loadProjectsHome);
+  const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
   const [picked, setPicked] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
 
   const choose = async () => {
     setProblem("");
-    const result = await pickFolder();
+    const result = await pickFolder("projects_home");
     if (result.kind !== "ok") {
       setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message);
       return;

@@ -419,3 +419,115 @@ fn service_status_for_another_data_root_names_its_own_label_not_the_default() {
     );
     assert!(stdout.contains("running: no"), "{stdout}");
 }
+
+#[test]
+fn tui_auto_start_runs_a_detached_engine_where_the_service_manager_is_missing() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let layout = Layout::new(temp.path().join("engine")).unwrap();
+    let mut service = unused_service(temp.path(), layout.root());
+    service.platform = Platform::Linux;
+    let started = runtime()
+        .block_on(crazyagent::service::ensure_running(
+            &layout,
+            &service,
+            Path::new(BIN),
+            Some(OsStr::new(BARE_PATH)),
+            READY_TIMEOUT,
+        ))
+        .unwrap();
+    let Started::Detached { pid } = started else {
+        panic!("expected a detached engine, got {started:?}");
+    };
+    let group = Group(pid);
+    assert!(crazyagent::service::answering(&layout.socket()));
+    drop(group);
+    wait_silent(&layout.socket());
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn release_folder(folder: &Path) {
+    std::fs::create_dir(folder).unwrap();
+    let built = Path::new(BIN).parent().unwrap();
+    for name in ["crazyagent", "crazyagent-runner", "crazyagent-landlock"] {
+        if built.join(name).is_file() {
+            std::fs::hard_link(built.join(name), folder.join(name)).unwrap();
+        }
+    }
+}
+
+fn exited(pid: u32) -> bool {
+    let pid = rustix::process::Pid::from_raw(pid as i32).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG) {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => return false,
+        }
+    }
+}
+
+fn readies(layout: &Layout) -> usize {
+    std::fs::read_to_string(layout.engine_log())
+        .unwrap()
+        .lines()
+        .filter(|line| *line == "ready")
+        .count()
+}
+
+#[test]
+fn an_update_stops_an_engine_running_without_the_service_and_restarts_it_from_the_new_binary() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let layout = Layout::new(temp.path().join("engine")).unwrap();
+    let install = temp.path().join("install");
+    let unpacked = temp.path().join("unpacked");
+    release_folder(&install);
+    release_folder(&unpacked);
+    let executable = install.join("crazyagent");
+    let mut service = unused_service(temp.path(), layout.root());
+    service.executable = executable.clone();
+    let started = runtime()
+        .block_on(crazyagent::service::ensure_running(
+            &layout,
+            &service,
+            &executable,
+            Some(OsStr::new(BARE_PATH)),
+            READY_TIMEOUT,
+        ))
+        .unwrap();
+    let Started::Detached { pid: old } = started else {
+        panic!("expected a detached engine, got {started:?}");
+    };
+    let old_group = Group(old);
+    assert_eq!(readies(&layout), 1);
+    let said = crazyagent::update::swap_around_engine(&layout, &install, &unpacked, VERSION);
+    let stopped = exited(old);
+    let restarted = crazyagent::service::stop_detached(&layout).unwrap();
+    drop(old_group);
+    wait_silent(&layout.socket());
+    assert_eq!(
+        said.unwrap(),
+        format!("Updated crazyagent to {VERSION}. The engine restarted.")
+    );
+    assert!(stopped, "the engine that ran the old binary kept running");
+    assert_eq!(readies(&layout), 2);
+    let new = restarted.expect("no engine answered after the update");
+    assert_ne!(new, old);
+    assert!(exited(new));
+}
+
+#[test]
+fn an_update_with_no_engine_running_and_no_service_only_swaps_the_files() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let layout = Layout::new(temp.path().join("engine")).unwrap();
+    let install = temp.path().join("install");
+    let unpacked = temp.path().join("unpacked");
+    release_folder(&install);
+    release_folder(&unpacked);
+    let said = crazyagent::update::swap_around_engine(&layout, &install, &unpacked, VERSION);
+    assert!(!crazyagent::service::answering(&layout.socket()));
+    assert_eq!(said.unwrap(), format!("Updated crazyagent to {VERSION}."));
+    assert!(install.join("crazyagent").is_file());
+    assert!(!unpacked.join("crazyagent").exists());
+}

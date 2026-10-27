@@ -1,35 +1,61 @@
 import type { GraphEdge, GraphEdgeState, GraphNode, TeamAgentStatus, TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
 
-export const NODE_WIDTH = 184;
-export const NODE_HEIGHT = 76;
-export const COLUMN_GAP = 24;
-export const ROW_GAP = 96;
+export const CARD_WIDTH = 216;
+export const CARD_HEIGHT = 96;
+export const CARD_GAP = 16;
+export const GROUP_HEAD = 44;
+export const GROUP_PAD = 12;
+export const GROUP_GAP = 32;
+export const GROUP_COLUMNS_MAX = 6;
+export const LEVEL_GAP = 72;
 export const MARGIN = 24;
 export const NODES_MAX = 64;
-export const EDGES_SHOWN_MAX = 24;
-export const LABEL_STACK = 30;
-export const ARROW_STEP = 16;
-export const ARROW_STEP_LARGE = 64;
+export const REFERENCE_VIEW: Size = { width: 1200, height: 560 };
+export const BADGE_WIDTH = 96;
+export const BADGE_HEIGHT = 24;
+export const TITLE_CHARS = 26;
+export const LINE_CHARS = 30;
+export const TASK_LINES = 2;
+export const TIP_CHARS = 1000;
+export const TIP_HALF = 160;
+export const TIP_GAP = 8;
+export const ELLIPSIS = "...";
+export const ZOOM_MIN = 0.2;
+export const ZOOM_MAX = 2;
+export const ZOOM_STEP = 1.25;
+export const PAN_STEP = 48;
+export const PAN_KEEP = 48;
 export const DRAG_SLOP = 4;
-const OFFSET_MAX = 4000;
+const WHEEL_ZOOM_RATE = 0.01;
 
 export interface Point { x: number; y: number }
-export type Offsets = ReadonlyMap<string, Point>;
+export interface Size { width: number; height: number }
+export interface Box extends Point, Size {}
 
-export interface PlacedNode { node: GraphNode; x: number; y: number }
-export interface Link { from: string; to: string; path: string }
-export interface PlacedEdge { edge: GraphEdge; path: string; label: Point }
+/** Where the canvas sits in the viewport: its offset in screen pixels and its zoom. */
+export interface View { x: number; y: number; zoom: number }
 
-/** A team graph laid out for drawing: node boxes, parent links, task edges with label
- * points, and the canvas size that holds them all. A task still waiting at the master has
- * no path; its label sits under the master. */
-export interface GraphLayout {
-  nodes: PlacedNode[];
+export const VIEW_HOME: View = { x: 0, y: 0, zoom: 1 };
+
+export interface PlacedCard extends Box { node: GraphNode }
+
+/** One harness frame: its group node, or null for agents with no known harness, and the
+ * agent cards inside it under its header. */
+export interface PlacedGroup extends Box { node: GraphNode | null; cards: PlacedCard[] }
+
+/** The link from the master to one harness frame. It carries no text, only the number of live
+ * tasks in that harness and the number of questions its agents wait on, at `badge`. */
+export interface Link { group: GraphNode | null; path: string; badge: Point; tasks: number; questions: number }
+
+/** A team graph laid out for drawing: master cards on top, one frame per harness under them
+ * with agent cards in a grid, the links between, the canvas size that holds them all, and how
+ * many agents the `NODES_MAX` cap left out. */
+export interface GraphLayout extends Size {
+  masters: PlacedCard[];
+  groups: PlacedGroup[];
   links: Link[];
-  edges: PlacedEdge[];
-  width: number;
-  height: number;
+  hidden: number;
 }
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -38,122 +64,293 @@ function assert(condition: boolean, message: string): asserts condition {
 
 const byText = (a: string, b: string) => a.localeCompare(b, "en", { numeric: true });
 const byNode = (a: GraphNode, b: GraphNode) => byText(a.label, b.label) || byText(a.id, b.id);
-const column = (index: number) => MARGIN + index * (NODE_WIDTH + COLUMN_GAP);
-const row = (index: number) => MARGIN + index * (NODE_HEIGHT + ROW_GAP);
+const clamp = (value: number, low: number, high: number) => Math.min(Math.max(value, low), Math.max(low, high));
+const span = (count: number, size: number) => count * size + Math.max(0, count - 1) * CARD_GAP;
+const live = (edge: GraphEdge) => edge.state === "sent" || edge.state === "running";
+const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
+const running = (node: GraphNode) => node.status === "starting" || node.status === "idle" || node.status === "working";
+
+/** Which agents the graph keeps first when it cannot draw them all: running, then waiting on
+ * questions, then failed, then stopped. Input: an agent node. Output: the rank, lowest first. */
+function agentRank(node: GraphNode): number {
+  if (running(node)) return 0;
+  if (questionCount(node) > 0) return 1;
+  if (node.status === "failed") return 2;
+  return node.status === "stopped" ? 3 : 4;
+}
 
 function curve(from: Point, to: Point): string {
   const middle = (from.y + to.y) / 2;
   return `M ${from.x} ${from.y} C ${from.x} ${middle}, ${to.x} ${middle}, ${to.x} ${to.y}`;
 }
 
-function bottom(placed: PlacedNode): Point {
-  return { x: placed.x + NODE_WIDTH / 2, y: placed.y + NODE_HEIGHT };
-}
+const columnsFor = (agents: number, rows: number) => Math.min(GROUP_COLUMNS_MAX, Math.max(1, Math.ceil(agents / rows)));
 
-function top(placed: PlacedNode): Point {
-  return { x: placed.x + NODE_WIDTH / 2, y: placed.y };
-}
-
-/** Picks the task edges the graph draws: every live one first, then the newest ended ones,
- * at most `EDGES_SHOWN_MAX`. Input: the graph's edges. Output: the edges, newest first. */
-export function shownEdges(edges: readonly GraphEdge[]): GraphEdge[] {
-  const live = (edge: GraphEdge) => edge.state === "sent" || edge.state === "running";
-  return [...edges]
-    .sort((a, b) => Number(live(b)) - Number(live(a)) || b.task_id - a.task_id)
-    .slice(0, EDGES_SHOWN_MAX);
-}
-
-/** Lays out one project's team graph in three rows: the master on top, one box per harness
- * group under it, and each agent under its group. Dragged nodes move by their offset and the
- * canvas grows to hold them. Inputs: the graph and the drag offsets by node id. Output: the
- * layout, the same for the same graph and offsets. */
-export function layoutGraph(graph: TeamGraph, offsets: Offsets = new Map()): GraphLayout {
-  const nodes = graph.nodes.slice(0, NODES_MAX);
-  const masters = nodes.filter((node) => node.kind === "master").sort(byNode);
-  const groups = nodes.filter((node) => node.kind === "harness_group").sort(byNode);
-  const agents = nodes.filter((node) => node.kind === "agent").sort((a, b) => byText(a.id, b.id));
-  const groupIds = new Set(groups.map((group) => group.id));
-  const placed: PlacedNode[] = [];
-  let next = 0;
-  for (const group of groups) {
-    const children = agents.filter((agent) => agent.parent === group.id);
-    const span = Math.max(1, children.length);
-    placed.push({ node: group, x: (column(next) + column(next + span - 1)) / 2, y: row(1) });
-    children.forEach((agent, index) => placed.push({ node: agent, x: column(next + index), y: row(2) }));
-    next += span;
-  }
-  for (const agent of agents.filter((agent) => agent.parent === null || !groupIds.has(agent.parent))) {
-    placed.push({ node: agent, x: column(next), y: row(2) });
-    next += 1;
-  }
-  const columns = Math.max(next, masters.length, 1);
-  const masterStart = (columns - masters.length) / 2;
-  masters.forEach((master, index) => placed.push({ node: master, x: column(masterStart + index), y: row(0) }));
-  assert(placed.length === masters.length + groups.length + agents.length, "every node is placed once");
-
-  const moved = placed.map((item) => {
-    const offset = offsets.get(item.node.id);
-    return offset ? { ...item, x: Math.max(0, item.x + offset.x), y: Math.max(0, item.y + offset.y) } : item;
-  });
-  const at = new Map(moved.map((item) => [item.node.id, item]));
-  const links: Link[] = [];
-  for (const item of moved) {
-    const parent = item.node.parent === null ? undefined : at.get(item.node.parent);
-    if (parent) links.push({ from: parent.node.id, to: item.node.id, path: curve(bottom(parent), top(item)) });
-  }
-  const stacked = new Map<string, number>();
-  const edges: PlacedEdge[] = [];
-  for (const edge of shownEdges(graph.edges)) {
-    const from = at.get(edge.from);
-    const to = at.get(edge.to);
-    if (!from || !to) continue;
-    const start = bottom(from);
-    const end = top(to);
-    const pair = `${edge.from}\u0000${edge.to}`;
-    const index = stacked.get(pair) ?? 0;
-    stacked.set(pair, index + 1);
-    if (from === to) {
-      edges.push({ edge, path: "", label: { x: start.x, y: start.y + LABEL_STACK * (index + 1) } });
-      continue;
+/** How many card columns each harness frame uses. Every row count up to the largest frame is
+ * tried, and the one whose whole layout fits `REFERENCE_VIEW` at the largest zoom wins, fewer
+ * rows first on a tie; no frame uses more than `GROUP_COLUMNS_MAX` columns. Inputs: the agent
+ * count of each frame and whether a master row sits above. Output: columns per frame. */
+export function frameColumns(counts: readonly number[], master: boolean): number[] {
+  let best = counts.map((count) => columnsFor(count, 1));
+  let bestZoom = -1;
+  for (let rows = 1; rows <= Math.max(1, ...counts); rows += 1) {
+    const columns = counts.map((count) => columnsFor(count, rows));
+    const width = MARGIN * 2 + columns.reduce((sum, item) => sum + GROUP_PAD * 2 + span(item, CARD_WIDTH), 0)
+      + Math.max(0, columns.length - 1) * GROUP_GAP;
+    const tallest = Math.max(0, ...counts.map((count, index) => Math.ceil(count / columns[index])));
+    const height = MARGIN * 2 + (master ? CARD_HEIGHT + LEVEL_GAP : 0) + GROUP_HEAD + (tallest ? span(tallest, CARD_HEIGHT) + GROUP_PAD : 0);
+    const zoom = Math.min(REFERENCE_VIEW.width / width, REFERENCE_VIEW.height / height);
+    if (zoom > bestZoom) {
+      best = columns;
+      bestZoom = zoom;
     }
-    edges.push({ edge, path: curve(start, end), label: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 + index * LABEL_STACK } });
   }
-  const rows = agents.length ? 3 : groups.length ? 2 : 1;
-  const width = Math.max(column(columns - 1) + NODE_WIDTH + MARGIN, ...moved.map((item) => item.x + NODE_WIDTH + MARGIN));
-  const height = Math.max(row(rows - 1) + NODE_HEIGHT + MARGIN, ...moved.map((item) => item.y + NODE_HEIGHT + MARGIN),
-    ...edges.map((item) => item.label.y + LABEL_STACK));
-  return { nodes: moved, links, edges, width, height };
+  assert(best.length === counts.length && best.every((item) => item >= 1 && item <= GROUP_COLUMNS_MAX), "every frame has 1 to GROUP_COLUMNS_MAX columns");
+  return best;
 }
 
-/** Moves one node's drag offset, keeping it inside a fixed bound. Inputs: the offsets, the
- * node id and the move. Output: new offsets; the input is left unchanged. */
-export function moveNode(offsets: Offsets, id: string, dx: number, dy: number): Offsets {
-  const clamp = (value: number) => Math.min(OFFSET_MAX, Math.max(-OFFSET_MAX, Math.round(value)));
-  const current = offsets.get(id) ?? { x: 0, y: 0 };
-  const next = new Map(offsets);
-  next.set(id, { x: clamp(current.x + dx), y: clamp(current.y + dy) });
-  return next;
+/** The questions one node's agent waits on, as the engine reports them; anything but a
+ * positive whole number counts as none. Input: the node. Output: the count. */
+export function questionCount(node: GraphNode): number {
+  const count = node.questions;
+  return typeof count === "number" && Number.isInteger(count) && count > 0 ? count : 0;
 }
 
-/** Drops drag offsets of nodes the graph no longer has. Inputs: the offsets and the graph.
- * Output: the offsets that still apply, the same object when nothing changed. */
-export function keepOffsets(offsets: Offsets, graph: TeamGraph): Offsets {
-  const ids = new Set(graph.nodes.map((node) => node.id));
-  if ([...offsets.keys()].every((id) => ids.has(id))) return offsets;
-  return new Map([...offsets].filter(([id]) => ids.has(id)));
+/** Lays out one project's team graph: the master on top, then one frame per harness side by
+ * side with its agents in a grid of fixed-size cards (shaped by `frameColumns`), and agents
+ * with no known harness in a last frame. Cells never share space, so cards never overlap at any agent count. Past
+ * `NODES_MAX` the master and frames stay and agents are kept by `agentRank`, newest first in
+ * the engine's creation order. Input: the graph. Output: the layout, the same for the same graph. */
+export function layoutGraph(graph: TeamGraph): GraphLayout {
+  const seen = new Set<string>();
+  const unique = graph.nodes.filter((node) => !seen.has(node.id) && Boolean(seen.add(node.id)));
+  const fixed = unique.filter((node) => node.kind !== "agent").slice(0, NODES_MAX);
+  const ranked = unique.filter((node) => node.kind === "agent")
+    .map((node, order) => ({ node, order }))
+    .sort((a, b) => agentRank(a.node) - agentRank(b.node) || b.order - a.order)
+    .map((item) => item.node);
+  const kept = ranked.slice(0, NODES_MAX - fixed.length);
+  const nodes = [...fixed, ...kept];
+  const hidden = ranked.length - kept.length;
+  const masterNodes = nodes.filter((node) => node.kind === "master").sort(byNode);
+  const groupNodes = nodes.filter((node) => node.kind === "harness_group").sort(byNode);
+  const agents = nodes.filter((node) => node.kind === "agent").sort((a, b) => byText(a.id, b.id));
+  const groupIds = new Set(groupNodes.map((group) => group.id));
+  const frames: { node: GraphNode | null; members: GraphNode[] }[] =
+    groupNodes.map((node) => ({ node, members: agents.filter((agent) => agent.parent === node.id) }));
+  const orphans = agents.filter((agent) => agent.parent === null || !groupIds.has(agent.parent));
+  if (orphans.length) frames.push({ node: null, members: orphans });
+
+  const top = MARGIN + (masterNodes.length ? CARD_HEIGHT + LEVEL_GAP : 0);
+  const shape = frameColumns(frames.map((frame) => frame.members.length), masterNodes.length > 0);
+  const groups: PlacedGroup[] = [];
+  let left = MARGIN;
+  for (const [order, frame] of frames.entries()) {
+    const columns = shape[order];
+    const rows = Math.ceil(frame.members.length / columns);
+    const cards = frame.members.map((node, index) => ({
+      node,
+      x: left + GROUP_PAD + (index % columns) * (CARD_WIDTH + CARD_GAP),
+      y: top + GROUP_HEAD + Math.floor(index / columns) * (CARD_HEIGHT + CARD_GAP),
+      width: CARD_WIDTH,
+      height: CARD_HEIGHT,
+    }));
+    const width = GROUP_PAD * 2 + span(columns, CARD_WIDTH);
+    const height = GROUP_HEAD + (rows ? span(rows, CARD_HEIGHT) + GROUP_PAD : 0);
+    groups.push({ node: frame.node, cards, x: left, y: top, width, height });
+    left += width + GROUP_GAP;
+  }
+  const inner = Math.max(groups.length ? left - GROUP_GAP - MARGIN : 0, span(masterNodes.length, CARD_WIDTH));
+  const start = MARGIN + (inner - span(masterNodes.length, CARD_WIDTH)) / 2;
+  const masters = masterNodes.map((node, index) => ({
+    node, x: start + index * (CARD_WIDTH + CARD_GAP), y: MARGIN, width: CARD_WIDTH, height: CARD_HEIGHT,
+  }));
+  const placed = masters.length + groups.filter((group) => group.node).length + groups.reduce((sum, group) => sum + group.cards.length, 0);
+  assert(placed === masterNodes.length + groupNodes.length + agents.length, "every node is placed once");
+
+  const links: Link[] = [];
+  for (const group of groups) {
+    const parent = masters.find((master) => master.node.id === group.node?.parent) ?? masters[0];
+    if (!parent) continue;
+    const ids = new Set(group.cards.map((item) => item.node.id));
+    if (group.node) ids.add(group.node.id);
+    const from = { x: parent.x + CARD_WIDTH / 2, y: parent.y + CARD_HEIGHT };
+    const to = { x: group.x + group.width / 2, y: group.y };
+    links.push({
+      group: group.node,
+      path: curve(from, to),
+      badge: { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 },
+      tasks: graph.edges.filter((edge) => live(edge) && ids.has(edge.to)).length,
+      questions: group.cards.reduce((sum, item) => sum + questionCount(item.node), 0),
+    });
+  }
+  const height = groups.length
+    ? top + Math.max(...groups.map((group) => group.height)) + MARGIN
+    : MARGIN * 2 + (masters.length ? CARD_HEIGHT : 0);
+  return { masters, groups, links, width: MARGIN * 2 + inner, height, hidden };
 }
 
-/** Turns an arrow key into a node move. Inputs: the key and whether Shift is held. Output:
- * the move, or null for any other key. */
-export function arrowMove(key: string, large: boolean): Point | null {
-  const step = large ? ARROW_STEP_LARGE : ARROW_STEP;
+/** Every card the layout draws: the masters, then each frame's agents. Input: the layout.
+ * Output: the cards in drawing order. */
+export function layoutCards(layout: GraphLayout): PlacedCard[] {
+  return [...layout.masters, ...layout.groups.flatMap((group) => group.cards)];
+}
+
+/** What a link's badges say to a screen reader. Input: the counts. Output: one phrase, empty
+ * when there is nothing to show. */
+export function badgeLabel(link: Pick<Link, "tasks" | "questions">): string {
+  const parts = [];
+  if (link.tasks > 0) parts.push(plural(link.tasks, "live task"));
+  if (link.questions > 0) parts.push(`${plural(link.questions, "question")} waiting`);
+  return parts.join(", ");
+}
+
+/** Wraps text into at most `lines` lines of at most `chars` characters, breaking at spaces
+ * and splitting a word longer than a line. Whitespace runs read as one space. When text is
+ * left over, the last line ends in "...". Inputs: text, line length and line count. Output:
+ * the lines, none for blank text. */
+export function clipLines(text: string, chars: number, lines: number): string[] {
+  assert(Number.isInteger(chars) && chars > ELLIPSIS.length, "a line holds more than the ellipsis");
+  assert(Number.isInteger(lines) && lines > 0, "at least one line");
+  const letters = Array.from(text.split(/\s+/).filter(Boolean).join(" "));
+  const out: string[] = [];
+  let start = 0;
+  while (start < letters.length && out.length < lines) {
+    let end = Math.min(start + chars, letters.length);
+    if (end < letters.length) {
+      const space = letters.lastIndexOf(" ", end);
+      if (space > start) end = space;
+    }
+    if (out.length === lines - 1 && end < letters.length) {
+      out.push(`${letters.slice(start, start + chars - ELLIPSIS.length).join("").trimEnd()}${ELLIPSIS}`);
+      break;
+    }
+    out.push(letters.slice(start, end).join(""));
+    start = end;
+    while (letters[start] === " ") start += 1;
+  }
+  assert(out.length <= lines && out.every((line) => Array.from(line).length <= chars), "clipped lines fit");
+  return out;
+}
+
+function clipChars(text: string, chars: number): string {
+  const letters = Array.from(text);
+  return letters.length <= chars ? text : `${letters.slice(0, chars - ELLIPSIS.length).join("")}${ELLIPSIS}`;
+}
+
+/** The task one agent card is about: its newest live task, else its newest ended one. Inputs:
+ * the node and the graph's edges. Output: the edge, or undefined when it has none. */
+export function latestTask(node: GraphNode, edges: readonly GraphEdge[]): GraphEdge | undefined {
+  return edges.filter((edge) => edge.to === node.id)
+    .sort((a, b) => Number(live(b)) - Number(live(a)) || b.task_id - a.task_id)[0];
+}
+
+/** The task line of a card: for the master, how many tasks are live and how many wait for an
+ * agent; for an agent, its latest task, led by Done or Failed once it ended. Inputs: the node
+ * and the edges. Output: the full line, before clipping. */
+export function cardTask(node: GraphNode, edges: readonly GraphEdge[]): string {
+  if (node.kind === "master") {
+    const count = edges.filter(live).length;
+    const waiting = edges.filter((edge) => live(edge) && edge.to === node.id).length;
+    return `${plural(count, "task")} live${waiting ? `, ${waiting} waiting for an agent` : ""}.`;
+  }
+  const task = latestTask(node, edges);
+  if (!task) return "No task yet.";
+  return live(task) ? task.text : `${edgeStatus(task).word}: ${task.text}`;
+}
+
+/** The clipped text of one card: the title, the harness line and up to `TASK_LINES` task
+ * lines. Inputs: the node, the edges and a harness name lookup. Output: the card text. */
+export function cardText(node: GraphNode, edges: readonly GraphEdge[], harness?: (id: string) => string):
+  { title: string; detail: string; task: string[] } {
+  return {
+    title: clipLines(node.label, TITLE_CHARS, 1)[0] ?? "",
+    detail: clipLines(nodeDetail(node, harness), LINE_CHARS, 1)[0] ?? "",
+    task: clipLines(cardTask(node, edges), LINE_CHARS, TASK_LINES),
+  };
+}
+
+/** The full text a card shows on hover: title, harness line, status, task and the reply once
+ * it came, each kept to `TIP_CHARS`. Inputs: the node, the edges and a harness name lookup.
+ * Output: the lines. */
+export function cardTip(node: GraphNode, edges: readonly GraphEdge[], harness?: (id: string) => string): string[] {
+  const reply = node.kind === "agent" ? latestTask(node, edges)?.reply : null;
+  return [node.label, nodeDetail(node, harness), nodeStatus(node)?.word, cardTask(node, edges), reply ? `Reply: ${reply}` : undefined]
+    .filter((line): line is string => Boolean(line))
+    .map((line) => clipChars(line, TIP_CHARS));
+}
+
+/** The header of a harness frame: the group's name and agent count, or "Other agents".
+ * Inputs: the frame and a harness name lookup. Output: one line. */
+export function groupTitle(group: PlacedGroup, harness?: (id: string) => string): string {
+  return group.node ? nodeDetail(group.node, harness) : "Other agents";
+}
+
+/** The view that shows the whole graph centred, never zoomed past 100%. Inputs: the canvas and
+ * viewport sizes. Output: the view, or the home view before the viewport has a size. */
+export function fitView(content: Size, viewport: Size): View {
+  if (!(viewport.width > 0 && viewport.height > 0 && content.width > 0 && content.height > 0)) return VIEW_HOME;
+  const zoom = clamp(Math.min(viewport.width / content.width, viewport.height / content.height, 1), ZOOM_MIN, ZOOM_MAX);
+  return { x: (viewport.width - content.width * zoom) / 2, y: Math.max(0, (viewport.height - content.height * zoom) / 2), zoom };
+}
+
+function keepInView(view: View, content: Size, viewport: Size): View {
+  const zoom = clamp(view.zoom, ZOOM_MIN, ZOOM_MAX);
+  return {
+    x: clamp(view.x, PAN_KEEP - content.width * zoom, viewport.width - PAN_KEEP),
+    y: clamp(view.y, PAN_KEEP - content.height * zoom, viewport.height - PAN_KEEP),
+    zoom,
+  };
+}
+
+/** Moves the view, keeping at least `PAN_KEEP` pixels of the graph on screen. Inputs: the view,
+ * the move, and the canvas and viewport sizes. Output: the new view; a non-finite move keeps it. */
+export function panView(view: View, dx: number, dy: number, content: Size, viewport: Size): View {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return view;
+  return keepInView({ ...view, x: view.x + dx, y: view.y + dy }, content, viewport);
+}
+
+/** Zooms the view by a factor about a viewport point, which stays still, within the zoom
+ * range. Inputs: the view, the factor, the point, and the canvas and viewport sizes. Output:
+ * the new view; a non-finite or non-positive factor keeps it. */
+export function zoomView(view: View, factor: number, at: Point, content: Size, viewport: Size): View {
+  if (!Number.isFinite(factor) || factor <= 0 || !Number.isFinite(at.x) || !Number.isFinite(at.y)) return view;
+  assert(view.zoom > 0, "a view always has a positive zoom");
+  const zoom = clamp(view.zoom * factor, ZOOM_MIN, ZOOM_MAX);
+  const scale = zoom / view.zoom;
+  return keepInView({ x: at.x - (at.x - view.x) * scale, y: at.y - (at.y - view.y) * scale, zoom }, content, viewport);
+}
+
+/** What a key does to the graph view: arrows pan, plus and minus zoom, 0 fits. Input: the
+ * key. Output: the action, or null for any other key. */
+export function viewKey(key: string): { kind: "pan"; dx: number; dy: number } | { kind: "zoom"; factor: number } | { kind: "fit" } | null {
   switch (key) {
-    case "ArrowLeft": return { x: -step, y: 0 };
-    case "ArrowRight": return { x: step, y: 0 };
-    case "ArrowUp": return { x: 0, y: -step };
-    case "ArrowDown": return { x: 0, y: step };
+    case "ArrowLeft": return { kind: "pan", dx: PAN_STEP, dy: 0 };
+    case "ArrowRight": return { kind: "pan", dx: -PAN_STEP, dy: 0 };
+    case "ArrowUp": return { kind: "pan", dx: 0, dy: PAN_STEP };
+    case "ArrowDown": return { kind: "pan", dx: 0, dy: -PAN_STEP };
+    case "+": case "=": return { kind: "zoom", factor: ZOOM_STEP };
+    case "-": case "_": return { kind: "zoom", factor: 1 / ZOOM_STEP };
+    case "0": return { kind: "fit" };
     default: return null;
   }
+}
+
+/** The zoom factor of a wheel event: a pinch or a Ctrl or Cmd wheel zooms, a plain wheel is
+ * left to scroll the page. Input: the event. Output: the factor, or null to leave it. */
+export function wheelZoom(event: { deltaY: number; ctrlKey: boolean; metaKey: boolean }): number | null {
+  if (!(event.ctrlKey || event.metaKey) || !Number.isFinite(event.deltaY)) return null;
+  return Math.exp(-event.deltaY * WHEEL_ZOOM_RATE);
+}
+
+/** Where a card's hover text sits in the viewport: centred under the card, or over it when the
+ * card is in the lower half, kept inside the viewport's width. Inputs: the card, the view and
+ * the viewport size. Output: the anchor point and whether the text sits above it. */
+export function tipPlace(card: Box, view: View, viewport: Size): { left: number; top: number; above: boolean } {
+  const left = clamp(view.x + (card.x + card.width / 2) * view.zoom, TIP_HALF, viewport.width - TIP_HALF);
+  const above = view.y + (card.y + card.height / 2) * view.zoom > viewport.height / 2;
+  const top = above ? view.y + card.y * view.zoom - TIP_GAP : view.y + (card.y + card.height) * view.zoom + TIP_GAP;
+  return { left, top, above };
 }
 
 const AGENT_WORDS: Record<TeamAgentStatus, { word: string; tone: Tone }> = {
@@ -184,6 +381,14 @@ export function edgeStatus(edge: GraphEdge): { word: string; tone: Tone } {
   return EDGE_WORDS[edge.state];
 }
 
+/** One line naming an agent or the master with its harness and status, such as
+ * "Ada (@onboarding-fix) · Claude Code · working". Inputs: the node and a harness display
+ * name lookup. Output: the line; a node without a status leaves that part out. */
+export function nodeLine(node: GraphNode, harness: (id: string) => string = (id) => id): string {
+  const status = nodeStatus(node);
+  return [node.label, harness(node.harness), status?.word.toLowerCase()].filter(Boolean).join(" · ");
+}
+
 /** The second line of a node box: the master's harness, a group's agent count, or an
  * agent's harness and account. Inputs: the node and a harness display name lookup.
  * Output: one short line. */
@@ -199,18 +404,27 @@ export function nodeDetail(node: GraphNode, harness: (id: string) => string = (i
   }
 }
 
+/** Puts each node's account name in place of the engine's account id, so the graph names
+ * accounts as the Team panel does. Inputs: the graph and an account namer. Output: a new graph;
+ * the input is left unchanged. */
+export function namedAccounts(graph: TeamGraph, account: (id: string) => string): TeamGraph {
+  return { ...graph, nodes: graph.nodes.map((node) => node.account === null ? node : { ...node, account: account(node.account) }) };
+}
+
 /** Whether the graph can still change soon: an agent starting or working, or a task sent or
  * running. Input: the graph. Output: true to read it again quickly. */
 export function graphLive(graph: TeamGraph): boolean {
   return graph.nodes.some((node) => node.status === "starting" || node.status === "working")
-    || graph.edges.some((edge) => edge.state === "sent" || edge.state === "running");
+    || graph.edges.some(live);
 }
 
-/** The one line under the graph title: how many agents work and how many tasks are live.
- * Input: the graph. Output: the line. */
-export function graphSummary(graph: TeamGraph): string {
+/** The one line under the graph title: how many agents work, how many tasks are live and how
+ * many agents the drawing leaves out. Inputs: the graph and the layout's hidden count.
+ * Output: the line. */
+export function graphSummary(graph: TeamGraph, hidden = 0): string {
   const agents = graph.nodes.filter((node) => node.kind === "agent");
   const working = agents.filter((node) => node.status === "working").length;
-  const live = graph.edges.filter((edge) => edge.state === "sent" || edge.state === "running").length;
-  return `${working} of ${agents.length} ${agents.length === 1 ? "agent" : "agents"} working. ${live} ${live === 1 ? "task" : "tasks"} live.`;
+  const count = graph.edges.filter(live).length;
+  const left = hidden > 0 ? ` ${plural(hidden, "agent")} not shown.` : "";
+  return `${working} of ${plural(agents.length, "agent")} working. ${plural(count, "task")} live.${left}`;
 }

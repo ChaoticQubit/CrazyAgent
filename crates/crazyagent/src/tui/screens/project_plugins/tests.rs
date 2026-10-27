@@ -21,6 +21,7 @@ use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::text::Line;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,7 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         id: format!("pl0x{name}"),
         name: name.into(),
         description: format!("How to do {name} work."),
+        line: format!("How to do {name} work."),
         scope_label: scope.label().into(),
         scope,
         enabled,
@@ -388,6 +390,54 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
 }
 
 #[test]
+fn enter_on_a_skill_asks_the_host_for_its_page_and_skill_names_share_the_accent() {
+    let mut view = loaded();
+    assert!(
+        frame(&view, 120, 36)
+            .last()
+            .unwrap()
+            .contains("Enter Details")
+    );
+    match view.key(press(KeyCode::Enter)) {
+        PluginsReply::OpenSkill { id, name } => {
+            assert_eq!(id, "pl0xfrontend-design");
+            assert_eq!(name, "frontend-design");
+        }
+        other => panic!("the skill page expected, got {other:?}"),
+    }
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    assert!(
+        !frame(&view, 120, 36)
+            .last()
+            .unwrap()
+            .contains("Enter Details")
+    );
+    assert!(
+        matches!(view.key(press(KeyCode::Enter)), PluginsReply::Ignored),
+        "Enter on an approved server stays with the host"
+    );
+
+    let mut look = Look::plain();
+    look.accent = Style::new().fg(ratatui::style::Color::Cyan);
+    let (rows, _) = loaded().rows(116, 30, &look);
+    let lines: Vec<Line<'static>> = rows.into_iter().map(Row::line).collect();
+    let fg = |name: &str| {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.trim() == name)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+            .style
+            .fg
+    };
+    assert_eq!(fg("linear-method"), look.accent.fg);
+    assert_eq!(fg("tidepool-style"), look.accent.fg);
+    assert_ne!(fg("github"), look.accent.fg, "server names stay plain");
+}
+
+#[test]
 fn a_and_m_ask_the_host_for_the_project_add_forms() {
     let mut view = loaded();
     assert!(matches!(
@@ -471,6 +521,53 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     assert_eq!(
         view.notice,
         Some(Notice::plain("Removed postgres and its secrets."))
+    );
+}
+
+#[test]
+fn a_short_window_keeps_the_question_and_the_notice_before_the_details() {
+    let look = Look::plain();
+    let texts = |view: &ProjectPlugins, room: usize| -> Vec<String> {
+        let (rows, _) = view.rows(76, room, &look);
+        assert!(rows.len() <= room, "{} rows in {room}", rows.len());
+        rows.iter()
+            .map(|row| row.text().trim_end().to_owned())
+            .collect()
+    };
+    let mut view = loaded();
+    for _ in 0..3 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Char(' ')));
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    let shown = texts(&view, 8);
+    assert!(
+        shown.iter().any(|row| row == "tidepool-style is off."),
+        "{shown:?}"
+    );
+    assert!(
+        shown.iter().any(|row| row.starts_with("tidepool-style")),
+        "the details keep their name line: {shown:?}"
+    );
+
+    view.key(press(KeyCode::Char('d')));
+    let shown = texts(&view, 8);
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.starts_with("Remove tidepool-style?")),
+        "{shown:?}"
+    );
+    assert!(
+        shown.iter().any(|row| row.contains("Your folder stays.")),
+        "{shown:?}"
+    );
+    let roomy = texts(&view, 18);
+    assert!(
+        roomy
+            .iter()
+            .any(|row| row == "How to do tidepool-style work."),
+        "a window with room keeps the whole panel: {roomy:?}"
     );
 }
 
@@ -733,6 +830,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                     sent.push(match job.as_ref() {
                         SettingsJob::ProjectPlugins { .. } => "project plugins",
                         SettingsJob::Plugin(_) => "plugin change",
+                        SettingsJob::SkillDetail { .. } => "skill detail",
                         _ => "settings",
                     });
                     connection.settings(*job).unwrap();
@@ -844,4 +942,118 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Project settings"), "{shown}");
     assert!(shown.contains("Off here"), "{shown}");
+
+    shell.key(Key::Enter);
+    let sent = drive(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["skill detail"]);
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("Tidepool  /  Settings  /  release-notes"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("release-notes  Off for this project"),
+        "{shown}"
+    );
+    shell.key(Key::Char(' '));
+    let sent = drive(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["plugin change", "skill detail"]);
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("release-notes  On for this project"),
+        "{shown}"
+    );
+    let skills = engine
+        .controller
+        .plugin_skills(Some(project()))
+        .await
+        .unwrap();
+    assert_eq!(skills[0].on_here, Some(true));
+    shell.key(Key::Esc);
+    drive(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Project settings"), "{shown}");
+    assert!(!shown.contains("Off here"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list() {
+    let engine = engine().await;
+    engine
+        .controller
+        .add_mcp_server(
+            here(),
+            "postgres".into(),
+            ServerSpec::Stdio {
+                command: "/bin/echo".into(),
+                args: vec!["hello".into()],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+    for _ in 0..4 {
+        if render(&mut shell, 100, 40).contains("> postgres") {
+            break;
+        }
+        shell.key(Key::Down);
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("> postgres") && shown.contains("Needs approval"),
+        "{shown}"
+    );
+
+    shell.key(Key::Char('f'));
+    let typed = "/Users/x/st[u]dy?";
+    for character in typed.chars() {
+        shell.key(Key::Char(character));
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains(typed),
+        "every typed key reaches the box: {shown}"
+    );
+    shell.key(Key::Enter);
+    for character in "my".chars() {
+        shell.key(Key::Char(character));
+    }
+    let sent = drive(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"plugin change"), "{sent:?}");
+    assert_eq!(shell.place(), Some(settings));
+    let servers = engine
+        .controller
+        .plugin_servers(Some(project()))
+        .await
+        .unwrap();
+    let postgres = servers
+        .iter()
+        .find(|server| server.name == "postgres")
+        .expect("typing in the box removed no server");
+    assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
 }

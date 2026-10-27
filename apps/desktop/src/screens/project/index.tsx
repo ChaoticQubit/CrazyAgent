@@ -1,18 +1,21 @@
-import { harnessCatalog, nextGeneration } from "../../api";
-import { useContext, useEffect, useRef, useState } from "react";
-import { cancelTeamTask, failureCopy, loadContext, loadPools, loadProjects, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
-import { SessionContext } from "../../state";
+import { harnessCatalog, nextGeneration, type Result } from "../../api";
+import { useContext, useEffect, useState } from "react";
+import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
+import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
+import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
-import { ConversationTab } from "./conversation";
+import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
+import { ProcessEditor } from "../process";
 import { pauseSummary, shouldPoll } from "./research";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
+import { TeamActivity } from "./team-activity";
 import { useTeam } from "./team";
 import "./projects.css";
 
@@ -20,28 +23,31 @@ export const TABS = [
   { id: "overview", label: "Overview", icon: "house" },
   { id: "conversation", label: "Conversation", icon: "message-square" },
   { id: "agents", label: "Agents", icon: "bot" },
+  { id: "changes", label: "Changes", icon: "git-branch" },
   { id: "context", label: "Context", icon: "folder-open" },
+  { id: "process", label: "Process", icon: "list-checks" },
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
 export type TabId = typeof TABS[number]["id"];
 
+function shown<T>(read: Loaded<T>): Result<T> | undefined {
+  return read.kind === "loading" ? undefined : read;
+}
+
 function useProject(id: string, navigate: (path: string) => void, known = "") {
-  const [name, setName] = useState(known);
-  const [setup, setSetup] = useState<ProjectData["setup"]>();
-  const [research, setResearch] = useState<ProjectData["research"]>();
-  const [context, setContext] = useState<ProjectData["context"]>();
-  const [pools, setPools] = useState<ProjectData["pools"]>();
-  const [harnesses, setHarnesses] = useState<ProjectData["harnesses"]>();
+  const [setup, reloadSetup] = useLoad(() => loadSetup(id), [id], "project-setup");
+  const [research, reloadResearch] = useLoad(() => loadResearch(id), [id], "project-research");
+  const [context, reloadContext] = useLoad(() => loadContext(id), [id], "project-context");
+  const [pools, reloadPools] = useLoad(loadPools, [], "project-pools");
+  const [harnesses] = useLoad(harnessCatalog, [], "harness-catalog");
   const [now, setNow] = useState(() => Date.now());
   const [toast, setToast] = useState<string | null>(null);
   const session = useContext(SessionContext);
   const notify = (message: string) => { if (session) session.showToast(message); else setToast(message); };
-  const [round, setRound] = useState(0);
-  const [poolRound, setPoolRound] = useState(0);
   const [team, reloadTeam] = useTeam(id);
-  const current = useRef(id);
-  current.current = id;
+  const listed = session?.projects.kind === "ok" ? session.projects.value.find((item) => item.id === id)?.name : undefined;
+  const name = (setup.kind === "ok" && setup.value ? setup.value.name : "") || known || listed || "";
 
   useEffect(() => {
     const message = takeFlash();
@@ -54,49 +60,24 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  useEffect(() => {
-    const live = id;
-    void loadSetup(id).then((result) => {
-      if (current.current !== live) return;
-      setSetup(result);
-      if (result.kind === "ok" && result.value) setName(result.value.name);
-    });
-    void loadProjects().then((result) => {
-      if (current.current !== live || result.kind !== "ok") return;
-      const found = result.value.find((item) => item.id === live);
-      if (found) setName((prior) => prior || found.name);
-    });
-    void loadResearch(id).then((result) => { if (current.current === live) setResearch(result); });
-    void loadContext(id).then((result) => { if (current.current === live) setContext(result); });
-  }, [id, round]);
-
-  useEffect(() => {
-    void harnessCatalog().then(setHarnesses);
-  }, []);
-
-  useEffect(() => {
-    void loadPools().then(setPools);
-  }, [poolRound]);
-
-  const jobs = valueOf(research)?.jobs ?? [];
+  const jobs = research.kind === "ok" ? research.value.jobs : [];
   const polling = shouldPoll(jobs);
   useEffect(() => {
     if (!polling) return;
-    const live = id;
     const timer = window.setInterval(() => {
       setNow(Date.now());
-      void loadResearch(live).then((result) => { if (current.current === live) setResearch(result); });
-      void loadContext(live).then((result) => { if (current.current === live) setContext(result); });
+      reloadResearch();
+      reloadContext();
     }, 3000);
     return () => window.clearInterval(timer);
   }, [id, polling]);
 
-  const assigned = valueOf(pools)?.find((choice) => choice.pool.projects.includes(id)) ?? null;
+  const assigned = pools.kind === "ok" ? pools.value.find((choice) => choice.pool.projects.includes(id)) ?? null : null;
   const data: ProjectData = {
-    id, name, setup, research, context, pools, harnesses, assigned, now, navigate,
-    notify,
-    reload: () => { setNow(Date.now()); setRound((value) => value + 1); },
-    reloadPools: () => setPoolRound((value) => value + 1),
+    id, name, setup: shown(setup), research: shown(research), context: shown(context), pools: shown(pools), harnesses: shown(harnesses),
+    assigned, now, navigate, notify,
+    reload: () => { setNow(Date.now()); reloadSetup(); reloadResearch(); reloadContext(); },
+    reloadPools,
     team,
     reloadTeam,
   };
@@ -189,9 +170,11 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
-      {active === "conversation" && <ConversationTab data={data} />}
+      {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
+      {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
+      {active === "process" && <ProcessEditor scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}

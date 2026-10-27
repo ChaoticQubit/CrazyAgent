@@ -25,7 +25,8 @@ mod migrations;
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    close_master_for_removal, native_sign_in, validate_configured_initial_conversation_receipt,
+    close_master_for_removal, master_resolve_ready, native_sign_in,
+    validate_configured_initial_conversation_receipt,
 };
 mod native_auth;
 #[cfg(all(test, unix))]
@@ -282,6 +283,7 @@ impl Storage {
                 }
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
+                let mut ended_custody: Option<NativeAuthFact> = None;
                 let mut model_access_snapshot = None;
                 let mut home_watch = projects_home::WatchSlot::default();
                 if !readonly {
@@ -375,6 +377,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
                             } else {
+                                ended_custody = Some(dispatch.fact().clone());
                                 native_auth::recover_native_auth(
                                     &mut connection,
                                     custody.as_mut().unwrap(),
@@ -393,6 +396,7 @@ impl Storage {
                                     &config,
                                     sources.as_ref(),
                                     custody.as_mut().unwrap(),
+                                    ended_custody.as_ref(),
                                     &admission,
                                     command,
                                 )
@@ -675,6 +679,8 @@ impl Storage {
                                 &query,
                                 OwnerRead::ProjectMaster { .. }
                                     | OwnerRead::ProjectMasterTurns { .. }
+                                    | OwnerRead::ProjectMasterSessions { .. }
+                                    | OwnerRead::ProjectMasterInputs { .. }
                             ) {
                                 let _ = reply.send(master_session::read(
                                     &mut connection,
@@ -926,6 +932,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::projects_home::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
@@ -935,6 +942,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
+    crate::master_sessions::initialize(connection)?;
     native_auth::initialize(connection)?;
     master_bootstrap::initialize(connection)?;
     harness_groups::initialize(connection)
@@ -1139,6 +1147,23 @@ fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
     assert_eq!(lock.metadata().map_err(error)?.ino(), lock_metadata.ino());
     assert_eq!(lock.metadata().map_err(error)?.dev(), lock_metadata.dev());
     Ok(EngineLock { file: lock })
+}
+
+/// Says whether no engine holds the database lock of a data folder, so a new engine can
+/// open its database. Input: the data folder. Output: true when the lock file is missing or
+/// free, false while an engine holds it or when it cannot be opened.
+#[cfg(unix)]
+pub fn engine_lock_released(root: &Path) -> bool {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(root.join("engine.db").with_extension("engine-lock"));
+    match lock {
+        Ok(lock) => {
+            rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared).is_ok()
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Releases the engine database lock and reports whether the unlock succeeded.
@@ -1435,6 +1460,15 @@ fn execute(
             crate::project_setup::execute(tx, config, action, revision)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
+        Command::AccountSchedule { change } => crate::scheduling::apply(
+            tx,
+            config
+                .settings
+                .model_access
+                .as_ref()
+                .unwrap_or(&crate::config::ModelAccess::default()),
+            change,
+        ),
         Command::Team { action } => crate::team::execute(
             tx,
             &config.settings.model_access.clone().unwrap_or_default(),
@@ -2362,6 +2396,14 @@ fn owner_read(
             project_id: project_id.clone(),
             setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
         },
+        OwnerRead::ProjectReadPaths { project_id } => OwnerData::ProjectReadPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::extra_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?
@@ -2370,6 +2412,9 @@ fn owner_read(
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
+        },
+        OwnerRead::TeamEvents => OwnerData::TeamEvents {
+            events: Box::new(crate::team::events::app(&tx)?),
         },
         OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
             graph: Box::new(crate::team::graph(&crate::team::status(
@@ -2421,6 +2466,20 @@ fn owner_read(
             memories: crate::memory::library::approved_for_project(&tx, project_id)?,
         },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
+        OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
+            schedule: crate::scheduling::load(&tx)?,
+        },
+        OwnerRead::AccountRanking => OwnerData::AccountRanking {
+            pools: crate::scheduling::ranking(
+                &tx,
+                config
+                    .settings
+                    .model_access
+                    .as_ref()
+                    .unwrap_or(&crate::config::ModelAccess::default()),
+                crate::team::now_ms(),
+            )?,
+        },
         OwnerRead::Page {
             view,
             cursor,

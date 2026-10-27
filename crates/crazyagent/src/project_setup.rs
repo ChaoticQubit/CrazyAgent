@@ -617,6 +617,9 @@ pub enum SetupQuery {
     Context {
         project: ProjectId,
     },
+    ReadPaths {
+        project: ProjectId,
+    },
     Item {
         project: ProjectId,
         path: String,
@@ -657,6 +660,7 @@ pub enum SetupView {
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
+    ReadPaths(Vec<String>),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -703,6 +707,10 @@ pub enum SetupAction {
         project_id: ProjectId,
         job: i64,
     },
+    SetReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
 }
 
 impl SetupAction {
@@ -742,6 +750,16 @@ impl SetupAction {
             Self::DeleteContext { path, .. } => {
                 if path.len() > 512 || context_kind(path).is_none() {
                     return Err(failure("context_path_invalid"));
+                }
+                Ok(())
+            }
+            Self::SetReadPaths { paths, .. } => {
+                if paths.len() > crate::sandbox::extra_paths::EXTRA_PATHS_MAX
+                    || paths
+                        .iter()
+                        .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
+                {
+                    return Err(failure("read_paths_invalid"));
                 }
                 Ok(())
             }
@@ -944,6 +962,7 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 /// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
 /// Returns the pool's best signed-in harness, Codex before Claude Code, as master and as one
 /// research agent per toggle, tools on; Codex when the pool has no signed-in harness, never RCLI.
+/// Without research no harness is chosen, which means any harness up to `TEAM_AGENTS_MAX`.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
@@ -967,9 +986,13 @@ pub fn default_team(
     let team = TeamPlan {
         master,
         master_tools: true,
+        max_agents: if sub_harnesses.is_empty() {
+            TEAM_AGENTS_MAX
+        } else {
+            1 + agents
+        },
         sub_harnesses,
         min_agents: 1,
-        max_agents: 1 + agents,
     };
     assert!(team.validate().is_ok());
     team
@@ -1739,6 +1762,7 @@ pub(crate) fn execute(
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
+        SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2134,7 +2158,7 @@ fn retry_research(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 8] = [
+const REMOVED_WITH_PROJECT: [&str; 10] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2142,8 +2166,39 @@ const REMOVED_WITH_PROJECT: [&str; 8] = [
     "team_owner_prompts",
     "team_settings",
     "team_paused_projects",
+    "team_worktrees",
+    "team_task_pins",
     "project_setups",
 ];
+
+/// Saves a project's extra read-only folders once each passes
+/// [`crate::sandbox::extra_paths::checked`]. Takes the transaction, project and typed paths.
+/// Returns Applied, or a plain rejection for an unknown project or a refused path.
+fn set_read_paths(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    paths: &[String],
+) -> Result<Outcome, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !exists {
+        return Ok(rejected("invalid_project"));
+    }
+    let Some(data_root) = tx.path().map(Path::new).and_then(Path::parent) else {
+        return Ok(rejected("read_path_refused"));
+    };
+    let checked = match crate::sandbox::extra_paths::checked_all(paths, data_root) {
+        Ok(checked) => checked,
+        Err(code) => return Ok(rejected(code)),
+    };
+    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    Ok(Outcome::Applied)
+}
 
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
@@ -2173,6 +2228,7 @@ fn remove(
         )
         .map_err(error)?;
     }
+    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

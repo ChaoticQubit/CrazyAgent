@@ -23,8 +23,11 @@ const MASTER_READ_ATTEMPTS: u32 = 4;
 mod account_profile;
 pub(super) mod accounts;
 pub(super) mod app_setup;
+pub(super) mod changes;
 mod claude_code;
+pub(super) mod cleanup;
 pub(super) mod intake;
+pub(super) mod process;
 mod project_setup;
 pub(super) mod settings;
 mod shell;
@@ -52,7 +55,11 @@ enum Job {
     Shell(Box<crate::tui::seam::ShellRequest>),
     Settings(Box<settings::SettingsJob>),
     TeamGraph(Box<ProjectId>),
+    ProjectFiles(Box<(ProjectId, String)>),
     Intake(Box<intake::IntakeJob>),
+    Changes(Box<changes::ChangesQuery>),
+    Process(Box<process::ProcessQuery>),
+    Cleanup(Box<cleanup::CleanupQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -166,7 +173,15 @@ pub(super) enum OwnerEvent {
         project: ProjectId,
         result: Result<Box<crate::team::TeamGraph>, String>,
     },
+    ProjectFiles {
+        project: ProjectId,
+        query: String,
+        result: Result<Vec<String>, String>,
+    },
     Intake(Box<intake::IntakeEvent>),
+    Changes(Box<changes::ChangesEvent>),
+    Process(Box<process::ProcessEvent>),
+    Cleanup(Box<cleanup::CleanupEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -585,6 +600,41 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::ProjectFiles(job) => {
+                            let (project, query) = *job;
+                            let result = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let result =
+                                        runtime.block_on(native.project_files(&project, &query));
+                                    let problem = result.as_ref().err().map(String::as_str);
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    result
+                                }
+                                None => Err("trusted_connection_unavailable".into()),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::ProjectFiles {
+                                        project,
+                                        query,
+                                        result,
+                                    },
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Intake(job) => {
                             let event = match native.as_mut() {
                                 Some(native) => {
@@ -608,6 +658,90 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Intake(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Changes(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.changes(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => changes::ChangesEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Changes(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Process(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.process(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => process::ProcessEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Process(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Cleanup(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.cleanup(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => cleanup::CleanupEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Cleanup(Box::new(event)),
                                 })
                                 .is_err()
                             {
@@ -802,6 +936,18 @@ impl Connection {
     /// `OwnerEvent::TeamGraph`.
     pub(super) fn team_graph(&mut self, project: ProjectId) -> Result<(), String> {
         self.owner_job(Job::TeamGraph(Box::new(project)))
+    }
+
+    /// Lists one project's files for the console's `@` completion: at most
+    /// `project_files::FILES_MAX` paths that contain the query.
+    /// Input: the project and the query. Output: Ok once queued; the paths come back as
+    /// `OwnerEvent::ProjectFiles`.
+    pub(super) fn project_files(
+        &mut self,
+        project: ProjectId,
+        query: String,
+    ) -> Result<(), String> {
+        self.owner_job(Job::ProjectFiles(Box::new((project, query))))
     }
 
     fn owner_job(&mut self, job: Job) -> Result<(), String> {
@@ -1003,6 +1149,8 @@ impl NativeOwner {
             master_session::Job::Read {
                 context,
                 confirmation,
+                sessions,
+                known,
             } => {
                 let result = match self.master_controller(&context.identity) {
                     Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
@@ -1013,6 +1161,8 @@ impl NativeOwner {
                                 &mut *controller,
                                 &context,
                                 confirmation.as_deref(),
+                                sessions,
+                                &known,
                             )
                             .await
                             {
@@ -1208,6 +1358,30 @@ impl NativeOwner {
             },
             Err(error) => Err(bounded_problem(&error.0)),
         }
+    }
+
+    /// Lists one project's files on the trusted owner connection.
+    /// Input: the project and the query. Output: the paths, or the engine's plain problem code.
+    async fn project_files(
+        &mut self,
+        project: &ProjectId,
+        query: &str,
+    ) -> Result<Vec<String>, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        controller
+            .project_files(
+                project.clone(),
+                query.to_owned(),
+                crate::project_files::FILES_MAX,
+            )
+            .await
+            .map_err(|error| bounded_problem(&error.0))
     }
 
     async fn read_dispatch(&mut self, query: &dispatch::Query) -> Result<OwnerReadReply, String> {
@@ -2189,7 +2363,7 @@ mod creation_recovery_tests {
             .find(|path| path.exists())
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
             silent.push(
                 crate::spawn_gate::connect_unix(&owner_socket)
                     .await

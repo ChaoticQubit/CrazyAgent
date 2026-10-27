@@ -74,6 +74,15 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
+    process: Option<Box<Process>>,
+}
+
+/// The owner's app and project instructions one launch writes into the agent's home,
+/// with the project they belong to.
+#[derive(Debug)]
+struct Process {
+    project: crate::agent_home::AgentProject,
+    text: String,
 }
 
 /// The files one launch wrote into its agent home, and the lock that keeps a second launch
@@ -103,10 +112,34 @@ pub fn for_project(
     let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0))?;
     let instructions = project_instructions(&tx, project)?;
+    let home_project = agent_project(&tx, project)?;
     drop(tx);
+    let text = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
+        process: Some(Box::new(Process {
+            project: home_project,
+            text,
+        })),
+    })
+}
+
+/// Names what an agent home of the project receives the owner's instructions from: the
+/// engine data folder (the folder of `engine.db`) and the project's recorded folder.
+/// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
+pub(crate) fn agent_project(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<crate::agent_home::AgentProject, LaunchError> {
+    let folder = crate::project_setup::load_setup(tx, project)
+        .map_err(unavailable)?
+        .map(|setup| setup.project_folder())
+        .filter(|folder| folder.is_absolute());
+    Ok(crate::agent_home::AgentProject {
+        data: engine_root(tx)?,
+        id: project.clone(),
+        folder,
     })
 }
 
@@ -124,12 +157,14 @@ pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, L
 /// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
 /// the approved skills and MCP servers that team agents with tools on receive. No secret
 /// value, command, URL or file of a server is read or given. Input: a transaction the caller
-/// holds on `engine.db`, the project and its master tools switch. Output: at most
-/// `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown, or a plain code.
+/// holds on `engine.db`, the project, its master tools switch and the live model access,
+/// none without settings. Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown,
+/// or a plain code.
 pub fn for_master(
     tx: &Transaction<'_>,
     project: &ProjectId,
     tools: bool,
+    access: Option<&crate::config::ModelAccess>,
 ) -> Result<String, LaunchError> {
     let root = engine_root(tx)?;
     let mut text = project_instructions(tx, project)?;
@@ -137,7 +172,10 @@ pub fn for_master(
         let setup = crate::project_setup::load_setup(tx, project)
             .map_err(unavailable)?
             .ok_or_else(|| failure("launch_context_master_tools_without_plan"))?;
-        text.push_str(&master_tools_section(&setup));
+        let available = access
+            .map(|access| crate::team::available_harnesses(access, project))
+            .unwrap_or_default();
+        text.push_str(&master_tools_section(&setup, &available));
     } else {
         let plugins = crate::storage::plugins::effective(tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
@@ -149,9 +187,10 @@ pub fn for_master(
 
 /// Tells a conversation master whose tools are on what it can do and how it starts a
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
-/// to the team, and the team plan's sub-agents, or plainly that the plan has none.
-/// Input: the project setup. Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
-pub(crate) fn master_tools_section(setup: &StoredSetup) -> String {
+/// to the team, and the team plan's sub-agents, or for an empty plan the harnesses it can use.
+/// Input: the project setup and the harnesses with an eligible account now.
+/// Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
+pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> String {
     let mut section = format!(
         "\n## Your tools\n\nYour tools are on in this conversation. You can read and search files, edit them and run shell commands in this conversation's own git worktree, your working folder. You cannot write outside it; the project folder itself stays read-only to you.\n\nTo start a sub-agent, call the `{}` tool of the `{}` MCP server with the task in plain words and, if you choose, a harness from the team plan. Each call hands over one task, at most {} in one reply. Start sub-agents only with this tool. Never use your harness's own sub-agent tools, such as Codex's `spawn_agent`, `followup_task`, `send_message` or `wait_agent`: CrazyAgent stops any agent they start, and only agents started with this tool run on the project's pool and appear in the project's Agents tab and Team view. When your reply ends, CrazyAgent checks each task against the team plan and runs it in its own git worktree. Its full progress and result show in the project's Team view. When it ends, a short note on how it went comes back to this conversation as an `Engine:` line you see on your next turn.\n\n",
         crate::team::tool::TOOL_NAME,
@@ -159,7 +198,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup) -> String {
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
     if setup.team.sub_harnesses.is_empty() {
-        section.push_str("This project's team plan has no sub-agents, so CrazyAgent refuses every task you hand over. Do the work yourself, or tell the owner to add sub-agents in the project's Team settings.\n");
+        section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
         section.push_str("The team plan's sub-agents:\n");
         let mut left = 0;
@@ -234,7 +273,28 @@ impl AgentContext {
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
     /// is not plain or an approved server already uses the name.
-    pub fn with_team_tool(mut self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
+    pub fn with_team_tool(self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
+        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop)
+    }
+
+    /// Adds the engine's own MCP server that gives a live team master with tools on its team
+    /// tools, answered by the engine at once through the mailbox folder. Input: the absolute
+    /// canonical engine executable and the absolute mailbox in the master's private temporary
+    /// folder. Output: the context, or a plain code as for [`Self::with_team_tool`].
+    pub fn with_live_team_tool(
+        self,
+        executable: &Path,
+        mailbox: &Path,
+    ) -> Result<Self, LaunchError> {
+        self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)
+    }
+
+    fn with_team_server(
+        mut self,
+        executable: &Path,
+        subcommand: &str,
+        drop: &Path,
+    ) -> Result<Self, LaunchError> {
         let plain = |path: &Path| {
             path.is_absolute()
                 .then(|| path.to_str())
@@ -258,7 +318,7 @@ impl AgentContext {
             name: name.into(),
             spec: ServerSpec::Stdio {
                 command,
-                args: vec![crate::team::tool::SERVER_COMMAND.into(), drop],
+                args: vec![subcommand.into(), drop],
             },
             secrets: Vec::new(),
         });
@@ -325,8 +385,24 @@ impl AgentContext {
         };
         remove(&state);
         directory(&state, true)?;
+        if let Some(process) = &self.process {
+            let harness = crate::agent_home::Harness::from_id(id)
+                .ok_or_else(|| failure("launch_harness_unsupported"))?;
+            crate::agent_home::prepare(home, harness, &process.project, &process.text)
+                .map_err(|problem| LaunchError(problem.0))?;
+        }
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
         let skills = tools && !self.plugins.skills.is_empty();
+        let names: Vec<&str> = match skills {
+            true => self
+                .plugins
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect(),
+            false => Vec::new(),
+        };
+        crate::agent_home::record_skills(home, &names).map_err(|problem| LaunchError(problem.0))?;
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
@@ -346,6 +422,14 @@ impl AgentContext {
                 .arguments
                 .extend([OsString::from("--mcp-config"), mcp.into_os_string()]);
             let mut text = self.instructions.clone();
+            if let Some(process) = self
+                .process
+                .as_ref()
+                .filter(|process| !process.text.is_empty())
+            {
+                text.push('\n');
+                text.push_str(&process.text);
+            }
             if skills {
                 let plugin = state.join("plugin");
                 directory(&plugin, true)?;
@@ -360,7 +444,13 @@ impl AgentContext {
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
             }
-            assert!(text.len() <= INSTRUCTIONS_BYTES_MAX + SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
+            assert!(
+                text.len()
+                    <= INSTRUCTIONS_BYTES_MAX
+                        + SKILLS_INDEX_BYTES_MAX
+                        + SECTION_SLACK
+                        + crate::agent_home::PROCESS_BYTES_MAX
+            );
             let instructions = state.join("instructions.md");
             write_private(&instructions, text.as_bytes())?;
             installed.arguments.extend([

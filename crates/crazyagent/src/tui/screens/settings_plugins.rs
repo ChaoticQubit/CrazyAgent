@@ -307,7 +307,6 @@ impl Plugins {
 
     fn actions(&self) -> Vec<Action> {
         match self.picked() {
-            Some(Picked::Skill(_)) => vec![Action::Toggle, Action::Remove, Action::Close],
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let mut actions = Vec::new();
@@ -321,16 +320,13 @@ impl Plugins {
                 actions.extend([Action::Edit, Action::Toggle, Action::Remove]);
                 actions
             }
-            None => Vec::new(),
+            Some(Picked::Skill(_)) | None => Vec::new(),
         }
     }
 
     fn label(&self, action: Action) -> &'static str {
-        let on = match self.picked() {
-            Some(Picked::Skill(index)) => self.skills[index].enabled,
-            Some(Picked::Server(index)) => self.servers[index].enabled,
-            None => false,
-        };
+        let on =
+            matches!(self.picked(), Some(Picked::Server(index)) if self.servers[index].enabled);
         match action {
             Action::Approve => "Approve",
             Action::NotNow => "Not now",
@@ -549,7 +545,7 @@ impl Plugins {
                 .take(skill_window)
                 .map(|(index, skill)| {
                     let values = vec![
-                        Line::raw(skill.name.clone()),
+                        styled(skill.name.clone(), Role::Accent, theme),
                         Line::raw(if skill.enabled { "On" } else { "Off" }),
                         Line::raw(tilde(&skill.source, ctx)),
                     ];
@@ -651,20 +647,7 @@ impl Plugins {
         let labels: Vec<&str> = actions.iter().map(|action| self.label(*action)).collect();
         let mut body = Vec::new();
         let title = match self.picked()? {
-            Picked::Skill(index) => {
-                let skill = &self.skills[index];
-                body.push(join([
-                    styled(skill.name.clone(), Role::Accent, theme),
-                    Line::raw("  "),
-                    Line::raw(if skill.enabled { "On" } else { "Off" }),
-                ]));
-                body.push(Line::default());
-                body.extend(wrap(&skill.description, room).into_iter().map(Line::raw));
-                body.push(Line::default());
-                wrapped("Folder", &tilde(&skill.source, ctx), &mut body);
-                body.push(label("Projects", Line::raw("All projects")));
-                "Skill"
-            }
+            Picked::Skill(_) => return None,
             Picked::Server(index) => {
                 let server = &self.servers[index];
                 let asking = server.status == ServerStatus::WaitingForApproval;
@@ -814,6 +797,8 @@ impl Screen for Plugins {
             hint("m", "Add MCP server"),
             hint("Space", "On or off"),
             hint("Enter", "Details"),
+            hint("i", "Import"),
+            hint("d", "Remove"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
         ]
@@ -826,11 +811,25 @@ impl Screen for Plugins {
         let count = self.count();
         match key {
             Key::Char('a') => return Flow::Replace(Box::new(AddPlugin::skill())),
+            Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
             Key::Char('m') => return Flow::Replace(Box::new(AddPlugin::server())),
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
-            Key::Enter if self.picked().is_some() && self.changing.is_none() => {
-                self.open = Open::Details { focus: 0 }
+            Key::Enter if self.changing.is_none() => match self.picked() {
+                Some(Picked::Skill(index)) => {
+                    let skill = &self.skills[index];
+                    return Flow::Replace(Box::new(SkillDetailPage::new(
+                        skill.id.clone(),
+                        skill.name.clone(),
+                    )));
+                }
+                Some(Picked::Server(_)) => self.open = Open::Details { focus: 0 },
+                None => {}
+            },
+            Key::Char('d') if self.picked().is_some() && self.changing.is_none() => {
+                self.open = Open::Remove {
+                    remove_focused: false,
+                }
             }
             Key::Up => self.selected = self.selected.saturating_sub(1),
             Key::Down => self.selected = (self.selected + 1).min(count.saturating_sub(1)),
@@ -1882,6 +1881,11 @@ impl Screen for EditServer {
         Some(place_of(self.project.as_ref()))
     }
 }
+
+mod import_page;
+mod skill_detail;
+pub use import_page::ImportSkillsPage;
+pub use skill_detail::SkillDetailPage;
 
 #[cfg(test)]
 mod tests;

@@ -18,7 +18,7 @@ const catalog = [
   harness("gemini", "Gemini CLI", missing, undefined, undefined, noReader),
 ];
 const engineTeam = (master, agents) => ({
-  master, master_tools: true, sub_harnesses: agents ? [{ harness: master, agents, tools: true }] : [], min_agents: 1, max_agents: 1 + agents,
+  master, master_tools: true, sub_harnesses: agents ? [{ harness: master, agents, tools: true }] : [], min_agents: 1, max_agents: agents ? 1 + agents : wizard.TEAM_AGENTS_MAX,
 });
 
 test("a new draft starts on Basics with market, competitor and design research on", () => {
@@ -55,6 +55,24 @@ test("tech stack entries are unique, bounded and custom entries are short", () =
   assert.deepEqual(wizard.removeStack(["A", "B"], "A"), ["B"]);
 });
 
+test("the form counts the bytes the engine stores, with the Other platform text joined to the description", () => {
+  const draft = { ...wizard.emptyDraft(), name: "Harbor Notes" };
+  const japanese = "説".repeat(3000);
+  assert.equal([...japanese].length, 3000, "well under the 4000 character limit");
+  assert.equal(wizard.basicsErrors({ ...draft, about: japanese }, []).about, "Shorten the description: it is too long to save.");
+  assert.equal(wizard.basicsErrors({ ...draft, about: "a".repeat(4000) }, []).about, undefined);
+  const near = "説".repeat(2730);
+  assert.equal(wizard.basicsErrors({ ...draft, about: near }, []).about, undefined, "8190 bytes fit");
+  const joined = { ...draft, about: near, platforms: ["other"], otherPlatform: "Kiosk" };
+  assert.equal(wizard.basicsErrors(joined, []).about, "Shorten the description or the Other platform text: together they are too long to save.");
+  assert.ok(new TextEncoder().encode(wizard.buildRequest(joined).setup.about).length > 8192, "the joined text is what the engine checks");
+  assert.equal(wizard.basicsErrors({ ...joined, otherPlatform: "" }, []).about, undefined);
+  assert.equal(wizard.addStack([], "説".repeat(22)).error, "This custom entry is too long to save. Shorten it.");
+  assert.deepEqual(wizard.addStack([], "説".repeat(21)), { stack: ["説".repeat(21)] });
+  assert.equal(wizard.basicsErrors({ ...draft, name: "😀".repeat(65) }, []).name, "This name is too long to save. Shorten it.");
+  assert.equal(wizard.basicsErrors({ ...draft, name: "😀".repeat(64) }, []).name, undefined, "256 bytes fit");
+});
+
 test("documents are checked by type, name and count before the engine copies them", () => {
   const extensions = ["pdf", "md", "txt", "docx", "csv", "png", "jpg", "jpeg"];
   const added = wizard.addDocuments([], ["/Users/m/brief.PDF", "/Users/m/budget.xlsx", "relative/notes.md", "/Users/m/folder/"], extensions, 16);
@@ -89,11 +107,32 @@ test("team defaults keep the engine plan while the harness catalog is not ready"
   assert.deepEqual(wizard.defaultTeam(engineTeam("gemini", 2), null), engineTeam("gemini", 2));
 });
 
-test("team defaults with no research have only the master and keep tools on", () => {
+test("team defaults with no research run any harness up to the team maximum and keep tools on", () => {
   const team = wizard.defaultTeam(engineTeam("codex", 0), catalog);
   assert.deepEqual(team.sub_harnesses, []);
   assert.equal(team.master_tools, true);
-  assert.deepEqual([team.min_agents, team.max_agents], [1, 1]);
+  assert.deepEqual([team.min_agents, team.max_agents], [1, 64]);
+  assert.deepEqual(wizard.teamErrors(team, catalog), { rows: [] });
+});
+
+test("an empty agent list reads as any harness, and the total as up to the team maximum", () => {
+  const any = engineTeam("codex", 0);
+  assert.equal(wizard.ANY_HARNESS_NOTE, "Any harness, no limit. Add a harness to limit which ones run and how many.");
+  assert.equal(wizard.anyHarnessTotal(any), "Any harness, up to 63 agents");
+  assert.equal(wizard.anyHarnessNote(any), wizard.ANY_HARNESS_NOTE);
+  assert.equal(wizard.agentTotalText(any), "This team has up to 64 agents.");
+  assert.equal(wizard.agentTotalText({ ...any, max_agents: 5 }), "This team has up to 5 agents.");
+  const chosen = wizard.addHarnessRow(any, catalog);
+  assert.deepEqual(chosen.sub_harnesses, [{ harness: "codex", agents: 1, tools: true }]);
+  assert.equal(wizard.agentTotalText(chosen), "This team has 2 agents.");
+  assert.equal(wizard.agentTotalText({ ...engineTeam("codex", 0), sub_harnesses: [], max_agents: 1 }), "This team has up to 1 agent.");
+});
+
+test("an empty agent list with a team maximum of one says no sub-agent runs", () => {
+  const alone = { ...engineTeam("codex", 0), max_agents: 1 };
+  assert.equal(wizard.anyHarnessTotal(alone), "No sub-agents (team maximum is 1)");
+  assert.equal(wizard.anyHarnessTotal({ ...alone, max_agents: 2 }), "Any harness, up to 1 agent");
+  assert.equal(wizard.anyHarnessNote(alone), "No sub-agents run with a team maximum of 1. Raise the maximum to let any harness run.");
 });
 
 test("a harness whose tools can't be turned off keeps tools on", () => {
@@ -171,6 +210,38 @@ test("adding and removing agent rows keeps the agent range valid", () => {
   assert.equal(wizard.teamValid(team, catalog), true);
   assert.equal(wizard.setAgents(team, 0, 99).sub_harnesses[0].agents, 15);
   assert.equal(wizard.setAgents(team, 0, 0).sub_harnesses[0].agents, 1);
+});
+
+test("a team at the agent maximum takes no more agents or rows and says what to remove", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const rows = (counts) => counts.map((agents) => ({ harness: "codex", agents, tools: true }));
+  const full = { master: "codex", master_tools: true, sub_harnesses: rows([15, 15, 15, 15, 3]), min_agents: 1, max_agents: wizard.TEAM_AGENTS_MAX };
+  assert.equal(wizard.totalAgents(full), wizard.TEAM_AGENTS_MAX);
+  assert.equal(wizard.teamFull(full), true);
+  assert.equal(wizard.teamValid(full, catalog), true);
+  assert.equal(wizard.setAgents(full, 4, 4).sub_harnesses[4].agents, 3);
+  assert.equal(wizard.setAgents(full, 0, 14).sub_harnesses[0].agents, 14);
+  const lower = wizard.setAgents(full, 4, 1);
+  assert.equal(wizard.teamFull(lower), false);
+  assert.equal(wizard.setAgents(lower, 4, 15).sub_harnesses[4].agents, 3);
+  assert.equal(wizard.addHarnessRow(full, catalog), full);
+  assert.equal(wizard.addHarnessRow(lower, catalog).sub_harnesses.length, 6);
+
+  const over = { ...full, sub_harnesses: rows([15, 15, 15, 15, 15]) };
+  assert.equal(wizard.teamErrors(over, catalog).range, "This team has 76 agents: the master and 75 more, but a team runs at most 64. Remove 12 or more.");
+  assert.equal(wizard.teamErrors({ ...over, max_agents: 76 }, catalog).range, "At most can be up to 64.");
+  assert.equal(wizard.teamValid(over, catalog), false);
+
+  const html = renderToStaticMarkup(createElement(TeamEditor, { team: full, harnesses: catalog, pool: null, research: [], onChange: () => {}, prefix: "np" }));
+  assert.equal(html.match(/aria-label="More Codex agents" disabled=""/g)?.length, 5);
+  assert.equal(html.match(/aria-label="Fewer Codex agents" disabled=""/g), null);
+  assert.match(html, /class="btn" disabled="">\+ Add harness/);
+  assert.match(html, /A team runs at most 64 agents, counting the master\. Lower a count or remove a harness to add another\./);
+  const shown = renderToStaticMarkup(createElement(TeamEditor, { team: over, harnesses: catalog, pool: null, research: [], onChange: () => {}, prefix: "np" }));
+  assert.match(shown, /Remove 12 or more\./);
+  assert.doesNotMatch(shown, /Set At most to/);
 });
 
 test("the request carries every answer and no repositories", () => {

@@ -54,6 +54,9 @@ fn read_failure(code: &str) -> BridgeError {
             "context_offset_invalid" => "context_offset_invalid",
             "project_missing" => "project_missing",
             "research_job_missing" => "research_job_missing",
+            "project_files_query_invalid" => "project_files_query_invalid",
+            "project_files_folder_missing" => "project_files_folder_missing",
+            "project_files_no_repository" => "project_files_no_repository",
             _ => "owner_read_failed",
         },
         code,
@@ -65,9 +68,9 @@ fn project(id: &str) -> Result<ProjectId, BridgeError> {
 }
 
 impl NativeBridge {
-    pub(super) fn ready_for_intent(&self, generation: u64) -> Result<(), BridgeError> {
+    pub(super) fn ready_for_intent(&mut self, generation: u64) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -133,9 +136,9 @@ impl NativeBridge {
     /// Reads the stored setup of one project.
     /// Takes the project id.
     /// Returns the setup, or none for a project created without one.
-    pub async fn project_setup(&mut self, id: &str) -> Result<Option<StoredSetup>, BridgeError> {
+    pub async fn project_setup(&self, id: &str) -> Result<Option<StoredSetup>, BridgeError> {
         let setup = self
-            .controller()?
+            .reader()?
             .project_setup(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -145,9 +148,9 @@ impl NativeBridge {
     /// Lists a project's research jobs with plain status labels.
     /// Takes the project id.
     /// Returns the jobs in creation order.
-    pub async fn research_jobs(&mut self, id: &str) -> Result<ResearchJobs, BridgeError> {
+    pub async fn research_jobs(&self, id: &str) -> Result<ResearchJobs, BridgeError> {
         let jobs = self
-            .controller()?
+            .reader()?
             .research_jobs(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -160,9 +163,9 @@ impl NativeBridge {
     /// Lists the brief, documents and research reports of a project folder.
     /// Takes the project id.
     /// Returns the folder path and its context items.
-    pub async fn project_context(&mut self, id: &str) -> Result<ProjectContext, BridgeError> {
+    pub async fn project_context(&self, id: &str) -> Result<ProjectContext, BridgeError> {
         let context = self
-            .controller()?
+            .reader()?
             .project_context(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -246,7 +249,7 @@ impl NativeBridge {
     /// Takes the project id and the last memory id already shown, if any.
     /// Returns at most one engine batch with plain status names.
     pub async fn project_memories(
-        &mut self,
+        &self,
         id: &str,
         after: Option<&str>,
     ) -> Result<Vec<MemoryItem>, BridgeError> {
@@ -255,7 +258,7 @@ impl NativeBridge {
             .map(|after| RequestId::new(after).map_err(|_| failure("invalid_memory")))
             .transpose()?;
         let entries = self
-            .controller()?
+            .reader()?
             .project_memories(project_id, after)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -313,6 +316,59 @@ impl NativeBridge {
         self.controller()?
             .begin_mutation(
                 OwnerMutation::DeleteProjectContext { project_id, path },
+                generation,
+            )
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Reads the extra read-only folders a project's agents get beside its toolchains.
+    /// Takes the project id.
+    /// Returns the folders in saved order.
+    pub async fn project_read_paths(&mut self, id: &str) -> Result<Vec<String>, BridgeError> {
+        let paths = self
+            .controller()?
+            .project_read_paths(project(id)?)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(paths)
+    }
+
+    /// Lists a set-up project's files for the console's `@` completion: tracked and
+    /// untracked, not ignored paths relative to its folder that contain the query.
+    /// Takes the project id and the query. Returns at most 200 paths in git's order.
+    pub async fn project_files(
+        &mut self,
+        id: &str,
+        query: &str,
+    ) -> Result<Vec<String>, BridgeError> {
+        let paths = self
+            .controller()?
+            .project_files(
+                project(id)?,
+                query.to_owned(),
+                crazyagent::project_files::FILES_MAX,
+            )
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(paths)
+    }
+
+    /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
+    /// path, the home folder, a credential location and the CrazyAgent data folder.
+    /// Takes the project id, the folders and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn set_project_read_paths(
+        &mut self,
+        id: &str,
+        paths: Vec<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::SetProjectReadPaths { project_id, paths },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

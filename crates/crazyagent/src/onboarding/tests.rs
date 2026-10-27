@@ -184,6 +184,37 @@ fn a_saved_draft_and_overview_are_reused_not_overwritten() {
 }
 
 #[test]
+fn saving_an_unchanged_draft_leaves_the_file_and_a_changed_one_replaces_it() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let file = layout.join("setup").join("draft.json");
+    let mut saved = Drafted::new("Demo tool".into(), &pool());
+    draft::save(&layout, &saved).unwrap();
+    let first = std::fs::symlink_metadata(&file).unwrap();
+    draft::save(&layout, &saved).unwrap();
+    let again = std::fs::symlink_metadata(&file).unwrap();
+    assert_eq!(
+        (again.ino(), again.modified().unwrap()),
+        (first.ino(), first.modified().unwrap())
+    );
+    let mut longer = std::fs::read(&file).unwrap();
+    longer.push(b'\n');
+    std::fs::write(&file, &longer).unwrap();
+    draft::save(&layout, &saved).unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        serde_json::to_vec_pretty(&saved).unwrap()
+    );
+    let kept = std::fs::symlink_metadata(&file).unwrap().ino();
+    saved.draft.about = "Changed by the agent.".into();
+    draft::save(&layout, &saved).unwrap();
+    assert_ne!(std::fs::symlink_metadata(&file).unwrap().ino(), kept);
+    assert_eq!(draft::reused(&layout), Some(saved));
+}
+
+#[test]
 fn a_linked_draft_is_ignored() {
     let dir = rust_repo();
     let outside = tempfile::tempdir().unwrap();
@@ -356,6 +387,15 @@ fn a_setup_folder_swapped_for_a_link_mid_save_is_never_written_through() {
 }
 
 #[test]
+fn only_linux_refuses_the_graph_build_with_a_plain_line() {
+    assert_eq!(
+        graph::unavailable("linux"),
+        Some("Graph build is not available on Linux in this version.")
+    );
+    assert_eq!(graph::unavailable("macos"), None);
+}
+
+#[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     let system = service::installed_graphify()
         .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
@@ -372,6 +412,7 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     assert_eq!(found.canonicalize().unwrap(), system);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_graph_leaves_out_the_engine_files_in_the_project() {
     let graphify = service::installed_graphify()

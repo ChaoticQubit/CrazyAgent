@@ -254,8 +254,8 @@ pub(crate) fn sign_in_rejected(
         .is_some_and(|observation| observation.kind == ObservationKind::InvalidAuthentication))
 }
 
-/// Supersedes a rejected sign-in once the account signed in afresh, so its next turn may
-/// run at once instead of waiting out the failure hold. Inputs: the transaction, the
+/// Supersedes a rejected sign-in once the account signed in afresh or got a new API key, so
+/// its next turn may run at once instead of waiting out the failure hold. Inputs: the transaction, the
 /// connection and the time. Output: an unknown-health observation when the newest one
 /// was a rejection; nothing otherwise.
 pub(crate) fn sign_in_renewed(

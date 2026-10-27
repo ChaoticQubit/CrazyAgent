@@ -1,19 +1,19 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Settings
 ────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
-───────────────────────────────────────────────────────━━━━━━━━━━───────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
+───────────────────────────────────────────────────────────────────━━━━━━━━━━───
   Project settings
 
   Name      Fieldnotes Mobile   g Edit details
   Folder    ~/projects/fieldnotes-mobile   x Remove project
   Pool      No pool yet   Enter Pick a pool
+  Accounts  Loading...   u Change order
   Team      Codex leads. Codex x3. Tools on.
+  Folders   Loading...   f Edit read-only folders
+  Process   Instructions for this project's agents   i Edit
 
   Skills  0                                   From Settings, plus this project
     Loading...
-
-
-
 
 
 

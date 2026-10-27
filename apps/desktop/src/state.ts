@@ -5,7 +5,7 @@ import type { EngineState } from "./ui/shell";
 import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
-  revokeBaseline, sendMessage, status, watchUnconfirmed,
+  revokeBaseline, sendMessage, status, watchUnconfirmed, leavesProfileUnconfirmed,
   modelAccessPage, inspectModelAccess, editModelAccess, createProject,
   startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth, submitClaudeAuthCode,
   prepareManagedAccount, prepareConfiguredAccount, accountAuthCapabilities,
@@ -1013,13 +1013,17 @@ export interface Unconfirmed {
 export interface Session {
   engine: EngineState;
   unconfirmed: Unconfirmed | null;
+  profileCheck: { busy: boolean } | null;
   profile: Loaded<OwnerProfile | null>;
   projects: Loaded<ProjectRow[]>;
+  projectsMore: boolean;
   toast: string;
   revision: number;
   retry: () => void;
   checkUnconfirmed: () => Promise<void>;
+  checkProfile: () => Promise<void>;
   retryUnconfirmed: () => Promise<void>;
+  dropUnconfirmed: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   refreshProjects: () => Promise<void>;
   showToast: (message: string) => void;
@@ -1034,8 +1038,11 @@ export function useSession(): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
   const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
   const tracking = useRef(false);
+  const [profileCheck, setProfileCheck] = useState<{ busy: boolean } | null>(null);
+  const profileTracking = useRef(false);
   const [profile, setProfile] = useState<Loaded<OwnerProfile | null>>({ kind: "loading" });
   const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
+  const [projectsMore, setProjectsMore] = useState(false);
   const [toast, setToast] = useState("");
   const [revision, setRevision] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -1089,12 +1096,41 @@ export function useSession(): Session {
     }
   }
 
+  async function checkProfile(): Promise<boolean> {
+    setProfileCheck((old) => old && { busy: true });
+    const check = await api.checkAccountProfile();
+    if (check === "pending" || check === "failed") {
+      setProfileCheck({ busy: false });
+      return false;
+    }
+    setProfileCheck(null);
+    const line = api.profileSettledLine(check);
+    if (line) showToast(line);
+    return true;
+  }
+
+  async function trackProfile() {
+    if (profileTracking.current) return;
+    profileTracking.current = true;
+    try {
+      if (await checkProfile()) return;
+      for (const pause of api.UNCONFIRMED_CHECKS_MS) {
+        await new Promise((resolve) => setTimeout(resolve, pause));
+        if (await checkProfile()) return;
+      }
+    } finally {
+      profileTracking.current = false;
+    }
+  }
+
   async function refreshProfile() {
     setProfile(noteResult(await api.getProfile()));
   }
 
   async function refreshProjects() {
-    setProjects(noteResult(await api.listProjects()));
+    const result = noteResult(await api.listProjects());
+    setProjectsMore(result.kind === "ok" && result.value.more);
+    setProjects(result.kind === "ok" ? { kind: "ok", value: result.value.items } : result);
   }
 
   async function start() {
@@ -1110,16 +1146,23 @@ export function useSession(): Session {
   }
 
   useEffect(() => {
-    const stop = watchUnconfirmed(() => { void track(); });
+    const stop = watchUnconfirmed((settled) => { void (leavesProfileUnconfirmed(settled) ? trackProfile() : track()); });
     void start();
     return stop;
   }, []);
 
   return {
-    engine, unconfirmed, profile, projects, toast, revision,
+    engine, unconfirmed, profileCheck, profile, projects, projectsMore, toast, revision,
     retry: () => { void start(); },
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
+    checkProfile: async () => { await checkProfile(); },
     retryUnconfirmed: async () => { await settle(api.retryUnconfirmed); },
+    dropUnconfirmed: async () => {
+      setUnconfirmed((old) => old && { ...old, busy: true });
+      const dropped = noteResult(await api.dropUnconfirmed());
+      if (dropped.kind === "error") showToast(dropped.message);
+      await loadUnconfirmed();
+    },
     refreshProfile,
     refreshProjects,
     showToast,
@@ -1137,20 +1180,78 @@ export function useAppSession(): Session {
   return session;
 }
 
+export const LOAD_CACHE_MAX = 64;
+const loadCache = new Map<string, Result<unknown>>();
+
+/** The cache key of one read: its name and the keys it reads with. Inputs: the read's cache
+ * name and keys. Output: the key. */
+export function loadKey(cache: string, keys: readonly unknown[]): string {
+  return `${cache}\n${JSON.stringify(keys)}`;
+}
+
+/** Keeps a read's good reply for the next mount, in memory only, newest last, dropping the
+ * oldest past LOAD_CACHE_MAX. Errors and not-ready replies leave the cached value as it was.
+ * Inputs: the cache key and the reply. Output: none. */
+export function cacheLoad<T>(key: string, result: Result<T>): void {
+  if (result.kind !== "ok") return;
+  loadCache.delete(key);
+  loadCache.set(key, result);
+  for (const oldest of loadCache.keys()) {
+    if (loadCache.size <= LOAD_CACHE_MAX) break;
+    loadCache.delete(oldest);
+  }
+}
+
+/** The last good reply cached for a key. Input: the cache key, or null for an uncached read.
+ * Output: the reply, or undefined. */
+export function cachedLoad<T>(key: string | null): Result<T> | undefined {
+  return key === null ? undefined : loadCache.get(key) as Result<T> | undefined;
+}
+
+const loadReads = new Map<string, Promise<Result<unknown>>>();
+
+/** Starts a cached read, or joins the read of the same key already in flight, so screens that
+ * mount together ask the engine once. A fresh read (a reload) never joins: it starts its own and
+ * later joiners share that newer one. Inputs: the shared key (null reads alone), whether to read
+ * fresh and the read. Output: the reply. */
+export function sharedLoad<T>(key: string | null, fresh: boolean, read: () => Promise<Result<T>>): Promise<Result<T>> {
+  if (key === null) return read();
+  const running = loadReads.get(key);
+  if (running && !fresh) return running as Promise<Result<T>>;
+  const started = read();
+  loadReads.set(key, started);
+  const clear = () => { if (loadReads.get(key) === started) loadReads.delete(key); };
+  started.then(clear, clear);
+  return started;
+}
+
 /** Loads one engine read for a screen and reloads it when the session revision or the given
- * keys change. Inputs: the read and its keys. Output: the loaded value and a reload action. */
-export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = []): [Loaded<T>, () => void] {
+ * keys change. A read given a cache name first shows its last good reply from an earlier mount,
+ * then refreshes in the background; a failed refresh shows its error as an uncached read does.
+ * Cached reads mounting together share one engine read; a reload always reads again.
+ * Inputs: the read, its keys and an optional cache name. Output: the loaded value and a reload action. */
+export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [], cache?: string): [Loaded<T>, () => void] {
   const session = useContext(SessionContext);
-  const [value, setValue] = useState<Loaded<T>>({ kind: "loading" });
+  const key = cache === undefined ? null : loadKey(cache, keys);
+  const [value, setValue] = useState<Loaded<T>>(() => cachedLoad<T>(key) ?? { kind: "loading" });
   const [tick, setTick] = useState(0);
+  const shownKey = useRef(key);
+  const fresh = useRef(false);
   useEffect(() => {
     let live = true;
-    setValue((old) => old.kind === "ok" ? old : { kind: "loading" });
-    void read().then((result) => {
+    const cached = cachedLoad<T>(key);
+    const same = shownKey.current === key;
+    shownKey.current = key;
+    setValue((old) => cached ?? (old.kind === "ok" && same ? old : { kind: "loading" }));
+    const reading = sharedLoad(key === null ? null : `${key}\n${session?.revision ?? 0}`, fresh.current, read);
+    fresh.current = false;
+    void reading.then((result) => {
       if (!live) return;
-      setValue(session ? session.noteResult(result) : result);
+      const noted = session ? session.noteResult(result) : result;
+      if (key !== null) cacheLoad(key, noted);
+      setValue(noted);
     });
     return () => { live = false; };
-  }, [session?.revision, tick, ...keys]);
-  return [value, () => setTick((old) => old + 1)];
+  }, [session?.revision, tick, key, ...keys]);
+  return [value, () => { fresh.current = true; setTick((old) => old + 1); }];
 }

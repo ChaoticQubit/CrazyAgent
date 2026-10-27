@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
+import { PROJECT_LIST_MAX, harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
 import { loadSetupStatus } from "../../api-intake";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
 import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
 import { waitingLine } from "../project/research";
@@ -102,7 +103,8 @@ function accountStep(owned: number, usable: AccountView[]): Pick<SetupItem, "bod
  * (signed in, a saved key, or a reachable URL or local model) and names it, Create a pool when one
  * pool exists, Install tools when tmux, uv and graphify are installed; harnesses never block.
  * Accounts that exist but none ready send the owner to Accounts. The panel shows until those
- * three are done. Inputs: the four engine reads. Output: items and whether the panel shows. */
+ * three are done, and never while one of the four reads is still loading, so it cannot flash in
+ * and out. Inputs: the four engine reads. Output: items and whether the panel shows. */
 export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
   tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
   const owned = accounts.kind === "ok" ? accounts.value : [];
@@ -121,7 +123,8 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
     { id: "tools", icon: "wrench", title: "Install tools", ...installTools,
       action: "Set up tools", href: formatRoute({ name: "settings", tab: "pack" }) },
   ];
-  return { items, visible: !(accountsDone && poolsDone && installTools.done) };
+  const settled = [accounts, pools, harnesses, tools].every((read) => read.kind !== "loading");
+  return { items, visible: settled && !(accountsDone && poolsDone && installTools.done) };
 }
 
 /** One Needs you row: the project it is about (none for an account), one sentence and one link. */
@@ -134,15 +137,23 @@ export interface NeedRow {
   href: string;
 }
 
-/** Lists what needs the owner across projects, for the Needs you strip: accounts that are not
+/** Lists what needs the owner across projects, for the Needs you strip: projects whose team
+ * left unseen notifications (one row each, opening its conversation), accounts that are not
  * signed in (one row each, with Sign in again opening that account's sign-in; accounts sharing
  * a name and provider fold into one row that opens Accounts), research waiting for a pool, then
  * suggested memories grouped by project. Inputs: the accounts read, the projects, each
- * project's card activity and the suggestions read. Output: the first three rows, every row
- * and the total. */
+ * project's card activity, the suggestions read and each project's unseen notification count.
+ * Output: the first three rows, every row and the total. */
 export function needsYou(accounts: Loaded<AccountView[]>, projects: ProjectRow[] = [], activity: Map<string, CardActivity> = new Map(),
-  suggestions: Loaded<Suggestion[]> = { kind: "loading" }): { rows: NeedRow[]; all: NeedRow[]; total: number } {
+  suggestions: Loaded<Suggestion[]> = { kind: "loading" }, alerts: Map<string, number> = new Map()): { rows: NeedRow[]; all: NeedRow[]; total: number } {
   const all: NeedRow[] = [];
+  for (const project of projects) {
+    const unseen = alerts.get(project.id) ?? 0;
+    if (unseen <= 0) continue;
+    all.push({ key: `alerts-${project.id}`, icon: "inbox", project: project.name,
+      text: `${unseen} new team notification${unseen === 1 ? "" : "s"}.`,
+      action: "Open conversation", href: formatRoute({ name: "project", id: project.id, tab: "conversation" }) });
+  }
   const unsigned = new Map<string, AccountView[]>();
   for (const account of accounts.kind === "ok" ? accounts.value : []) {
     if (account.status !== "not_signed_in") continue;
@@ -191,15 +202,16 @@ function SetupPanel({ items }: { items: SetupItem[] }) {
 }
 
 function ProjectCard({ project, activity }: { project: ProjectRow; activity: CardActivity | undefined }) {
-  return <a className="project-card" href={formatRoute({ name: "project", id: project.id, tab: "overview" })} aria-label={project.name}>
-    <span className="title-row"><Icon name="folder" /><h3 className="ellipsis">{project.name}</h3></span>
+  const name = displayText(project.name);
+  return <a className="project-card" href={formatRoute({ name: "project", id: project.id, tab: "overview" })} aria-label={name}>
+    <span className="title-row"><Icon name="folder" /><h3 className="ellipsis">{name}</h3></span>
     {activity?.research && <span className={`activity${activity.waiting ? " warn" : ""}`}><Icon name="search" size={14} />{activity.research}</span>}
     {activity?.agents && <span className="activity"><Icon name="bot" size={14} />{activity.agents}</span>}
     <span className="meta"><span>Open project</span><Icon name="chevron-right" size={14} /></span>
   </a>;
 }
 
-function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow[]>; activity: Map<string, CardActivity> | undefined; onRetry: () => void }) {
+function Projects({ projects, more, activity, onRetry }: { projects: Loaded<ProjectRow[]>; more: boolean; activity: Map<string, CardActivity> | undefined; onRetry: () => void }) {
   if (projects.kind === "loading") return <Skeleton shape="card" count={6} />;
   if (projects.kind === "not_ready") return <NotReady what="Projects" compact />;
   if (projects.kind === "error") return <LoadError message="Couldn't load your projects." onRetry={onRetry} />;
@@ -207,16 +219,21 @@ function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow
     action={<a className="btn" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>}>
     Create a project and agents start the research you pick.
   </EmptyState>;
-  return <div className="cards">{projects.value.map((project) => <ProjectCard key={project.id} project={project} activity={activity?.get(project.id)} />)}</div>;
+  return <>
+    <div className="cards">{projects.value.map((project) => <ProjectCard key={project.id} project={project} activity={activity?.get(project.id)} />)}</div>
+    {more && <p className="secondary" role="status">Showing the first {PROJECT_LIST_MAX} projects. The rest are not listed here, in the sidebar or in Go to.</p>}
+  </>;
 }
 
 /** Home as a view of its engine reads: the Add actions (new, clone from GitHub, existing folder),
  * the Needs you strip (three rows, Show all for the rest), the projects folder section, project
- * cards with their live work or the empty state, and the Get set up panel while setup is
- * incomplete. Inputs: the five reads, each card's activity and the suggested memories when read,
+ * cards with their live work or the empty state, a note when the list stops at its bound, and
+ * the Get set up panel while setup is incomplete. Inputs: the five reads, whether the engine
+ * holds more projects than listed, each card's activity and the suggested memories when read,
  * the projects folder section and a retry for the project list. */
-export function HomeView({ projects, accounts, pools, harnesses, tools, activity, suggestions, found, onRetryProjects }: {
+export function HomeView({ projects, moreProjects = false, accounts, pools, harnesses, tools, activity, suggestions, alerts, found, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
+  moreProjects?: boolean;
   onRetryProjects: () => void;
   accounts: Loaded<AccountView[]>;
   pools: Loaded<PoolSummary[]>;
@@ -224,10 +241,11 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
   tools: Loaded<SetupStatus>;
   activity?: Map<string, CardActivity>;
   suggestions?: Loaded<Suggestion[]>;
+  alerts?: Map<string, number>;
   found?: ReactNode;
 }) {
   const setup = setupSteps(accounts, pools, harnesses, tools);
-  const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions);
+  const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions, alerts);
   const [expanded, setExpanded] = useState(false);
   return <>
     <PageHeader title="Projects" actions={<>
@@ -237,7 +255,7 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
     </>} />
     {needs.total > 0 && <section className="needs" aria-label="Needs you">
       {(expanded ? needs.all : needs.rows).map((row) => <div className="need" key={row.key}>
-        <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{row.project}</strong>{" "}</>}{row.text}</span></span>
+        <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{displayText(row.project)}</strong>{" "}</>}{row.text}</span></span>
         <a className="btn small" href={row.href}>{row.action}</a>
       </div>)}
       {needs.total > NEEDS_SHOWN && <Button variant="quiet" size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
@@ -245,7 +263,7 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
     </section>}
     {found}
     <div className={`home${setup.visible ? " with-setup" : ""}`}>
-      <Projects projects={projects} activity={activity} onRetry={onRetryProjects} />
+      <Projects projects={projects} more={moreProjects} activity={activity} onRetry={onRetryProjects} />
       {setup.visible && <SetupPanel items={setup.items} />}
     </div>
   </>;
@@ -254,7 +272,7 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
 /** Reads setup for the Install tools item, and reads it again every few seconds only while a
  * tool is still being checked or setup is installing. Output: the latest setup read. */
 export function useToolsStatus(): Loaded<SetupStatus> {
-  const [tools, reload] = useLoad(loadSetupStatus);
+  const [tools, reload] = useLoad(loadSetupStatus, [], "setup-status");
   const moving = tools.kind === "ok" && (toolsChecking(tools.value) || setupBusy(tools.value));
   useEffect(() => {
     if (!moving) return;
@@ -265,12 +283,13 @@ export function useToolsStatus(): Loaded<SetupStatus> {
 }
 
 /** Home: loads accounts, pools, harnesses and tool setup for the setup panel, each project's live
- * work and the suggested memories for Needs you, and renders HomeView with the session's projects. */
-export function Home() {
+ * work and the suggested memories for Needs you, and renders HomeView with the session's projects.
+ * Input: each project's unseen team notification count, when the app watches them. */
+export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   const session = useAppSession();
-  const [accounts] = useLoad(listAccounts);
-  const [pools] = useLoad(poolSummaries);
-  const [harnesses] = useLoad(harnessCatalog);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [pools] = useLoad(poolSummaries, [], "pool-summaries");
+  const [harnesses] = useLoad(harnessCatalog, [], "harness-catalog");
   const tools = useToolsStatus();
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
   const activity = useProjectActivity(projects.map((project) => project.id));
@@ -282,5 +301,5 @@ export function Home() {
     return () => { live = false; };
   }, [named]);
   return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} activity={activity} suggestions={suggestions}
-    found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
+    alerts={alerts} moreProjects={session.projectsMore} found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
 }

@@ -1,4 +1,4 @@
-import { nextGeneration } from "../../api";
+import { listAccounts, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
 import { cancelResearch, failureCopy, loadResearchLog, retryResearch } from "../../api-projects";
@@ -7,14 +7,19 @@ import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
+import { accountName, changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
+import { AgentUsageCard } from "./usage";
+import { FinishedAgentsCleanup } from "./cleanup";
 import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
 import { TeamControls } from "../team/controls";
+import { TeamEventsPanel } from "../team/wake-rules";
+import { cardActivity } from "../dashboard";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
+import { useLoad } from "../../state";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
  * Input: the research row. Output: the agent status word and tone. */
@@ -67,8 +72,9 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const [busy, setBusy] = useState<number | null>(null);
   const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
-  const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
+  const [loadedAccounts] = useLoad(listAccounts, [], "accounts");
+  const named = loadedAccounts.kind === "ok" ? loadedAccounts.value : [];
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
   const accounts = data.assigned?.pool.members.length ?? 0;
@@ -76,6 +82,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const teamValue = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
+  const working = cardActivity(team.result, data.research).agents;
 
   function settle(result: Result<IntentReceipt>, done: string, missing: string) {
     setBusy(null);
@@ -102,15 +109,18 @@ export function AgentsTab({ data }: { data: ProjectData }) {
       <Segmented label="Show" value={filter} onValue={setFilter}
         options={[{ value: "running", label: `Running (${running.length + teamCount("running")})` }, { value: "all", label: `All (${jobs.length + teamCount("all")})` }]} />
       <span className="pj-secondary">{data.assigned
-        ? `${jobs.filter((job) => job.status === "running").length} of ${setup?.team.max_agents ?? "?"} agents running. ${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
+        ? `${working ? `${working}. ` : ""}${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
         : "No pool. Pick a pool to start."}</span>
     </div>
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} />
+    <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
-    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={data.reloadTeam} />
+    {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
+    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
+    <FinishedAgentsCleanup projectId={data.id} finished={teamValue.agents.filter((agent) => agent.status === "stopped" || agent.status === "failed").length} harness={(id) => harnessName(harnesses, id)} />
+    <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);

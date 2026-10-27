@@ -29,7 +29,7 @@ FIELDS = (
     "slots", "cpu_millis", "memory_mib", "processes", "output_bytes",
     "wall_time_ms", "spend_microunits",
 )
-DEFAULTS = (1, 1000, 512, 4, 1048576, 120000, 0)
+DEFAULTS = (1, 1000, 512, 4, 2097152, 120000, 0)
 CAPACITY = (2, 2000, 1024, 8, 2097152, 120000, 10)
 ALLOWANCE = (2, 900, 384, 3, 524288, 45000, 1)
 F2 = b"\x1bOQ"
@@ -144,7 +144,7 @@ def counts(database):
 
 def wait_session(database, child, master, count, backend, phase):
     assert 1 <= count <= 3
-    assert phase in ("configured", "closed")
+    assert phase in ("configured", "parked")
     deadline = time.monotonic() + 6
     while time.monotonic() < deadline:
         found = sessions(database)
@@ -233,6 +233,7 @@ def seed(binary, root):
             assert reply["outcome"] == {"kind": "Applied"}, reply
         with terminal(binary, root / "engine.sock") as (child, master):
             conversation.body_contains(master, child, "Project owner conversation")
+            conversation.body_contains(master, child, "Project P 686")
             os.write(master, NOTE.encode() + b"\r")
             conversation.committed(master, child, database, "p", "message", 0, NOTE)
             os.write(master, b"\x02")
@@ -370,9 +371,9 @@ def brief_cancel_close(database, session, turn, child, master):
     assert counts(database) == before
     conversation.draft_contains(master, child, NEWER)
     os.write(master, F4)
-    closed = wait_session(database, child, master, 1, "rcli", "closed")
-    assert closed["session_id"] == session["session_id"]
-    assert closed["current_turn"] is None
+    parked = wait_session(database, child, master, 1, "rcli", "parked")
+    assert parked["session_id"] == session["session_id"]
+    assert parked["current_turn"] is None
     assert turns(database) == [turn], turns(database)
     assert counts(database) == (1, 1, before[2] + 1, before[3] + 1)
     conversation.draft_contains(master, child, NEWER)
@@ -402,8 +403,8 @@ def native_metadata(database, child, master):
         assert session["current_turn"] is None and len(turns(database)) == 1
         truthful(master)
         os.write(master, F4)
-        closed = wait_session(database, child, master, count, backend, "closed")
-        assert closed["session_id"] == session["session_id"]
+        parked = wait_session(database, child, master, count, backend, "parked")
+        assert parked["session_id"] == session["session_id"]
         conversation.draft_contains(master, child, NEWER)
         previous_label = label
 
@@ -443,7 +444,7 @@ def run(binary, root):
                 with creation.engine(binary, root, writable=True):
                     os.write(master, b"\x12")
                     tui_flow.expect(master, "Owner: connected", child)
-                    tui_flow.expect(master, "Master: Closed", child)
+                    tui_flow.expect(master, "Master: Parked", child)
                     tui_flow.expect(master, before_sessions[-1]["session_id"], child)
                     conversation.draft_contains(master, child, NEWER)
                     assert sessions(database) == before_sessions and turns(database) == before_turns

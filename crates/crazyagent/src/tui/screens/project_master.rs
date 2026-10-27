@@ -3,7 +3,7 @@ use super::project_time::clock;
 use crate::conversation::ConversationEntry;
 use crate::master_session::{MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView};
 
-const TURNS_SHOWN_MAX: usize = 200;
+pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
 
 /// The engine's master conversation for one project, as read through the owner connection.
 /// Holds the session phase (none before the master is opened), its turns in order and the owner's messages.
@@ -16,8 +16,9 @@ pub(in crate::tui) struct MasterRead<'a> {
 
 /// Builds the Conversation transcript from the engine's master turns.
 /// Takes the read, the master harness name, the account label, whether tools are on and the UTC offset.
-/// Returns the transcript: the owner's messages, the master's real replies, a notice per task a reply
-/// handed to the team and a plain notice for a stopped turn.
+/// Returns the transcript: the owner's messages, or the engine's plain line for a turn it asked
+/// for, the master's real replies, a notice per task a reply handed to the team, the engine's note
+/// when a turn's edits wait in Changes and a plain notice for a stopped turn.
 pub(in crate::tui) fn transcript_from(
     read: &MasterRead<'_>,
     harness: &str,
@@ -41,6 +42,13 @@ pub(in crate::tui) fn transcript_from(
                 text: entry.text.clone(),
                 error: false,
             });
+        } else if let Some(request) = &turn.engine_request {
+            messages.push(Message {
+                speaker: Speaker::Notice,
+                time: None,
+                text: request.line.clone(),
+                error: false,
+            });
         }
         if let Some(reply) = &turn.reply {
             let time = turn
@@ -58,9 +66,17 @@ pub(in crate::tui) fn transcript_from(
         }
         for task in &turn.tasks {
             messages.push(Message {
-                speaker: Speaker::Notice,
+                speaker: Speaker::Task,
                 time: None,
                 text: task.line(),
+                error: false,
+            });
+        }
+        if let Some(changes) = &turn.changes {
+            messages.push(Message {
+                speaker: Speaker::Notice,
+                time: None,
+                text: changes.clone(),
                 error: false,
             });
         }
@@ -73,12 +89,17 @@ pub(in crate::tui) fn transcript_from(
             });
         }
     }
-    assert!(messages.len() <= turns.len() * 3 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
+    assert!(messages.len() <= turns.len() * 4 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
     let status = match (read.session, turns.last()) {
         (None, _) => MasterStatus::NotReady,
-        (Some(MasterSessionPhase::Closing | MasterSessionPhase::Closed), _) => {
-            MasterStatus::Stopped
-        }
+        (
+            Some(
+                MasterSessionPhase::Parked
+                | MasterSessionPhase::Closing
+                | MasterSessionPhase::Closed,
+            ),
+            _,
+        ) => MasterStatus::Stopped,
         (Some(MasterSessionPhase::Configured), None) => MasterStatus::Ready,
         (Some(MasterSessionPhase::Configured), Some(turn)) => status(turn),
     };
@@ -86,10 +107,15 @@ pub(in crate::tui) fn transcript_from(
         .session
         .is_some_and(|phase| phase != MasterSessionPhase::Configured)
     {
+        let text = if read.session == Some(MasterSessionPhase::Parked) {
+            "This session is parked. Resume it from Sessions to continue it."
+        } else {
+            "The master conversation is closed."
+        };
         messages.push(Message {
             speaker: Speaker::Notice,
             time: None,
-            text: "The master conversation is closed.".into(),
+            text: text.into(),
             error: false,
         });
     }
@@ -183,6 +209,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::RateLimited | MasterReason::CooldownActive) => {
             "the account is resting after too many requests."
         }
+        Some(MasterReason::TransientFailure) => "the account is unavailable for a moment.",
         Some(MasterReason::CapacityUnavailable) => "another turn is still running.",
         Some(MasterReason::ProfileBusy) => "its account is busy signing in or out.",
         Some(MasterReason::ConnectionChanged) => "its settings changed while it was open.",
@@ -276,6 +303,8 @@ mod tests {
             reply: None,
             accounts: Vec::new(),
             tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
             detail: None,
             cause: None,
         }
@@ -519,6 +548,7 @@ mod tests {
             (MasterReason::QuotaExhausted, "quota_exhausted"),
             (MasterReason::RateLimited, "rate_limited"),
             (MasterReason::CooldownActive, "cooldown_active"),
+            (MasterReason::TransientFailure, "transient_failure"),
             (MasterReason::ConnectionChanged, "connection_changed"),
             (MasterReason::ScopeRevoked, "scope_revoked"),
             (MasterReason::CapacityUnavailable, "capacity_unavailable"),
@@ -682,8 +712,80 @@ mod tests {
             [
                 (Speaker::You, "Plan the page.", false),
                 (Speaker::Master, "I handed it to a sub-agent.", false),
-                (Speaker::Notice, done, false),
-                (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+                (Speaker::Task, done, false),
+                (Speaker::Task, "Task 8 is still with a sub-agent.", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_edits_wait_in_changes_says_so_under_its_reply_and_tasks() {
+        use crate::master_session::{MasterReply, MasterReplyProvenance, MasterTask};
+        let inputs = [entry(3, "Fix the README.")];
+        let mut replied = turn(1, 3, MasterTurnPhase::Succeeded, None);
+        replied.reply = Some(MasterReply {
+            text: "I fixed the README.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-1").unwrap(),
+                runtime_ref: RequestId::new("runtime-1").unwrap(),
+                capture_ref: RequestId::new("capture-1").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        replied.tasks = vec![MasterTask {
+            task: 8,
+            note: None,
+        }];
+        let waiting = "The edits from this turn are waiting for you in Changes.";
+        replied.changes = Some(waiting.into());
+        let quiet = turn(2, 4, MasterTurnPhase::Succeeded, None);
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[replied, quiet],
+            &inputs,
+        );
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Fix the README.", false),
+                (Speaker::Master, "I fixed the README.", false),
+                (Speaker::Task, "Task 8 is still with a sub-agent.", false),
+                (Speaker::Notice, waiting, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_the_engine_asked_for_shows_its_plain_line_before_the_master_s_reply() {
+        use crate::master_session::{MasterEngineRequest, MasterReply, MasterReplyProvenance};
+        let inputs = [entry(3, "Fix the README.")];
+        let line = "CrazyAgent asked the master to resolve the conflicts in NOTES.md.";
+        let mut asked = turn(2, 5, MasterTurnPhase::Succeeded, None);
+        asked.engine_request = Some(MasterEngineRequest {
+            change_set: crate::landing::ChangeSetId::new("0".repeat(32)).unwrap(),
+            line: line.into(),
+            text: "Resolve every conflict in NOTES.md.".into(),
+        });
+        asked.reply = Some(MasterReply {
+            text: "I kept both notes.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-2").unwrap(),
+                runtime_ref: RequestId::new("runtime-2").unwrap(),
+                capture_ref: RequestId::new("capture-2").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[turn(1, 3, MasterTurnPhase::Succeeded, None), asked],
+            &inputs,
+        );
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Fix the README.", false),
+                (Speaker::Notice, line, false),
+                (Speaker::Master, "I kept both notes.", false),
             ]
         );
     }

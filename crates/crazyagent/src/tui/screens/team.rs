@@ -1,11 +1,19 @@
+use crate::agent_home::Harness;
 use crate::config::plain_problem;
+use crate::engine::owner::AgentInstructions;
+use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamGraph};
+use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph};
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
 use crate::tui::keys::Key;
+use crate::tui::screens::process::{message, size};
+use crate::tui::screens::project_markdown::sanitize;
+use crate::tui::screens::project_team::account_name;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -15,6 +23,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
+mod cleanup;
 #[cfg(test)]
 mod tests;
 
@@ -25,6 +34,15 @@ const TREE_MIN: u16 = 30;
 const TREE_MAX: u16 = 44;
 const BOX_MIN: u16 = 8;
 const ENDED: &str = "terminal_ended";
+const STOPPED: &str = "agent_stopped";
+const PAGE_STEP: usize = 10;
+const MASTER_WAITING: &str =
+    "Starting the master's terminal. It opens once the master signs in and starts.";
+const MASTER_ON: &str = "Live master on. It starts when you open this view.";
+const MASTER_OFF: &str = "Live master stopped.";
+const MASTER_STOPPED: &str =
+    "The live master is stopped. Its terminal opens again once you start it.";
+const MASTER_HEAD_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -54,6 +72,14 @@ struct TreeRow {
     body: Body,
 }
 
+/// The live master switch as the engine last told it: on, off, or never set, and why the
+/// master last could not start.
+#[derive(Debug)]
+struct LiveSwitch {
+    on: Option<bool>,
+    problem: Option<String>,
+}
+
 struct Attached {
     agent: AgentId,
     node: String,
@@ -64,21 +90,37 @@ struct Attached {
     closed: Option<String>,
 }
 
+/// The read-only box with what one team card's agent received at its last launch.
+struct Instructions {
+    label: String,
+    query: ProcessQuery,
+    read: Load<Box<AgentInstructions>>,
+    top: usize,
+}
+
 /// A project's live team: a boxed tree of the master, one group per harness
 /// and each agent with its status and account, the tasks the master handed out
 /// under it, and the selected agent's live terminal beside it.
 /// Input: TeamGraph reads, terminal frames and keys; while the terminal has
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
+/// The master view is the same screen showing only the live master's terminal.
 pub struct Team {
     project: ProjectId,
     name: String,
+    master: bool,
+    asked: bool,
+    switch: Option<LiveSwitch>,
+    want: Option<bool>,
+    refused: Option<String>,
     graph: Load<Box<TeamGraph>>,
     cursor: usize,
     offset: usize,
     focus: Focus,
     attached: Option<Attached>,
     task: Option<i64>,
+    cleanup: cleanup::Cleanup,
+    instructions: Option<Instructions>,
 }
 
 impl Team {
@@ -88,13 +130,169 @@ impl Team {
         Self {
             project,
             name,
+            master: false,
+            asked: false,
+            switch: None,
+            want: None,
+            refused: None,
             graph: Load::Loading,
             cursor: 0,
             offset: 0,
             focus: Focus::Tree,
             attached: None,
             task: None,
+            cleanup: cleanup::Cleanup::new(),
+            instructions: None,
         }
+    }
+
+    /// The master view of one project: a header with the live master switch, then the
+    /// live master's own terminal filling the body, opened as soon as the team shows it.
+    /// The first open of a project whose switch was never set turns the master on.
+    /// Inputs: the project id and name. Output: the screen, waiting for the master.
+    pub fn master(project: ProjectId, name: String) -> Self {
+        Self {
+            master: true,
+            ..Self::new(project, name)
+        }
+    }
+
+    /// Whether the live master is on as the owner sees it: the owner's last change until the
+    /// engine shows it, else the engine's switch; None until read or when never set.
+    fn live_on(&self) -> Option<bool> {
+        self.want
+            .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
+    }
+
+    fn turn_live(&mut self, on: bool, ctx: &mut Ctx) {
+        self.asked = true;
+        self.want = Some(on);
+        self.refused = None;
+        if !on {
+            self.detach(ctx);
+        }
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::LiveMaster {
+                project_id: self.project.clone(),
+                on,
+            },
+            generation,
+        }));
+    }
+
+    fn read_switch(&self, ctx: &mut Ctx) {
+        ctx.request(Request::Setup(SetupQuery::Team {
+            project: self.project.clone(),
+        }));
+    }
+
+    /// Takes a team status read or a live switch change of this master view: a good read
+    /// replaces the switch and turns a never set one on once; a failed read changes nothing;
+    /// an accepted change is the switch until the next read, which is read at once.
+    /// Inputs: the setup query, its result and the context. Output: none.
+    fn took_setup(
+        &mut self,
+        query: &SetupQuery,
+        result: &Result<SetupView, String>,
+        ctx: &mut Ctx,
+    ) {
+        if !self.master {
+            return;
+        }
+        match query {
+            SetupQuery::Team { project } if *project == self.project => {
+                let Ok(SetupView::Team(status)) = result else {
+                    return;
+                };
+                let switch = LiveSwitch {
+                    on: status.live_master,
+                    problem: status.live_problem.clone(),
+                };
+                if self.want.is_some() && self.want == switch.on {
+                    self.want = None;
+                }
+                let never = switch.on.is_none();
+                self.switch = Some(switch);
+                if never && !self.asked {
+                    self.turn_live(true, ctx);
+                }
+            }
+            SetupQuery::TeamChange {
+                action: TeamAction::LiveMaster { project_id, on },
+                ..
+            } if *project_id == self.project => match result {
+                Ok(_) => {
+                    self.want = None;
+                    self.switch = Some(LiveSwitch {
+                        on: Some(*on),
+                        problem: None,
+                    });
+                    self.read_switch(ctx);
+                }
+                Err(code) => {
+                    self.want = None;
+                    if *on {
+                        self.refused = Some(code.clone());
+                    } else {
+                        ctx.say(Message::warning(
+                            "The live master could not be stopped.",
+                            plain_problem(code).unwrap_or(code.as_str()),
+                        ));
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Opens the master's terminal once the team lists it, and the new one
+    /// after the master moved to another account.
+    /// Input: the context. Output: none; attach and size requests are queued.
+    fn follow_master(&mut self, ctx: &mut Ctx) {
+        if !self.master || self.live_on() == Some(false) {
+            return;
+        }
+        let Some((node, terminal)) = self.graph.ready().and_then(|graph| {
+            graph.nodes.iter().enumerate().find_map(|(index, node)| {
+                let live = node.status.is_none_or(|status| status.live());
+                (node.kind == NodeKind::Master && live)
+                    .then(|| node.terminal.clone().map(|terminal| (index, terminal)))
+                    .flatten()
+            })
+        }) else {
+            return;
+        };
+        let current = self
+            .attached
+            .as_ref()
+            .is_some_and(|attached| attached.agent == terminal && attached.closed.is_none());
+        if !current {
+            self.open(node, ctx);
+        }
+    }
+
+    fn master_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let open = self
+            .attached
+            .as_ref()
+            .is_some_and(|attached| attached.closed.is_none());
+        match key {
+            Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
+            Key::Char('s') => {
+                let on = self.live_on() == Some(false);
+                self.turn_live(on, ctx);
+            }
+            Key::Char('r') => ctx.request(Request::TeamGraph {
+                project: self.project.clone(),
+            }),
+            Key::Esc => {
+                self.detach(ctx);
+                return Flow::Back;
+            }
+            _ => return Flow::Ignored,
+        }
+        Flow::Handled
     }
 
     fn items(&self, glyphs: &Glyphs) -> Vec<Item> {
@@ -161,6 +359,7 @@ impl Team {
         };
         if target.status.is_some_and(|status| !status.live()) {
             self.task = None;
+            self.instructions = None;
             ctx.say(Message::warning(
                 "This agent has stopped.",
                 "Its terminal is closed.",
@@ -176,6 +375,7 @@ impl Team {
         };
         let (id, label) = (target.id.clone(), target.label.clone());
         self.task = None;
+        self.instructions = None;
         if self
             .attached
             .as_ref()
@@ -185,7 +385,7 @@ impl Team {
             return;
         }
         self.detach(ctx);
-        let (rows, cols) = pane_size(ctx);
+        let (rows, cols) = pane_size(ctx, self.master);
         ctx.request(Request::TerminalAttach {
             agent: agent.clone(),
         });
@@ -221,7 +421,7 @@ impl Team {
     /// back; a terminal that ended stays closed.
     /// Input: the context. Output: none; attach and size requests are queued.
     fn reattach(&mut self, ctx: &mut Ctx) {
-        let (rows, cols) = pane_size(ctx);
+        let (rows, cols) = pane_size(ctx, self.master);
         let Some(attached) = self
             .attached
             .as_mut()
@@ -262,7 +462,7 @@ impl Team {
                 agent: attached.agent.clone(),
             });
         }
-        attached.closed = Some(ENDED.into());
+        attached.closed = Some(STOPPED.into());
         self.focus = Focus::Tree;
     }
 
@@ -272,11 +472,64 @@ impl Team {
             .ready()
             .and_then(|graph| graph.edges.get(edge))
             .map(|edge| edge.task_id);
+        self.instructions = None;
         self.focus = Focus::Tree;
     }
 
+    /// Asks the engine what one card's agent received at its last launch and opens the
+    /// box for it: the master card reads the project's newest master.
+    /// Inputs: the node index and context. Output: none; a Process request is queued.
+    fn read_instructions(&mut self, node: usize, ctx: &mut Ctx) {
+        let Some(target) = self.graph.ready().and_then(|graph| graph.nodes.get(node)) else {
+            return;
+        };
+        let agent = match target.kind {
+            NodeKind::Master => None,
+            _ => match AgentId::new(&target.id).ok().and_then(|id| id.team_agent()) {
+                Some(agent) => Some(agent),
+                None => {
+                    ctx.say(Message::warning(
+                        "This card has no instructions to show.",
+                        "Only the master and team agents get instructions at launch.",
+                    ));
+                    return;
+                }
+            },
+        };
+        let label = target.label.clone();
+        let query = ProcessQuery::Agent {
+            project: self.project.clone(),
+            agent,
+        };
+        ctx.request(Request::Process(Box::new(query.clone())));
+        self.task = None;
+        self.instructions = Some(Instructions {
+            label,
+            query,
+            read: Load::Loading,
+            top: 0,
+        });
+    }
+
+    fn take_instructions(&mut self, event: &ProcessEvent) {
+        let Some(open) = self
+            .instructions
+            .as_mut()
+            .filter(|open| open.query == event.query)
+        else {
+            return;
+        };
+        open.read = match &event.result {
+            Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
+            Ok(ProcessReply::Text(_)) => return,
+            Err(code) if code == NOT_READY => Load::NotReady,
+            Err(code) => Load::Failed(code.clone()),
+        };
+        open.top = 0;
+    }
+
     fn sync(&mut self, ctx: &mut Ctx) {
-        let (rows, cols) = pane_size(ctx);
+        let (rows, cols) = pane_size(ctx, self.master);
         let Some(attached) = self.attached.as_mut() else {
             return;
         };
@@ -417,31 +670,109 @@ impl Team {
             ),
             Line::default(),
         ];
-        lines.extend(wrap(&edge.text, limit).into_iter().map(Line::raw));
+        lines.extend(wrap(&plain(&edge.text), limit).into_iter().map(Line::raw));
         lines.push(Line::default());
         lines.push(styled("Reply", Role::Muted, theme));
         match &edge.reply {
-            Some(reply) => lines.extend(wrap(reply, limit).into_iter().map(Line::raw)),
+            Some(reply) => lines.extend(wrap(&plain(reply), limit).into_iter().map(Line::raw)),
             None => lines.push(styled("No reply yet.", Role::Muted, theme)),
         }
         Some(lines)
+    }
+
+    fn switch_control(&self) -> &'static str {
+        if self.live_on() == Some(false) {
+            "Start live master"
+        } else {
+            "Stop live master"
+        }
+    }
+
+    /// The master view's header: whether the live master is on, and the key that switches it
+    /// at the right edge. Inputs: the width and context. Output: the line.
+    fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
+        let state = if self.live_on() == Some(false) {
+            MASTER_OFF
+        } else {
+            MASTER_ON
+        };
+        let control = format!("s {}", self.switch_control());
+        let room = limit.saturating_sub(width(&control));
+        if room < width(state) + 2 {
+            return styled(
+                cut(&control, limit, ctx.glyphs.ellipsis),
+                Role::Muted,
+                &ctx.theme,
+            );
+        }
+        join([
+            Line::raw(format!("{state:<room$}")),
+            styled(control, Role::Muted, &ctx.theme),
+        ])
     }
 
     fn draw_right(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
+        if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
+            boxed(frame, area, &title, false, lines, ctx);
+            return None;
+        }
+        if let Some(open) = self.instructions.as_mut() {
+            let lines = instruction_lines(&open.read, limit, ctx);
+            open.top = open
+                .top
+                .min(lines.len().saturating_sub(usize::from(inner.height)));
+            let title = format!("Instructions: {}", plain(&open.label));
+            let shown = lines.into_iter().skip(open.top).collect();
+            boxed(frame, area, &title, false, shown, ctx);
+            return None;
+        }
         if let Some(lines) = self.task_lines(limit, ctx) {
             boxed(frame, area, "Task", false, lines, ctx);
             return None;
         }
         let focused = self.focus == Focus::Terminal;
+        if let Some(code) = self.refused.as_deref().filter(|_| self.attached.is_none()) {
+            let mut lines = vec![Line::raw("The master terminal could not start.")];
+            lines.extend(
+                wrap(plain_problem(code).unwrap_or(code), limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
+        if self.master && self.live_on() == Some(false) && self.attached.is_none() {
+            let problem = self
+                .switch
+                .as_ref()
+                .and_then(|switch| switch.problem.as_deref());
+            let mut lines: Vec<Line<'static>> = wrap(problem.unwrap_or(MASTER_STOPPED), limit)
+                .into_iter()
+                .map(Line::raw)
+                .collect();
+            lines.extend(
+                wrap("Press s to start it.", limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
         let Some(attached) = self.attached.as_mut() else {
-            let lines = wrap("Enter on an agent opens its live terminal here.", limit)
+            let waiting = if self.master {
+                MASTER_WAITING
+            } else {
+                "Enter on an agent opens its live terminal here."
+            };
+            let lines = wrap(waiting, limit)
                 .into_iter()
                 .map(|text| styled(text, Role::Muted, theme))
                 .collect();
-            boxed(frame, area, "Terminal", false, lines, ctx);
+            let title = if self.master { "Master" } else { "Terminal" };
+            boxed(frame, area, title, false, lines, ctx);
             return None;
         };
         if let Some(code) = &attached.closed {
@@ -487,15 +818,40 @@ impl Team {
 
 impl Screen for Team {
     fn crumbs(&self) -> Vec<String> {
-        vec![self.name.clone(), "Team".into()]
+        let page = if self.master { "Master" } else { "Team" };
+        vec![self.name.clone(), page.into()]
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if self.focus == Focus::Terminal && self.master {
+            return vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+        }
         if self.focus == Focus::Terminal {
             return vec![hint("Ctrl-]", "Back to the team")];
         }
+        if self.master {
+            let mut hints = Vec::new();
+            if self
+                .attached
+                .as_ref()
+                .is_some_and(|attached| attached.closed.is_none())
+            {
+                hints.push(hint("Enter", "Terminal"));
+            }
+            hints.push(hint("s", self.switch_control()));
+            hints.push(hint("Esc", "Earlier conversation"));
+            hints.push(hint("r", "Refresh"));
+            return hints;
+        }
+        if self.cleanup.open() {
+            return self.cleanup.hints();
+        }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-        let mut hints = vec![hint(&vertical, "Move"), hint("Enter", "Open")];
+        let mut hints = vec![
+            hint(&vertical, "Move"),
+            hint("Enter", "Open"),
+            hint("i", "Instructions"),
+        ];
         if self
             .attached
             .as_ref()
@@ -504,7 +860,16 @@ impl Screen for Team {
             hints.push(hint("Tab", "Terminal"));
         }
         hints.push(hint("r", "Refresh"));
-        hints.push(hint("Esc", "Back"));
+        match self.instructions {
+            Some(_) => {
+                hints.push(hint("PgUp/PgDn", "Scroll"));
+                hints.push(hint("Esc", "Close"));
+            }
+            None => {
+                hints.push(hint("c", "Clean up"));
+                hints.push(hint("Esc", "Back"));
+            }
+        }
         hints
     }
 
@@ -515,6 +880,12 @@ impl Screen for Team {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if self.focus == Focus::Terminal {
             return self.terminal_key(key, ctx);
+        }
+        if self.master {
+            return self.master_key(key, ctx);
+        }
+        if let Some(flow) = self.cleanup.key(key, &self.project, ctx) {
+            return flow;
         }
         let items = self.items(ctx.glyphs);
         match key {
@@ -534,12 +905,29 @@ impl Screen for Team {
                     .is_some_and(|attached| attached.closed.is_none())
                 {
                     self.task = None;
+                    self.instructions = None;
                     self.focus = Focus::Terminal;
+                }
+            }
+            Key::Char('i') => {
+                if let Some(Item::Node(node)) = items.get(self.cursor) {
+                    self.read_instructions(*node, ctx);
+                }
+            }
+            Key::PageDown if self.instructions.is_some() => {
+                if let Some(open) = self.instructions.as_mut() {
+                    open.top = open.top.saturating_add(PAGE_STEP);
+                }
+            }
+            Key::PageUp if self.instructions.is_some() => {
+                if let Some(open) = self.instructions.as_mut() {
+                    open.top = open.top.saturating_sub(PAGE_STEP);
                 }
             }
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Esc if self.instructions.is_some() => self.instructions = None,
             Key::Esc => {
                 self.detach(ctx);
                 return Flow::Back;
@@ -550,12 +938,19 @@ impl Screen for Team {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        self.cleanup.arrive(arrival, &self.project, ctx);
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
+                self.follow_master(ctx);
             }
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Process(event) => self.take_instructions(event),
+                OwnerEvent::Setup(event) => self.took_setup(&event.query, &event.result, ctx),
+                _ => {}
+            },
             _ => {}
         }
         self.sync(ctx);
@@ -563,6 +958,9 @@ impl Screen for Team {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        if self.master {
+            self.read_switch(ctx);
+        }
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });
@@ -575,6 +973,12 @@ impl Screen for Team {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
+        if self.master {
+            let (head, body) = master_split(whole(area));
+            let line = self.master_head(usize::from(head.width), ctx);
+            draw_lines(frame.buffer_mut(), head, &[line]);
+            return self.draw_right(frame, body, ctx);
+        }
         let (left, right) = split(area);
         let inner = inside(left);
         let lines = self.tree_lines(usize::from(inner.width), usize::from(inner.height), ctx);
@@ -587,9 +991,11 @@ impl Screen for Team {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Team {
-            id: self.project.clone(),
-            name: self.name.clone(),
+        let (id, name) = (self.project.clone(), self.name.clone());
+        Some(if self.master {
+            Place::Master { id, name }
+        } else {
+            Place::Team { id, name }
         })
     }
 }
@@ -716,33 +1122,45 @@ fn account_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
     }
 }
 
+/// One tree row's text after its prefix. A master or agent row leads with its
+/// status glyph, then its label and status word; a task row leads with its
+/// status glyph, then the agent it went to and its title. The row is cut from
+/// the right with an ellipsis, so the glyph always shows. Inputs: the row, the
+/// graph and the context. Output: the line.
 fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
-    let state = |node: &GraphNode| match node.status {
-        Some(status) => {
-            let kind = agent_status(status);
-            let word = node
-                .status_label
-                .clone()
-                .unwrap_or_else(|| status.label().to_owned());
-            Span::styled(
-                format!("  {} {word}", glyphs.status(kind)),
-                theme.style(kind.role()),
-            )
-        }
-        None => Span::raw(""),
-    };
     match &row.body {
-        Body::Master(node) | Body::Agent(node) => Line::from(vec![
-            Span::raw(graph.nodes[*node].label.clone()),
-            state(&graph.nodes[*node]),
-        ]),
+        Body::Master(node) | Body::Agent(node) => {
+            let node = &graph.nodes[*node];
+            match node.status {
+                Some(status) => {
+                    let kind = agent_status(status);
+                    let word = node
+                        .status_label
+                        .clone()
+                        .unwrap_or_else(|| status.label().to_owned());
+                    Line::from(vec![
+                        Span::styled(glyphs.status(kind), theme.style(kind.role())),
+                        Span::raw(format!(" {}", node.label)),
+                        Span::styled(format!("  {word}"), theme.style(kind.role())),
+                    ])
+                }
+                None => Line::raw(node.label.clone()),
+            }
+        }
         Body::Group { node, count } => Line::from(vec![
             Span::styled(graph.nodes[*node].label.clone(), theme.heading),
             Span::styled(format!(" ({count})"), theme.muted),
         ]),
-        Body::Account(account) => styled(account.clone(), Role::Muted, theme),
+        Body::Account(account) => styled(
+            account_name(
+                Some(account),
+                ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
+            ),
+            Role::Muted,
+            theme,
+        ),
         Body::Heading(text) => styled(*text, Role::Muted, theme),
         Body::Blank => Line::default(),
         Body::Edge(edge) => {
@@ -750,12 +1168,7 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             let (kind, _) = edge_status(edge.state);
             Line::from(vec![
                 Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                Span::raw(format!(
-                    " {} {} {}  ",
-                    label(graph, &edge.from),
-                    glyphs.right,
-                    label(graph, &edge.to)
-                )),
+                Span::raw(format!(" {}  ", label(graph, &edge.to))),
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
@@ -763,9 +1176,10 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
 }
 
 /// Says whether a terminal code means the agent's terminal ended for good.
-/// Input: a Closed or Rejected code. Output: true for an ended or unknown pane.
+/// Input: a Closed or Rejected code. Output: true for an ended run, a stopped agent or an
+/// unknown pane.
 fn dead(code: &str) -> bool {
-    matches!(code, ENDED | "terminal_agent_unknown")
+    matches!(code, ENDED | STOPPED | "terminal_agent_unknown")
 }
 
 /// Says whether a terminal code means the engine connection dropped, so the
@@ -790,6 +1204,7 @@ fn closed_words(code: &str) -> (&'static str, &'static str) {
             "Not ready yet.",
             "This engine cannot stream agent terminals yet.",
         ),
+        ENDED => ("This run finished.", "Its last screen stays here."),
         code if dead(code) => ("This agent has stopped.", "Its terminal is closed."),
         code if lost(code) => (
             "Lost the engine connection.",
@@ -828,12 +1243,86 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
 }
 
-fn title(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
+/// The lines of an agent's Instructions box: the instruction file with its size and
+/// text, then the skills installed for it, or why nothing can be shown.
+/// Inputs: the read, the box width and context. Output: the lines, unscrolled.
+fn instruction_lines(
+    read: &Load<Box<AgentInstructions>>,
+    limit: usize,
+    ctx: &Ctx,
+) -> Vec<Line<'static>> {
+    let theme = &ctx.theme;
+    let muted = |text: &str| -> Vec<Line<'static>> {
+        wrap(text, limit)
+            .into_iter()
+            .map(|line| styled(line, Role::Muted, theme))
+            .collect()
+    };
+    let view = match read {
+        Load::Idle | Load::Loading => return muted("Reading what this agent received..."),
+        Load::NotReady => return muted("Instructions aren't ready in this engine yet."),
+        Load::Failed(code) => {
+            return wrap(&message(code), limit)
+                .into_iter()
+                .map(Line::raw)
+                .collect();
+        }
+        Load::Ready(view) if !view.launched => {
+            return muted(
+                "This agent hasn't launched yet. What it receives shows here after its first launch.",
+            );
+        }
+        Load::Ready(view) => view,
+    };
+    let file = Harness::from_id(&view.harness).map_or("Instructions", Harness::instruction_file);
+    let mut lines = match view.text.is_empty() {
+        true => muted("No app or project instructions were given at its last launch."),
+        false => vec![Line::from(vec![
+            Span::styled(file, theme.heading),
+            Span::styled(format!("  {}", size(view.text.len())), theme.muted),
+        ])],
+    };
+    lines.push(Line::default());
+    for text in sanitize(&view.text).lines() {
+        match text.is_empty() {
+            true => lines.push(Line::default()),
+            false => lines.extend(wrap(text, limit).into_iter().map(Line::raw)),
+        }
+    }
+    if !view.text.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.push(styled("Skills", Role::Heading, theme));
+    match view.skills.is_empty() {
+        true => lines.extend(muted("No skills were installed at its last launch.")),
+        false => lines.extend(
+            view.skills
+                .iter()
+                .map(|skill| Line::raw(format!("{} {}", ctx.glyphs.dot, plain(skill)))),
+        ),
+    }
+    lines
+}
+
+/// Task text safe to draw in a terminal cell grid: tabs become spaces and
+/// other control characters but newlines are dropped, so nothing moves the
+/// cursor or overlaps. Input: the text. Output: the cleaned text.
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|character| if character == '\t' { ' ' } else { character })
+        .filter(|character| *character == '\n' || !character.is_control())
+        .collect()
+}
+
+/// The one-line title of a task: its first non-blank line, cleaned by
+/// `plain`, with whitespace runs read as one space. Input: the task text.
+/// Output: the title, or "Untitled task" for blank text.
+pub(in crate::tui) fn title(text: &str) -> String {
+    plain(text)
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .find(|line| !line.is_empty())
-        .unwrap_or("Untitled task")
-        .to_owned()
+        .unwrap_or_else(|| "Untitled task".to_owned())
 }
 
 /// The body rectangle the shell gives screens, from the window size.
@@ -863,6 +1352,17 @@ fn split(area: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
+/// The master view's terminal box: the whole body inside the side margins.
+/// Input: the body area. Output: the terminal rectangle.
+fn whole(area: Rect) -> Rect {
+    Rect::new(
+        area.x + MARGIN,
+        area.y,
+        area.width.saturating_sub(2 * MARGIN),
+        area.height,
+    )
+}
+
 fn inside(area: Rect) -> Rect {
     Rect::new(
         area.x + 1,
@@ -872,11 +1372,27 @@ fn inside(area: Rect) -> Rect {
     )
 }
 
+/// Splits the master view into its header row with the live master switch and the body.
+/// Takes the area inside the side margins. Returns the header and the body.
+fn master_split(area: Rect) -> (Rect, Rect) {
+    let rows = MASTER_HEAD_ROWS.min(area.height);
+    (
+        Rect::new(area.x, area.y, area.width, rows),
+        Rect::new(area.x, area.y + rows, area.width, area.height - rows),
+    )
+}
+
 /// The terminal size the pane gets at the current window size, within the
 /// engine's terminal size bounds.
-/// Input: the context. Output: (rows, columns).
-fn pane_size(ctx: &Ctx) -> (u16, u16) {
-    let inner = inside(split(body_area(ctx)).1);
+/// Input: the context and whether the master view fills the body. Output:
+/// (rows, columns).
+fn pane_size(ctx: &Ctx, master: bool) -> (u16, u16) {
+    let body = body_area(ctx);
+    let inner = inside(if master {
+        master_split(whole(body)).1
+    } else {
+        split(body).1
+    });
     (
         inner.height.clamp(SIZE_MIN, SIZE_MAX),
         inner.width.clamp(SIZE_MIN, SIZE_MAX),

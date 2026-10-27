@@ -1,6 +1,8 @@
 use super::new_project::*;
 use crate::config::{EffectiveConfig, resolve_config_bytes};
-use crate::project_setup::{Platform, ResearchKind, TeamPlan, catalog};
+use crate::project_setup::{
+    HarnessSlot, Platform, ResearchKind, TEAM_AGENTS_MAX, TeamPlan, catalog,
+};
 use crate::protocol::CredentialRef;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeSet;
@@ -224,7 +226,10 @@ fn team_defaults_come_from_the_engine_and_owner_edits_survive_a_reload() {
         "RCLI never leads the default team"
     );
     assert!(fallback.sub_harnesses.is_empty());
-    assert_eq!((fallback.min_agents, fallback.max_agents), (1, 1));
+    assert_eq!(
+        (fallback.min_agents, fallback.max_agents),
+        (1, TEAM_AGENTS_MAX)
+    );
 }
 
 #[test]
@@ -283,6 +288,63 @@ fn team_counts_follow_the_engine_rule_including_the_master() {
     wizard.key(key(KeyCode::Enter));
     assert_eq!(wizard.step, Step::Review);
     assert!(wizard.done[Step::Team.index()]);
+}
+
+#[test]
+fn a_full_team_refuses_another_agent_and_says_to_lower_a_count() {
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["c-codex"]);
+    let slot = wizard.team.as_ref().unwrap().sub_harnesses[0].clone();
+    let team = wizard.team.as_mut().unwrap();
+    team.sub_harnesses = [15, 15, 15, 15, 3]
+        .into_iter()
+        .map(|agents| HarnessSlot {
+            agents,
+            ..slot.clone()
+        })
+        .collect();
+    team.max_agents = TEAM_AGENTS_MAX;
+    wizard.max.set(&TEAM_AGENTS_MAX.to_string());
+    assert_eq!(
+        wizard.team.as_ref().unwrap().total_agents(),
+        u32::from(TEAM_AGENTS_MAX)
+    );
+    let full = "A team runs at most 64 agents, counting the master. Lower a count or remove a sub-harness to add another.";
+    let note = |wizard: &Wizard| wizard.note.as_ref().map(|n| (n.control, n.text.clone()));
+
+    wizard.go(Step::Team);
+    assert_eq!(wizard.focused(), Control::Team);
+    for _ in 0..5 {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Right));
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses[4].agents, 3);
+    assert_eq!(note(&wizard), Some((Control::Team, full.to_owned())));
+
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.team_row, 6);
+    wizard.key(key(KeyCode::Enter));
+    assert!(wizard.picker.is_none());
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses.len(), 5);
+    assert_eq!(note(&wizard), Some((Control::Team, full.to_owned())));
+
+    wizard.key(key(KeyCode::Up));
+    wizard.key(key(KeyCode::Left));
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses[4].agents, 2);
+    assert_eq!(note(&wizard), None);
+    wizard.key(key(KeyCode::Right));
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses[4].agents, 3);
+    assert_eq!(note(&wizard), None);
+
+    wizard.team.as_mut().unwrap().sub_harnesses[4].agents = 4;
+    assert_eq!(
+        wizard.check_team().map_err(|n| (n.control, n.text)),
+        Err((
+            Control::Team,
+            "Sub-agents add up to 64, plus the master makes 65, but a team runs at most 64. Lower a count or remove a sub-harness.".to_owned()
+        ))
+    );
 }
 
 #[test]
@@ -450,7 +512,7 @@ fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
     use std::os::unix::fs::PermissionsExt;
     let bin = tempfile::Builder::new()
         .prefix("ca-tui-team-use-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     for name in ["codex", "opencode"] {
         let path = bin.path().join(name);

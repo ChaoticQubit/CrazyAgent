@@ -1,10 +1,10 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
+export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -26,6 +26,7 @@ const COPY: Record<string, string> = {
   engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
   pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
+  change_may_be_recorded: "This change may still go through, so it can't be dismissed. Use Check again.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   stale_config: "This changed since you opened it. Review and save again.",
@@ -40,6 +41,11 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
+  account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
+  account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
+  account_schedule_full: "Too many saved account choices. Clear some you no longer need, then try again.",
+  connection_not_found: "This account no longer exists. Refresh and try again.",
   approved_accounts_limit: "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
   allowed_destinations_limit: "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
   model_access_duplicate: "This already exists.",
@@ -88,7 +94,8 @@ const COPY: Record<string, string> = {
   rcli_private_key_writer_unavailable: "This engine can't set up accounts for agents. Start it with the CrazyAgent model runner.",
   native_profile_in_use: "An agent is using this account now. Try again after it stops.",
   account_profile_operations_full: "This engine can't set up more accounts for agents.",
-  account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents. Save the pool again to check.",
+  account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents yet. The app checks again on its own, or use Check again at the top of the window.",
+  account_profile_recovery_required: "An account's set-up for agents isn't confirmed yet. Use Check again at the top of the window, then try again.",
   memory_note_blank: "Write something to remember.",
   memory_note_too_long: "Keep the memory under 2000 characters.",
   memory_note_invalid: "Remove hidden, direction-changing or control characters from the memory.",
@@ -104,6 +111,16 @@ const COPY: Record<string, string> = {
   knowledge_version_conflict: "This memory changed. Reload it and try again.",
   knowledge_source_revoked: "The research this came from was deleted.",
   invalid_knowledge_text: "Write the memory as plain text, up to 4096 bytes, without hidden or direction-changing characters.",
+  read_path_not_absolute: "Type the full path of a folder, starting with /.",
+  read_path_missing: "That folder doesn't exist on this computer.",
+  read_path_not_folder: "That path is a file. Add a folder.",
+  read_path_holds_home: "Agents can't read your whole home folder. Add a folder inside it.",
+  read_path_credentials: "That folder holds or sits in a credential location, such as .ssh or .aws, so agents can never read it.",
+  read_path_engine_data: "That folder holds CrazyAgent's own data, so agents can never read it.",
+  read_path_refused: "That folder can't be shared with agents. Pick another folder.",
+  read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
+  read_paths_too_many: "A project can share at most 8 extra folders.",
+  read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -243,6 +260,12 @@ export function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_retry_intent");
 }
 
+/** Drops the kept change once the engine said it never recorded it, so it never goes
+ * through. Output: the connection, or why it can't be dropped while it may still land. */
+export function dropUnconfirmed(): Promise<Result<ConnectionStatus>> {
+  return call<ConnectionStatus>("desktop_drop_intent");
+}
+
 /** Pauses before each automatic check of an unconfirmed change, in milliseconds. */
 export const UNCONFIRMED_CHECKS_MS: readonly number[] = [2000, 4000, 8000, 16000, 30000];
 
@@ -269,6 +292,8 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   research_memory: "saving research to memory",
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
+  project_read_paths: "saving extra folders agents can read",
+  account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
@@ -285,12 +310,19 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   run_setup: "running project setup",
   pack_set: "changing the default pack",
   pack_remove: "removing a pack",
+  team: "changing the team",
+  project_setup_update: "updating the project setup",
+  project_remove: "removing the project",
+  research_cancel: "cancelling the research",
+  research_retry: "retrying the research",
 };
 
-/** Names a kept change in plain words. Input: the change. Output: a lower-case phrase. */
+/** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the
+ * broader phrase for an access edit the window has no name for, and "your change" for a kind
+ * it does not know, so the banner never fails to render. */
 export function changeLabel(intent: PendingIntent): string {
-  if (intent.kind === "model_access" && intent.model_access) return MODEL_ACCESS_CHANGE[intent.model_access.kind];
-  return CHANGE[intent.kind];
+  const access = intent.kind === "model_access" && intent.model_access ? MODEL_ACCESS_CHANGE[intent.model_access.kind] : undefined;
+  return access ?? CHANGE[intent.kind] ?? "your change";
 }
 
 function capital(text: string): string {
@@ -301,7 +333,7 @@ function capital(text: string): string {
  * check's outcome, or null before any check. Output: the line naming the change. */
 export function unconfirmedLine(intent: PendingIntent, outcome: ActionReceipt["outcome"] | null): string {
   const label = changeLabel(intent);
-  if (outcome === "not_recorded_at_barrier") return `${capital(label)} hasn't reached the engine. Retry sends the same change again.`;
+  if (outcome === "not_recorded_at_barrier") return `${capital(label)} never reached the engine. Retry sends it again, or Dismiss drops it.`;
   return `We couldn't confirm ${label}. Other changes wait until it's checked.`;
 }
 
@@ -455,6 +487,36 @@ export async function readyForAgents(id: string): Promise<Result<void>> {
   return { kind: "ok", value: undefined };
 }
 
+/** Where an account set-up for agents that the bridge kept unconfirmed stands after it read
+ * the same request again: configured, never recorded (nothing was set up), still unanswered,
+ * no set-up kept, or the read failed. */
+export type ProfileCheck = "configured" | "not_recorded" | "pending" | "none" | "failed";
+
+/** Reads where a kept account set-up stands from one read of it. Input: the read.
+ * Output: the state. */
+export function profileCheck(read: Result<AccountProfileView>): ProfileCheck {
+  if (read.kind !== "ok") return read.kind === "error" && read.code === "account_profile_operation_missing" ? "none" : "failed";
+  if (read.value.pending) return "pending";
+  return read.value.reply.outcome === "not_recorded" ? "not_recorded" : "configured";
+}
+
+/** Reads the account set-up the bridge still keeps unconfirmed, the same request again, so
+ * no key is sent twice. Output: where it stands. */
+export async function checkAccountProfile(): Promise<ProfileCheck> {
+  return profileCheck(await call<AccountProfileView>("desktop_read_account_profile"));
+}
+
+/** The banner line while an account set-up for agents is unconfirmed. */
+export const PROFILE_UNCONFIRMED_LINE = "We couldn't confirm an account's set-up for agents. Account, pool and project changes wait until it's checked.";
+
+/** The toast once an unconfirmed account set-up settles. Input: the check. Output: the line,
+ * or null while it is unconfirmed or when nothing was kept. */
+export function profileSettledLine(check: ProfileCheck): string | null {
+  if (check === "configured") return "The account is set up for agents.";
+  if (check === "not_recorded") return "The account set-up for agents never reached the engine. Save the pool again to set it up.";
+  return null;
+}
+
 export interface PoolMember {
   id: string;
   kind: "chatgpt" | "claude" | "api_key" | "url" | "local" | "other";
@@ -476,6 +538,64 @@ export const POOL_MEMBER_MAX = 15;
 /** Reads every pool with its plain summary and member statuses. Output: the pools. */
 export function poolSummaries(): Promise<Result<PoolSummary[]>> {
   return call<PoolSummary[]>("desktop_pool_summaries");
+}
+
+export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
+export type AccountPin = "never_use" | "use_last";
+
+export interface AccountPlan {
+  rank: number | null;
+  reserve_percent: number;
+  pin: AccountPin | null;
+}
+
+export interface AccountSchedule {
+  strategy: AccountStrategy;
+  pools: { id: string; strategy: AccountStrategy }[];
+  projects: { id: string; strategy: AccountStrategy }[];
+  accounts: { connection: string; plan: AccountPlan }[];
+}
+
+export type ScheduleChange =
+  | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
+  | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
+  | { kind: "account"; connection: string; plan: AccountPlan };
+
+/** Reads how pools choose accounts: the app strategy, pool strategies, project overrides
+ * and each account's rank, reserve and pin. Output: the schedule. */
+export function accountSchedule(): Promise<Result<AccountSchedule>> {
+  return call<AccountSchedule>("desktop_account_schedule");
+}
+
+export type AccountStanding =
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "paused"; until_ms: number }
+  | { kind: "never_use" }
+  | { kind: "five_hour_cap"; until_ms: number | null }
+  | { kind: "reserve_reached"; reserve_percent: number; until_ms: number | null };
+
+export interface RankedAccount {
+  connection: string;
+  standing: AccountStanding;
+}
+
+export interface PoolRanking {
+  pool: string;
+  strategy: AccountStrategy;
+  accounts: RankedAccount[];
+}
+
+/** Reads each pool's account ranking: the order work would try its accounts now, then each
+ * held account with why. Output: one ranking per pool. */
+export function accountRanking(): Promise<Result<PoolRanking[]>> {
+  return call<PoolRanking[]>("desktop_account_ranking");
+}
+
+/** Saves one account choice change. Input: the change. Output: ok once the engine applied
+ * it, or a plain error. */
+export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
+  return change("desktop_set_account_schedule", { change: scheduleChange, generation: nextGeneration() });
 }
 
 function poolId(): string {
@@ -563,10 +683,11 @@ export interface HarnessEntry {
   aliases: string[];
 }
 
-/** Reads the harness catalog with what is installed on this Mac. Output: harnesses in
+/** Reads the harness catalog with what is installed on this Mac, from the engine's last look
+ * unless `check` asks it to look again now. Input: whether to look again. Output: harnesses in
  * catalog priority order. */
-export function harnessCatalog(): Promise<Result<HarnessEntry[]>> {
-  return call<HarnessEntry[]>("desktop_harness_catalog");
+export function harnessCatalog(check = false): Promise<Result<HarnessEntry[]>> {
+  return call<HarnessEntry[]>("desktop_harness_catalog", { check });
 }
 
 /** Reads skills for global settings (no project) or one project's settings, where global
@@ -589,6 +710,26 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<Sk
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
 export function removeSkill(id: string): Promise<Result<void>> {
   return call<void>("desktop_remove_skill", { id });
+}
+
+/** Reads one skill for its detail view: the skill with the project's switch when a project
+ * is given, its full SKILL.md text and its files. Inputs: skill id and optional project id.
+ * Output: the detail, or the engine's refusal such as a removed skill. */
+export function skillDetail(id: string, projectId?: string): Promise<Result<SkillDetail>> {
+  return call<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
+}
+
+/** Looks for skills in the owner's `~/.claude/skills` and `~/.codex/skills`, read only when
+ * the owner asks. Output: each skill found with its state against the app's skills. */
+export function skillImportScan(): Promise<Result<ImportList>> {
+  return call<ImportList>("desktop_skill_import_scan", {});
+}
+
+/** Imports one ticked skill into the app's skills, turned on for every project, leaving out
+ * dotfiles and credential-like files. Inputs: the found folder and, for a skill whose files
+ * differ, the added skill's id to replace. Output: the skill and the paths left out. */
+export function importSkill(folder: string, replace: string | null): Promise<Result<ImportedSkill>> {
+  return call<ImportedSkill>("desktop_import_skill", { folder, replace });
 }
 
 /** Reads MCP servers for global settings (no project) or one project's settings.
@@ -676,10 +817,14 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
   return call<AccountUse>("desktop_release_account", { accountId, generation: nextGeneration() });
 }
 
-/** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
- * owner closed the chooser. */
-export function pickFolder(): Promise<Result<string | null>> {
-  return call<string | null>("desktop_pick_folder");
+/** What the native folder chooser is for: a skill folder, an existing project folder to add, or
+ * the folder that holds the owner's projects. Each shows its own fixed prompt. */
+export type FolderPurpose = "skill" | "project" | "projects_home";
+
+/** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
+ * chosen folder's full path, or null when the owner closed the chooser. */
+export function pickFolder(purpose: FolderPurpose): Promise<Result<string | null>> {
+  return call<string | null>("desktop_pick_folder", { purpose });
 }
 
 const SUGGESTION_PROJECTS_MAX = 50;
@@ -780,10 +925,14 @@ export function dismissSuggestion(suggestion: Suggestion): Promise<Result<void>>
   return change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Reject" }, generation: nextGeneration() });
 }
 
-/** Reads the first page of projects for Home and the sidebar. Output: projects. */
-export async function listProjects(): Promise<Result<ProjectPage["items"]>> {
-  const result = await call<ProjectPage>("desktop_projects", { next: false });
-  return result.kind === "ok" ? { kind: "ok", value: result.value.items } : result;
+/** The most projects Home, the sidebar and Go to list, the bridge's PROJECT_LIST_MAX. */
+export const PROJECT_LIST_MAX = 200;
+
+/** Reads the projects for Home, the sidebar and Go to in one bridge call that walks every
+ * page with its own cursor, up to PROJECT_LIST_MAX. Input: none. Output: the projects in
+ * engine order and whether more exist, or the read's error. */
+export function listProjects(): Promise<Result<ProjectList>> {
+  return call<ProjectList>("desktop_project_list");
 }
 
 /** Reads one project's team graph: master, harness groups, agents and task edges.
@@ -793,9 +942,10 @@ export function loadTeamGraph(id: string): Promise<Result<TeamGraph>> {
 }
 
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
- * then live output. Inputs: the terminal name and the channel. Output: ok once attached. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<void>> {
-  return call<void>("desktop_terminal_attach", { agent, output });
+ * then live output. Inputs: the terminal name and the channel. Output: the view's serial
+ * once attached, which its detach names. */
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, output });
 }
 
 /** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
@@ -817,16 +967,24 @@ export function resizeTerminal(agent: string, cols: number, rows: number): Promi
   return call<void>("desktop_terminal_resize", { agent, cols, rows });
 }
 
-/** Closes this window's view of an agent terminal; the agent keeps running.
- * Input: the terminal name. Output: ok once closed. */
-export function detachTerminal(agent: string): Promise<Result<void>> {
-  return call<void>("desktop_terminal_detach", { agent });
+/** Closes this window's view of an agent terminal; the agent keeps running. A newer view
+ * of the same agent stays open. Inputs: the terminal name and the serial its attach
+ * returned. Output: ok once closed. */
+export function detachTerminal(agent: string, serial: number): Promise<Result<void>> {
+  return call<void>("desktop_terminal_detach", { agent, serial });
 }
 
 /** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id
  * and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Turns the project's live master on or off; on, the engine keeps the master's own app running
+ * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
+ * or a plain error. */
+export function setLiveMaster(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_live_master", { id, on, generation: nextGeneration() });
 }
 
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan

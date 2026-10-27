@@ -5,7 +5,7 @@ import { failureCopy, loadProjectMemories, retryResearch } from "../../api-proje
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { poolName, poolSummary } from "../new-project/wizard";
+import { anyHarnessTotal, poolName, poolSummary } from "../new-project/wizard";
 import { poolReadiness } from "../settings/pools";
 import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
@@ -50,9 +50,9 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);
   const [allActivity, setAllActivity] = useState(false);
-  const [skills] = useLoad(() => listSkills(data.id), [data.id]);
-  const [servers] = useLoad(() => listMcpServers(data.id), [data.id]);
-  const [summaries] = useLoad(poolSummaries, [data.id]);
+  const [skills] = useLoad(() => listSkills(data.id), [data.id], "skills");
+  const [servers] = useLoad(() => listMcpServers(data.id), [data.id], "mcp-servers");
+  const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
   const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;
@@ -108,7 +108,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
           ? <><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=pool`)}>{displayText(assignedSummary?.name ?? poolName(data.assigned.pool))}</button> <span className="pj-small pj-muted">{assignedSummary ? `${poolSummary(data.assigned.members)}, ${poolReadiness(assignedSummary.members)}` : poolSummary(data.assigned.members)}</span></>
           : data.pools?.kind === "ok" ? <Badge word="Needs a pool" tone="warn" /> : <span className="pj-muted">{data.pools === undefined ? "Loading..." : "Unknown"}</span>}</dd></div>
         {setup && <div><dt>Team</dt><dd>Master: {harnessName(harnesses, setup.team.master)}</dd>
-          <dd className="pj-secondary">{setup.team.sub_harnesses.length ? `Agents: ${setup.team.sub_harnesses.map((slot) => `${harnessName(harnesses, slot.harness)} x${slot.agents}`).join(", ")}` : "No agents beside the master"}</dd></div>}
+          <dd className="pj-secondary">{setup.team.sub_harnesses.length ? `Agents: ${setup.team.sub_harnesses.map((slot) => `${harnessName(harnesses, slot.harness)} x${slot.agents}`).join(", ")}` : anyHarnessTotal(setup.team)}</dd></div>}
         {setup && setup.documents.length > 0 && <div><dt>Documents</dt><dd>{setup.documents.length} attached</dd></div>}
         <div><dt>Skills</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=plugins`)}>{onFact(skills, "skill", "skills") ?? "Project settings"}</button></dd></div>
         <div><dt>MCP servers</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=plugins`)}>{onFact(servers, "server", "servers") ?? "Project settings"}</button></dd></div>

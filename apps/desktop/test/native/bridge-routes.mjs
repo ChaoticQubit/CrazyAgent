@@ -72,8 +72,8 @@ export function plan(command) {
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };
   let body = command.body.slice(prefix.length).replace("ensure_default_engine().await?;", "").replace(/\s+/g, " ").trim();
   if (NATIVE_ONLY.test(body)) return { skip: "native-only body" };
-  body = body.replaceAll("lock(&state)", "lock(state)");
-  if (/\bstate\b/.test(body.replaceAll("lock(state)", ""))) return { skip: "uses the state directly" };
+  body = body.replaceAll("lock(&state)", "lock(state)").replaceAll("read(&state)", "read(state)");
+  if (/\bstate\b/.test(body.replaceAll("lock(state)", "").replaceAll("read(state)", ""))) return { skip: "uses the state directly" };
   return { route: { name: command.name, args: args.map((arg) => ({ name: arg.name, type: arg.type.replaceAll(/\bbridge::/g, "crazyagent_desktop::bridge::") })), body } };
 }
 
@@ -119,7 +119,7 @@ ${parse}            let result: Result<_, BridgeError> = async { ${body} }.await
   const uses = [...imports(source)].filter(([leaf]) => used.has(leaf) && leaf !== "BridgeError").map(([, path]) => `    use ${path};\n`).sort().join("");
   return `#[rustfmt::skip]
 pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json::Value) -> super::Routed {
-    use super::{lock, parse, routed, Routed};
+    use super::{lock, parse, read, routed, Routed};
     use crazyagent_desktop::bridge::BridgeError;
 ${uses}    match command {
 ${arms}        _ => Routed::Unknown,

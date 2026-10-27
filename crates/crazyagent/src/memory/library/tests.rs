@@ -1124,3 +1124,143 @@ async fn a_selection_from_a_context_file_becomes_an_approved_project_memory() {
     drop(owner);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn research_text_with_hidden_characters_stored_before_the_check_is_never_kept_or_made_global()
+{
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-hidden", next()).await;
+    let report = engine
+        .folder("mem-hidden")
+        .join("context/research/market_research.md");
+    std::fs::write(&report, "# Market\n\nHouseholds plan meals weekly.\n").unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let clean = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(clean.len(), 1);
+    let clean = clean[0].clone();
+    let tags = "\u{E0049}\u{E0047}\u{E004E}\u{E004F}\u{E0052}\u{E0045}";
+    std::fs::write(
+        &report,
+        format!("# Market\n\nHouseholds plan meals weekly.{tags}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_text_hidden"),
+        "new research text with hidden characters is refused at save"
+    );
+    drop(owner);
+
+    let mut service = engine.service.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let config = crate::config::resolve_config(
+        &engine.root.path().join("global.toml"),
+        &engine.root.path().join("project.toml"),
+    )
+    .unwrap();
+    let (pending_id, kept_id) = {
+        let mut db = rusqlite::Connection::open_with_flags(
+            engine.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(1)).unwrap();
+        let tx = db.transaction().unwrap();
+        let hidden =
+            crate::project_setup::research_text(&tx, &meals, ResearchKind::MarketResearch, None)
+                .unwrap()
+                .unwrap();
+        assert!(crate::memory::hidden_text(&hidden), "{hidden:?}");
+        let written_before_the_check = |id: RequestId, status: KnowledgeStatus| KnowledgeEntry {
+            id,
+            version: 1,
+            content_hash: crate::memory::hash(hidden.as_bytes()),
+            text: hidden.clone(),
+            human_reviewed: status == KnowledgeStatus::Confirmed,
+            status,
+            ..clean.clone()
+        };
+        let pending = written_before_the_check(
+            crate::memory::research_entry_id(&meals, ResearchKind::MarketResearch.name(), &hidden)
+                .unwrap(),
+            KnowledgeStatus::Provisional,
+        );
+        let kept = written_before_the_check(
+            crate::memory::research_entry_id(&meals, "kept-before-the-check", &hidden).unwrap(),
+            KnowledgeStatus::Confirmed,
+        );
+        for entry in [&pending, &kept] {
+            assert_eq!(
+                crate::memory::save_entry(&tx, &config.settings.knowledge, entry).unwrap(),
+                Outcome::Applied
+            );
+        }
+        tx.commit().unwrap();
+        (pending.id, kept.id)
+    };
+    engine.boot().await;
+    let mut owner = engine.owner().await;
+
+    assert_eq!(
+        result(
+            owner
+                .remember_research(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_text_hidden"),
+        "a stored research entry with hidden characters is never kept"
+    );
+    assert_eq!(
+        result(
+            owner
+                .promote_memory(meals.clone(), kept_id.clone(), 1, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_note_invalid"),
+        "a kept entry with hidden characters never reaches every project"
+    );
+    let entries = owner.project_memories(meals.clone(), None).await.unwrap();
+    let pending = entries.iter().find(|entry| entry.id == pending_id).unwrap();
+    assert_eq!(
+        (&pending.status, pending.human_reviewed),
+        (&KnowledgeStatus::Provisional, false)
+    );
+    assert_eq!(
+        owner
+            .memories(MemoryScope::Global, None, None)
+            .await
+            .unwrap()
+            .items,
+        []
+    );
+    assert!(
+        !tables_holding(&engine.database(), tags).contains(&"memory_library".to_owned()),
+        "no saved memory holds the hidden characters"
+    );
+    drop(owner);
+    engine.stop().await;
+}

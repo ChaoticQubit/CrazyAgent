@@ -11,7 +11,7 @@ use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
-    MasterTurnPhase, MasterTurnView,
+    MasterTurnPhase, MasterTurnView, fitted_reply,
 };
 use crate::protocol::RequestId;
 use crate::rcli_host::RcliMasterStatus;
@@ -24,7 +24,6 @@ mod custody;
 
 use custody::RcliCustody;
 
-const REPLY_BYTES_MAX: usize = 8192;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -347,13 +346,10 @@ impl OwnerRuntimeHandle {
                     if text.trim().is_empty() || text.contains('\0') {
                         return Err(failure("rcli_master_capture_incomplete"));
                     }
-                    if text.len() > REPLY_BYTES_MAX {
-                        return Err(failure("rcli_master_output_limit"));
-                    }
                     assert!(active.capture.sequence() > 0);
                     return Ok(MasterRuntimeObservation::Response {
                         reply: MasterReply {
-                            text,
+                            text: fitted_reply(&text, 0),
                             provenance: MasterReplyProvenance {
                                 attempt_id: prepared.attempt.request.id.clone(),
                                 runtime_ref: active.runtime.runtime_ref.clone(),

@@ -19,6 +19,21 @@ export function encodeTyped(data: string): Uint8Array {
   return encoder.encode(data);
 }
 
+/** The newline key both Claude Code and Codex read as a new line in the message being typed,
+ * in every terminal: Ctrl+J. */
+export const NEW_LINE = "\n";
+
+/** What a key press means before xterm sees it. Shift+Enter is a new line in the agent's
+ * message rather than a second Enter, so its keydown types `NEW_LINE` and every event of it
+ * is kept from xterm; any other key goes to xterm unchanged. Input: the key event's type,
+ * key and modifiers. Output: the text to type and false to keep it from xterm, nothing to
+ * type and false, or nothing to type and true. */
+export function keyOverride(event: { type: string; key: string; shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): { typed: string | null; xterm: boolean } {
+  const shiftEnter = event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+  if (!shiftEnter) return { typed: null, xterm: true };
+  return { typed: event.type === "keydown" ? NEW_LINE : null, xterm: false };
+}
+
 /** Encodes xterm's binary event, one byte per character code, such as some mouse reports.
  * Input: the binary string. Output: the bytes, each code kept to its low eight bits. */
 export function encodeBinary(data: string): Uint8Array {
@@ -99,6 +114,31 @@ export function inputQueue(send: (chunk: number[]) => Promise<boolean>, stopped:
   return keyQueue(jobQueue(stopped), send);
 }
 
+/** Calls `settle` once, on the first frame after which no queued output write is still being
+ * parsed, so a new view keeps the pane's size until the attach's history and screen are both
+ * drawn; a resize partway would push history rows off the view. Inputs: a frame scheduler that
+ * returns its cancel, and the action. Output: a function to call as each write is queued; it
+ * returns that write's done callback. */
+export function settleAfterWrites(frame: (run: () => void) => () => void, settle: () => void): () => () => void {
+  let pending = 0;
+  let settled = false;
+  let cancel = () => {};
+  return () => {
+    pending += 1;
+    cancel();
+    return () => {
+      pending -= 1;
+      assert(pending >= 0, "every write is done once");
+      if (settled || pending > 0) return;
+      cancel = frame(() => {
+        if (settled || pending > 0) return;
+        settled = true;
+        settle();
+      });
+    };
+  };
+}
+
 export const PROMPT_BYTES_MAX = 4096;
 
 /** Checks a composer prompt before it is sent as the owner's explicit message. The engine
@@ -119,14 +159,28 @@ const QUERY_CSI: IFunctionIdentifier[] = [
   { intermediates: "$", final: "p" }, { prefix: "?", intermediates: "$", final: "p" },
 ];
 const QUERY_DCS: IFunctionIdentifier[] = [{ intermediates: "$", final: "q" }];
+const QUERY_OSC = [4, 10, 11, 12];
+const PASTE_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 /** Stops a view answering the terminal queries an agent's app writes (device attributes,
- * status and cursor reports, mode and setting requests). tmux owns the agent's terminal and
- * answers them already; a second answer from the view would be typed into the agent.
- * Input: the view's terminal. Output: none; the handlers end with the terminal. */
-export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandler" | "registerDcsHandler"> }): void {
+ * status and cursor reports, mode and setting requests, and color queries). tmux owns the
+ * agent's terminal and answers them already; a second answer from the view would be typed
+ * into the agent. A color sequence that only sets colors still applies. Input: the view's
+ * terminal. Output: none; the handlers end with the terminal. */
+export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandler" | "registerDcsHandler" | "registerOscHandler"> }): void {
   for (const id of QUERY_CSI) terminal.parser.registerCsiHandler(id, () => true);
   for (const id of QUERY_DCS) terminal.parser.registerDcsHandler(id, () => true);
+  for (const id of QUERY_OSC) terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"));
+}
+
+/** The text a clipboard paste may type into an agent: every control character is dropped
+ * except tab, new line and carriage return, so pasted text can never end the app's
+ * bracketed paste or press Escape, Ctrl keys or other keys inside it. Input: the clipboard
+ * text. Output: the text to paste. */
+export function pasteText(text: string): string {
+  const kept = text.replace(PASTE_CONTROLS, "");
+  assert(!kept.includes("\x1b"), "pasted text keeps no Escape");
+  return kept;
 }
 
 /** What one terminal channel message means for the view. */
@@ -137,11 +191,13 @@ export type TerminalEvent =
 
 const END_COPY: Record<string, string> = {
   terminal_agent_unknown: "This agent's terminal isn't running. It may have finished or not started yet.",
+  terminal_ended: "This run finished. Its last screen stays above.",
   terminal_unavailable: "Terminals need tmux, and it isn't ready on this Mac. Run setup again from Settings.",
   terminal_viewers_full: "Too many terminals are open. Close one and try again.",
   terminal_agent_mismatch: "The engine opened a different agent's terminal, so the view closed.",
   terminal_connection_lost: "Lost the connection to this terminal. Open it again to reconnect.",
   terminal_connection_closed: "The engine closed this terminal view. Open it again to reconnect.",
+  terminal_view_replaced: "This terminal opened in a newer view, so this one closed. Open it again to bring it back here.",
   exited: "The agent's app exited.",
 };
 

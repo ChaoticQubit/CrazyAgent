@@ -871,7 +871,11 @@ impl App {
             OwnerEvent::Shell(_)
             | OwnerEvent::Settings(_)
             | OwnerEvent::TeamGraph { .. }
+            | OwnerEvent::ProjectFiles { .. }
             | OwnerEvent::Intake(_)
+            | OwnerEvent::Changes(_)
+            | OwnerEvent::Process(_)
+            | OwnerEvent::Cleanup(_)
             | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {

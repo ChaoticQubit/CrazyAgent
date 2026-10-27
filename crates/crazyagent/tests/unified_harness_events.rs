@@ -1,10 +1,10 @@
 use crazyagent::adapters::claude::ClaudeProtocol;
 use crazyagent::adapters::codex::{CodexProtocol, Event, ProtocolError, State, WireId};
-use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge};
+use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge, OUTPUT_BYTES_MAX};
 use crazyagent::adapters::events::{
     Approval, Capability, EventKind, NativeRequestId, ObservedEvent, Support, TurnOutcome,
 };
-use crazyagent::adapters::{NativeAction, NativeHarness};
+use crazyagent::adapters::{FIELD_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -461,10 +461,80 @@ fn public_typed_events_cannot_expand_shared_output_without_a_bound() {
     let mut bridge = bridge();
     let event = Event::UnsupportedRequest {
         id: WireId::Text("id".into()),
-        method: "x".repeat(262_144),
+        method: "x".repeat(OUTPUT_BYTES_MAX),
     };
     assert!(matches!(
         bridge.translate(event, None),
         Err(BridgeError::FrameTooLarge)
     ));
+}
+
+#[test]
+fn a_codex_message_past_a_field_is_clipped_instead_of_failing_the_turn() {
+    let (mut protocol, mut bridge, request) = active();
+    let text = "é\u{1b}".repeat(25_000);
+    for (method, params) in [
+        (
+            "item/agentMessage/delta",
+            json!({"threadId":"native-thread","turnId":"native-turn","itemId":"item","delta":text}),
+        ),
+        (
+            "error",
+            json!({"threadId":"native-thread","turnId":"native-turn","error":{"message":text},"willRetry":true}),
+        ),
+    ] {
+        let events = notice(&mut protocol, method, params);
+        let observed = bridge
+            .translate(events.into_iter().next().unwrap(), Some(request.clone()))
+            .unwrap();
+        let clipped = match observed.kind {
+            EventKind::AssistantDelta { text, .. } => text,
+            EventKind::TurnError { message, .. } => message,
+            other => panic!("{other:?}"),
+        };
+        assert!(clipped.len() <= FIELD_BYTES_MAX);
+        let (kept, note) = clipped.rsplit_once('\n').unwrap();
+        assert!(text.starts_with(kept));
+        assert_eq!(
+            note,
+            format!("[{} more bytes not shown]", text.len() - kept.len())
+        );
+        assert_eq!(protocol.state(), State::Active);
+    }
+}
+
+#[test]
+fn a_codex_approval_past_a_field_is_summarized_instead_of_failing_the_turn() {
+    let (mut protocol, mut bridge, request) = active();
+    let command = format!(
+        "cat > note.txt <<'EOF'\n{}EOF",
+        "\u{1}line\n".repeat(50_000)
+    );
+    let params = json!({
+        "threadId":"native-thread", "turnId":"native-turn", "itemId":"item", "startedAtMs":1,
+        "command":command, "cwd":"/worktree", "reason":"write the note"
+    });
+    let size = serde_json::to_vec(&params).unwrap().len();
+    let events = protocol
+        .receive(&wire(
+            json!({"id":9,"method":"item/commandExecution/requestApproval","params":params}),
+        ))
+        .unwrap();
+    let observed = bridge
+        .translate(events.into_iter().next().unwrap(), Some(request))
+        .unwrap();
+    assert_eq!(observed.native_turn_id.as_deref(), Some("native-turn"));
+    let summary = json!({
+        "threadId":"native-thread", "turnId":"native-turn", "itemId":"item", "startedAtMs":1,
+        "omitted_bytes":size
+    });
+    assert!(matches!(
+        &observed.kind,
+        EventKind::ApprovalRequired { id: NativeRequestId::Number(9), approval: Approval::Command, params }
+        if *params == summary
+    ));
+    let denial: Value =
+        serde_json::from_slice(&protocol.deny_request(&WireId::Number(9)).unwrap()).unwrap();
+    assert_eq!(denial["result"]["decision"], "decline");
+    assert_eq!(protocol.state(), State::Active);
 }

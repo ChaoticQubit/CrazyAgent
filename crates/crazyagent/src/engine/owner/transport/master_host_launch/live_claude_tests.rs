@@ -5,6 +5,7 @@ use crate::adapters::{NativeAction, NativeHarness};
 use crate::engine::claude_host::ClaudeHost;
 use crate::protocol::SessionId;
 use crate::routing::ResourceBudget;
+use crate::sandbox::warden::fixture::{detached_survivors, naming, processes_naming};
 use crate::team::runtime::managed_agent::SignedIn;
 use std::os::unix::fs::PermissionsExt;
 
@@ -423,7 +424,7 @@ const DETACHED_ENGINE_BASE: &str = "CRAZYAGENT_LB46_ENGINE_BASE";
 /// held profile and the owner root.
 struct DetachingMaster {
     master: ClaudeHost,
-    _credential: Option<crate::engine::bootstrap::AgentCredential>,
+    _credential: crate::engine::bootstrap::AgentCredential,
     _folder: MasterRuntimeFolder,
     _signed_in: SignedIn,
     _root: Root,
@@ -518,47 +519,6 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
     }
 }
 
-/// This user's processes whose command line contains `needle`, read with `ps`. Input: the
-/// text. Output: their ids and command lines.
-fn processes_naming(needle: &str) -> Vec<(i32, String)> {
-    let listing = crate::spawn_gate::output(
-        std::process::Command::new("/bin/ps")
-            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(
-        listing.status.success(),
-        "{}",
-        String::from_utf8_lossy(&listing.stderr)
-    );
-    assert!(!listing.stdout.is_empty());
-    naming(
-        &String::from_utf8_lossy(&listing.stdout),
-        &rustix::process::getuid().as_raw().to_string(),
-        i32::try_from(std::process::id()).unwrap(),
-        needle,
-    )
-}
-
-/// Picks from a `ps -o pid=,uid=,command=` listing the processes of `user` other than `own`
-/// whose command line contains `needle`. Inputs: the listing, the user id, this process's id
-/// and the text. Output: their ids and command lines.
-fn naming(listing: &str, user: &str, own: i32, needle: &str) -> Vec<(i32, String)> {
-    listing
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid: i32 = fields.next()?.parse().ok()?;
-            let owner = fields.next()?;
-            let command = fields.collect::<Vec<_>>().join(" ");
-            (owner == user && pid != own && command.contains(needle)).then_some((pid, command))
-        })
-        .collect()
-}
-
 /// Reads what the LB-46 turn's shells have started: the sleep in its own session, and the
 /// plain sleeps, the `nohup` one and then the foreground one. Output: what runs now.
 fn detached_seen() -> DetachedSeen {
@@ -589,27 +549,6 @@ fn detached_ready(seen: &DetachedSeen, since: &mut Option<std::time::Instant>) -
     }
     let since = *since.get_or_insert_with(std::time::Instant::now);
     seen.sleeps >= 2 || since.elapsed() >= DETACHED_FOREGROUND_TIME
-}
-
-/// Waits until `deadline` for no process of this user to name any of `needles`, then kills
-/// by id whatever still does, so a failing run leaves nothing behind. Inputs: the deadline
-/// and the texts. Output: the processes that outlived it.
-fn detached_survivors(deadline: std::time::Instant, needles: &[&str]) -> Vec<(i32, String)> {
-    loop {
-        let left: Vec<(i32, String)> = needles
-            .iter()
-            .flat_map(|needle| processes_naming(needle))
-            .collect();
-        if left.is_empty() || std::time::Instant::now() >= deadline {
-            for (pid, _) in &left {
-                if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
-                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-                }
-            }
-            return left;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 /// Qualifies LB-46 on a real Claude master with its tools on: its Bash tool leaves a `nohup`

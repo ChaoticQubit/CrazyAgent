@@ -1,11 +1,12 @@
 import { Channel } from "@tauri-apps/api/core";
+import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
-import { Button, Icon, NotReady, StatusBadge, keyLabel, shortcutKey } from "../../ui";
+import { Button, Icon, NotReady, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
-import { nodeDetail, nodeStatus } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, terminalEvent, terminalSize } from "./terminal-io";
+import { nodeLine } from "./graph";
+import { encodeBinary, encodeTyped, endCopy, jobQueue, keyOverride, keyQueue, muteQueries, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -16,6 +17,26 @@ type View = { kind: "connecting" } | { kind: "live" } | { kind: "ended"; copy: s
 function token(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
+}
+
+/** The view's xterm settings: the app's mono font and terminal colors, Option as Meta and
+ * `SCROLLBACK_LINES` of scrollback for the history the engine sends on attach. Output: the
+ * options for a new terminal. */
+export function terminalOptions(): ITerminalOptions {
+  return {
+    cursorBlink: true,
+    fontFamily: token("--mono", "ui-monospace, Menlo, monospace"),
+    fontSize: 13,
+    macOptionIsMeta: true,
+    scrollback: SCROLLBACK_LINES,
+    theme: {
+      background: token("--terminal-bg", "#161513"),
+      foreground: token("--terminal-fg", "#eeeae2"),
+      cursor: token("--terminal-cursor", "#ff6a45"),
+      cursorAccent: token("--terminal-bg", "#161513"),
+      selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
+    },
+  };
 }
 
 /** The note under a live terminal: who reads what the owner types. Input: the node.
@@ -33,7 +54,12 @@ export function promptCopy(node: GraphNode): { label: string; placeholder: strin
     : { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
 }
 
-function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
+/** The prompt box under an agent's terminal: Enter sends the text as one message, Shift+Enter
+ * adds a line. The box always takes typing and keeps its draft, as a master turn's terminal
+ * ends after each turn; only sending waits for a live terminal. Inputs: the node, whether the
+ * terminal is live and the send action, which says whether the prompt was queued. Output: the
+ * form. */
+export function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
   const [text, setText] = useState("");
   const id = `tg-prompt-${node.id}`;
   const copy = promptCopy(node);
@@ -44,38 +70,61 @@ function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSe
   };
   return <form className="tg-composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
     <label htmlFor={id} className="pj-sr">{displayText(copy.label)}</label>
-    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} disabled={!live}
+    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text}
       placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
       onChange={(event) => setText(event.target.value)}
-      onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); send(); } }} />
+      onKeyDown={(event) => { if (sendsMessage(event.nativeEvent)) { event.preventDefault(); send(); } }} />
     <div className="tg-composer-foot">
-      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Opens once the terminal is live." : check.kind === "too_long" ? check.reason : keyLabel("Sends the text as one message, then Enter. Cmd+Enter to send.")}</span>
+      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Sends once the terminal is live." : check.kind === "too_long" ? check.reason : "Sends the text as one message, then Enter. Enter to send, Shift+Enter for a new line."}</span>
       <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || check.kind !== "ok"}>Send</Button>
     </div>
   </form>;
 }
 
+/** Routes an opened terminal's keys to the agent: what xterm types, Shift+Enter as one new
+ * line that xterm never also reads as Enter, and clipboard pastes with their control
+ * characters dropped before xterm brackets them. Inputs: the terminal and the typing action.
+ * Output: the subscription for typed text and pastes. */
+export function typeKeys(terminal: Terminal, type: (data: string) => void): IDisposable {
+  const element = terminal.element;
+  if (!element) throw new Error("typeKeys needs an opened terminal");
+  const typed = terminal.onData(type);
+  terminal.attachCustomKeyEventHandler((event) => {
+    const override = keyOverride(event);
+    if (override.typed !== null) type(override.typed);
+    return override.xterm;
+  });
+  const paste = (event: ClipboardEvent) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    if (text) terminal.paste(pasteText(text));
+  };
+  element.addEventListener("paste", paste, true);
+  return { dispose: () => { typed.dispose(); element.removeEventListener("paste", paste, true); } };
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel. Closing it detaches
  * the view; the agent keeps running. Inputs: the graph node, a harness name lookup and the
- * close action. Output: the panel. */
+ * close action, when the panel can be closed. Output: the panel. */
 export function TerminalPanel({ node, harness, onClose }: {
   node: GraphNode;
   harness?: (id: string) => string;
-  onClose: () => void;
+  onClose?: () => void;
 }) {
   const screen = useRef<HTMLDivElement>(null);
   const prompt = useRef<((text: string) => boolean) | null>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
   const [round, setRound] = useState(0);
   const name = node.terminal;
-  const status = nodeStatus(node);
 
   useEffect(() => {
     const element = screen.current;
     if (!name || !element) return;
     setView({ kind: "connecting" });
     let disposed = false;
+    let serial: number | null = null;
     let release = () => {};
     void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -84,20 +133,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         import("@xterm/xterm/css/xterm.css"),
       ]);
       if (disposed) return;
-      const terminal = new Terminal({
-        cursorBlink: true,
-        fontFamily: token("--mono", "ui-monospace, Menlo, monospace"),
-        fontSize: 13,
-        macOptionIsMeta: true,
-        scrollback: SCROLLBACK_LINES,
-        theme: {
-          background: token("--terminal-bg", "#161513"),
-          foreground: token("--terminal-fg", "#eeeae2"),
-          cursor: token("--terminal-cursor", "#ff6a45"),
-          cursorAccent: token("--terminal-bg", "#161513"),
-          selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
-        },
-      });
+      const terminal = new Terminal(terminalOptions());
       muteQueries(terminal);
       const fit = new FitAddon();
       terminal.loadAddon(fit);
@@ -118,9 +154,20 @@ export function TerminalPanel({ node, harness, onClose }: {
         window.cancelAnimationFrame(frame);
         frame = window.requestAnimationFrame(() => { if (fitted && !disposed) fit.fit(); });
       };
+      let unsettle = () => {};
+      const wrote = settleAfterWrites((run) => {
+        const id = window.requestAnimationFrame(run);
+        unsettle = () => window.cancelAnimationFrame(id);
+        return unsettle;
+      }, () => {
+        if (disposed) return;
+        fitted = true;
+        fit.fit();
+        sendSize();
+      });
       const run = jobQueue(() => end(STOPPED_TYPING));
       const type = keyQueue(run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok");
-      const typed = terminal.onData((data) => { if (live) type(encodeTyped(data)); });
+      const typed = typeKeys(terminal, (data) => { if (live) type(encodeTyped(data)); });
       prompt.current = (text) => {
         if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();
@@ -137,12 +184,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         if (disposed) return;
         const event = terminalEvent(message);
         if (event.kind === "output") {
-          terminal.write(event.bytes, () => {
-            if (fitted || disposed) return;
-            fitted = true;
-            fit.fit();
-            sendSize();
-          });
+          terminal.write(event.bytes, wrote());
         } else if (event.kind === "attached") {
           const size = terminalSize(event.cols, event.rows);
           if (size) terminal.resize(size.cols, size.rows);
@@ -162,29 +204,30 @@ export function TerminalPanel({ node, harness, onClose }: {
         resized.dispose();
         window.clearTimeout(timer);
         window.cancelAnimationFrame(frame);
+        unsettle();
         terminal.dispose();
       };
       const result = await attachTerminal(name, channel);
       if (disposed) {
-        if (result.kind === "ok") void detachTerminal(name);
+        if (result.kind === "ok") void detachTerminal(name, result.value);
         return;
       }
-      if (result.kind === "not_ready") setView({ kind: "not_ready" });
+      if (result.kind === "ok") serial = result.value;
+      else if (result.kind === "not_ready") setView({ kind: "not_ready" });
       else if (result.kind === "error") end(result.code.startsWith("terminal_") ? endCopy(result.code) : result.message);
     })();
     return () => {
       disposed = true;
       release();
-      void detachTerminal(name);
+      if (serial !== null) void detachTerminal(name, serial);
     };
   }, [name, round]);
 
   return <section className="tg-terminal" aria-label={`${node.label} terminal`}>
     <div className="tg-terminal-head">
-      <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(node.label)}</span>
-      <span className="tg-terminal-detail">{displayText(nodeDetail(node, harness))}</span>
-      {status && <StatusBadge word={status.word} tone={status.tone} />}
-      <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />
+      <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(nodeLine(node, harness))}</span>
+      {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
+      {onClose && <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />}
     </div>
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
     {view.kind === "not_ready" && <NotReady what="Agent terminals" compact />}

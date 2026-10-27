@@ -44,6 +44,7 @@ fn case() -> Case {
         &project.join("worktrees"),
         &git.join("hooks"),
         &git.join("objects"),
+        &git.join("modules"),
     ] {
         fs::create_dir_all(directory).unwrap();
     }
@@ -92,6 +93,7 @@ fn boundary_script(case: &Case) -> String {
         "echo inside > {inside} && echo home > {home} && \
          (echo x > {escape} || true) && (echo x >> {brief} || true) && \
          (echo x > {hook} || true) && (echo x > {top} || true) && \
+         (echo x > {module} || true) && \
          (echo x > {via_link} || true) && (cat {fixture} > {leak} || true)",
         inside = quoted(&worktrees.join("inside.txt")),
         home = quoted(&case.home.join("home.txt")),
@@ -99,6 +101,7 @@ fn boundary_script(case: &Case) -> String {
         brief = quoted(&case.project.join("context").join("brief.md")),
         hook = quoted(&git.join("hooks").join("pre-commit")),
         top = quoted(&case.project.join("top.txt")),
+        module = quoted(&git.join("modules").join("config")),
         via_link = quoted(&case.project.join("link").join("via-link.txt")),
         fixture = quoted(&case.outside.join("fixture.txt")),
         leak = quoted(&worktrees.join("leak.txt")),
@@ -134,6 +137,14 @@ fn assert_boundary(case: &Case, output: &Output) {
             .exists()
     );
     assert!(!case.project.join("top.txt").exists());
+    assert!(
+        !case
+            .project
+            .join(".git")
+            .join("modules")
+            .join("config")
+            .exists()
+    );
     assert!(!case.outside.join("via-link.txt").exists());
     assert!(
         !fs::read_to_string(worktrees.join("leak.txt"))
@@ -645,7 +656,6 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
     let git = case.project.join(".git");
     for granted in [
         case.project.join("worktrees"),
-        git.join("objects"),
         case.home.clone(),
         case.tmp.clone(),
     ] {
@@ -658,6 +668,8 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
         git.clone(),
         git.join("hooks"),
         git.join("config"),
+        git.join("objects"),
+        git.join("modules"),
     ] {
         assert!(!policy.write.contains(&refused), "{}", refused.display());
     }
@@ -854,7 +866,6 @@ struct Checkouts {
     home: PathBuf,
     tmp: PathBuf,
     own: PathBuf,
-    sibling: PathBuf,
 }
 
 fn git(cwd: &Path, arguments: &[&str]) {
@@ -896,27 +907,23 @@ fn checkouts() -> Checkouts {
     git(&project, &["add", "owner.txt"]);
     git(&project, &["commit", "-q", "-m", "start"]);
     let own = project.join("worktrees").join("agent-1");
-    let sibling = project.join("worktrees").join("agent-2");
-    for worktree in [&own, &sibling] {
-        git(
-            &project,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                worktree.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-    }
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            own.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
     Checkouts {
         _temp: temp,
         project,
         home,
         tmp,
         own,
-        sibling,
     }
 }
 
@@ -932,70 +939,105 @@ fn confined(checkouts: &Checkouts) -> ProjectSandbox {
     .unwrap()
 }
 
-fn assert_confined(sandbox: &dyn Sandbox, checkouts: &Checkouts) {
-    let script = format!(
-        "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\n\
-         g='git -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null'\n\
-         echo mine > mine.txt && $g add mine.txt && $g commit -q -m mine && echo committed\n\
-         (echo x > {sibling}) 2>/dev/null && echo sibling=written || echo sibling=refused\n\
-         (echo x >> {owner}) 2>/dev/null && echo owner=written || echo owner=refused\n\
-         (echo x > {fresh}) 2>/dev/null && echo project=written || echo project=refused\n\
-         (ln {owner} linked.txt) 2>/dev/null && echo link=made || echo link=refused\n",
-        sibling = quoted(&checkouts.sibling.join("escaped.txt")),
-        owner = quoted(&checkouts.project.join("owner.txt")),
-        fresh = quoted(&checkouts.project.join("fresh.txt")),
-    );
-    let mut harness = Command::new("/bin/sh");
-    harness.arg("-c").arg(script).current_dir(&checkouts.own);
-    let output = crazyagent::spawn_gate::output(
-        sandbox
-            .wrap(&harness)
-            .unwrap()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-    .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "committed\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\n",
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!checkouts.sibling.join("escaped.txt").exists());
-    assert_eq!(
-        fs::read_to_string(checkouts.project.join("owner.txt")).unwrap(),
-        "owner\n"
-    );
-    assert!(!checkouts.project.join("fresh.txt").exists());
-}
-
+/// Neither backend holds an agent confined to its own worktree: inside the worktree's git
+/// admin folder and the object store it must write, Landlock cannot keep `commondir`,
+/// `gitdir` or the existing objects read-only, and bubblewrap cannot bind every object.
 #[test]
-fn a_confined_landlock_agent_writes_only_its_own_worktree() {
-    let checkouts = checkouts();
-    let sandbox = LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)).unwrap();
-    assert!(
-        matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
-        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
-        sandbox.backend()
-    );
-    assert_confined(&sandbox, &checkouts);
-}
-
-#[test]
-fn a_confined_bubblewrap_agent_writes_only_its_own_worktree() {
+fn an_agent_confined_to_its_worktree_is_refused_on_both_backends() {
     let checkouts = checkouts();
     let bwrap = BWRAP_PATHS
         .iter()
         .map(Path::new)
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
-    let sandbox = LinuxSandbox::new(
-        confined(&checkouts),
+    for backend in [
+        LinuxBackend::Landlock {
+            helper: PathBuf::from(HELPER),
+        },
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    ] {
+        assert!(matches!(
+            LinuxSandbox::new(confined(&checkouts), backend),
+            Err(SandboxError::Unavailable(_))
+        ));
+    }
+    assert!(matches!(
+        LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)),
+        Err(SandboxError::Unavailable(_))
+    ));
+}
+
+/// An agent writing the project folder may add objects and refs as git does, but may not
+/// plant or rewrite the metadata git follows to other repository data: alternates, grafts,
+/// a shallow list, a common dir, a worktree config or another worktree's links.
+#[test]
+fn no_agent_plants_the_git_metadata_git_follows_on_either_backend() {
+    let case = case();
+    let git = case.project.join(".git");
+    for folder in ["objects/info", "objects/ab", "info", "worktrees/agent-1"] {
+        fs::create_dir_all(git.join(folder)).unwrap();
+    }
+    fs::write(git.join("worktrees/agent-1/commondir"), "../..\n").unwrap();
+    let planted = [
+        "objects/info/alternates",
+        "info/grafts",
+        "shallow",
+        "commondir",
+        "config.worktree",
+        "worktrees/agent-1/commondir",
+    ];
+    let mut script = String::new();
+    for target in planted {
+        script.push_str(&format!(
+            "(echo /elsewhere > {path}) 2>/dev/null && echo {target}=written || echo {target}=refused\n",
+            path = quoted(&git.join(target)),
+        ));
+    }
+    script.push_str(&format!(
+        "(echo object > {path}) 2>/dev/null && echo object=written || echo object=refused\n",
+        path = quoted(&git.join("objects/ab/0123")),
+    ));
+    let expected: String = planted
+        .iter()
+        .map(|target| format!("{target}=refused\n"))
+        .chain(["object=written\n".to_owned()])
+        .collect();
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
     )
     .unwrap();
-    assert_confined(&sandbox, &checkouts);
+    for sandbox in [&landlock as &dyn Sandbox, &bubblewrap] {
+        let output = run(sandbox, &case, &script);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            expected,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_file(git.join("objects/ab/0123")).unwrap();
+    }
+    for target in &planted[..5] {
+        assert!(!git.join(target).exists(), "{target}");
+    }
+    assert_eq!(
+        fs::read_to_string(git.join("worktrees/agent-1/commondir")).unwrap(),
+        "../..\n"
+    );
 }

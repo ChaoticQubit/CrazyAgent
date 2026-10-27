@@ -15,6 +15,7 @@ use crate::memory::library::{
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
 use crate::protocol::CredentialRef;
+use crate::usage::report::UsageReport;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -33,6 +34,11 @@ pub(in crate::tui) enum SettingsJob {
     Accounts(AccountsRequest),
     AllAccounts,
     Harnesses,
+    Usage {
+        since_ms: Option<i64>,
+        offset_minutes: i32,
+    },
+    RefreshUsage,
     SignIn(SignInJob),
     JoinPools {
         account: CredentialRef,
@@ -62,8 +68,22 @@ pub(in crate::tui) enum SettingsJob {
     ProjectPlugins {
         project: ProjectId,
     },
+    SkillDetail {
+        id: String,
+        project: Option<ProjectId>,
+    },
+    ImportScan,
+    ImportSkills {
+        picks: Vec<(String, Option<String>)>,
+    },
     Plugin(PluginChange),
     AppSetup(AppSetupJob),
+    Schedule,
+    SetSchedule {
+        change: crate::scheduling::ScheduleChange,
+        generation: u64,
+    },
+    Ranking,
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -127,6 +147,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::Accounts(_) => "Accounts",
             Self::AllAccounts => "AllAccounts",
             Self::Harnesses => "Harnesses",
+            Self::Usage { .. } => "Usage",
+            Self::RefreshUsage => "RefreshUsage",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
@@ -136,8 +158,14 @@ impl std::fmt::Debug for SettingsJob {
             Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
             Self::ProjectPlugins { .. } => "ProjectPlugins",
+            Self::SkillDetail { .. } => "SkillDetail",
+            Self::ImportScan => "ImportScan",
+            Self::ImportSkills { .. } => "ImportSkills",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
+            Self::Schedule => "Schedule",
+            Self::SetSchedule { .. } => "SetSchedule",
+            Self::Ranking => "Ranking",
         })
     }
 }
@@ -218,11 +246,17 @@ impl std::fmt::Debug for SignInView {
 }
 
 /// The engine's reply to one Settings job.
+/// Each ticked folder with its imported skill or the plain problem code, in order.
+pub(in crate::tui) type ImportOutcomes =
+    Vec<(String, Result<crate::skills::import::Imported, String>)>;
+
 /// Input: produced on the owner worker. Output: read by the settings screens.
 pub(in crate::tui) enum SettingsEvent {
     Accounts(Result<AccountsReply, String>),
     AllAccounts(Result<Vec<AccountView>, String>),
     Harnesses(Result<Vec<HarnessEntry>, String>),
+    Usage(Result<Box<UsageReport>, String>),
+    UsageRefreshed(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
@@ -232,8 +266,14 @@ pub(in crate::tui) enum SettingsEvent {
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
+    SkillDetail(Result<crate::skills::SkillDetail, String>),
+    ImportScan(Result<crate::skills::import::ImportList, String>),
+    Imported(Result<ImportOutcomes, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
+    Schedule(Result<crate::scheduling::Schedule, String>),
+    ScheduleSet(Result<(), String>),
+    Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
 }
 
 impl SettingsEvent {
@@ -245,6 +285,8 @@ impl SettingsEvent {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
             SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
+            SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
+            SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
@@ -258,8 +300,14 @@ impl SettingsEvent {
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
+            SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
+            SettingsJob::ImportScan => Self::ImportScan(Err(problem)),
+            SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
+            SettingsJob::Schedule => Self::Schedule(Err(problem)),
+            SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
+            SettingsJob::Ranking => Self::Ranking(Err(problem)),
         }
     }
 }
@@ -361,11 +409,31 @@ impl NativeOwner {
             }
             SettingsJob::Harnesses => SettingsEvent::Harnesses(match self.settings_controller() {
                 Ok(controller) => controller
-                    .harness_catalog()
+                    .harness_catalog(true)
                     .await
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::Usage {
+                since_ms,
+                offset_minutes,
+            } => SettingsEvent::Usage(match self.settings_controller() {
+                Ok(controller) => controller
+                    .usage_report(None, since_ms, offset_minutes)
+                    .await
+                    .map(Box::new)
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::RefreshUsage => {
+                SettingsEvent::UsageRefreshed(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_refresh()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::SignIn(job) => SettingsEvent::SignIn(self.sign_in(job, lost).await),
             SettingsJob::JoinPools { account, pools } => {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
@@ -378,10 +446,68 @@ impl NativeOwner {
                 project.clone(),
                 self.plugins(Some(project), lost).await,
             ),
+            SettingsJob::SkillDetail { id, project } => {
+                SettingsEvent::SkillDetail(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .skill_detail(id, project)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::ImportScan => {
+                SettingsEvent::ImportScan(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .skill_import_scan()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::ImportSkills { picks } => {
+                SettingsEvent::Imported(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .import_skills(picks)
+                        .await
+                        .map(|done| {
+                            done.into_iter()
+                                .map(|(folder, result)| {
+                                    (folder, result.map_err(|code| bounded_problem(&code)))
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
+            SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {
+                Ok(controller) => controller
+                    .account_schedule()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::Ranking => SettingsEvent::Ranking(match self.settings_controller() {
+                Ok(controller) => controller
+                    .account_ranking()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::SetSchedule { change, generation } => {
+                SettingsEvent::ScheduleSet(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.set_account_schedule(change, generation).await,
+                        "account_schedule_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::AddMemory {
                 scope,
                 text,
@@ -1061,7 +1187,7 @@ mod tests {
 
         let root = tempfile::Builder::new()
             .prefix("ca-tdel-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let (mut service, _stop) = engine(root.path()).await;
@@ -1208,7 +1334,7 @@ mod tests {
 
         let root = tempfile::Builder::new()
             .prefix("ca-tadd-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let (mut service, _stop) = engine(root.path()).await;
@@ -1512,6 +1638,23 @@ mod tests {
         };
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].on_here, None, "Settings shows no project switch");
+        assert_eq!(skills[0].line, "Teaches release notes.");
+        match native
+            .settings(SettingsJob::SkillDetail {
+                id: skills[0].id.clone(),
+                project: None,
+            })
+            .await
+        {
+            SettingsEvent::SkillDetail(Ok(detail)) => {
+                assert_eq!(detail.skill.id, skills[0].id);
+                assert!(detail.text.ends_with("\n\nSteps.\n"), "{}", detail.text);
+                let files: Vec<&str> = detail.files.iter().map(|file| file.path.as_str()).collect();
+                assert_eq!(files, vec!["SKILL.md"]);
+            }
+            SettingsEvent::SkillDetail(Err(code)) => panic!("skill detail failed: {code}"),
+            _ => panic!("a skill detail reply required"),
+        }
 
         let switched = native
             .settings(SettingsJob::Plugin(PluginChange::Switch {
@@ -1529,6 +1672,33 @@ mod tests {
                 .await,
         );
         assert_eq!(here, vec![("release-notes".to_owned(), Some(false))]);
+
+        let found = root.path().join("home/.claude/skills/zeta");
+        std::fs::create_dir_all(&found).unwrap();
+        std::fs::write(
+            found.join("SKILL.md"),
+            "---\nname: zeta\ndescription: Zeta steps.\n---\n",
+        )
+        .unwrap();
+        std::fs::write(found.join("deploy.pem"), "dummy").unwrap();
+        let folder = found.display().to_string();
+        match native
+            .settings(SettingsJob::ImportSkills {
+                picks: vec![(folder.clone(), None), (folder.clone(), None)],
+            })
+            .await
+        {
+            SettingsEvent::Imported(Ok(done)) => {
+                assert_eq!(done.len(), 2);
+                let first = done[0].1.as_ref().unwrap();
+                assert_eq!(first.skill.name, "zeta");
+                assert!(first.skill.enabled);
+                assert_eq!(first.skipped, vec!["deploy.pem"]);
+                assert_eq!(done[1].1.as_ref().unwrap_err(), "skill_name_taken");
+            }
+            SettingsEvent::Imported(Err(code)) => panic!("import failed: {code}"),
+            _ => panic!("an import reply required"),
+        }
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await

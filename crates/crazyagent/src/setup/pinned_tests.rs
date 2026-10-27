@@ -167,3 +167,106 @@ fn a_tool_lock_with_an_unsafe_name_or_python_is_refused_before_uv_runs() {
     );
     assert!(!root.path().join("setup/uv/tools").exists());
 }
+
+#[test]
+fn a_tool_the_previous_build_installed_with_uv_tool_install_updates_to_its_lock() {
+    let uv = found("uv");
+    let python = found("python3");
+    let root = private_root();
+    let work = tempfile::tempdir().unwrap();
+    let (wheel, sha256) = wheel(work.path(), &python);
+    let mut folders = vec![uv.parent().unwrap().to_path_buf()];
+    folders.push(python.parent().unwrap().to_path_buf());
+    let installer = PinnedInstaller::with_paths(root.path(), folders);
+    let setup = root.path().join("setup");
+    let bin = setup.join("bin");
+    let tools = setup.join("uv/tools");
+    for folder in [
+        bin.clone(),
+        tools.clone(),
+        setup.join("uv/cache"),
+        setup.join("uv/python"),
+        setup.join("uv/python-bin"),
+    ] {
+        private_folder(&folder).unwrap();
+    }
+    let mut env = installer.env();
+    env.extend([
+        ("UV_TOOL_DIR", tools.clone().into_os_string()),
+        ("UV_TOOL_BIN_DIR", bin.clone().into_os_string()),
+        ("UV_CACHE_DIR", setup.join("uv/cache").into_os_string()),
+        (
+            "UV_PYTHON_INSTALL_DIR",
+            setup.join("uv/python").into_os_string(),
+        ),
+        (
+            "UV_PYTHON_BIN_DIR",
+            setup.join("uv/python-bin").into_os_string(),
+        ),
+        ("UV_NO_CONFIG", "1".into()),
+        ("UV_NO_PROGRESS", "1".into()),
+    ]);
+    let (ok, _) = run(
+        &uv,
+        &[
+            "tool".into(),
+            "install".into(),
+            "--python".into(),
+            "3".into(),
+            wheel.clone().into_os_string(),
+        ],
+        &env,
+        &setup,
+        UV_TOOL_TIME,
+    )
+    .unwrap();
+    assert!(ok);
+    let home = tools.join("demo-tool");
+    let program = bin.join("demo-tool");
+    assert_ne!(
+        std::fs::metadata(&home).unwrap().permissions().mode() & 0o077,
+        0
+    );
+    assert!(home.join("uv-receipt.toml").is_file());
+    let old = std::fs::read_link(&program).unwrap();
+    assert!(old.starts_with(&home));
+    let report = |installer: &PinnedInstaller| {
+        let (ok, output) = run(
+            &program,
+            &[],
+            &installer.env(),
+            root.path(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(ok);
+        String::from_utf8(output).unwrap()
+    };
+    assert_eq!(report(&installer), "demo-tool 1.0\n");
+    let good = hashed(&wheel, &sha256);
+    let tampered = hashed(&wheel, &"0".repeat(64));
+    let lock = |requirements| ToolLock {
+        package: "demo-tool",
+        version: "1.0",
+        programs: &["demo-tool"],
+        requirements,
+    };
+
+    assert_eq!(
+        installer.install_locked(&lock(&tampered), "3"),
+        Err(InstallError("setup_install_failed"))
+    );
+    assert_eq!(std::fs::read_link(&program).unwrap(), old);
+    assert_eq!(report(&installer), "demo-tool 1.0\n");
+
+    assert_eq!(installer.install_locked(&lock(&good), "3"), Ok(()));
+    let linked = std::fs::read_link(&program).unwrap();
+    assert_ne!(linked, old);
+    assert!(linked.starts_with(&home));
+    assert_eq!(report(&installer), "demo-tool 1.0\n");
+    assert_eq!(environments(&home), 1);
+    assert_eq!(
+        std::fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}

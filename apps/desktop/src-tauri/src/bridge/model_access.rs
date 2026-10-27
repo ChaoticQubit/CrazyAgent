@@ -69,8 +69,8 @@ impl NativeBridge {
             .controller
             .as_ref()
             .ok_or_else(|| failure("not_connected"))?;
-        if !controller
-            .view()
+        if !self
+            .current_view()
             .is_some_and(|value| value.fresh && value.state == selected.state)
         {
             return Err(failure("stale_model_access"));
@@ -234,7 +234,7 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -260,10 +260,7 @@ impl NativeBridge {
             .as_ref()
             .filter(|selected| ticket.len() <= 20 && ticket == selected.generation.to_string())
             .ok_or_else(|| failure("stale_model_access"))?;
-        let view = self
-            .controller
-            .as_ref()
-            .and_then(|controller| controller.view());
+        let view = self.current_view();
         if !self.status().connected
             || !view.is_some_and(|view| view.fresh && view.state == selected.state)
         {

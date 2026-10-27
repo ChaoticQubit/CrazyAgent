@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { listSkills } from "../../api";
 import { intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } from "../../api-intake";
+import type { SkillEntry } from "../../api-process";
 import type { PackEntry, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Skeleton, StatusBadge, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
+import { SkillTag, skillEntries } from "../skill-tag";
 import "../project/projects.css";
 import "../intake/intake.css";
 
@@ -55,10 +58,11 @@ function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; b
  * grouped like setup, a switch on each installed entry, Remove on each removable one and Install
  * on each that isn't installed. Inputs: the setup read, the change in flight, the last problem
  * and the handlers. */
-export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onInstallTools, onRetry }: {
+export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onRetry }: {
   status: Loaded<SetupStatus>;
   busy: string | null;
   problem: string;
+  skills: readonly SkillEntry[];
   onSwitch: (entry: PackEntry, on: boolean) => void;
   onAsk: (ask: PackAsk) => void;
   onInstallTools: () => void;
@@ -81,7 +85,7 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onIns
         const locked = running || busy !== null;
         return <li className="in-row" key={entry.id}>
           <span className="in-row-main">
-            <span className="pj-row"><Icon name={entryIcon(entry)} size={14} /><strong>{entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
+            <span className="pj-row"><Icon name={entryIcon(entry)} size={14} /><strong>{entry.kind === "skill" ? <SkillTag name={entry.id} label={entryName(entry)} skills={skills} /> : entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
               <StatusBadge word={state.word} tone={state.tone} /></span>
             <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}</span>
             {state.line && <span className="pj-small pj-error">{state.line}</span>}
@@ -99,11 +103,35 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onIns
   </div>;
 }
 
+/** The confirm before a pack change: Remove in a danger confirm, Install in a plain one, and
+ * neither closes or cancels while a change is in flight, so a request that still lands is never
+ * shown as cancelled. Inputs: the pending change, whether a change is in flight and the handlers. */
+export function PackConfirmDialogs({ ask, pending, onCancel, onConfirm }: {
+  ask: PackAsk | null;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: (ask: PackAsk) => void;
+}) {
+  const words = ask ? packConfirm(ask) : null;
+  return <>
+    <ConfirmDialog open={ask?.kind === "remove"} title={words?.title ?? ""} confirmLabel={words?.confirm ?? "Remove"} pending={pending}
+      onCancel={onCancel} onConfirm={() => { if (ask) onConfirm(ask); }}>
+      {words?.body}
+    </ConfirmDialog>
+    <Dialog open={ask?.kind === "install"} title={words?.title ?? ""} busy={pending} onClose={onCancel}
+      footer={<><Button disabled={pending} onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" pending={pending} pendingLabel="Starting..." onClick={() => { if (ask) onConfirm(ask); }}>{words?.confirm ?? "Install"}</Button></>}>
+      <p>{words?.body}</p>
+    </Dialog>
+  </>;
+}
+
 /** Settings, Pack: reads the tools and the pack, installs missing tools, switches, removes and
  * installs entries, and reads again every few seconds while a tool is checked or setup installs. */
 export function PackSettings() {
   const session = useAppSession();
-  const [loaded, reload] = useLoad(loadSetupStatus);
+  const [loaded, reload] = useLoad(loadSetupStatus, [], "setup-status");
+  const [listed] = useLoad(() => listSkills(), [undefined], "skills");
   const [fresh, setFresh] = useState<SetupStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [ask, setAsk] = useState<PackAsk | null>(null);
@@ -136,19 +164,10 @@ export function PackSettings() {
     else void apply(pending.entry.id, () => runSetup([pending.entry.id]), `Installing ${name}.`);
   };
 
-  const words = ask ? packConfirm(ask) : null;
   return <>
-    <PackSettingsView status={status} busy={busy} problem={problem} onRetry={reload} onAsk={setAsk}
+    <PackSettingsView status={status} busy={busy} problem={problem} skills={listed.kind === "ok" ? skillEntries(listed.value) : []} onRetry={reload} onAsk={setAsk}
       onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing tmux, uv and graphify.")}
       onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
-    <ConfirmDialog open={ask?.kind === "remove"} title={words?.title ?? ""} confirmLabel={words?.confirm ?? "Remove"} pending={busy !== null}
-      onCancel={() => setAsk(null)} onConfirm={() => { if (ask) confirm(ask); }}>
-      {words?.body}
-    </ConfirmDialog>
-    <Dialog open={ask?.kind === "install"} title={words?.title ?? ""} onClose={() => setAsk(null)}
-      footer={<><Button onClick={() => setAsk(null)}>Cancel</Button>
-        <Button variant="primary" pending={busy !== null} pendingLabel="Starting..." onClick={() => { if (ask) confirm(ask); }}>{words?.confirm ?? "Install"}</Button></>}>
-      <p>{words?.body}</p>
-    </Dialog>
+    <PackConfirmDialogs ask={ask} pending={busy !== null} onCancel={() => { if (busy === null) setAsk(null); }} onConfirm={confirm} />
   </>;
 }

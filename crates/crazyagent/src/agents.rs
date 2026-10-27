@@ -262,6 +262,7 @@ impl AgentSpec {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: self.sandbox_profile.clone(),
+            git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(self.run_time_secs),
                 stop_grace: STOP_GRACE,
@@ -517,13 +518,17 @@ struct Recorder {
     id: String,
     epoch: String,
     attempt: u32,
+    folder: PathBuf,
 }
 
 impl Recorder {
+    /// Records how this attempt ended and, when it was the agent's live attempt, removes the
+    /// agent's runtime folder under the same database lock a restart takes before it makes
+    /// the folder again. Inputs: the state, exit code and reason. Output: none.
     fn finish(&self, state: AgentState, exit_code: Option<i32>, reason: Option<&str>) {
         assert!(state != AgentState::Running);
         if let Ok(db) = self.db.lock() {
-            let _ = db.execute(
+            let ended = db.execute(
                 "UPDATE agent_runs SET state=?4,exit_code=?5,reason=?6,ended_ms=?7
                  WHERE id=?1 AND epoch=?2 AND attempt=?3 AND state='running'",
                 params![
@@ -536,6 +541,9 @@ impl Recorder {
                     now_ms() as i64
                 ],
             );
+            if matches!(ended, Ok(1)) {
+                let _ = std::fs::remove_dir_all(&self.folder);
+            }
         }
     }
 
@@ -585,6 +593,7 @@ pub struct Agents {
     hosts: Mutex<Vec<String>>,
     holds: Holds,
     next_hold: AtomicU64,
+    typing: crate::team::master::OwnerTyping,
 }
 
 impl Agents {
@@ -627,8 +636,10 @@ impl Agents {
             hosts: Mutex::new(Vec::new()),
             holds: Arc::default(),
             next_hold: AtomicU64::new(0),
+            typing: crate::team::master::OwnerTyping::new(root.join("engine.db")),
         };
         agents.recover()?;
+        agents.prune()?;
         Ok(agents)
     }
 
@@ -638,6 +649,12 @@ impl Agents {
     #[cfg(not(unix))]
     pub fn open(_root: &Path) -> Result<Self, LaunchError> {
         Err(failure("agent_root_unavailable"))
+    }
+
+    /// The owner typing signal of this engine's team agent terminals: the terminal viewer
+    /// records the owner's keys in it and live master input reads it. Output: the signal.
+    pub fn typing(&self) -> &crate::team::master::OwnerTyping {
+        &self.typing
     }
 
     fn db(&self) -> Result<MutexGuard<'_, Connection>, LaunchError> {
@@ -707,6 +724,43 @@ impl Agents {
         Ok(())
     }
 
+    /// Removes the runtime folders of agents that no longer run, such as those an engine
+    /// closed before it recorded their end, so the folder never fills toward the sandbox's
+    /// runtime entry bound. Takes nothing. Returns `agent_root_unsafe` when the agents folder
+    /// cannot be read; a folder that cannot be removed is left for the next start.
+    #[cfg(unix)]
+    fn prune(&self) -> Result<(), LaunchError> {
+        let running: std::collections::HashSet<String> = {
+            let db = self.db()?;
+            let mut statement = db
+                .prepare("SELECT id FROM agent_runs WHERE state='running'")
+                .map_err(database)?;
+            statement
+                .query_map([], |row| row.get(0))
+                .map_err(database)?
+                .collect::<Result<_, _>>()
+                .map_err(database)?
+        };
+        let entries =
+            std::fs::read_dir(self.root.join(AGENTS)).map_err(|_| failure("agent_root_unsafe"))?;
+        for entry in entries {
+            let entry = entry.map_err(|_| failure("agent_root_unsafe"))?;
+            let name = entry.file_name();
+            let Some(id) = name.to_str().filter(|id| valid_id(id)) else {
+                continue;
+            };
+            if running.contains(id) {
+                continue;
+            }
+            let folder = self.folder(id);
+            let _ = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&folder),
+                _ => std::fs::remove_file(&folder),
+            };
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     fn probe(&self, id: &str) -> Option<File> {
         log_probe(&self.folder(id).join(launch::DURABLE_OUTPUT)).filter(launch::holder_alive)
@@ -722,6 +776,7 @@ impl Agents {
             id: id.clone(),
             epoch: self.epoch.clone(),
             attempt,
+            folder: self.folder(&id),
         };
         let limit = LaunchLimits::default().output_bytes as u64;
         let thread = {
@@ -809,6 +864,7 @@ impl Agents {
             id: id.to_owned(),
             epoch: self.epoch.clone(),
             attempt,
+            folder: self.folder(id),
         };
         let started = self.spawn(id, spec, key);
         let mut session = match started {
@@ -1227,6 +1283,7 @@ impl Agents {
                 id: id.clone(),
                 epoch: self.epoch.clone(),
                 attempt,
+                folder: self.folder(&id),
             },
             id,
             control,
@@ -1350,6 +1407,7 @@ impl Agents {
             id: id.to_owned(),
             epoch: self.epoch.clone(),
             attempt,
+            folder: self.folder(id),
         })
     }
 }
@@ -1413,20 +1471,24 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
 
 /// Stops an owned agent's session, then ends what still holds its output log, such as a
 /// child that left the agent's group with setsid. Inputs: the session and its log path.
-/// Output: the exit code, and true once no holder of the log is left.
+/// Output: the exit code, and true once no holder of the log is left and no warden of the
+/// session failed to confirm its sandbox empty.
 #[cfg(unix)]
 fn end_session(session: Session, output: &Path) -> (Option<i32>, bool) {
     let group = session.process_group();
-    let code = session.stop();
+    let stopped = session.stop();
     let complete = log_probe(output).is_some_and(|probe| kill_holders(group, output, &probe));
-    (code, complete)
+    let confirmed = stopped.is_ok();
+    (stopped.ok().flatten(), complete && confirmed)
 }
 
 /// Stops an owned agent's session where no output log lock exists. Inputs: the session
-/// and the log path, unused. Output: the exit code and true.
+/// and the log path, unused. Output: the exit code, and true unless the stop was uncertain.
 #[cfg(not(unix))]
 fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
-    (session.stop(), true)
+    let stopped = session.stop();
+    let confirmed = stopped.is_ok();
+    (stopped.ok().flatten(), confirmed)
 }
 
 /// Opens an agent output log read-only to probe its lock, refusing a link, anything but

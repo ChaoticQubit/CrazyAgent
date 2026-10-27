@@ -53,6 +53,27 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert_eq!(receipt.intent.kind, "owner_profile");
     assert!(matches!(receipt.outcome, ActionOutcome::Applied));
     assert!(!receipt.pending);
+    let home = tempfile::Builder::new()
+        .prefix("ca-desk-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    let picked = home
+        .path()
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .to_str()
+        .ok_or("home path")?
+        .to_owned();
+    let picked = bridge
+        .set_projects_home(picked, 2)
+        .await
+        .map_err(|e| e.code.to_owned())?;
+    assert!(
+        matches!(picked.outcome, ActionOutcome::Applied),
+        "a change right after another change reads the engine's current state first"
+    );
     assert_eq!(
         bridge
             .owner_profile()
@@ -63,7 +84,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     let mut blank = profile;
     blank.name = String::new();
     assert_eq!(
-        bridge.save_owner_profile(blank, 2).await.unwrap_err().code,
+        bridge.save_owner_profile(blank, 3).await.unwrap_err().code,
         "owner_profile_name"
     );
     let pools = bridge
@@ -125,6 +146,9 @@ fn owner_setup_commands_use_the_local_main_window_acl() {
         "desktop_owner_profile",
         "desktop_save_owner_profile",
         "desktop_pool_summaries",
+        "desktop_account_schedule",
+        "desktop_account_ranking",
+        "desktop_set_account_schedule",
     ] {
         assert!(
             authority

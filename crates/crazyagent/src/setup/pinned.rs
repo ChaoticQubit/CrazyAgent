@@ -5,7 +5,7 @@ use super::{
 };
 use std::ffi::OsString;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ const ARCHIVE_BYTES_MAX: u64 = 128 * 1024 * 1024;
 const VERSION_TIME: Duration = Duration::from_secs(10);
 const DOWNLOAD_TIME: Duration = Duration::from_secs(300);
 const UV_TOOL_TIME: Duration = Duration::from_secs(900);
+const UV_RECEIPT: &str = "uv-receipt.toml";
 const NAME_BYTES_MAX: usize = 64;
 
 /// The folders searched after `setup/bin` on a Unix system: the owner's `~/.local/bin`,
@@ -241,7 +242,11 @@ impl PinnedInstaller {
         let cache = self.setup.join("uv/cache");
         let pythons = self.setup.join("uv/python");
         let python_bin = self.setup.join("uv/python-bin");
-        for folder in [&bin, &tools, &home, &cache, &pythons, &python_bin] {
+        for folder in [&bin, &tools] {
+            private_folder(folder)?;
+        }
+        narrow_uv_tool_folder(&home)?;
+        for folder in [&home, &cache, &pythons, &python_bin] {
             private_folder(folder)?;
         }
         let mut env = self.env();
@@ -311,6 +316,28 @@ impl PinnedInstaller {
                 })
         })
     }
+}
+
+/// Narrows a tool folder the previous build's `uv tool install` left at the umask mode
+/// (0755) to 0700, so the private check passes and `keep_only` clears it once the locked
+/// install succeeds. Only a real folder of this user holding uv's receipt changes, and its
+/// parent is checked private first. Input: the tool folder. Output: Ok, or
+/// `setup_store_unavailable` when the mode cannot be set.
+fn narrow_uv_tool_folder(home: &Path) -> Result<(), InstallError> {
+    let Ok(metadata) = std::fs::symlink_metadata(home) else {
+        return Ok(());
+    };
+    let receipt =
+        std::fs::symlink_metadata(home.join(UV_RECEIPT)).is_ok_and(|entry| entry.is_file());
+    if !receipt
+        || !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o077 == 0
+    {
+        return Ok(());
+    }
+    std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| InstallError("setup_store_unavailable"))
 }
 
 fn plain_name(name: &str) -> bool {

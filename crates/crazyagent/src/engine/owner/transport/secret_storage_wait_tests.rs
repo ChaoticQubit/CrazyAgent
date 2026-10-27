@@ -19,7 +19,7 @@ impl Busy {
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-busy-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
@@ -53,7 +53,7 @@ impl Busy {
         handle.authority.root.path.parent().unwrap().to_path_buf()
     }
 
-    fn occupy_storage(&self) -> (PathBuf, oneshot::Receiver<Result<(), EngineError>>) {
+    fn occupy_storage(&self) -> (PathBuf, Sweep) {
         let swept = self
             .engine_root()
             .join(crate::storage::plugins::STORE)
@@ -64,19 +64,22 @@ impl Busy {
         for index in 0..SWEPT_FILES {
             std::fs::write(swept.join(index.to_string()), b"x").unwrap();
         }
-        let (send, sweep) = oneshot::channel();
-        self.service
+        let storage = self
+            .service
             .owner_runtime()
             .unwrap()
             .engine
             .storage
             .sender
+            .clone();
+        let (send, answer) = oneshot::channel();
+        storage
             .try_send(crate::storage::Job::Setup(
                 crate::storage::setup::Command::Sweep,
                 send,
             ))
             .unwrap();
-        (swept, sweep)
+        (swept, Sweep { answer, storage })
     }
 
     async fn stop(mut self) {
@@ -89,13 +92,38 @@ impl Busy {
     }
 }
 
-async fn settled(swept: &Path, sweep: oneshot::Receiver<Result<(), EngineError>>) {
-    tokio::time::timeout(Duration::from_secs(60), sweep)
+/// The real sweep that holds storage, and the storage queue it sits in. Fields: the
+/// sweep's answer, and the storage sender [`settled`] queues its barrier on.
+struct Sweep {
+    answer: oneshot::Receiver<Result<(), EngineError>>,
+    storage: tokio::sync::mpsc::Sender<crate::storage::Job>,
+}
+
+/// Waits until storage has run everything queued behind the real sweep: the sweep's own
+/// answer, then the answer to one more sweep queued after it. Storage answers its jobs one
+/// at a time in order, so the request that outlasted the owner wait has run by then and
+/// the reads that follow do not race its commit. Inputs: the swept folder and the sweep.
+async fn settled(swept: &Path, sweep: Sweep) {
+    tokio::time::timeout(Duration::from_secs(60), sweep.answer)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     assert!(!swept.exists());
+    let (send, barrier) = oneshot::channel();
+    sweep
+        .storage
+        .send(crate::storage::Job::Setup(
+            crate::storage::setup::Command::Sweep,
+            send,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), barrier)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 fn holders(root: &Path, secret: &[u8]) -> usize {

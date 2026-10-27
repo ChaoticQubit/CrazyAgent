@@ -1,3 +1,5 @@
+use super::interactive::KEY_FILE;
+use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
@@ -6,6 +8,8 @@ use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+use crate::sandbox::toolchains::{self, ToolHomes};
+use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
@@ -23,11 +27,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const LINE_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX;
+const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
+/// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
+/// for the JSON-RPC envelope around it.
+const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-pub(super) const CODEX_KEY_VARIABLE: &str = "CRAZYAGENT_API_KEY";
 pub(super) const LOCAL_PLACEHOLDER_KEY: &str = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
 const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -36,7 +42,10 @@ pub const DURABLE_OUTPUT: &str = "output.log";
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
-const CODEX_TOOLS_OFF: [&str; 13] = [
+/// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
+/// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
+/// web search tool and no MCP server.
+pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "sandbox_mode=\"read-only\"",
     "approval_policy=\"never\"",
     "features.shell_tool=false",
@@ -75,6 +84,7 @@ pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "Team
 /// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -86,7 +96,7 @@ const CLAUDE_COMMON: [&str; 12] = [
     "--setting-sources",
     "",
     "--settings",
-    "{\"disableAllHooks\":true}",
+    CLAUDE_SETTINGS,
     "--no-session-persistence",
 ];
 
@@ -193,8 +203,9 @@ impl Default for LaunchLimits {
 }
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
-/// account, optional model, tools switch, the project sandbox profile and limits.
-/// Every launch is refused unless a sandbox profile is given.
+/// account, optional model, tools switch, the project sandbox profile, the owner's git
+/// identity for the agent's own commits and limits. Every launch is refused unless a
+/// sandbox profile is given.
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -204,7 +215,47 @@ pub struct LaunchRequest {
     pub model: Option<String>,
     pub tools: bool,
     pub sandbox_profile: Option<PathBuf>,
+    pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
+}
+
+const GIT_IDENTITY_BYTES_MAX: usize = 256;
+
+/// The git author and committer an agent's own commits carry: the owner's `user.name`
+/// and `user.email`, each non-empty, at most 256 bytes and free of control characters
+/// and angle brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitIdentity {
+    name: String,
+    email: String,
+}
+
+impl GitIdentity {
+    /// Checks an identity. Inputs: the name and email. Output: the identity, or
+    /// `launch_git_identity_invalid`.
+    pub fn new(name: String, email: String) -> Result<Self, LaunchError> {
+        let valid = |value: &str| {
+            !value.trim().is_empty()
+                && value.len() <= GIT_IDENTITY_BYTES_MAX
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() || c == '<' || c == '>')
+        };
+        if !valid(&name) || !valid(&email) {
+            return Err(failure("launch_git_identity_invalid"));
+        }
+        Ok(Self { name, email })
+    }
+
+    /// The variables that make git author and commit as this identity.
+    pub(crate) fn variables(&self) -> [(&'static str, &str); 4] {
+        [
+            ("GIT_AUTHOR_NAME", &self.name),
+            ("GIT_AUTHOR_EMAIL", &self.email),
+            ("GIT_COMMITTER_NAME", &self.name),
+            ("GIT_COMMITTER_EMAIL", &self.email),
+        ]
+    }
 }
 
 /// One event in the stream every launch adapter produces, whatever the harness.
@@ -217,6 +268,7 @@ pub enum LaunchEvent {
     ApprovalDenied,
     Interrupted,
     TurnFinished { success: bool },
+    Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
@@ -358,10 +410,22 @@ pub fn command_with_context(
 
 fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Command, LaunchError> {
     validate(request)?;
+    if request
+        .account
+        .key()
+        .is_some_and(|key| !is_placeholder(key.reveal()))
+    {
+        return Err(failure("launch_environment_refused"));
+    }
     let home = request.account.home();
+    let key_file = request
+        .account
+        .key()
+        .map(|_| key_file_text(&home.join(KEY_FILE)))
+        .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed.is_some())?,
-        "claude-code" => claude_invocation(request, installed),
+        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref()),
+        "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
     let profile = request
@@ -371,21 +435,37 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
+    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = if request.tools {
-        TOOLS_ON_PATH
+        toolchains::agent_path(&homes, TOOLS_ON_PATH)
     } else {
-        TOOLS_OFF_PATH
+        TOOLS_OFF_PATH.to_owned()
     };
+    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let tools = if request.tools {
+        toolchains::agent_env(home, &homes)
+    } else {
+        Vec::new()
+    };
+    let mut base = vec![
+        ("HOME", home.as_os_str()),
+        ("TMPDIR", tmp.as_os_str()),
+        ("PATH", OsStr::new(&path)),
+        ("LANG", OsStr::new("C")),
+        ("LC_ALL", OsStr::new("C")),
+    ];
+    base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
+    if let Some(identity) = &request.git_identity {
+        base.extend(
+            identity
+                .variables()
+                .map(|(name, value)| (name, OsStr::new(value))),
+        );
+    }
     let mut command = crate::sandbox::agent_command(
         profile,
         &request.executable,
-        &[
-            ("HOME", home.as_os_str()),
-            ("TMPDIR", home.as_os_str()),
-            ("PATH", OsStr::new(path)),
-            ("LANG", OsStr::new("C")),
-            ("LC_ALL", OsStr::new("C")),
-        ],
+        &base,
         environment
             .iter()
             .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),
@@ -411,25 +491,43 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
-fn codex_invocation(request: &LaunchRequest, context: bool) -> Result<Invocation, LaunchError> {
+fn codex_invocation(request: &LaunchRequest, context: bool, key_file: Option<&str>) -> Invocation {
     let home = request.account.home().as_os_str().to_owned();
-    let mut environment = vec![("CODEX_HOME", home)];
-    if let Some(key) = request.account.key() {
-        environment.push((CODEX_KEY_VARIABLE, OsString::from(&key.0)));
-    }
+    let environment = vec![("CODEX_HOME", home)];
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context) {
+    for setting in codex_configuration(request, context, key_file) {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
     arguments.extend(["app-server", "--listen", "stdio://"].map(OsString::from));
-    Ok((arguments, environment))
+    (arguments, environment)
+}
+
+/// Checks the path of an account's key file before a harness is told to read it: an
+/// absolute path that fits inside a single-quoted shell word and a TOML string unchanged.
+/// Input: the path. Output: its text, or `launch_key_file_invalid`.
+pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
+    let file = path
+        .to_str()
+        .filter(|text| !text.chars().any(char::is_control))
+        .ok_or_else(|| failure("launch_key_file_invalid"))?;
+    if !path.is_absolute() || file.contains(['\'', '"', '\\']) {
+        return Err(failure("launch_key_file_invalid"));
+    }
+    Ok(file.to_owned())
 }
 
 /// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
-/// the account's provider, the model and the tools switch. Input: the request and whether
-/// project context was installed. Output: the settings, in order, without any secret.
-pub(super) fn codex_configuration(request: &LaunchRequest, context: bool) -> Vec<String> {
+/// the account's provider, the model and the tools switch. A keyed provider reads its
+/// relay token by running `/bin/cat` on `key_file` (see [`key_file_text`]), so the token
+/// is in no argument or variable. Input: the request, whether project context was
+/// installed and the key file of a keyed account. Output: the settings, in order.
+pub(super) fn codex_configuration(
+    request: &LaunchRequest,
+    context: bool,
+    key_file: Option<&str>,
+) -> Vec<String> {
+    assert_eq!(request.account.key().is_some(), key_file.is_some());
     let mut configuration = vec!["cli_auth_credentials_store=\"file\"".to_owned()];
     match &request.account {
         AccountBinding::Subscription { .. } => {
@@ -437,8 +535,8 @@ pub(super) fn codex_configuration(request: &LaunchRequest, context: bool) -> Vec
         }
         AccountBinding::ApiKey { .. } | AccountBinding::Url { .. } => {
             let base_url = request.account.base_url().unwrap_or(CODEX_DEFAULT_BASE_URL);
-            let key = request.account.key().map_or(String::new(), |_| {
-                format!(",env_key=\"{CODEX_KEY_VARIABLE}\"")
+            let key = key_file.map_or(String::new(), |file| {
+                format!(",auth={{command=\"/bin/cat\",args=[\"{file}\"]}}")
             });
             configuration.push(format!(
                 "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{base_url}\",wire_api=\"responses\"{key}}}"
@@ -468,9 +566,37 @@ pub(super) fn codex_configuration(request: &LaunchRequest, context: bool) -> Vec
     configuration
 }
 
-fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> Invocation {
+/// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
+/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]).
+/// Input: the key file of a keyed account. Output: the settings JSON.
+fn claude_settings(key_file: Option<&str>) -> String {
+    let Some(key_file) = key_file else {
+        return CLAUDE_SETTINGS.to_owned();
+    };
+    let mut settings: serde_json::Value =
+        serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
+    settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    settings.to_string()
+}
+
+fn claude_invocation(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    key_file: Option<&str>,
+) -> Invocation {
+    assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let mut arguments: Vec<OsString> = CLAUDE_COMMON.iter().map(OsString::from).collect();
+    let settings = claude_settings(key_file);
+    let mut arguments: Vec<OsString> = CLAUDE_COMMON
+        .iter()
+        .map(|argument| {
+            if *argument == CLAUDE_SETTINGS {
+                OsString::from(&settings)
+            } else {
+                OsString::from(argument)
+            }
+        })
+        .collect();
     match installed {
         Some(installed) => arguments.extend(installed.arguments().iter().cloned()),
         None => arguments.extend(CLAUDE_NO_MCP.iter().map(OsString::from)),
@@ -513,11 +639,9 @@ fn claude_invocation(request: &LaunchRequest, installed: Option<&Installed>) -> 
     }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
         arguments.push(OsString::from("--bare"));
-        let key = request
-            .account
-            .key()
-            .map_or(LOCAL_PLACEHOLDER_KEY, |key| key.0.as_str());
-        environment.push(("ANTHROPIC_API_KEY", OsString::from(key)));
+        if key_file.is_none() {
+            environment.push(("ANTHROPIC_API_KEY", OsString::from(LOCAL_PLACEHOLDER_KEY)));
+        }
         if let Some(base_url) = request.account.base_url() {
             environment.push(("ANTHROPIC_BASE_URL", OsString::from(base_url)));
         }
@@ -690,7 +814,7 @@ impl Driver {
     }
 
     fn send(&mut self, text: &str) -> Result<Option<Vec<u8>>, LaunchError> {
-        if text.trim().is_empty() || text.contains('\0') || text.len() > LINE_BYTES_MAX / 2 {
+        if text.trim().is_empty() || text.contains('\0') || text.len() > PROMPT_BYTES_MAX {
             return Err(failure("launch_prompt_invalid"));
         }
         match self {
@@ -928,8 +1052,12 @@ impl Driver {
                                     status: RateLimitStatus::Rejected,
                                     ..
                                 } => events.push(LaunchEvent::TurnError { rate_limited: true }),
-                                EventKind::TurnFinished { outcome, .. } => {
+                                EventKind::TurnFinished { outcome, usage, .. } => {
                                     *interrupt = None;
+                                    let tokens = Tokens::reported(&usage);
+                                    if !tokens.is_empty() {
+                                        events.push(LaunchEvent::Usage { tokens });
+                                    }
                                     events.push(LaunchEvent::TurnFinished {
                                         success: outcome == TurnOutcome::Success,
                                     });
@@ -948,9 +1076,11 @@ impl Driver {
 /// A running harness process driven through its headless interface.
 /// The process leads its own process group, and a harness on pipes has a warden in its
 /// sandbox, so stop reaches every descendant, those in their own sessions included.
+/// `uncertain` is set once its warden did not confirm that sandbox empty.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
+    uncertain: bool,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -962,6 +1092,7 @@ pub struct Session {
     stopped: bool,
     _context: Option<Installed>,
     _relay: Option<Relay>,
+    _key: Option<KeyFile>,
 }
 
 impl Session {
@@ -970,8 +1101,9 @@ impl Session {
     /// refusal code.
     pub fn start(request: LaunchRequest) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
+        let key = write_key_file(&request)?;
         let command = command(&request)?;
-        Self::spawn(request, command, None, None, relay)
+        Self::spawn(request, command, None, None, (relay, key))
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,
@@ -983,9 +1115,10 @@ impl Session {
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
+        let key = write_key_file(&request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
-        Self::spawn(request, command, Some(installed), None, relay)
+        Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
     /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
@@ -999,6 +1132,7 @@ impl Session {
         state: &Path,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
+        let key = write_key_file(&request)?;
         let (command, installed) = match &context {
             Some(context) => {
                 let (command, installed) = command_with_context(&request, context)?;
@@ -1008,7 +1142,7 @@ impl Session {
         };
         drop(context);
         let io = DurableIo::create(state)?;
-        Self::spawn(request, command, installed, Some(io), relay)
+        Self::spawn(request, command, installed, Some(io), (relay, key))
     }
 
     fn spawn(
@@ -1016,7 +1150,7 @@ impl Session {
         mut command: Command,
         context: Option<Installed>,
         durable: Option<DurableIo>,
-        relay: Option<Relay>,
+        (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
         let (driver, startup) = Driver::new(&request)?;
         let output_bytes = request.limits.output_bytes;
@@ -1069,6 +1203,7 @@ impl Session {
         let mut session = Self {
             child,
             warden,
+            uncertain: false,
             stdin,
             lines,
             driver,
@@ -1080,6 +1215,7 @@ impl Session {
             stopped: false,
             _context: context,
             _relay: relay,
+            _key: key,
         };
         for bytes in startup {
             session.write(&bytes)?;
@@ -1167,9 +1303,15 @@ impl Session {
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
     /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally.
-    pub fn stop(mut self) -> Option<i32> {
-        self.stop_group()
+    /// Output: the leader's exit code when it exited normally, or
+    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
+    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+        let code = self.stop_group();
+        assert!(self.stopped && self.warden.is_none());
+        if self.uncertain {
+            return Err(failure("harness_cleanup_uncertain"));
+        }
+        Ok(code)
     }
 
     fn require_live(&self) -> Result<(), LaunchError> {
@@ -1234,11 +1376,8 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
-        if let Some(warden) = self.warden.take()
-            && let Err(code) = warden.fire(crate::sandbox::warden::FIRE_TIME)
-        {
-            eprintln!("harness_warden_unconfirmed cause={code}");
-        }
+        self.uncertain =
+            crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
         assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))

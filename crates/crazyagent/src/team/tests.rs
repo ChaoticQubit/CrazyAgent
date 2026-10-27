@@ -143,15 +143,18 @@ fn delegation_lines_are_read_from_a_master_reply() {
         [
             Delegation {
                 harness: None,
-                prompt: "Write apple.txt".into()
+                prompt: "Write apple.txt".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("codex".into()),
-                prompt: "List the files".into()
+                prompt: "List the files".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("claude-code".into()),
-                prompt: "Review the notes".into()
+                prompt: "Review the notes".into(),
+                role: None,
             },
         ]
     );
@@ -255,29 +258,52 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
     let mut paused = BTreeSet::new();
     let busy_a = |c: &CredentialRef| usize::from(c.as_str() == "local-a");
     assert_eq!(
-        pick_account(&accounts, &|_| 0, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &|_| 0,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-a"
     );
     assert_eq!(
-        pick_account(&accounts, &busy_a, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &busy_a,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-b"
     );
     paused.insert(reference("local-b"));
     assert_eq!(
-        pick_account(&accounts, &busy_a, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &busy_a,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-a"
     );
     paused.insert(reference("local-a"));
-    assert!(pick_account(&accounts, &|_| 0, &paused).is_none());
+    assert!(
+        pick_account(
+            &accounts,
+            &|_| 0,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -416,22 +442,248 @@ fn admission_follows_the_team_plan_and_the_pool() {
         .unwrap(),
         Err("team_queue_full")
     );
-    let none = stored("team-solo", vec![]);
+    let codex_only = stored(
+        "team-codex-only",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: true,
+        }],
+    );
     assert_eq!(
         admit(
             &tx,
-            &with_pool,
-            &none,
-            None,
-            "Alone",
-            TaskSource::Owner,
+            &access("team-codex-only", &["local-a", "anthropic-local"]),
+            &codex_only,
+            Some("claude-code"),
+            "Outside the plan",
+            TaskSource::Master,
             None,
             16
         )
         .unwrap(),
-        Err("team_has_no_sub_agents")
+        Err("team_harness_not_in_plan"),
+        "a runnable harness with an account is still refused outside a chosen plan"
     );
     tx.commit().unwrap();
+}
+
+#[test]
+fn an_empty_plan_hands_work_to_any_runnable_harness_with_an_account() {
+    let (_directory, mut connection) = database();
+    let mut any = stored("team-any", vec![]);
+    any.team.master_tools = true;
+    any.team.max_agents = crate::project_setup::TEAM_AGENTS_MAX;
+    assert!(any.team.validate().is_ok());
+    let both = access("team-any", &["local-a", "anthropic-local"]);
+    let tx = connection.transaction().unwrap();
+    let hand = |access: &ModelAccess, setup: &StoredSetup, harness: Option<&str>| {
+        admit(
+            &tx,
+            access,
+            setup,
+            harness,
+            "Do the work",
+            TaskSource::Master,
+            None,
+            20,
+        )
+        .unwrap()
+    };
+    let named_codex = hand(&both, &any, Some("codex")).unwrap();
+    let named_claude = hand(&both, &any, Some("claude")).unwrap();
+    let tie = hand(&both, &any, None).unwrap();
+    let lighter = hand(&both, &any, None).unwrap();
+    assert_eq!(
+        hand(&both, &any, Some("gemini-cli")),
+        Err("team_harness_cannot_run")
+    );
+    assert_eq!(
+        hand(&both, &any, Some("no-such-harness")),
+        Err("team_harness_not_in_plan")
+    );
+
+    let mut codex_pool = any.clone();
+    codex_pool.project_id = ProjectId::new("team-any-codex").unwrap();
+    let codex_access = access("team-any-codex", &["local-a"]);
+    assert_eq!(
+        hand(&codex_access, &codex_pool, Some("claude-code")),
+        Err("team_harness_cannot_run"),
+        "Claude Code has no account in this pool while Codex has one"
+    );
+    let only_codex = hand(&codex_access, &codex_pool, None).unwrap();
+
+    let mut parked = any.clone();
+    parked.project_id = ProjectId::new("team-any-parked").unwrap();
+    let no_pool = ModelAccess::default();
+    let parked_default = hand(&no_pool, &parked, None).unwrap();
+    let parked_named = hand(&no_pool, &parked, Some("claude-code")).unwrap();
+
+    let rows: Vec<(i64, String, bool, String)> = tx
+        .prepare("SELECT id,harness,tools,status FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let queued = |id: i64, harness: &str| (id, harness.to_owned(), true, "queued".to_owned());
+    let waiting = |id: i64, harness: &str| (id, harness.to_owned(), true, "needs_pool".to_owned());
+    assert_eq!(
+        rows,
+        [
+            queued(named_codex, "codex"),
+            queued(named_claude, "claude-code"),
+            queued(tie, "codex"),
+            queued(lighter, "claude-code"),
+            queued(only_codex, "codex"),
+            waiting(parked_default, "codex"),
+            waiting(parked_named, "claude-code"),
+        ],
+        "tools follow the master; a tie goes to the master's harness, then the least loaded wins"
+    );
+    tx.commit().unwrap();
+
+    let team = status(&connection, &any).unwrap();
+    assert_eq!(
+        team.harnesses
+            .iter()
+            .map(|h| (
+                h.harness.as_str(),
+                h.role,
+                h.agents_max,
+                h.tools,
+                h.runnable
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("codex", AgentRole::Master, 1, true, true),
+            ("codex", AgentRole::Sub, 63, true, true),
+            ("claude-code", AgentRole::Sub, 63, true, true),
+        ],
+        "an empty plan lists every runnable harness under the team maximum"
+    );
+
+    let mut solo = any.clone();
+    solo.project_id = ProjectId::new("team-any-solo").unwrap();
+    solo.team.max_agents = 1;
+    let solo_access = access("team-any-solo", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    for harness in [None, Some("codex")] {
+        assert_eq!(
+            admit(
+                &tx,
+                &solo_access,
+                &solo,
+                harness,
+                "Alone",
+                TaskSource::Owner,
+                None,
+                30
+            )
+            .unwrap(),
+            Err("team_has_no_sub_agents"),
+            "a team maximum of one agent leaves room for the master only"
+        );
+    }
+    tx.commit().unwrap();
+    assert_eq!(
+        status(&connection, &solo)
+            .unwrap()
+            .harnesses
+            .iter()
+            .map(|h| h.role)
+            .collect::<Vec<_>>(),
+        [AgentRole::Master]
+    );
+}
+
+#[test]
+fn an_empty_plan_runs_more_than_one_sub_agent_at_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored("team-any-run", vec![]);
+    setup.team.max_agents = crate::project_setup::TEAM_AGENTS_MAX;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-any-run", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    for prompt in ["Write a.md", "Write b.md"] {
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::Delegate {
+                    project_id: setup.project_id.clone(),
+                    harness: None,
+                    prompt: prompt.into(),
+                }
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+    }
+    tx.commit().unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 30\n");
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let subs = |team: &TeamStatus| {
+        team.agents
+            .iter()
+            .filter(|a| a.role == AgentRole::Sub && a.status.live())
+            .count()
+    };
+    loop {
+        team.tick().unwrap();
+        let now = status(&connection, &setup).unwrap();
+        if subs(&now) >= 2 {
+            assert!(
+                now.tasks.iter().all(|t| t.status == TaskStatus::Running),
+                "{now:#?}"
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{now:#?}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    team.shutdown().unwrap();
 }
 
 #[test]
@@ -567,6 +819,146 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
     );
     assert_eq!(team.harnesses[0].delegation, Some(DelegationPath::Reply));
     assert_eq!(team.harnesses[1].agents_max, 1);
+}
+
+#[test]
+fn the_team_status_tells_the_live_master_switch_and_why_it_could_not_start() {
+    let (_directory, connection) = database();
+    let setup = stored("live-switch", Vec::new());
+    let switch = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        (team.live_master, team.live_problem)
+    };
+    assert_eq!(switch(&connection), (None, None), "never set");
+    master::set_live(&connection, &setup.project_id, true).unwrap();
+    assert_eq!(switch(&connection), (Some(true), None));
+    let line = "The live master could not start: no signed-in account.";
+    assert!(master::problem(&connection, &setup.project_id, Some(line)).unwrap());
+    master::set_live(&connection, &setup.project_id, false).unwrap();
+    assert_eq!(switch(&connection), (Some(false), Some(line.to_owned())));
+    master::problem(&connection, &setup.project_id, None).unwrap();
+    assert_eq!(switch(&connection), (Some(false), None));
+}
+
+#[test]
+fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-names",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-names", &["local-a"]);
+    let agent = |role: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('team-names',?1,'codex',0,'working',1,1)",
+                [role],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let master = agent("master");
+    let first = agent("sub");
+    let second = agent("sub");
+    let unnamed = agent("sub");
+    for sub in [first, second] {
+        names::assign_persona(&connection, &project, sub).unwrap();
+    }
+    names::assign_role(&connection, &project, first, "onboarding-fix")
+        .unwrap()
+        .unwrap();
+    let rename = |agent: i64, handle: &str| TeamAction::Rename {
+        project_id: project.clone(),
+        agent,
+        handle: handle.into(),
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "@docs-pass")).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "onboarding-fix")).unwrap(),
+        rejected("team_handle_taken")
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "Docs Pass")).unwrap(),
+        rejected("team_handle_invalid")
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(master, "lead")).unwrap(),
+        rejected("team_agent_unknown")
+    );
+    for invalid in [rename(second, &"a".repeat(34)), rename(0, "docs")] {
+        assert_eq!(
+            execute(&tx, &pool, &invalid).unwrap_err().0,
+            "team_handle_invalid"
+        );
+    }
+    tx.commit().unwrap();
+    let team = status(&connection, &setup).unwrap();
+    let shown: Vec<(i64, &str, Option<&str>, Option<&str>)> = team
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.id,
+                a.label.as_str(),
+                a.persona.as_deref(),
+                a.handle.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (master, "Master", None, None),
+            (
+                first,
+                &*format!("{} (@onboarding-fix)", names::PERSONAS[0]),
+                Some(names::PERSONAS[0]),
+                Some("onboarding-fix")
+            ),
+            (
+                second,
+                &*format!("{} (@docs-pass)", names::PERSONAS[1]),
+                Some(names::PERSONAS[1]),
+                Some("docs-pass")
+            ),
+            (unnamed, &*format!("Sub-agent {unnamed}"), None, None),
+        ]
+    );
+    assert_eq!(
+        graph(&team)
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Agent)
+            .map(|node| node.label.clone())
+            .collect::<Vec<_>>(),
+        [
+            format!("{} (@onboarding-fix)", names::PERSONAS[0]),
+            format!("{} (@docs-pass)", names::PERSONAS[1]),
+            format!("Sub-agent {unnamed}"),
+        ]
+    );
+    assert_eq!(
+        names::resolve(&connection, &project, "@docs-pass").unwrap(),
+        Some(second)
+    );
 }
 
 #[test]
@@ -804,8 +1196,7 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
     let mut setup = stored(
@@ -901,8 +1292,7 @@ fn a_master_whose_project_folder_is_gone_names_the_plain_file_code() {
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let mut setup = stored("team-moved", vec![]);
     setup.folder = base.join("moved-away").to_str().unwrap().into();
     connection
@@ -975,8 +1365,7 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
     let mut setup = stored(
@@ -1211,6 +1600,14 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
         "the plan's two warm sub-agents start once and are not started again: {cold:#?}"
     );
     assert!(cold.agents.iter().all(|a| a.status == AgentStatus::Failed));
+    assert_eq!(
+        cold.agents
+            .iter()
+            .map(|a| a.label.as_str())
+            .collect::<Vec<_>>(),
+        [names::PERSONAS[0], names::PERSONAS[1]],
+        "each sub-agent gets its own persona when it starts: {cold:#?}"
+    );
     assert!(
         cold.messages.iter().any(|m| m.state == MessageState::Note
             && m.text.starts_with("Keeping sub-agents warm was turned off")),
@@ -1369,8 +1766,7 @@ fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
     let mut setup = stored(
@@ -1926,7 +2322,10 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         ),
         ("conversation-alone", vec![]),
     ] {
-        let setup = stored(project, sub);
+        let mut setup = stored(project, sub);
+        if setup.team.sub_harnesses.is_empty() {
+            setup.team.max_agents = 1;
+        }
         connection
             .execute(
                 "INSERT INTO project_setups VALUES (?1,?2)",
@@ -2071,4 +2470,340 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         ],
         "the clients read a conversation master's task as the master's, the owner's own as theirs"
     );
+}
+
+#[test]
+fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one_pinned_task() {
+    let (_directory, mut connection) = database();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES
+               ('team-resolve','master','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1);
+             INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES
+               (1,'team-resolve','/r','/r/a','/r/.git/worktrees/a'),
+               (2,'team-resolve','/r','/r/b','/r/.git/worktrees/b');",
+        )
+        .unwrap();
+    let project = ProjectId::new("team-resolve").unwrap();
+    let tx = connection.transaction().unwrap();
+    admit_resolve(&tx, &project, 1, "Resolve the master's merge.", 5)
+        .unwrap()
+        .unwrap();
+    admit_resolve(&tx, &project, 2, "Resolve the first merge.", 6)
+        .unwrap()
+        .unwrap();
+    admit_resolve(&tx, &project, 2, "Resolve the newest merge.", 7)
+        .unwrap()
+        .unwrap();
+    tx.commit().unwrap();
+    let messages: Vec<(String, String, String)> = connection
+        .prepare("SELECT author,text,state FROM team_messages WHERE project='team-resolve'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        messages,
+        vec![(
+            "engine".to_owned(),
+            "Resolve the master's merge.".to_owned(),
+            "pending".to_owned()
+        )]
+    );
+    let tasks: Vec<(String, String, i64)> = connection
+        .prepare(
+            "SELECT t.prompt,t.status,p.agent FROM team_tasks t JOIN team_task_pins p ON p.task=t.id
+             WHERE t.project='team-resolve'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        tasks,
+        vec![(
+            "Resolve the newest merge.".to_owned(),
+            "queued".to_owned(),
+            2
+        )]
+    );
+}
+
+#[test]
+fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_live_and_stopped() {
+    use crate::agents::tests::{alive, until};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "lb52-browsky",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 4,
+            tools: true,
+        }],
+    );
+    setup.team.min_agents = 5;
+    setup.team.max_agents = 5;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("lb52-browsky", &["local-a", "local-b"]);
+    let warm = |connection: &mut Connection, on: bool| {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::KeepWarm {
+                    project_id: setup.project_id.clone(),
+                    on,
+                }
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+    };
+    warm(&mut connection, true);
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 300\n");
+    let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
+    let source = pool.clone();
+    let team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone());
+    let service = runtime::TeamService::start(team, std::time::Duration::from_millis(50));
+    let project = setup.project_id.clone();
+    let running = |connection: &Connection| {
+        status(connection, &setup)
+            .unwrap()
+            .agents
+            .iter()
+            .filter(|a| a.status.live() && a.process_group.is_some())
+            .count()
+    };
+    until("four warm codex sub-agents", || running(&connection) == 4);
+
+    let live = status(&connection, &setup).unwrap();
+    let ids: Vec<i64> = live.agents.iter().map(|agent| agent.id).collect();
+    assert_eq!(ids.len(), 4, "{live:#?}");
+    let groups: Vec<i32> = live
+        .agents
+        .iter()
+        .map(|agent| i32::try_from(agent.process_group.unwrap()).unwrap())
+        .collect();
+    assert!(groups.iter().all(|group| alive(*group)));
+    let listed = agents
+        .list(Some(&project), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    let mut registered: Vec<String> = listed.iter().map(|entry| entry.label.clone()).collect();
+    registered.sort();
+    let mut expected: Vec<String> = ids
+        .iter()
+        .map(|id| format!("Team sub-agent {id}"))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        registered, expected,
+        "the register names each agent by its id"
+    );
+    for agent in &live.agents {
+        assert_eq!(agent.role, AgentRole::Sub);
+        let name = names::name(&connection, agent.id).unwrap();
+        assert!(name.is_some(), "{agent:?}");
+        assert_eq!(
+            agent.label,
+            names::label(AgentRole::Sub, agent.id, name.as_ref())
+        );
+        assert!(agent.account.is_some(), "{agent:?}");
+    }
+    let labels: std::collections::HashMap<i64, String> = live
+        .agents
+        .iter()
+        .map(|agent| (agent.id, agent.label.clone()))
+        .collect();
+
+    let shape = [ids[0], ids[1], ids[2], ids[3], ids[2]];
+    for (index, agent) in shape.iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,result,delivered,created_ms,started_ms,finished_ms)
+                 VALUES (?1,'owner','codex',1,?2,'done',?3,1,?4,1,?5,?5,?5)",
+                params![
+                    project.as_str(),
+                    format!("Browsky task {}", index + 1),
+                    agent,
+                    format!("Result {}", index + 1),
+                    now_ms()
+                ],
+            )
+            .unwrap();
+    }
+    let edges = |graph: &TeamGraph| -> Vec<String> {
+        graph.edges.iter().map(|edge| edge.to.clone()).collect()
+    };
+    let expected_edges: Vec<String> = shape.iter().map(|agent| format!("team-{agent}")).collect();
+
+    let live = graph(&status(&connection, &setup).unwrap());
+    let nodes: Vec<&GraphNode> = live
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Agent)
+        .collect();
+    assert_eq!(nodes.len(), 4, "{live:#?}");
+    for (node, id) in nodes.iter().zip(&ids) {
+        assert_eq!(node.label, labels[id]);
+        assert!(node.status.is_some_and(AgentStatus::live), "{node:?}");
+        assert_eq!(
+            node.terminal,
+            Some(crate::terminal::AgentId::team(*id).unwrap())
+        );
+        assert_eq!(node.parent.as_deref(), Some("group:codex"));
+    }
+    assert_eq!(edges(&live), expected_edges);
+
+    warm(&mut connection, false);
+    for entry in &listed {
+        agents.stop(&entry.id).unwrap();
+    }
+    until("every stand-in process group to end", || {
+        groups.iter().all(|group| !alive(*group))
+    });
+    until("every sub-agent to read stopped", || {
+        status(&connection, &setup)
+            .unwrap()
+            .agents
+            .iter()
+            .all(|agent| agent.status == AgentStatus::Stopped)
+    });
+    let stopped = status(&connection, &setup).unwrap();
+    assert_eq!(stopped.agents.len(), 4, "a stopped agent is not replaced");
+    assert!(stopped.agents.iter().all(|agent| agent.task.is_none()));
+    let stopped = graph(&stopped);
+    let nodes: Vec<&GraphNode> = stopped
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Agent)
+        .collect();
+    assert_eq!(
+        nodes.len(),
+        4,
+        "stopped sub-agents stay listed: {stopped:#?}"
+    );
+    for (node, id) in nodes.iter().zip(&ids) {
+        assert_eq!(node.label, labels[id]);
+        assert_eq!(node.status, Some(AgentStatus::Stopped));
+        assert_eq!(node.status_label.as_deref(), Some("Stopped"));
+        assert_eq!(node.terminal, None);
+        assert!(node.account.is_some());
+    }
+    assert_eq!(
+        edges(&stopped),
+        expected_edges,
+        "each task still points at the agent that ran it"
+    );
+    service.stop();
+}
+
+#[test]
+fn the_owner_marks_one_project_s_notifications_seen_up_to_an_id_and_no_other_project_s() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-seen",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let other = ProjectId::new("team-other").unwrap();
+    let pool = access("team-seen", &["local-a"]);
+    let raise = |project: &ProjectId, text: &str| {
+        events::escalate(&connection, project, text, 5)
+            .unwrap()
+            .unwrap()
+    };
+    let first = raise(&project, "May Ada push to main?");
+    let second = raise(&project, "May Ada delete the old branch?");
+    let foreign = raise(&other, "May Grace spend on a new provider?");
+    let third = raise(&project, "May Ada rename the crate?");
+    let seen = |project: &ProjectId, upto: i64| TeamAction::Seen {
+        project_id: project.clone(),
+        upto,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &seen(&project, foreign)).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &seen(&other, third)).unwrap(),
+        rejected("project_setup_missing")
+    );
+    for upto in [0, -1] {
+        assert_eq!(
+            execute(&tx, &pool, &seen(&project, upto)).unwrap_err().0,
+            "team_notification_missing"
+        );
+    }
+    tx.commit().unwrap();
+    let state = |project: &ProjectId| -> Vec<(i64, bool)> {
+        events::notifications(&connection, Some(project), 10)
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.id, item.seen_ms.is_some()))
+            .collect()
+    };
+    assert_eq!(
+        state(&project),
+        [(third, false), (second, true), (first, true)]
+    );
+    assert_eq!(state(&other), [(foreign, false)]);
 }

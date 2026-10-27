@@ -202,6 +202,7 @@ pub struct SkillView {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub line: String,
     pub scope: Scope,
     pub scope_label: String,
     pub enabled: bool,
@@ -362,6 +363,26 @@ const PROBLEMS: &[(&str, &str)] = &[
     ("skill_limit", "You can add up to 100 skills here."),
     ("skill_not_found", "This skill was removed."),
     (
+        "skill_text_too_large",
+        "This SKILL.md is too large to show here.",
+    ),
+    (
+        "skill_page_invalid",
+        "This skill changed while it was read. Open it again.",
+    ),
+    (
+        "skill_import_too_large",
+        "A skill brought in from your skills folders can be up to 2 MB.",
+    ),
+    (
+        "skill_import_name_changed",
+        "This folder now holds a different skill. Look for your skills again.",
+    ),
+    (
+        "skill_import_home_unknown",
+        "Your home folder is unknown, so your skills can't be found.",
+    ),
+    (
         "server_name_invalid",
         "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
     ),
@@ -415,6 +436,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Can't start: this file can't be run.",
     ),
     ("server_cant_start", "The server can't start."),
+    (
+        "server_cleanup_uncertain",
+        "The server's processes could not be confirmed stopped.",
+    ),
     ("server_exited", "The server stopped before answering."),
     (
         "server_check_timeout",

@@ -91,8 +91,8 @@ test("onboarding steps and setup states use the engine's tags", () => {
   const tags = [...`${step[1] ?? ""}${step[2]}`.matchAll(/^\s*([A-Z][A-Za-z]*)\b/gm)]
     .map(([, name]) => name.replace(/(?<=[a-z])([A-Z])/g, "_$1").toLowerCase());
   assert.ok(tags.includes("waiting") && tags.includes("failed"), `engine Step tags read: ${tags.join(", ")}`);
-  assert.match(engine, /Failed \{ reason: String \}/);
-  const union = client.match(/export type OnboardingStep = ([^;]*(?:; reason: string \})?[^;]*);/);
+  assert.match(engine, /Failed \{\s*reason: String,?\s*\}/);
+  const union = client.match(/^export type OnboardingStep = (.*);$/m);
   assert.ok(union, "engine-client.ts declares OnboardingStep");
   const kinds = [...union[1].matchAll(/\{ kind: "([a-z_]+)"/g)].map(([, kind]) => kind);
   assert.deepEqual([...kinds].sort(), [...tags].sort());

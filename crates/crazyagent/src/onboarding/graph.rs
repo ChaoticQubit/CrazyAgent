@@ -38,6 +38,15 @@ const POLL: Duration = Duration::from_millis(100);
 /// The plain reason a graph step fails with when no graphify is installed.
 pub(crate) const GRAPHIFY_MISSING: &str = "graphify not installed";
 
+/// The owner's line for a graph build on a system that runs no confined graphify in V1:
+/// Linux (DEC-094), where the build would start the macOS Seatbelt tool that is not there.
+/// Input: the operating system name as `std::env::consts::OS` gives it. Output: the line,
+/// or None where the graph builds.
+#[cfg(unix)]
+pub(crate) fn unavailable(os: &str) -> Option<&'static str> {
+    (os == "linux").then_some("Graph build is not available on Linux in this version.")
+}
+
 /// How one `graphify update .` run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GraphEnding {
@@ -99,6 +108,9 @@ pub(crate) fn update(
     limit: Duration,
     stop: &dyn Fn() -> bool,
 ) -> Result<GraphEnding, RunError> {
+    if let Some(line) = unavailable(std::env::consts::OS) {
+        return Ok(GraphEnding::Failed(line));
+    }
     let Some(graphify) = graphify
         .canonicalize()
         .ok()
@@ -117,7 +129,9 @@ pub(crate) fn update(
     }
     let agent = state.join("agents").join(name);
     if std::fs::symlink_metadata(&agent).is_ok() {
-        return Err(RunError::Invalid("graph run name already used".into()));
+        return Err(RunError::Invalid(
+            crate::research::runner::RUN_NAME_USED.into(),
+        ));
     }
     private_directory(&agent)?;
     let home = agent.join("home");
@@ -142,7 +156,7 @@ pub(crate) fn update(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut running = AgentProcess::new(crate::spawn_gate::spawn(&mut command)?)?;
+    let mut running = AgentProcess::spawn(&mut command)?;
     let counted = Arc::new(AtomicU64::new(0));
     let streams = [
         (
@@ -194,7 +208,7 @@ pub(crate) fn update(
         }
         std::thread::sleep(POLL);
     };
-    running.stop();
+    running.stop().map_err(RunError::Uncertain)?;
     Ok(ending)
 }
 

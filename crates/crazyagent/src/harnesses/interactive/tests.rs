@@ -67,6 +67,7 @@ impl Case {
             model: None,
             tools,
             sandbox_profile: Some(self.profile()),
+            git_identity: None,
             limits: LaunchLimits::default(),
         }
     }
@@ -96,10 +97,21 @@ fn run(key_file: Option<&Path>) -> Run<'_> {
     Run {
         session_id: SESSION,
         key_file,
+        resume: false,
     }
 }
 
 fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let home = env
+        .iter()
+        .find(|(name, _)| name == "HOME")
+        .map(|(_, home)| PathBuf::from(home))
+        .unwrap();
+    env.extend(
+        toolchains::agent_env(&home, &ToolHomes::owner().unwrap())
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
+    );
     env.extend(
         crate::sandbox::AGENT_GIT_ENV
             .into_iter()
@@ -186,7 +198,7 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
             built.env,
             with_git_env(vec![
                 ("HOME".to_owned(), case.home().to_str().unwrap().to_owned()),
-                ("PATH".to_owned(), TOOLS_ON_PATH.to_owned()),
+                ("PATH".to_owned(), tools_on_path()),
                 ("LANG".to_owned(), LOCALE.to_owned()),
                 ("LC_ALL".to_owned(), LOCALE.to_owned()),
             ]),
@@ -306,15 +318,58 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
             "{setting}"
         );
     }
-    assert!(
-        built
-            .env
-            .contains(&("PATH".to_owned(), TOOLS_ON_PATH.to_owned()))
+    assert!(built.env.contains(&("PATH".to_owned(), tools_on_path())));
+}
+
+/// A resumed Codex or Claude Code app continues the conversation it recorded under the
+/// stored id, Codex through its `resume` subcommand after its settings and Claude Code
+/// through `--resume` in place of a new `--session-id`, with the same transcript source.
+#[test]
+fn a_resumed_harness_continues_the_conversation_it_recorded() {
+    let case = Case::new();
+    let resumed = Run {
+        resume: true,
+        ..run(None)
+    };
+    let codex = case.request("codex", case.subscription(), false);
+    let fresh = command(&codex, None, &run(None)).unwrap();
+    let again = command(&codex, None, &resumed).unwrap();
+    let mut argv = fresh.argv.clone();
+    argv.extend(strings(&["resume", SESSION]));
+    assert_eq!(again.argv, argv);
+    assert_eq!(again.transcript, fresh.transcript);
+    assert_eq!(again.env, fresh.env);
+    let unknown = Run {
+        session_id: "not-a-uuid",
+        ..resumed
+    };
+    assert_eq!(
+        command(&codex, None, &unknown).unwrap_err().0,
+        "launch_session_id_invalid"
+    );
+
+    let claude = case.request("claude-code", case.subscription(), false);
+    let fresh = command(&claude, None, &run(None)).unwrap();
+    let again = command(&claude, None, &resumed).unwrap();
+    let at = fresh
+        .argv
+        .iter()
+        .position(|argument| argument == "--session-id")
+        .unwrap();
+    let mut argv = fresh.argv.clone();
+    argv[at] = "--resume".into();
+    assert_eq!(argv[at + 1], SESSION);
+    assert_eq!(again.argv, argv);
+    assert!(!again.argv.iter().any(|argument| argument == "--session-id"));
+    assert_eq!(again.transcript, fresh.transcript);
+    assert_eq!(
+        command(&claude, None, &unknown).unwrap_err().0,
+        "launch_session_id_invalid"
     );
 }
 
 #[test]
-fn a_keyed_codex_reads_its_key_from_the_key_file_inside_the_sandbox() {
+fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment() {
     let case = Case::new();
     let mut request = case.request(
         "codex",
@@ -330,21 +385,28 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_inside_the_sandbox() {
     let built = command(&request, None, &run(Some(&key_file))).unwrap();
     no_secret(&built);
     assert_eq!(
-        built.argv[..9],
+        built.argv[..4],
         strings(&[
             SANDBOX_EXEC,
             "-f",
             case.profile().to_str().unwrap(),
-            "/bin/sh",
-            "-c",
-            KEY_SCRIPT,
-            KEY_SCRIPT_NAME,
-            key_file.to_str().unwrap(),
             request.executable.to_str().unwrap(),
         ])
     );
-    assert!(built.argv.iter().any(|argument| argument
-        == "model_providers.crazyagent={name=\"CrazyAgent\",base_url=\"https://models.example.test/v1\",wire_api=\"responses\",env_key=\"CRAZYAGENT_API_KEY\"}"));
+    let provider = format!(
+        "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"https://models.example.test/v1\",wire_api=\"responses\",auth={{command=\"/bin/cat\",args=[\"{}\"]}}}}",
+        key_file.display()
+    );
+    assert!(built.argv.contains(&provider), "{:?}", built.argv);
+    let helper = crate::spawn_gate::output(
+        std::process::Command::new("/bin/cat")
+            .arg(&key_file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8(helper.stdout).unwrap(), KEY);
 
     let output = crate::spawn_gate::output(
         std::process::Command::new(&built.argv[0])
@@ -359,29 +421,21 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_inside_the_sandbox() {
     .unwrap();
     assert!(output.status.success(), "{output:?}");
     let seen = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        seen.lines()
-            .any(|line| line == format!("CRAZYAGENT_API_KEY={KEY}"))
-    );
+    assert!(!seen.contains(KEY), "{seen}");
+    assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
     assert!(
         seen.lines()
             .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
     );
 
-    std::fs::remove_file(&key_file).unwrap();
-    let missing = crate::spawn_gate::output(
-        std::process::Command::new(&built.argv[0])
-            .args(&built.argv[1..])
-            .env_clear()
-            .envs(built.env.iter().map(|(name, value)| (name, value)))
-            .current_dir(&built.cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(!missing.status.success(), "no key file, no harness");
-    assert!(!String::from_utf8_lossy(&missing.stdout).contains("CODEX_HOME="));
+    let quoted = case.path().join("say \"hi\"");
+    std::fs::create_dir(&quoted).unwrap();
+    assert_eq!(
+        command(&request, None, &run(Some(&quoted.join("key"))))
+            .unwrap_err()
+            .0,
+        "launch_key_file_invalid"
+    );
 }
 
 #[test]
@@ -399,7 +453,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "--setting-sources",
         "",
         "--settings",
-        "{\"disableAllHooks\":true,\"skipDangerousModePermissionPrompt\":true}",
+        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
     ]);
@@ -477,6 +531,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
     let bad = Run {
         session_id: "not-a-uuid",
         key_file: None,
+        resume: false,
     };
     assert_eq!(
         command(&request, None, &bad).unwrap_err().0,
@@ -776,4 +831,64 @@ fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
         "launch_claude_config_unsafe"
     );
+}
+
+#[test]
+fn the_owner_git_identity_reaches_a_pane_agent_environment() {
+    let case = Case::new();
+    let mut request = case.request("claude-code", case.subscription(), true);
+    request.git_identity = Some(
+        crate::harnesses::launch::GitIdentity::new(
+            "Repo Owner".into(),
+            "owner@example.invalid".into(),
+        )
+        .unwrap(),
+    );
+    let built = command(&request, None, &run(None)).unwrap();
+    for (name, value) in [
+        ("GIT_AUTHOR_NAME", "Repo Owner"),
+        ("GIT_AUTHOR_EMAIL", "owner@example.invalid"),
+        ("GIT_COMMITTER_NAME", "Repo Owner"),
+        ("GIT_COMMITTER_EMAIL", "owner@example.invalid"),
+    ] {
+        assert!(
+            built.env.contains(&(name.to_owned(), value.to_owned())),
+            "{name}: {:?}",
+            built.env
+        );
+    }
+}
+
+fn tools_on_path() -> String {
+    toolchains::agent_path(&ToolHomes::owner().unwrap(), TOOLS_ON_PATH)
+}
+
+#[test]
+fn a_pane_gets_the_agent_short_temp_folder_and_the_toolchain_settings() {
+    let case = Case::new();
+    let tmp = toolchains::make_tmp(&case.home()).unwrap();
+    for harness in ["codex", "claude-code"] {
+        let request = case.request(harness, case.subscription(), true);
+        let built = command(&request, None, &run(None)).unwrap();
+        let tmpdirs: Vec<&str> = built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "TMPDIR")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(tmpdirs, [tmp.to_str().unwrap()], "{harness}");
+        for (name, value) in [
+            ("RUSTUP_AUTO_INSTALL", "0".to_owned()),
+            (
+                "CARGO_HOME",
+                case.home().join(".cargo").to_str().unwrap().to_owned(),
+            ),
+        ] {
+            assert!(
+                built.env.contains(&(name.to_owned(), value)),
+                "{harness} {name}"
+            );
+        }
+    }
+    toolchains::remove_tmp(&case.home()).unwrap();
 }

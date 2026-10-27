@@ -814,6 +814,14 @@ impl Wizard {
                 format!("Min is {min}, but Max is {max}. Min can't be more than Max."),
             ));
         }
+        if total > u32::from(TEAM_AGENTS_MAX) {
+            return Err(Note::error(
+                Control::Team,
+                format!(
+                    "Sub-agents add up to {sub}, plus the master makes {total}, but a team runs at most {TEAM_AGENTS_MAX}. Lower a count or remove a sub-harness."
+                ),
+            ));
+        }
         if total > u32::from(max) {
             return Err(Note::error(
                 Control::Max,
@@ -1464,16 +1472,20 @@ impl Wizard {
         };
         let slots = team.sub_harnesses.len();
         let row = self.team_row.min(slots + 1);
+        let full = team.total_agents() >= u32::from(TEAM_AGENTS_MAX);
+        let mut refused = false;
         match key.code {
             KeyCode::Up => self.team_row = row.saturating_sub(1),
             KeyCode::Down => self.team_row = (row + 1).min(slots + 1),
             KeyCode::Left | KeyCode::Right if (1..=slots).contains(&row) => {
                 let slot = &mut team.sub_harnesses[row - 1];
-                slot.agents = if key.code == KeyCode::Left {
-                    slot.agents.saturating_sub(1).max(1)
+                if key.code == KeyCode::Left {
+                    slot.agents = slot.agents.saturating_sub(1).max(1);
+                } else if full {
+                    refused = true;
                 } else {
-                    (slot.agents + 1).min(HARNESS_AGENTS_MAX)
-                };
+                    slot.agents = (slot.agents + 1).min(HARNESS_AGENTS_MAX);
+                }
                 self.team_edited = true;
             }
             KeyCode::Char(' ') if row == 0 => {
@@ -1501,6 +1513,10 @@ impl Wizard {
                         ));
                         return Reply::Handled;
                     }
+                    _ if full => {
+                        self.note = Some(team_full());
+                        return Reply::Handled;
+                    }
                     _ => PickFor::NewSlot,
                 };
                 self.picker = Some(Picker { target, cursor: 0 });
@@ -1509,7 +1525,7 @@ impl Wizard {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ' | 'd') | KeyCode::Delete => {}
             _ => return Reply::Ignored,
         }
-        self.note = self.check_team().err();
+        self.note = self.check_team().err().or_else(|| refused.then(team_full));
         Reply::Handled
     }
 
@@ -1605,12 +1621,50 @@ pub(in crate::tui) fn harness_name(id: &str, catalog: Option<&[HarnessChoice]>) 
     .to_owned()
 }
 
+/// What an empty sub-agent list means (DEC-096 addendum 3), shown where the list would be.
+pub(in crate::tui) const ANY_HARNESS_NOTE: &str =
+    "Any harness, no limit. Add a harness to limit which ones run and how many.";
+
+/// Says what an empty sub-agent list runs: any harness, or no sub-agent at all under a team
+/// maximum of one. Takes the team plan. Returns the note for the place the list would be.
+pub(in crate::tui) fn any_harness_note(team: &TeamPlan) -> &'static str {
+    if team.max_agents <= 1 {
+        "No sub-agents run with a team maximum of 1. Raise the maximum to let any harness run."
+    } else {
+        ANY_HARNESS_NOTE
+    }
+}
+
+/// The note for a team already at the agent maximum when the owner asks for one more agent.
+/// Takes nothing. Returns an error note under Team that names the maximum and what to do.
+fn team_full() -> Note {
+    Note::error(
+        Control::Team,
+        format!(
+            "A team runs at most {TEAM_AGENTS_MAX} agents, counting the master. Lower a count or remove a sub-harness to add another."
+        ),
+    )
+}
+
+/// Names the sub-agents an empty sub-agent list allows: the team maximum less the master.
+/// Takes the team plan. Returns, for example, "Any harness, up to 63 agents".
+pub(in crate::tui) fn any_harness_total(team: &TeamPlan) -> String {
+    let subs = team.max_agents.saturating_sub(1);
+    match subs {
+        0 => "No sub-agents (team maximum is 1)".to_owned(),
+        1 => "Any harness, up to 1 agent".to_owned(),
+        _ => format!("Any harness, up to {subs} agents"),
+    }
+}
+
 /// Describes a team in one plain sentence.
 /// Takes the team plan and the harness catalog when known.
 /// Returns, for example, "Codex leads. Claude Code x2, Codex x1. Tools on."
 pub(in crate::tui) fn team_summary(team: &TeamPlan, catalog: Option<&[HarnessChoice]>) -> String {
     let mut text = format!("{} leads.", harness_name(&team.master, catalog));
-    if !team.sub_harnesses.is_empty() {
+    if team.sub_harnesses.is_empty() {
+        text.push_str(&format!(" {}.", any_harness_total(team)));
+    } else {
         let slots: Vec<String> = team
             .sub_harnesses
             .iter()

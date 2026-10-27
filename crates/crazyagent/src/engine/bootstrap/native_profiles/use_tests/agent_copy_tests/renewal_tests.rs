@@ -36,7 +36,7 @@ fn a_lapsed_codex_record_is_renewed_by_the_real_codex_in_the_managed_home_before
     let guard = execution(&mut case);
     assert_eq!(
         refused(guard.hand_to_agent(&agent, TURN, &codex())),
-        "native_profile_credential_expiring"
+        "native_profile_renewal_failed"
     );
     assert!(
         home.join("installation_id").is_file(),
@@ -166,6 +166,45 @@ fn an_account_check_runs_beside_agents_but_never_beside_a_renewal() {
     let renewed = second.hold_renewal(Duration::ZERO).unwrap();
     drop(renewed);
     drop(second);
+    drop(agent);
+}
+
+#[test]
+fn a_custodian_check_waits_for_a_running_renewal_and_the_engine_admits_it_meanwhile() {
+    let mut case = UseCase::new();
+    let agent = execution(&mut case);
+    let renewal = agent.hold_renewal(Duration::ZERO).unwrap();
+    let admitted = case.recapture().acquire_use_within(
+        &case.host,
+        &case.binding,
+        &request_id("check-admitted-during-renewal"),
+        1,
+        NativeProfileUsePurpose::Check,
+        None,
+    );
+    assert!(admitted.is_ok(), "{:?}", admitted.err());
+    drop(admitted);
+    let mut custody = case.recapture();
+    let (host, binding) = (case.host.clone(), case.binding.clone());
+    let waiter = std::thread::spawn(move || {
+        let started = Instant::now();
+        let checked = custody
+            .acquire_use_within(
+                &host,
+                &binding,
+                &request_id("check-after-renewal"),
+                1,
+                NativeProfileUsePurpose::Check,
+                Some(Duration::from_secs(20)),
+            )
+            .map(drop);
+        (started.elapsed(), checked)
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    drop(renewal);
+    let (waited, checked) = waiter.join().unwrap();
+    assert!(checked.is_ok(), "{:?}", checked.err());
+    assert!(waited >= Duration::from_millis(400), "{waited:?}");
     drop(agent);
 }
 

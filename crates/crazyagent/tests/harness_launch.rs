@@ -1,10 +1,11 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
-use crazyagent::model_gateway::relay::is_placeholder;
+use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
         model: Some(LOCAL_MODEL.into()),
         tools: false,
         sandbox_profile: Some(project_profile(work, home)),
+        git_identity: None,
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),
             ..LaunchLimits::default()
@@ -139,7 +141,7 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
 }
 
 #[test]
-fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_relay_token() {
+fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_from_a_file() {
     let home = private_dir("ca-launch-home-");
     let work = private_dir("ca-launch-work-");
     let keyed = || AccountBinding::ApiKey {
@@ -147,6 +149,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         key: Secret::new(DUMMY_KEY.into()).unwrap(),
         base_url: None,
     };
+    let key_file = home.path().join(KEY_FILE);
     for harness in ["codex", "claude-code"] {
         assert_eq!(
             command(&request(harness, home.path(), work.path(), keyed()))
@@ -161,27 +164,29 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         let built = command(&routed).unwrap();
         let variables = environment(&built);
         let arguments = arguments(&built);
-        for text in arguments.iter().chain(variables.values()) {
-            assert!(!text.contains(DUMMY_KEY), "{harness}");
-        }
+        no_key_in(&arguments, &variables, harness);
+        assert!(!variables.contains_key("ANTHROPIC_API_KEY"), "{harness}");
+        assert!(!variables.contains_key("CRAZYAGENT_API_KEY"), "{harness}");
         if harness == "codex" {
-            assert_eq!(
-                variables.get("CRAZYAGENT_API_KEY").map(String::as_str),
-                Some(relay.token())
-            );
             assert_eq!(
                 relay.base_url(),
                 format!("http://127.0.0.1:{}/v1", relay.port())
             );
             let provider = format!(
-                "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{}\",wire_api=\"responses\",env_key=\"CRAZYAGENT_API_KEY\"}}",
-                relay.base_url()
+                "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{}\",wire_api=\"responses\",auth={{command=\"/bin/cat\",args=[\"{}\"]}}}}",
+                relay.base_url(),
+                key_file.display()
             );
             assert!(arguments.contains(&provider), "{arguments:?}");
         } else {
+            let at = arguments
+                .iter()
+                .position(|argument| argument == "--settings");
+            let settings: serde_json::Value =
+                serde_json::from_str(&arguments[at.unwrap() + 1]).unwrap();
             assert_eq!(
-                variables.get("ANTHROPIC_API_KEY").map(String::as_str),
-                Some(relay.token())
+                settings["apiKeyHelper"],
+                format!("/bin/cat '{}'", key_file.display())
             );
             assert_eq!(
                 variables.get("ANTHROPIC_BASE_URL"),
@@ -204,6 +209,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         model: None,
         tools: false,
         sandbox_profile: Some(project_profile(work.path(), home.path())),
+        git_identity: None,
         limits: LaunchLimits::default(),
     };
     assert_eq!(
@@ -211,6 +217,73 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         Some("launch_key_relay_unsupported")
     );
     assert!(!format!("{:?}", Secret::new(DUMMY_KEY.into()).unwrap()).contains(DUMMY_KEY));
+}
+
+fn no_key_in(arguments: &[String], variables: &BTreeMap<String, String>, kind: &str) {
+    for text in arguments
+        .iter()
+        .chain(variables.keys())
+        .chain(variables.values())
+    {
+        assert!(!text.contains(DUMMY_KEY), "{kind}: {text}");
+        assert!(!text.contains(TOKEN_PREFIX), "{kind}: {text}");
+    }
+}
+
+/// Builds every command a keyed account can launch: the piped harnesses masters and headless
+/// team agents run, with and without tools, and the interactive apps team agents and research
+/// jobs run in panes. Research accounts carry no key at all. No argument or variable of any
+/// of them holds the relay token or the provider key.
+#[test]
+fn no_launch_command_kind_carries_a_relay_token_or_a_provider_key() {
+    let home = private_dir("ca-launch-home-");
+    let work = private_dir("ca-launch-work-");
+    for harness in ["codex", "claude-code"] {
+        for tools in [false, true] {
+            let mut keyed = request(
+                harness,
+                home.path(),
+                work.path(),
+                AccountBinding::ApiKey {
+                    home: home.path().to_path_buf(),
+                    key: Secret::new(DUMMY_KEY.into()).unwrap(),
+                    base_url: None,
+                },
+            );
+            keyed.tools = tools;
+            let (routed, relay) = route(keyed).unwrap();
+            let relay = relay.unwrap();
+            let piped = command(&routed).unwrap();
+            no_key_in(
+                &arguments(&piped),
+                &environment(&piped),
+                &format!("piped {harness} tools {tools}"),
+            );
+            let key_file = interactive::write_key(
+                home.path(),
+                &Secret::new(relay.token().to_owned()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(&key_file).unwrap(), relay.token());
+            let session = interactive::session_id().unwrap();
+            let pane = interactive::command(
+                &routed,
+                None,
+                &Run {
+                    session_id: &session,
+                    key_file: Some(&key_file),
+                    resume: false,
+                },
+            )
+            .unwrap();
+            no_key_in(
+                &pane.argv,
+                &pane.env.iter().cloned().collect(),
+                &format!("pane {harness} tools {tools}"),
+            );
+            std::fs::remove_file(&key_file).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -470,17 +543,23 @@ fn written_pid(folder: &Path, name: &str) -> Option<rustix::process::Pid> {
         .and_then(rustix::process::Pid::from_raw)
 }
 
-#[test]
-fn stopping_a_headless_agent_stops_what_its_shells_detached() {
+/// Starts a stand-in Claude Code harness running `script` headless under a tools-off project
+/// sandbox in a private folder, once it has run outside the sandbox so its first exec is
+/// done. Takes the folder prefix and the script. Returns the folder, the project the script
+/// works in, its executable and the session.
+fn sandboxed_stand_in(
+    prefix: &str,
+    script: &str,
+) -> (tempfile::TempDir, PathBuf, PathBuf, Session) {
     use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
 
-    let root = private_dir("crazyagent-detached-agent-");
+    let root = private_dir(prefix);
     let project = private_folder(root.path(), "project");
     let home = private_folder(root.path(), "home");
     let tmp = private_folder(root.path(), "tmp");
     let bin = private_folder(root.path(), "bin");
     let harness = bin.join("claude");
-    std::fs::write(&harness, DETACHING_AGENT).unwrap();
+    std::fs::write(&harness, script).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
     let first = crazyagent::spawn_gate::status(
         std::process::Command::new(&harness)
@@ -506,15 +585,62 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
     .unwrap();
     let session = Session::start(LaunchRequest {
         harness: "claude-code".into(),
-        executable: harness,
+        executable: harness.clone(),
         working_dir: project.clone(),
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
         sandbox_profile: Some(profile),
+        git_identity: None,
         limits: LaunchLimits::default(),
     })
     .unwrap();
+    (root, project, harness, session)
+}
+
+/// Kills, by id, the warden of every running agent of this user started from `harness`: the
+/// child the session shim forked keeps the shim's command line naming the harness after the
+/// shim itself became the harness. Takes the executable, unique to this test. Returns the
+/// wardens killed, so a caller that expects exactly one can check.
+fn kill_wardens_of(harness: &Path) -> Vec<i32> {
+    let listing = crazyagent::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(listing.status.success());
+    let user = rustix::process::getuid().as_raw().to_string();
+    let own = std::process::id();
+    let named = format!(" -- {}", harness.display());
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let wardens: Vec<i32> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let owner = fields.next()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (owner == user
+                && pid as u32 != own
+                && command.starts_with("/usr/bin/perl -mPOSIX -e setpgrp(0,")
+                && command.contains(&named))
+            .then_some(pid)
+        })
+        .collect();
+    for warden in &wardens {
+        let pid = rustix::process::Pid::from_raw(*warden).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    }
+    wardens
+}
+
+#[test]
+fn stopping_a_headless_agent_stops_what_its_shells_detached() {
+    let (_root, project, _harness, session) =
+        sandboxed_stand_in("crazyagent-detached-agent-", DETACHING_AGENT);
     let deadline = Instant::now() + Duration::from_secs(10);
     let (leader, detached) = loop {
         if let (Some(leader), Some(session), Some(orphan)) = (
@@ -531,7 +657,7 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
         assert_ne!(rustix::process::getpgid(Some(process)), Ok(leader));
         assert_eq!(rustix::process::test_kill_process(process), Ok(()));
     }
-    session.stop();
+    session.stop().unwrap();
     let deadline = Instant::now() + Duration::from_secs(1);
     let survivors = loop {
         let survivors: Vec<_> = [leader]
@@ -550,6 +676,34 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
         let _ = rustix::process::kill_process(*process, rustix::process::Signal::KILL);
     }
     assert!(survivors.is_empty(), "{survivors:?} survived the agent");
+}
+
+#[test]
+fn stopping_a_headless_agent_whose_warden_was_killed_reports_cleanup_uncertain() {
+    let (_root, project, harness, session) =
+        sandboxed_stand_in("crazyagent-wardenless-agent-", DETACHING_AGENT);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let detached = loop {
+        if let Some(detached) = written_pid(&project, "descendant.pid") {
+            break detached;
+        }
+        assert!(Instant::now() < deadline, "stand-in agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let killed = kill_wardens_of(&harness);
+    assert_eq!(
+        killed.len(),
+        1,
+        "one warden per run, killed by id: {killed:?}"
+    );
+    let stopped = session.stop().map_err(|problem| problem.0);
+    let outlived = rustix::process::test_kill_process(detached) == Ok(());
+    let _ = rustix::process::kill_process(detached, rustix::process::Signal::KILL);
+    assert_eq!(stopped, Err("harness_cleanup_uncertain".to_owned()));
+    assert!(
+        outlived,
+        "with its warden killed the detached process outlives the group"
+    );
 }
 
 fn group_alive(group: u32) -> bool {
@@ -589,7 +743,7 @@ fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_group
             "{harness}: {events:?}"
         );
         assert!(!text.trim().is_empty(), "{harness}: {events:?}");
-        session.stop();
+        session.stop().unwrap();
         assert!(!group_alive(group), "{harness} process group survived stop");
     }
 }
@@ -637,7 +791,49 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
             seen.contains(&LaunchEvent::TurnFinished { success: false }),
             "{harness}: {seen:?}"
         );
-        session.stop();
+        session.stop().unwrap();
+    }
+}
+
+#[test]
+fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file() {
+    let _owner = LOCAL_MODEL_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (harness, base_url) in [("codex", OLLAMA_OPENAI), ("claude-code", OLLAMA_ANTHROPIC)] {
+        let home = private_dir("ca-launch-keyed-");
+        let work = private_dir("ca-launch-work-");
+        let mut session = Session::start(request(
+            harness,
+            home.path(),
+            work.path(),
+            AccountBinding::Url {
+                home: home.path().to_path_buf(),
+                base_url: base_url.into(),
+                key: Some(Secret::new(DUMMY_KEY.into()).unwrap()),
+            },
+        ))
+        .unwrap();
+        let key_file = home.path().join(KEY_FILE);
+        assert!(
+            is_placeholder(&std::fs::read_to_string(&key_file).unwrap()),
+            "{harness}"
+        );
+        assert_eq!(
+            std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (text, events) = run_turn(&mut session, "Reply with one short greeting.");
+        assert!(
+            events.contains(&LaunchEvent::TurnFinished { success: true }),
+            "{harness}: {events:?}"
+        );
+        assert!(!text.trim().is_empty(), "{harness}: {events:?}");
+        session.stop().unwrap();
+        assert!(
+            !key_file.exists(),
+            "{harness}: the key file ends with its session"
+        );
     }
 }
 
@@ -674,6 +870,6 @@ fn live_tools_on_turn_completes_inside_the_project_sandbox() {
             events.contains(&LaunchEvent::TurnFinished { success: true }),
             "{harness}: {events:?}"
         );
-        session.stop();
+        session.stop().unwrap();
     }
 }

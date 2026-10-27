@@ -1,6 +1,7 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -80,7 +81,7 @@ test("a profile read that is not in this build yet skips Welcome instead of bloc
   assert.match(markup, /Profile/);
 });
 
-test("an unconfirmed change shows a banner naming it, with Check again and Retry", () => {
+test("an unconfirmed change shows a banner naming it, with Check again and Retry, and Dismiss once the engine says it never recorded it", () => {
   const intent = { kind: "setup_project", generation: "3", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "op-1" };
   const markup = render({ unconfirmed: { intent, outcome: null, busy: false } });
   assert.match(markup, /We couldn&#x27;t confirm saving the project setup\. Other changes wait until it&#x27;s checked\./);
@@ -88,11 +89,25 @@ test("an unconfirmed change shows a banner naming it, with Check again and Retry
   assert.match(markup, />Retry<\/button>/);
   assert.doesNotMatch(markup, /intent|Reconcile|operation|still being saved/i);
   const unsent = render({ unconfirmed: { intent, outcome: "not_recorded_at_barrier", busy: false } });
-  assert.match(unsent, /Saving the project setup hasn&#x27;t reached the engine\. Retry sends the same change again\./);
+  assert.match(unsent, /Saving the project setup never reached the engine\. Retry sends it again, or Dismiss drops it\./);
+  assert.match(unsent, />Retry<\/button>/);
+  assert.match(unsent, />Dismiss<\/button>/);
+  assert.doesNotMatch(markup, /Dismiss/, "a change that may have been recorded cannot be dismissed");
   const checking = render({ unconfirmed: { intent, outcome: null, busy: true } });
   assert.match(checking, /Checking\.\.\./);
   assert.match(checking, /<button[^>]*disabled=""[^>]*>[\s\S]*?Retry<\/button>/);
+  const unsentChecking = render({ unconfirmed: { intent, outcome: "not_recorded_at_barrier", busy: true } });
+  assert.match(unsentChecking, /<button[^>]*disabled=""[^>]*>Dismiss<\/button>/);
   assert.doesNotMatch(render({}), /class="banner"/);
+});
+
+test("an unconfirmed account set-up for agents shows its own banner whose Check again reads it", () => {
+  const markup = render({ profileCheck: { busy: false } });
+  assert.match(markup, /We couldn&#x27;t confirm an account&#x27;s set-up for agents\. Account, pool and project changes wait until it&#x27;s checked\./);
+  assert.match(markup, />Check again<\/button>/);
+  assert.doesNotMatch(markup, />Retry<\/button>/);
+  assert.match(render({ profileCheck: { busy: true } }), /Checking\.\.\./);
+  assert.doesNotMatch(render({ profileCheck: null }), /set-up for agents/);
 });
 
 test("routes reach Settings tabs and the project screens", () => {
@@ -136,6 +151,26 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   const unknown = setupSteps({ kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" }, { kind: "not_ready" });
   assert.equal(unknown.visible, true);
   assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
+});
+
+test("Get set up stays hidden until every read it uses has settled, so Home never flashes it", () => {
+  const harnesses = ok([harness("codex", "ready")]);
+  const loading = { kind: "loading" };
+  const failed = { kind: "error", message: "The engine is busy." };
+  assert.equal(setupSteps(loading, ok([]), harnesses, toolsReady).visible, false);
+  assert.equal(setupSteps(ok([]), loading, harnesses, toolsReady).visible, false);
+  assert.equal(setupSteps(ok([]), ok([]), loading, toolsReady).visible, false);
+  assert.equal(setupSteps(ok([]), ok([]), harnesses, loading).visible, false);
+  assert.equal(setupSteps(loading, loading, loading, loading).visible, false);
+  assert.equal(setupSteps(ok([]), ok([]), harnesses, toolsReady).visible, true);
+  assert.equal(setupSteps(failed, ok([]), harnesses, toolsReady).visible, true);
+  const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), harnesses, onRetryProjects: () => {} };
+  const waiting = renderToStaticMarkup(createElement(HomeView, { ...props, accounts: loading, pools: loading, tools: loading }));
+  assert.doesNotMatch(waiting, /Get set up|with-setup/);
+  assert.match(waiting, /Harbor/);
+  const settled = renderToStaticMarkup(createElement(HomeView, { ...props, accounts: ok([]), pools: ok([]), tools: toolsReady }));
+  assert.match(settled, /class="home with-setup"/);
+  assert.match(settled, /<h2>Get set up<\/h2>/);
 });
 
 test("Add an account is done only when an account is ready for agents, and says which; otherwise it links to Accounts", () => {
@@ -198,7 +233,7 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
     const checking = item(tools);
     assert.equal(checking.done, false);
     assert.equal(checking.body, "Checking tmux, uv and graphify on this computer.");
-    assert.equal(steps(tools).visible, true);
+    assert.equal(steps(tools).visible, tools.kind !== "loading", "a read still loading hides the panel; tools still being checked keep it");
   }
   assert.equal(item(toolsRead({ state: "installing" }, found, missing)).body, "Setup is installing the tools. This updates when it finishes.");
   assert.equal(item(toolsRead(found, found, found, { running: true })).done, true);
@@ -219,14 +254,13 @@ test("Home keeps the Get set up panel with Set up tools after a skipped tools st
   assert.match(skipped, /graphify isn&#x27;t installed\./);
   assert.match(skipped, /<a class="btn small" href="#\/settings\/pack">Set up tools<\/a>/);
   const checking = renderToStaticMarkup(createElement(HomeView, { ...props, tools: { kind: "loading" } }));
-  assert.match(checking, /Checking tmux, uv and graphify on this computer\./);
-  assert.doesNotMatch(checking, /Couldn&#x27;t check|role="alert"/);
+  assert.doesNotMatch(checking, /Get set up|with-setup|Couldn&#x27;t check|role="alert"/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(HomeView, { ...props, tools: toolsReady })), /Get set up/);
 });
 
 test("Home shows the empty state, setup panel and Needs you from real reads only", () => {
   const accounts = ok(Array.from({ length: 5 }, (_, index) => account({ id: `a${index}`, name: `Claude ${index}`, status: "not_signed_in", status_label: "Not signed in" })));
-  const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, tools: { kind: "loading" }, onRetryProjects: () => {} }));
+  const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, tools: { kind: "not_ready" }, onRetryProjects: () => {} }));
   assert.match(markup, /<h2>No projects yet<\/h2>/);
   assert.match(markup, /Create a project and agents start the research you pick\./);
   assert.match(markup, /<h2>Get set up<\/h2>/);
@@ -328,6 +362,15 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   assert.equal(new Set(needs.all.map((row) => row.key)).size, 4);
   assert.deepEqual(needsYou(accounts, projects, new Map(), { kind: "not_ready" }).all.map((row) => row.text), ["Claude 1 isn't signed in."]);
   assert.equal(needsYou({ kind: "loading" }).total, 0);
+  const alerts = new Map([["p 2", 2], ["p1", 1], ["gone", 4], ["quiet", 0]]);
+  const told = needsYou(accounts, projects, new Map(), ok([]), alerts);
+  assert.deepEqual(told.all.map((row) => [row.project, row.text, row.action, row.href]), [
+    ["Harbor Notes", "1 new team notification.", "Open conversation", "#/projects/p1/conversation"],
+    ["Quayside", "2 new team notifications.", "Open conversation", "#/projects/p%202/conversation"],
+    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=a1"],
+  ]);
+  assert.equal(told.total, 3);
+  assert.equal(new Set(told.all.map((row) => row.key)).size, 3);
 
   const markup = renderToStaticMarkup(createElement(HomeView, {
     projects: ok(projects), accounts, pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
@@ -339,6 +382,12 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   assert.match(markup, /<strong>Harbor Notes<\/strong> 2 suggested memories to review\./);
   assert.doesNotMatch(markup, /1 suggested memory to review/);
   assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">Show all \(4\)<\/button>/);
+  const alerted = renderToStaticMarkup(createElement(HomeView, {
+    projects: ok(projects), accounts, pools: ok([]), harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {}, activity, suggestions, alerts,
+  }));
+  assert.match(alerted, /<strong>Harbor Notes<\/strong> 1 new team notification\./);
+  assert.match(alerted, /<a class="btn small" href="#\/projects\/p%202\/conversation">Open conversation<\/a>/);
+  assert.match(alerted, /Show all \(6\)/);
 });
 
 test("each project gets its own page, so a switch never keeps the last project's ticket or name", async () => {
@@ -362,4 +411,41 @@ test("each project's onboarding review and settings get their own page, so a swi
   assert.equal(review("beta").key, "beta");
   const settings = (id) => Screen({ route: { name: "project", id, tab: "settings" }, session: session({ projects }) });
   assert.notEqual(settings("alpha").key, settings("beta").key);
+});
+
+test("Home, the sidebar and Go to keep every project up to the bound and say when more exist", async () => {
+  const { PROJECT_LIST_MAX } = await import("../src/api.ts");
+  const rows = (count) => Array.from({ length: count }, (_, at) => ({ id: `p-${at + 1}`, name: `Project ${at + 1}`, repository_count: 0 }));
+  const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  assert.equal(PROJECT_LIST_MAX, 200);
+  assert.match(source("src-tauri/src/bridge.rs"), new RegExp(`pub const PROJECT_LIST_MAX: usize = ${PROJECT_LIST_MAX};`));
+  const body = (text, name) => text.slice(text.indexOf(`function ${name}(`), text.indexOf("\n}\n", text.indexOf(`function ${name}(`)));
+  assert.match(body(source("src/api.ts"), "listProjects"), /call<ProjectList>\("desktop_project_list"\)/);
+  for (const name of ["loadProjects", "projectsUsing"]) {
+    const reader = body(source("src/api-projects.ts"), name);
+    assert.match(reader, /projectList\(\)/, `${name} reads the one-call list`);
+    assert.doesNotMatch(reader, /\bprojects\(/, `${name} never walks the shared page cursor`);
+  }
+
+  const twenty = render({ projects: ok(rows(20)) });
+  for (const at of [1, 17, 20]) assert.match(twenty, new RegExp(`<span class="name">Project ${at}</span>`));
+  assert.doesNotMatch(twenty, /Showing the first/);
+  const bounded = render({ projects: ok(rows(200)), projectsMore: true });
+  assert.match(bounded, /role="status">Showing the first 200 projects\. The rest are not listed here, in the sidebar or in Go to\.<\/p>/);
+});
+
+test("project names show direction and hidden characters as escapes in the sidebar, Home cards and Needs you", () => {
+  const name = "invoice‮fdp.exe";
+  const markup = render({ projects: ok([{ id: "p-1", name, repository_count: 0 }]) });
+  assert.match(markup, /<span class="name">invoice\\u202efdp\.exe<\/span>/);
+  assert.match(markup, /<h3 class="ellipsis">invoice\\u202efdp\.exe<\/h3>/);
+  assert.ok(!markup.includes("‮"), markup);
+  const needs = renderToStaticMarkup(createElement(HomeView, {
+    projects: ok([{ id: "p-1", name, repository_count: 0 }]), alerts: new Map([["p-1", 1]]), onRetryProjects: () => {},
+    accounts: ok([]), pools: ok([]), harnesses: ok([]), tools: ok({ dependencies: [], pack: [], running: false }),
+  }));
+  assert.match(needs, /<strong>invoice\\u202efdp\.exe<\/strong> 1 new team notification\./);
+  assert.ok(!needs.includes("‮"), needs);
+  const plain = render({ projects: ok([{ id: "p-2", name: "Harbor Notes 👩‍💻", repository_count: 0 }]) });
+  assert.match(plain, /<span class="name">Harbor Notes 👩‍💻<\/span>/);
 });
