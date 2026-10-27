@@ -562,7 +562,9 @@ fn accept_moves_the_branch_only_by_compare_and_swap() {
         moved,
         "a refused compare-and-swap moved the branch"
     );
-    match landing::accept(&db, &fx.owner_home, &id, &expected, None).expect("accept at the real tip") {
+    match landing::accept(&db, &fx.owner_home, &id, &expected, None)
+        .expect("accept at the real tip")
+    {
         landing::AcceptOutcome::Landed { commit, branch } => {
             assert_eq!(branch, "main");
             assert_eq!(fx.head(), commit, "the branch moved to the squash commit");
