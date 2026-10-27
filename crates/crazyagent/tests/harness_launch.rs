@@ -1,10 +1,11 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
-use crazyagent::model_gateway::relay::is_placeholder;
+use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -140,7 +141,7 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
 }
 
 #[test]
-fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_relay_token() {
+fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_from_a_file() {
     let home = private_dir("ca-launch-home-");
     let work = private_dir("ca-launch-work-");
     let keyed = || AccountBinding::ApiKey {
@@ -148,6 +149,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         key: Secret::new(DUMMY_KEY.into()).unwrap(),
         base_url: None,
     };
+    let key_file = home.path().join(KEY_FILE);
     for harness in ["codex", "claude-code"] {
         assert_eq!(
             command(&request(harness, home.path(), work.path(), keyed()))
@@ -162,27 +164,29 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         let built = command(&routed).unwrap();
         let variables = environment(&built);
         let arguments = arguments(&built);
-        for text in arguments.iter().chain(variables.values()) {
-            assert!(!text.contains(DUMMY_KEY), "{harness}");
-        }
+        no_key_in(&arguments, &variables, harness);
+        assert!(!variables.contains_key("ANTHROPIC_API_KEY"), "{harness}");
+        assert!(!variables.contains_key("CRAZYAGENT_API_KEY"), "{harness}");
         if harness == "codex" {
-            assert_eq!(
-                variables.get("CRAZYAGENT_API_KEY").map(String::as_str),
-                Some(relay.token())
-            );
             assert_eq!(
                 relay.base_url(),
                 format!("http://127.0.0.1:{}/v1", relay.port())
             );
             let provider = format!(
-                "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{}\",wire_api=\"responses\",env_key=\"CRAZYAGENT_API_KEY\"}}",
-                relay.base_url()
+                "model_providers.crazyagent={{name=\"CrazyAgent\",base_url=\"{}\",wire_api=\"responses\",auth={{command=\"/bin/cat\",args=[\"{}\"]}}}}",
+                relay.base_url(),
+                key_file.display()
             );
             assert!(arguments.contains(&provider), "{arguments:?}");
         } else {
+            let at = arguments
+                .iter()
+                .position(|argument| argument == "--settings");
+            let settings: serde_json::Value =
+                serde_json::from_str(&arguments[at.unwrap() + 1]).unwrap();
             assert_eq!(
-                variables.get("ANTHROPIC_API_KEY").map(String::as_str),
-                Some(relay.token())
+                settings["apiKeyHelper"],
+                format!("/bin/cat '{}'", key_file.display())
             );
             assert_eq!(
                 variables.get("ANTHROPIC_BASE_URL"),
@@ -213,6 +217,72 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         Some("launch_key_relay_unsupported")
     );
     assert!(!format!("{:?}", Secret::new(DUMMY_KEY.into()).unwrap()).contains(DUMMY_KEY));
+}
+
+fn no_key_in(arguments: &[String], variables: &BTreeMap<String, String>, kind: &str) {
+    for text in arguments
+        .iter()
+        .chain(variables.keys())
+        .chain(variables.values())
+    {
+        assert!(!text.contains(DUMMY_KEY), "{kind}: {text}");
+        assert!(!text.contains(TOKEN_PREFIX), "{kind}: {text}");
+    }
+}
+
+/// Builds every command a keyed account can launch: the piped harnesses masters and headless
+/// team agents run, with and without tools, and the interactive apps team agents and research
+/// jobs run in panes. Research accounts carry no key at all. No argument or variable of any
+/// of them holds the relay token or the provider key.
+#[test]
+fn no_launch_command_kind_carries_a_relay_token_or_a_provider_key() {
+    let home = private_dir("ca-launch-home-");
+    let work = private_dir("ca-launch-work-");
+    for harness in ["codex", "claude-code"] {
+        for tools in [false, true] {
+            let mut keyed = request(
+                harness,
+                home.path(),
+                work.path(),
+                AccountBinding::ApiKey {
+                    home: home.path().to_path_buf(),
+                    key: Secret::new(DUMMY_KEY.into()).unwrap(),
+                    base_url: None,
+                },
+            );
+            keyed.tools = tools;
+            let (routed, relay) = route(keyed).unwrap();
+            let relay = relay.unwrap();
+            let piped = command(&routed).unwrap();
+            no_key_in(
+                &arguments(&piped),
+                &environment(&piped),
+                &format!("piped {harness} tools {tools}"),
+            );
+            let key_file = interactive::write_key(
+                home.path(),
+                &Secret::new(relay.token().to_owned()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(&key_file).unwrap(), relay.token());
+            let session = interactive::session_id().unwrap();
+            let pane = interactive::command(
+                &routed,
+                None,
+                &Run {
+                    session_id: &session,
+                    key_file: Some(&key_file),
+                },
+            )
+            .unwrap();
+            no_key_in(
+                &pane.argv,
+                &pane.env.iter().cloned().collect(),
+                &format!("pane {harness} tools {tools}"),
+            );
+            std::fs::remove_file(&key_file).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -721,6 +791,48 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
             "{harness}: {seen:?}"
         );
         session.stop().unwrap();
+    }
+}
+
+#[test]
+fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file() {
+    let _owner = LOCAL_MODEL_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (harness, base_url) in [("codex", OLLAMA_OPENAI), ("claude-code", OLLAMA_ANTHROPIC)] {
+        let home = private_dir("ca-launch-keyed-");
+        let work = private_dir("ca-launch-work-");
+        let mut session = Session::start(request(
+            harness,
+            home.path(),
+            work.path(),
+            AccountBinding::Url {
+                home: home.path().to_path_buf(),
+                base_url: base_url.into(),
+                key: Some(Secret::new(DUMMY_KEY.into()).unwrap()),
+            },
+        ))
+        .unwrap();
+        let key_file = home.path().join(KEY_FILE);
+        assert!(
+            is_placeholder(&std::fs::read_to_string(&key_file).unwrap()),
+            "{harness}"
+        );
+        assert_eq!(
+            std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (text, events) = run_turn(&mut session, "Reply with one short greeting.");
+        assert!(
+            events.contains(&LaunchEvent::TurnFinished { success: true }),
+            "{harness}: {events:?}"
+        );
+        assert!(!text.trim().is_empty(), "{harness}: {events:?}");
+        session.stop().unwrap();
+        assert!(
+            !key_file.exists(),
+            "{harness}: the key file ends with its session"
+        );
     }
 }
 
