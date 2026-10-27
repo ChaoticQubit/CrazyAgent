@@ -202,8 +202,9 @@ function SetupPanel({ items }: { items: SetupItem[] }) {
 }
 
 function ProjectCard({ project, activity }: { project: ProjectRow; activity: CardActivity | undefined }) {
-  return <a className="project-card" href={formatRoute({ name: "project", id: project.id, tab: "overview" })} aria-label={project.name}>
-    <span className="title-row"><Icon name="folder" /><h3 className="ellipsis">{displayText(project.name)}</h3></span>
+  const name = displayText(project.name);
+  return <a className="project-card" href={formatRoute({ name: "project", id: project.id, tab: "overview" })} aria-label={name}>
+    <span className="title-row"><Icon name="folder" /><h3 className="ellipsis">{name}</h3></span>
     {activity?.research && <span className={`activity${activity.waiting ? " warn" : ""}`}><Icon name="search" size={14} />{activity.research}</span>}
     {activity?.agents && <span className="activity"><Icon name="bot" size={14} />{activity.agents}</span>}
     <span className="meta"><span>Open project</span><Icon name="chevron-right" size={14} /></span>
