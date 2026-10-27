@@ -224,11 +224,7 @@ impl ProjectPage {
             self.live_shown = false;
             return None;
         }
-        let live = self.screen.setup.as_ref().is_some_and(|setup| {
-            crate::harnesses::interactive::support(&setup.team.master)
-                == crate::harnesses::interactive::Support::Terminal
-        });
-        if !live || self.live_shown {
+        if !self.screen.live_master() || self.live_shown {
             return None;
         }
         self.live_shown = true;
@@ -799,6 +795,10 @@ impl ProjectPage {
                 Flow::Handled
             }
             ProjectReply::Team => Flow::Open(Place::Team {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
+            ProjectReply::Master => Flow::Open(Place::Master {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),

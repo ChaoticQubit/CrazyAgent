@@ -937,7 +937,13 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
                 .map(|s| harness_name(&s.team.master, None))
         })
         .unwrap_or_else(|| "Master".into());
-    let mut head = Row::of("Master", look.heading).push(format!("  {master}"), look.fg);
+    let live = screen.live_master();
+    let title = if live {
+        "Earlier conversation"
+    } else {
+        "Master"
+    };
+    let mut head = Row::of(title, look.heading).push(format!("  {master}"), look.fg);
     let status = if !screen.pool_ready {
         MasterStatus::NotReady
     } else if !assigned {
@@ -961,12 +967,46 @@ fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look
             look.muted,
         );
     }
-    let mut lines = vec![
-        spread(content, head, master_status(&status, look)),
-        Row::default(),
-    ];
+    let badge = if live {
+        Row::of("Read-only", look.muted)
+    } else {
+        master_status(&status, look)
+    };
+    let mut lines = vec![spread(content, head, badge), Row::default()];
     let available = room.saturating_sub(4);
-    let (body, top, input, help): (Vec<Row>, bool, Row, Help) = if !screen.pool_ready {
+    let (body, top, input, help): (Vec<Row>, bool, Row, Help) = if live {
+        let earlier = screen
+            .transcript
+            .as_ref()
+            .filter(|transcript| !transcript.messages.is_empty());
+        let body = match earlier {
+            Some(transcript) => transcript_lines(transcript, content, screen.now_ms, look),
+            None => std::iter::once(Row::of("No earlier conversation.", look.fg))
+                .chain(
+                    wrap_words(
+                        "Messages sent to the master before it ran live stay here to read.",
+                        content,
+                    )
+                    .into_iter()
+                    .map(|line| Row::of(line, look.fg)),
+                )
+                .collect(),
+        };
+        (
+            body,
+            earlier.is_none(),
+            Row::of(
+                "> The master runs live in its terminal. Enter opens it.",
+                look.muted,
+            ),
+            vec![
+                ("Enter", "Live master"),
+                ("PgUp", "Scroll"),
+                TABS,
+                ("Esc", "Home"),
+            ],
+        )
+    } else if !screen.pool_ready {
         (
             vec![Row::of(
                 "The master conversation is not ready yet in this window.",

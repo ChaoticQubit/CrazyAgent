@@ -611,7 +611,10 @@ impl Screen for Team {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.focus == Focus::Terminal && self.master {
-            return vec![hint("Ctrl-]", "Back"), hint("Ctrl-J", "New line")];
+            return vec![
+                hint("Ctrl-]", "Earlier conversation"),
+                hint("Ctrl-J", "New line"),
+            ];
         }
         if self.focus == Focus::Terminal {
             return vec![hint("Ctrl-]", "Back to the team")];
@@ -626,7 +629,7 @@ impl Screen for Team {
                 hints.push(hint("Enter", "Terminal"));
             }
             hints.push(hint("r", "Refresh"));
-            hints.push(hint("Esc", "Back"));
+            hints.push(hint("Esc", "Earlier conversation"));
             return hints;
         }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);

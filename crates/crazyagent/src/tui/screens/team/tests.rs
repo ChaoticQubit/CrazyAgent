@@ -878,7 +878,11 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     });
     let rows = render(&mut shell);
     assert_eq!(chars(&rows[3], 3, 77), format!("{:<74}", "> what next?"));
-    assert!(rows[23].contains("Ctrl-] Back"), "{}", rows[23]);
+    assert!(
+        rows[23].contains("Ctrl-] Earlier conversation"),
+        "{}",
+        rows[23]
+    );
     assert!(rows[23].contains("Ctrl-J New line"), "{}", rows[23]);
 
     for (key, bytes) in [
@@ -1046,4 +1050,17 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
             "task {id} points at Sub-agent {agent}:\n{text}"
         );
     }
+}
+
+#[test]
+fn the_master_view_names_its_way_back_as_the_earlier_conversation() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    let rows = render(&mut shell);
+    assert!(
+        rows[23].contains("Esc Earlier conversation"),
+        "{}",
+        rows[23]
+    );
+    assert!(!rows[23].contains("Esc Back"), "{}", rows[23]);
 }
