@@ -24,6 +24,8 @@ pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
 pub use transport::process::{AgentInstructions, PROCESS_CODES, ProcessText, SavedText};
+pub use transport::questions::QUESTIONS_CODES;
+pub use transport::recovery::RECOVERY_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
@@ -595,6 +597,9 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    IdeAsks {
+        project_id: ProjectId,
+    },
     ProjectFiles {
         project_id: ProjectId,
         query: String,
@@ -701,6 +706,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::IdeAsks { .. }
             | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
@@ -1062,6 +1068,9 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    IdeAsks {
+        entries: Vec<crate::memory::KnowledgeEntry>,
     },
     ProjectFiles {
         project_id: ProjectId,

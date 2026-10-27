@@ -47,6 +47,8 @@ pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
+pub(crate) mod questions;
+pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -1110,6 +1112,17 @@ impl OwnerRuntimeHandle {
         })
     }
 
+    /// Runs one domain command in this engine for the IDE bridge while the server is
+    /// usable; the bridge only builds commands for its capability's own project.
+    /// Input: the request. Output: the engine's reply, or `ide_unavailable`.
+    pub(crate) async fn ide_apply(
+        &self,
+        request: crate::protocol::WireRequest,
+    ) -> Result<crate::protocol::WireReply, EngineError> {
+        self.ide()?;
+        self.engine.apply(request).await
+    }
+
     /// This owner server's IDE capability grants, whether or not it still runs, so a
     /// capability can be revoked after the server stopped. Input: none. Output: the grants.
     pub(crate) fn ide_grants(&self) -> &crate::ide::bridge::Grants {
@@ -1368,6 +1381,9 @@ impl OwnerServer {
     }
 
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        if let Ok(root) = changes::engine_root(&self.authority) {
+            crate::ide::fetch::on_engine_start(&root);
+        }
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
         let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
@@ -1967,6 +1983,8 @@ enum Protocol {
     Changes,
     Cleanup,
     Usage,
+    Recovery,
+    Questions,
     NativeAuth,
     Process,
     Owner,
@@ -1994,6 +2012,8 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
+        ("recovery", Protocol::Recovery),
+        ("questions", Protocol::Questions),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
     ];
@@ -2066,6 +2086,20 @@ async fn serve_admitted(
                 return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
                     .await
                     .map_err(|_| failure("usage_outcome_unknown"))?
+                    .map(|()| None);
+            }
+            Protocol::Recovery => {
+                let served = recovery::serve(stream, engine, authority, auth, &a, body);
+                return tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served)
+                    .await
+                    .map_err(|_| failure("recovery_outcome_unknown"))?
+                    .map(|()| None);
+            }
+            Protocol::Questions => {
+                let served = questions::serve(stream, engine, authority, auth, &a, body);
+                return tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served)
+                    .await
+                    .map_err(|_| failure("questions_outcome_unknown"))?
                     .map(|()| None);
             }
             Protocol::NativeAuth => {
@@ -2305,6 +2339,8 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
+        Protocol::Recovery => recovery::refusal(code)?,
+        Protocol::Questions => questions::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         #[cfg(test)]
