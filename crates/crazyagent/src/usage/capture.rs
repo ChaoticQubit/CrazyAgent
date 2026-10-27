@@ -17,6 +17,7 @@ const NAME_BYTES_MAX: usize = 128;
 const AGENT_BYTES_MAX: usize = NAME_BYTES_MAX + 64;
 const WALK_DEPTH_MAX: usize = 3;
 const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
+const FINISHED_RUNS_PER_SCAN: i64 = 64;
 const LINE_TOKENS_MAX: u64 = 1_000_000_000;
 const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 
@@ -635,7 +636,8 @@ pub fn register_run(
     Ok(())
 }
 
-/// Counts what the records of every run registered in the last day gained.
+/// Counts what the records of every run registered in the last day gained, then forgets
+/// runs past that day whose home is gone, with their record progress.
 /// Inputs: the store, the pool lookup by project and account, and the time.
 /// Output: the tokens added, or `usage_unavailable`.
 pub fn scan_runs(
@@ -699,7 +701,45 @@ pub fn scan_runs(
             now_ms,
         )?);
     }
+    forget_finished_runs(db, now_ms)?;
     Ok(added)
+}
+
+/// Forgets up to `FINISHED_RUNS_PER_SCAN` runs, picked at random among those past their day,
+/// whose home is gone: first the progress of their records, then the run. A home that is still
+/// there keeps both, so a run registered on it again never counts its records twice. Counted
+/// tokens stay. Inputs: the store and the time. Output: done, or `usage_unavailable`.
+fn forget_finished_runs(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
+    let ended = now_ms - RUN_SCAN_MS;
+    let homes: Vec<String> = {
+        let mut statement = db
+            .prepare("SELECT home FROM usage_runs WHERE started_ms<?1 ORDER BY random() LIMIT ?2")
+            .map_err(storage)?;
+        statement
+            .query_map(params![ended, FINISHED_RUNS_PER_SCAN], |row| row.get(0))
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?
+    };
+    assert!(homes.len() <= FINISHED_RUNS_PER_SCAN as usize);
+    for home in homes {
+        let gone = std::fs::symlink_metadata(&home)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if !gone {
+            continue;
+        }
+        db.execute(
+            "DELETE FROM usage_files WHERE substr(path,1,length(?1))=?1",
+            params![format!("{home}/")],
+        )
+        .map_err(storage)?;
+        db.execute(
+            "DELETE FROM usage_runs WHERE home=?1 AND started_ms<?2",
+            params![home, ended],
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
 }
 
 fn checked_attribution(attribution: &Attribution) -> Result<(), EngineError> {
