@@ -133,7 +133,8 @@ fn occupy_storage(owner: &Usage) -> (PathBuf, oneshot::Receiver<Result<(), Engin
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revocation_waits_for_a_cleanup_removal_in_flight_and_refuses_the_next() {
+async fn a_cleanup_removal_runs_without_the_owner_barrier_and_a_revoked_client_removes_nothing_after()
+ {
     let owner = Usage::start().await;
     let runtime = owner.runtime();
     let held = crate::landing::open(&owner.engine_root).unwrap();
@@ -150,36 +151,47 @@ async fn a_revocation_waits_for_a_cleanup_removal_in_flight_and_refuses_the_next
         "the removal waits behind the held write"
     );
     assert!(
-        runtime.engine.owner_egress.try_write().is_err(),
-        "the removal holds the owner barrier while it waits"
-    );
-    let mut revoke = Box::pin(runtime.control(revocation(
-        runtime,
-        OwnerClientKind::Tui,
-        "revoke-during-cleanup",
-    )));
-    assert!(
-        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
-        "a revocation waits for the removal already in flight"
+        runtime.engine.owner_egress.try_write().is_ok(),
+        "a removal in flight leaves the owner barrier to other requests and revocations"
     );
     held.execute_batch("ROLLBACK").unwrap();
     assert_eq!(
         removal.await.unwrap_err().0,
         "cleanup_agent_not_found",
-        "the removal admitted before the revocation answers its own outcome"
+        "the removal answers its own outcome"
     );
-    assert!(!revoke.await.unwrap().active);
+    drop(held);
 
+    let revoked = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.control(revocation(
+            runtime,
+            OwnerClientKind::Tui,
+            "revoke-after-cleanup",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!revoked.active);
+    assert!(
+        owner
+            .client
+            .remove_finished_agents(project.clone(), vec![7])
+            .await
+            .is_err(),
+        "the revoked client removes nothing"
+    );
     assert!(
         owner.client.finished_agents(project).await.is_err(),
         "the revoked client reads no more finished agents"
     );
-    drop(held);
     owner.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revocation_waits_for_a_change_set_discard_in_flight_and_refuses_the_next() {
+async fn a_change_set_discard_runs_without_the_owner_barrier_and_a_revoked_client_changes_nothing_after()
+ {
     let owner = Usage::start().await;
     let runtime = owner.runtime();
     let (id, head) = pending_change_set(&owner);
@@ -191,29 +203,43 @@ async fn a_revocation_waits_for_a_change_set_discard_in_flight_and_refuses_the_n
         "the discard waits behind the held write"
     );
     assert!(
-        runtime.engine.owner_egress.try_write().is_err(),
-        "the discard holds the owner barrier while it waits"
-    );
-    let mut revoke = Box::pin(runtime.control(revocation(
-        runtime,
-        OwnerClientKind::Tui,
-        "revoke-during-discard",
-    )));
-    assert!(
-        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
-        "a revocation waits for the discard already in flight"
+        runtime.engine.owner_egress.try_write().is_ok(),
+        "a discard in flight leaves the owner barrier to other requests and revocations"
     );
     held.execute_batch("ROLLBACK").unwrap();
     discard
         .await
         .unwrap_or_else(|error| panic!("the held discard answered {}", error.0));
-    assert!(!revoke.await.unwrap().active);
+    drop(held);
 
+    let revoked = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.control(revocation(
+            runtime,
+            OwnerClientKind::Tui,
+            "revoke-after-discard",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!revoked.active);
     assert!(
-        owner.client.restore_changes(id).await.is_err(),
+        owner.client.restore_changes(id.clone()).await.is_err(),
         "the revoked client restores nothing"
     );
-    drop(held);
+    let db = crate::landing::open(&owner.engine_root).unwrap();
+    let project = ProjectId::new("project-1").unwrap();
+    let state = crate::landing::list(&db, &project)
+        .unwrap()
+        .into_iter()
+        .find(|set| set.id == id)
+        .map(|set| set.state);
+    assert_eq!(
+        state,
+        Some(crate::landing::ChangeState::Discarded),
+        "the refused restore left the change set discarded"
+    );
     owner.stop().await;
 }
 
