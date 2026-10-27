@@ -675,8 +675,11 @@ pub(crate) fn ask_rule(reach: AskReach) -> String {
             "The owner's answer or dismissal comes to you once as a message from the owner. If the owner answers you here in chat instead, record it with `{}`, naming the question, its version and the owner's turn.",
             crate::team::tool::RECORD_TOOL
         ),
-        AskReach::ReplyEnd => "The engine logs your questions when your reply ends, and the owner's answer or dismissal comes back to you once on a later turn.".to_owned(),
-        AskReach::SubAgent => "Your master sees your questions too, and the owner's answer or dismissal reaches you once through your master.".to_owned(),
+        AskReach::ReplyEnd => format!(
+            "The engine logs your questions when your reply ends, and the owner's answer or dismissal comes back to you on a later turn; after a turn that failed it can come again, so act on it once. Each turn lists your questions still open. If the owner answers one in chat instead, record it with `{}`, naming the question, version 0 and the owner's message number that list gives.",
+            crate::team::tool::RECORD_TOOL
+        ),
+        AskReach::SubAgent => "Your master sees your questions too, and CrazyAgent types the owner's answer or dismissal into your terminal once.".to_owned(),
     };
     let rule = format!(
         "\n## Asking the owner\n\nAsk the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the one you recommend in `recommended`, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",

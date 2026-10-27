@@ -130,6 +130,12 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
                 json!({"question": "Which day?", "options": ["Friday"], "recommended": "Sunday"}),
             ),
             ask_line(4, ASK_TOOL, json!({"question": "Which day?", "id": 3})),
+            ask_line(
+                5,
+                RECORD_TOOL,
+                json!({"question": 3, "version": 0, "owner_turn": 41}),
+            ),
+            ask_line(6, RECORD_TOOL, json!({"question": 3, "answer": "Yes"})),
         ]),
         &mut output,
         &drop,
@@ -142,15 +148,32 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, [super::super::TOOL_NAME, ASK_TOOL]);
+    assert_eq!(names, [super::super::TOOL_NAME, ASK_TOOL, RECORD_TOOL]);
     assert_eq!(answered[0]["result"]["tools"][1], super::super::ask_tool());
+    assert_eq!(
+        answered[0]["result"]["tools"][2],
+        super::super::record_tool()
+    );
     assert_eq!(text(&answered[1]), (ASK_LOGGED, false));
     let (refused, error) = text(&answered[2]);
     assert!(error && refused.starts_with("Not asked"), "{refused}");
     let (refused, error) = text(&answered[3]);
     assert!(error && refused.starts_with("Not asked"), "{refused}");
+    assert_eq!(text(&answered[4]), (RECORD_TAKEN, false));
+    let (refused, error) = text(&answered[5]);
+    assert!(error && refused.starts_with("Not recorded"), "{refused}");
 
-    assert_eq!(take_asks(&drop), [shipped()]);
+    assert_eq!(
+        take_asks(&drop),
+        [
+            shipped(),
+            Call::RecordAnswer {
+                question: 3,
+                version: 0,
+                owner_turn: 41
+            }
+        ]
+    );
     assert!(!ask_file(&drop).exists(), "taking clears the record");
     assert!(take_asks(&drop).is_empty(), "a question is taken once");
     assert!(
@@ -160,7 +183,7 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
 }
 
 #[test]
-fn one_reply_records_at_most_four_questions() {
+fn one_reply_records_at_most_eight_question_calls() {
     let case = Case::new();
     let drop = case.drop_file();
     for _ in 0..ASKS_PER_REPLY_MAX {
@@ -239,7 +262,7 @@ fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
     let (logged, error) = text(&answered[4]);
     assert!(!error, "{logged}");
     assert!(logged.starts_with("Question 1 is logged"), "{logged}");
-    assert!(logged.contains("through your master"));
+    assert!(logged.contains("types the owner's answer or dismissal into your terminal"));
 
     let pending = crate::questions::pending(&case.db, &case.project).unwrap();
     assert_eq!(pending.len(), 1);
@@ -342,4 +365,183 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
     assert_eq!(carried, [1, 2], "the third waits for a later turn");
     assert!(lines.len() <= NOTES_BYTES_MAX);
     assert_eq!(lines.matches("Engine: ").count(), 2);
+}
+
+/// Logs a plain question for `asker` straight into the store and returns its id.
+fn asked(case: &Case, asker: &Asker, question: &str) -> u64 {
+    let ask = crate::questions::Ask {
+        question: question.into(),
+        options: Vec::new(),
+        recommended: None,
+        context: None,
+    };
+    crate::questions::ask(&case.db, &case.project, asker, &ask).unwrap()
+}
+
+/// Writes one question call into the drop file as the master's tool server does.
+fn called(drop: &Path, name: &str, arguments: Value) {
+    let params = json!({"name": name, "arguments": arguments});
+    let (said, refused) = drop_call(Some(&params), drop).unwrap();
+    assert!(!refused, "{said}");
+}
+
+fn open_ids(case: &Case) -> Vec<u64> {
+    crate::questions::pending(&case.db, &case.project)
+        .unwrap()
+        .iter()
+        .map(|question| question.id)
+        .collect()
+}
+
+#[test]
+fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owner() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let master = Asker::Master(41);
+    let renamed = asked(&case, &master, "Rename the app?");
+    let tx = case.db.unchecked_transaction().unwrap();
+    let owner = crate::team::append_message(
+        &tx,
+        &case.project,
+        crate::team::MessageAuthor::Owner,
+        "Yes, rename it.",
+        crate::team::MessageState::Answered,
+        crate::team::now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+
+    called(&drop, ASK_TOOL, shipping());
+    called(
+        &drop,
+        RECORD_TOOL,
+        json!({"question": renamed, "version": 0, "owner_turn": owner}),
+    );
+    called(
+        &drop,
+        RECORD_TOOL,
+        json!({"question": 999, "version": 0, "owner_turn": owner}),
+    );
+    assert_eq!(
+        apply_master_calls(&case.db, &case.project, 41, &drop),
+        ["Your record of question 999 was not taken: you asked no such question in this project."]
+    );
+    assert!(take_asks(&drop).is_empty(), "the calls are taken once");
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    assert_eq!(open.len(), 1, "the renamed question is answered");
+    assert_eq!(open[0].question, "Ship the release on Friday?");
+    assert_eq!(open[0].asker, master.name());
+
+    for n in 1..crate::questions::PENDING_PER_ASKER_MAX {
+        asked(&case, &master, &format!("Question {n}?"));
+    }
+    called(&drop, ASK_TOOL, json!({"question": "One more?"}));
+    assert_eq!(
+        apply_master_calls(&case.db, &case.project, 41, &drop),
+        [
+            "Your question \"One more?\" was not logged for the owner: 8 of your questions are still open."
+        ]
+    );
+    assert!(apply_master_calls(&case.db, &case.project, 41, &drop).is_empty());
+}
+
+#[test]
+fn a_conversation_master_records_only_from_its_turns_owner_message_and_before_new_questions() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let session = SessionId::new("session-1").unwrap();
+    let older = asked(&case, &Asker::Session(session.clone()), "Rename the app?");
+    let fresh = older + 1;
+
+    called(&drop, ASK_TOOL, shipping());
+    called(
+        &drop,
+        RECORD_TOOL,
+        json!({"question": fresh, "version": 0, "owner_turn": 5}),
+    );
+    called(
+        &drop,
+        RECORD_TOOL,
+        json!({"question": older, "version": 0, "owner_turn": 4}),
+    );
+    called(
+        &drop,
+        RECORD_TOOL,
+        json!({"question": older, "version": 0, "owner_turn": 5}),
+    );
+    assert_eq!(
+        apply_session_calls(
+            &case.db,
+            &case.project,
+            &session,
+            Some((5, "Yes, rename it.")),
+            &drop
+        ),
+        [
+            format!(
+                "Your record of question {fresh} was not taken: you asked no such question in this project."
+            ),
+            format!(
+                "Your record of question {older} was not taken: message 4 is not the owner's message of that turn."
+            ),
+        ],
+        "a question asked in the same reply is logged only after the records"
+    );
+    assert_eq!(open_ids(&case), [fresh]);
+    assert!(
+        crate::questions::session_notes(&case.db, &case.project, &session)
+            .unwrap()
+            .is_empty(),
+        "a recorded chat answer is not handed back as a note"
+    );
+
+    called(
+        &drop,
+        RECORD_TOOL,
+        json!({"question": fresh, "version": 0, "owner_turn": 6}),
+    );
+    assert_eq!(
+        apply_session_calls(&case.db, &case.project, &session, None, &drop),
+        [format!(
+            "Your record of question {fresh} was not taken: message 6 is not the owner's message of that turn."
+        )],
+        "an engine turn carries no owner message"
+    );
+    assert_eq!(open_ids(&case), [fresh]);
+}
+
+#[test]
+fn the_open_line_names_only_the_askers_open_questions_and_the_message_to_record_from() {
+    let case = Case::new();
+    let master = Asker::Master(41);
+    assert_eq!(open_line(&[], &master, Some(5)), "");
+    let first = asked(&case, &master, "Ship on\nFriday?");
+    asked(&case, &Asker::Master(42), "Rename the app?");
+    let second = asked(&case, &master, "Which \"database\"?");
+    let pending = crate::questions::pending(&case.db, &case.project).unwrap();
+    assert_eq!(open_line(&pending, &Asker::Master(43), Some(5)), "");
+    let listed = format!(
+        "Engine: Your questions still open for the owner: {first} \"Ship on Friday?\"; {second} \"Which \\\"database\\\"?\"."
+    );
+    assert_eq!(open_line(&pending, &master, None), format!("{listed}\n\n"));
+    assert_eq!(
+        open_line(&pending, &master, Some(5)),
+        format!(
+            "{listed} The owner's message below is message 5. If it answers one of them, record it with record_answer: the question's number, version 0 and owner_turn 5.\n\n"
+        )
+    );
+
+    let crowded = Asker::Master(44);
+    for _ in 0..crate::questions::PENDING_PER_ASKER_MAX {
+        asked(
+            &case,
+            &crowded,
+            &"\"".repeat(crate::questions::QUESTION_BYTES_MAX),
+        );
+    }
+    let pending = crate::questions::pending(&case.db, &case.project).unwrap();
+    let line = open_line(&pending, &crowded, Some(u64::MAX));
+    assert!(line.len() <= OPEN_LINE_BYTES_MAX, "{}", line.len());
+    assert_eq!(line.matches("; ").count(), 7);
 }

@@ -1081,6 +1081,7 @@ impl TeamRuntime {
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.serve_agent_asks(project);
+        self.tell_agent_answers(project);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         let master_live = self.master(project).is_some();
@@ -1529,13 +1530,24 @@ impl TeamRuntime {
         }
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
+        if team_tool {
+            self.log_master_asks(project, id)?;
+            let pending = crate::questions::pending(&self.connection, project).unwrap_or_default();
+            let owner_message = (author == "owner")
+                .then(|| u64::try_from(message).ok())
+                .flatten();
+            prompt.push_str(&tool::questions::open_line(
+                &pending,
+                &crate::questions::Asker::Master(id),
+                owner_message,
+            ));
+        }
         prompt.push_str(&format!("{speaker}:\n{text}"));
         if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
             return Ok(());
         }
         if team_tool {
             tool::clear(&self.tool_record(id));
-            tool::questions::clear_asks(&self.tool_record(id));
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
@@ -1836,38 +1848,74 @@ impl TeamRuntime {
         }
     }
 
-    /// Logs the questions a drop-file master asked with its `ask` tool during the reply that
-    /// just ended, each as that master's own, and notes any the store refused so the master
-    /// hears why on its next turn. Takes the project and the master's team agent id.
-    /// Returns any SQLite failure of a note.
-    fn log_master_asks(&mut self, project: &ProjectId, id: i64) -> Result<(), EngineError> {
-        let asker = crate::questions::Asker::Master(id);
-        for call in tool::questions::take_asks(&self.tool_record(id)) {
-            let tool::Call::Ask {
-                question,
-                options,
-                recommended,
-                context,
-            } = call
-            else {
-                unreachable!("take_asks returns only questions");
+    /// Types into each running sub-agent of a project how the owner settled its questions,
+    /// the owner's own words from the questions log, once each. A note the terminal does not
+    /// take stays for the next tick; a note longer than one prompt points to the master, which
+    /// has it in full. Takes the project.
+    fn tell_agent_answers(&self, project: &ProjectId) {
+        let Some(host) = self.terminal.as_deref() else {
+            return;
+        };
+        let asking: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && worker.ask_tool && !worker.stopping)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in asking {
+            let Ok(notes) = crate::questions::agent_notes(&self.connection, project, id) else {
+                continue;
             };
-            let ask = crate::questions::Ask {
-                question,
-                options,
-                recommended,
-                context,
-            };
-            if let Err(problem) = crate::questions::ask(&self.connection, project, &asker, &ask) {
-                self.note(
+            let mut typed = Vec::new();
+            for note in notes {
+                let text = if note.text.len() <= super::events::SEND_BYTES_MAX {
+                    note.text
+                } else {
+                    format!(
+                        "The owner answered your question {}. The answer is longer than CrazyAgent types into a terminal, so ask your master for it.",
+                        note.question
+                    )
+                };
+                match super::events::send_to_agent(
+                    &self.connection,
+                    host,
                     project,
-                    &format!(
-                        "Your question \"{}\" was not logged for the owner ({}).",
-                        bound_text(&ask.question, 200),
-                        bound_text(&problem.0, 120)
-                    ),
-                )?;
+                    &format!("team-{id}"),
+                    &text,
+                ) {
+                    Ok(Ok(typed_to)) => {
+                        assert_eq!(typed_to, id);
+                        typed.push(note.question);
+                    }
+                    Ok(Err(_)) | Err(_) => break,
+                }
             }
+            if !typed.is_empty()
+                && let Err(problem) =
+                    crate::questions::agent_notes_delivered(&self.connection, project, id, &typed)
+            {
+                eprintln!(
+                    "questions_agent_notes_unmarked agent={id} code={}",
+                    problem.0
+                );
+            }
+        }
+    }
+
+    /// Logs the questions a drop-file master asked with its `ask` tool and records the chat
+    /// answers it named with `record_answer`, each as that master's own, whatever its turn's
+    /// outcome, and notes each call the store refused so the master hears why on its next
+    /// turn. Takes the project and the master's team agent id. Returns any SQLite failure of
+    /// a note.
+    fn log_master_asks(&mut self, project: &ProjectId, id: i64) -> Result<(), EngineError> {
+        let refused = tool::questions::apply_master_calls(
+            &self.connection,
+            project,
+            id,
+            &self.tool_record(id),
+        );
+        for line in refused {
+            self.note(project, &line)?;
         }
         Ok(())
     }
@@ -3104,6 +3152,9 @@ impl TeamRuntime {
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
+                if team_tool {
+                    self.log_master_asks(&project, id)?;
+                }
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
                     Some(Busy::Task(task)) => {
@@ -3115,9 +3166,6 @@ impl TeamRuntime {
                         } else {
                             Vec::new()
                         };
-                        if team_tool {
-                            self.log_master_asks(&project, id)?;
-                        }
                         self.finish_message(
                             &project,
                             message,

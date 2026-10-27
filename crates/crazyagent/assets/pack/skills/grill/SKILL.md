@@ -21,8 +21,8 @@ Settle a plan with the owner before the work starts, one decision at a time. The
 - Put the choices in `options`, at most 6 short one-line ones, and the one you recommend in `recommended`. Give the reason for it in `context`.
 - Use `context` for what the owner needs to know to answer: what the code or the documents show, and what each choice costs.
 - Do not act on a decision while its question is open.
-- The answer or dismissal comes back to you once. A sub-agent gets it through its master.
-- If the owner answers you in chat instead and you have the `record_answer` tool, record it with the question's number, the version you read and the number of the owner's message.
+- The answer or dismissal comes back to you once. A sub-agent gets it typed into its terminal.
+- If the owner answers you in chat instead and you have the `record_answer` tool, record it with the question's number, the version you read and the number of the owner's message. A master that gets its questions at the start of a turn finds both numbers there.
 - If this conversation has no `ask` tool, ask in your reply instead, with the same shape: one question, its options, your recommendation and why.
 
 ## Order

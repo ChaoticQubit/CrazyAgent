@@ -500,7 +500,11 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     assert_eq!(conversation.matches(rule).count(), 1, "{conversation}");
     assert!(conversation.ends_with(&ask_rule(AskReach::ReplyEnd)));
     assert!(conversation.contains("when your reply ends"));
-    assert!(!conversation.contains(crate::team::tool::RECORD_TOOL));
+    assert!(conversation.contains(&format!(
+        "record it with `{}`",
+        crate::team::tool::RECORD_TOOL
+    )));
+    assert!(conversation.contains("act on it once"));
 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -546,7 +550,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         .unwrap();
     let heard = agent.instructions();
     assert_eq!(heard, format!("{start}{}", ask_rule(AskReach::SubAgent)));
-    assert!(heard.contains("through your master"));
+    assert!(heard.contains("types the owner's answer or dismissal into your terminal once"));
     assert!(!heard.contains(crate::team::tool::RECORD_TOOL));
     let server = &agent.plugins.servers[0];
     assert_eq!(server.name, crate::team::tool::SERVER_NAME);

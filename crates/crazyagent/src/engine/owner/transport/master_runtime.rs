@@ -735,12 +735,16 @@ impl OwnerRuntimeHandle {
                 error.map(|error| error.0.as_str()),
             );
         }
+        if let Some(record) = &tool_record {
+            let replied = matches!(&observed, Ok(MasterRuntimeObservation::Response { .. }));
+            let noted = if replied { noted } else { Vec::new() };
+            self.log_session_asks(prepared, record, noted).await;
+        }
         closed.map_err(|error| {
             EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0))
         })?;
         let observed = match (observed, tool_record) {
             (Ok(MasterRuntimeObservation::Response { reply, .. }), Some(record)) => {
-                self.log_session_asks(prepared, &record, noted).await;
                 Ok(MasterRuntimeObservation::Response {
                     reply,
                     delegations: crate::team::tool::take(&record),
@@ -804,21 +808,30 @@ impl OwnerRuntimeHandle {
         eprintln!("master usage not counted: {problem}");
     }
 
-    /// Reads how the owner settled this conversation master's questions since a turn last
-    /// carried them, as engine lines that go before the turn's prompt. A store that cannot
-    /// be read gives no lines, and they come on a later turn. Input: the prepared turn.
-    /// Output: the lines and the question ids they carry.
+    /// Reads the engine lines that go before a conversation master's prompt: how the owner
+    /// settled its questions since a turn last carried them, then its questions still open
+    /// with this turn's owner message number for `record_answer`. A store that cannot be
+    /// read gives no lines, and the notes come on a later turn. Input: the prepared turn.
+    /// Output: the lines and the ids of the notes they carry.
     async fn session_notes(&self, prepared: &PreparedMasterTurn) -> (String, Vec<u64>) {
         let root = super::changes::engine_root(&self.authority);
         let project = prepared.session.project_id.clone();
         let session = prepared.session.session_id.clone();
+        let asker = crate::questions::Asker::Session(session.clone());
         let read = tokio::task::spawn_blocking(move || {
             let db = crate::questions::open(&root?)?;
-            crate::questions::session_notes(&db, &project, &session)
+            let notes = crate::questions::session_notes(&db, &project, &session)?;
+            let pending = crate::questions::pending(&db, &project)?;
+            Ok::<_, EngineError>((notes, pending))
         })
         .await;
         match read {
-            Ok(Ok(notes)) => crate::team::tool::questions::note_lines(&notes),
+            Ok(Ok((notes, pending))) => {
+                let (lines, carried) = crate::team::tool::questions::note_lines(&notes);
+                let open =
+                    crate::team::tool::questions::open_line(&pending, &asker, prepared.owner_turn);
+                (format!("{lines}{open}"), carried)
+            }
             Ok(Err(problem)) => {
                 eprintln!("master question notes not read: {}", problem.0);
                 (String::new(), Vec::new())
@@ -830,58 +843,46 @@ impl OwnerRuntimeHandle {
         }
     }
 
-    /// Logs the questions a conversation master asked during a turn that replied, under
-    /// its session, and marks the notes that turn carried as given. A store that cannot be
-    /// written logs only the failure code; unmarked notes come again on the next turn.
-    /// Inputs: the prepared turn, its delegation drop file and the ids of the notes it carried.
+    /// Records and logs what a conversation master asked of the owner during a turn, under
+    /// its session, whatever the turn's outcome, and marks the notes a replied turn carried
+    /// as given. A refusal is logged as its code; the master sees on its next turn which of
+    /// its questions are open. Unmarked notes come again on the next turn. Inputs: the
+    /// prepared turn, its delegation drop file and the ids of the notes it carried.
     async fn log_session_asks(
         &self,
         prepared: &PreparedMasterTurn,
         record: &std::path::Path,
         noted: Vec<u64>,
     ) {
-        let asks = crate::team::tool::questions::take_asks(record);
-        if asks.is_empty() && noted.is_empty() {
-            return;
-        }
         let root = super::changes::engine_root(&self.authority);
         let project = prepared.session.project_id.clone();
         let session = prepared.session.session_id.clone();
+        let owner = prepared
+            .owner_turn
+            .map(|number| (number, prepared.message.clone()));
+        let record = record.to_path_buf();
         let logged = tokio::task::spawn_blocking(move || {
             let db = crate::questions::open(&root?)?;
-            let asker = crate::questions::Asker::Session(session.clone());
-            let mut refused = Vec::new();
-            for call in asks {
-                let crate::team::tool::Call::Ask {
-                    question,
-                    options,
-                    recommended,
-                    context,
-                } = call
-                else {
-                    unreachable!("take_asks returns only questions");
-                };
-                let ask = crate::questions::Ask {
-                    question,
-                    options,
-                    recommended,
-                    context,
-                };
-                if let Err(problem) = crate::questions::ask(&db, &project, &asker, &ask) {
-                    refused.push(problem.0);
-                }
+            let refused = crate::team::tool::questions::apply_session_calls(
+                &db,
+                &project,
+                &session,
+                owner
+                    .as_ref()
+                    .map(|(number, text)| (*number, text.as_str())),
+                &record,
+            );
+            if !noted.is_empty() {
+                crate::questions::notes_delivered(&db, &project, &session, &noted)?;
             }
-            crate::questions::notes_delivered(&db, &project, &session, &noted)?;
-            Ok::<_, EngineError>(refused)
+            Ok::<_, EngineError>(refused.len())
         })
         .await;
-        let problems = match logged {
-            Ok(Ok(refused)) => refused,
-            Ok(Err(problem)) => vec![problem.0],
-            Err(_) => vec!["questions_unavailable".to_owned()],
-        };
-        for problem in problems {
-            eprintln!("master question not logged: {problem}");
+        match logged {
+            Ok(Ok(0)) => {}
+            Ok(Ok(refused)) => eprintln!("master question calls refused: {refused}"),
+            Ok(Err(problem)) => eprintln!("master question not logged: {}", problem.0),
+            Err(_) => eprintln!("master question not logged: questions_unavailable"),
         }
     }
 

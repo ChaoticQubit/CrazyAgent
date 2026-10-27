@@ -233,7 +233,7 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
                 "required": ["task"],
                 "additionalProperties": false,
             },
-        }, questions::ask_listing()]}),
+        }, questions::ask_listing(), questions::record_listing()]}),
         Some("tools/call") => match call(params, drop)
             .map(|(text, error)| (text.to_owned(), error))
             .or_else(|| questions::drop_call(params, drop))
@@ -291,21 +291,27 @@ fn live_tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
         },
         ask_tool(),
-        {
-            "name": RECORD_TOOL,
-            "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "integer", "description": "The question number the ask tool gave you."},
-                    "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
-                    "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
-                },
-                "required": ["question", "version", "owner_turn"],
-                "additionalProperties": false,
-            },
-        },
+        record_tool(),
     ]})
+}
+
+/// The MCP entry of the `record_answer` tool, the same for every master that is given it.
+/// Output: the tool's name, description and input schema.
+pub fn record_tool() -> Value {
+    json!({
+        "name": RECORD_TOOL,
+        "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
+            },
+            "required": ["question", "version", "owner_turn"],
+            "additionalProperties": false,
+        },
+    })
 }
 
 /// The MCP entry of the `ask` tool, the same for every master and agent that is given it.
