@@ -49,11 +49,13 @@ export interface PlacedGroup extends Box { node: GraphNode | null; cards: Placed
 export interface Link { group: GraphNode | null; path: string; badge: Point; tasks: number; questions: number }
 
 /** A team graph laid out for drawing: master cards on top, one frame per harness under them
- * with agent cards in a grid, the links between, and the canvas size that holds them all. */
+ * with agent cards in a grid, the links between, the canvas size that holds them all, and how
+ * many agents the `NODES_MAX` cap left out. */
 export interface GraphLayout extends Size {
   masters: PlacedCard[];
   groups: PlacedGroup[];
   links: Link[];
+  hidden: number;
 }
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -66,6 +68,16 @@ const clamp = (value: number, low: number, high: number) => Math.min(Math.max(va
 const span = (count: number, size: number) => count * size + Math.max(0, count - 1) * CARD_GAP;
 const live = (edge: GraphEdge) => edge.state === "sent" || edge.state === "running";
 const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
+const running = (node: GraphNode) => node.status === "starting" || node.status === "idle" || node.status === "working";
+
+/** Which agents the graph keeps first when it cannot draw them all: running, then waiting on
+ * questions, then failed, then stopped. Input: an agent node. Output: the rank, lowest first. */
+function agentRank(node: GraphNode): number {
+  if (running(node)) return 0;
+  if (questionCount(node) > 0) return 1;
+  if (node.status === "failed") return 2;
+  return node.status === "stopped" ? 3 : 4;
+}
 
 function curve(from: Point, to: Point): string {
   const middle = (from.y + to.y) / 2;
@@ -106,11 +118,20 @@ export function questionCount(node: GraphNode): number {
 
 /** Lays out one project's team graph: the master on top, then one frame per harness side by
  * side with its agents in a grid of fixed-size cards (shaped by `frameColumns`), and agents
- * with no known harness in a last frame. Cells never share space, so cards never overlap at any agent count. Input: the
- * graph. Output: the layout, the same for the same graph. */
+ * with no known harness in a last frame. Cells never share space, so cards never overlap at any agent count. Past
+ * `NODES_MAX` the master and frames stay and agents are kept by `agentRank`, newest first in
+ * the engine's creation order. Input: the graph. Output: the layout, the same for the same graph. */
 export function layoutGraph(graph: TeamGraph): GraphLayout {
   const seen = new Set<string>();
-  const nodes = graph.nodes.filter((node) => !seen.has(node.id) && Boolean(seen.add(node.id))).slice(0, NODES_MAX);
+  const unique = graph.nodes.filter((node) => !seen.has(node.id) && Boolean(seen.add(node.id)));
+  const fixed = unique.filter((node) => node.kind !== "agent").slice(0, NODES_MAX);
+  const ranked = unique.filter((node) => node.kind === "agent")
+    .map((node, order) => ({ node, order }))
+    .sort((a, b) => agentRank(a.node) - agentRank(b.node) || b.order - a.order)
+    .map((item) => item.node);
+  const kept = ranked.slice(0, NODES_MAX - fixed.length);
+  const nodes = [...fixed, ...kept];
+  const hidden = ranked.length - kept.length;
   const masterNodes = nodes.filter((node) => node.kind === "master").sort(byNode);
   const groupNodes = nodes.filter((node) => node.kind === "harness_group").sort(byNode);
   const agents = nodes.filter((node) => node.kind === "agent").sort((a, b) => byText(a.id, b.id));
@@ -166,7 +187,7 @@ export function layoutGraph(graph: TeamGraph): GraphLayout {
   const height = groups.length
     ? top + Math.max(...groups.map((group) => group.height)) + MARGIN
     : MARGIN * 2 + (masters.length ? CARD_HEIGHT : 0);
-  return { masters, groups, links, width: MARGIN * 2 + inner, height };
+  return { masters, groups, links, width: MARGIN * 2 + inner, height, hidden };
 }
 
 /** Every card the layout draws: the masters, then each frame's agents. Input: the layout.
@@ -397,11 +418,13 @@ export function graphLive(graph: TeamGraph): boolean {
     || graph.edges.some(live);
 }
 
-/** The one line under the graph title: how many agents work and how many tasks are live.
- * Input: the graph. Output: the line. */
-export function graphSummary(graph: TeamGraph): string {
+/** The one line under the graph title: how many agents work, how many tasks are live and how
+ * many agents the drawing leaves out. Inputs: the graph and the layout's hidden count.
+ * Output: the line. */
+export function graphSummary(graph: TeamGraph, hidden = 0): string {
   const agents = graph.nodes.filter((node) => node.kind === "agent");
   const working = agents.filter((node) => node.status === "working").length;
   const count = graph.edges.filter(live).length;
-  return `${working} of ${plural(agents.length, "agent")} working. ${plural(count, "task")} live.`;
+  const left = hidden > 0 ? ` ${plural(hidden, "agent")} not shown.` : "";
+  return `${working} of ${plural(agents.length, "agent")} working. ${plural(count, "task")} live.${left}`;
 }
