@@ -1853,8 +1853,9 @@ pub(crate) fn add_worktree(
 
 /// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
 /// git under the installed profile so that no command the repository configures runs: the
-/// worktree is added without a checkout, its effective config is listed in the worktree's
-/// own context, and the checkout blanks every filter driver that listing names.
+/// worktree is added without a checkout and made local-only, its effective config is
+/// listed in the worktree's own context, and the checkout blanks every filter driver that
+/// listing names.
 /// Takes the sandbox, its installed profile and the new worktree path.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
@@ -1873,6 +1874,8 @@ pub(crate) fn add_worktree(
         .arg(worktree)
         .arg("HEAD");
     setup_step(&mut add, "worktree_add_failed")?;
+    crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
+        .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
     let mut listing = worktree_git(sandbox, profile);
     listing
         .arg("-C")
@@ -3285,6 +3288,66 @@ mod tests {
             !marker.exists(),
             "the engine's git ran the project fsmonitor"
         );
+    }
+
+    /// A team or research agent's worktree, added the way the runtime adds it, is
+    /// local-only: the owner's own git pushing from it gets the plain refusal and the
+    /// remote gains nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_added_agent_worktree_refuses_remotes_with_the_plain_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        let profiles = base.join("profiles");
+        let remote = base.join("remote.git");
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let owner_git = |dir: &Path, args: &[&str]| {
+            crate::spawn_gate::output(
+                Command::new(GIT)
+                    .env_clear()
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let remote_path = remote.to_str().unwrap();
+        assert!(
+            owner_git(&base, &["init", "-q", "--bare", remote_path])
+                .status
+                .success()
+        );
+        assert!(
+            owner_git(&project, &["remote", "add", "origin", remote_path])
+                .status
+                .success()
+        );
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = project.join("worktrees").join("agent-one");
+        add_worktree(&sandbox, &profile, &worktree).unwrap();
+        let pushed = owner_git(&worktree, &["push", "origin", "HEAD:refs/heads/agent-work"]);
+        assert!(!pushed.status.success(), "{pushed:?}");
+        assert!(
+            String::from_utf8_lossy(&pushed.stderr).contains(crate::worktrees::REMOTE_REFUSAL),
+            "{pushed:?}"
+        );
+        let refs = owner_git(&remote, &["for-each-ref"]);
+        assert!(refs.status.success(), "{refs:?}");
+        assert!(refs.stdout.is_empty(), "{refs:?}");
     }
 
     /// The engine's sandboxed setup git must be the real git, not the `/usr/bin/git` xcrun
