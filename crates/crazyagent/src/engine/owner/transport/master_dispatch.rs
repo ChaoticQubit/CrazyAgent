@@ -4,7 +4,8 @@ use super::{
 };
 use crate::master_session::{MasterOwnerAction, TURNS_MAX};
 use crate::protocol::{ProjectId, RequestId, SessionId};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::{Instant, timeout_at};
@@ -30,6 +31,7 @@ pub(super) struct MasterDispatch {
     entries: Vec<Dispatch>,
     tasks: JoinSet<Result<(), EngineError>>,
     closing: Option<Instant>,
+    stopping: Arc<AtomicBool>,
     uncertain: bool,
     first_error: Option<String>,
 }
@@ -41,6 +43,7 @@ impl MasterDispatch {
             entries: Vec::new(),
             tasks: JoinSet::new(),
             closing: None,
+            stopping: Arc::new(AtomicBool::new(false)),
             uncertain: false,
             first_error: None,
         };
@@ -64,6 +67,13 @@ impl MasterDispatch {
         ) {
             return Ok(());
         }
+        self.ready()
+    }
+
+    /// Checks that one more driver could start now, after reaping finished ones. Output:
+    /// Ok, or `master_dispatch_stopped` once shutdown began, or `master_dispatch_capacity`
+    /// while `TURNS_MAX` drivers run.
+    pub(super) fn ready(&mut self) -> Result<(), EngineError> {
         if self.closing.is_some() {
             return Err(failure("master_dispatch_stopped"));
         }
@@ -73,6 +83,21 @@ impl MasterDispatch {
         }
         self.assert_consistent();
         Ok(())
+    }
+
+    /// Starts the driver of a master turn the engine created from a waiting resolve
+    /// request (DEC-095), after `ready` passed under the same lock. Inputs: the runtime
+    /// handle, the turn's project, session and id. Output: true when a driver started,
+    /// false when this turn already had one, or the dispatch refusal.
+    pub(super) fn start(
+        &mut self,
+        runtime: OwnerRuntimeHandle,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        turn_id: &RequestId,
+    ) -> Result<bool, EngineError> {
+        self.ready()?;
+        self.spawn(runtime, project_id, session_id, turn_id)
     }
 
     pub(super) fn committed(
@@ -111,10 +136,26 @@ impl MasterDispatch {
         }
         validate_commit(&runtime, request, operation)?;
         self.reap();
+        self.spawn(runtime, project_id, session_id, &request.request_id)
+    }
+
+    /// Spawns the driver of one master turn unless this run already started one for it.
+    /// After its turn settles the driver starts and drives the session's waiting resolve
+    /// turn, if any, so Ask agent to update runs right after the turn it waited for.
+    /// Inputs: the runtime handle and the turn's project, session and id. Output: true
+    /// when a driver started, or the capacity refusal.
+    fn spawn(
+        &mut self,
+        runtime: OwnerRuntimeHandle,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        turn_id: &RequestId,
+    ) -> Result<bool, EngineError> {
+        assert!(self.closing.is_none());
         if self.entries.iter().any(|entry| {
             entry.project_id == *project_id
                 && entry.session_id == *session_id
-                && entry.turn_id == request.request_id
+                && entry.turn_id == *turn_id
         }) {
             return Ok(false);
         }
@@ -130,33 +171,50 @@ impl MasterDispatch {
             .map_err(|_| failure("master_dispatch_runtime_unavailable"))?;
         let project = project_id.clone();
         let session = session_id.clone();
-        let turn = request.request_id.clone();
+        let mut turn = turn_id.clone();
+        let stopping = self.stopping.clone();
         let task = self.tasks.spawn_on(
             async move {
-                let result = drive_until_settled(
-                    || async {
-                        runtime
-                            .drive_master_turn(&project, &session, &turn)
-                            .await
-                            .map(|_| ())
-                    },
-                    DRIVE_PAUSE,
-                )
-                .await;
-                if let Err(error) = &result {
-                    eprintln!("{}", super::master_turn_diagnostic(error));
-                    if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
-                        eprintln!("master_turn_debug_cause={}", error.0.escape_debug());
+                let mut settled = Ok(());
+                for _ in 0..TURNS_MAX {
+                    let result = drive_until_settled(
+                        || async {
+                            runtime
+                                .drive_master_turn(&project, &session, &turn)
+                                .await
+                                .map(|_| ())
+                        },
+                        DRIVE_PAUSE,
+                    )
+                    .await;
+                    if let Err(error) = &result {
+                        eprintln!("{}", super::master_turn_diagnostic(error));
+                        if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
+                            eprintln!("master_turn_debug_cause={}", error.0.escape_debug());
+                        }
+                    }
+                    settled = settled.and(result);
+                    if stopping.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match runtime.start_waiting_resolve(&project, &session).await {
+                        Ok(Some(next)) => turn = next,
+                        Ok(None) => break,
+                        Err(error) => {
+                            eprintln!("master_resolve_not_started cause={}", error.0);
+                            settled = settled.and(Err(error));
+                            break;
+                        }
                     }
                 }
-                result
+                settled
             },
             &executor,
         );
         self.entries.push(Dispatch {
             project_id: project_id.clone(),
             session_id: session_id.clone(),
-            turn_id: request.request_id.clone(),
+            turn_id: turn_id.clone(),
             task: task.id(),
             finished: false,
         });
@@ -166,6 +224,7 @@ impl MasterDispatch {
 
     pub(super) async fn shutdown(&mut self) -> Result<(), EngineError> {
         self.assert_consistent();
+        self.stopping.store(true, Ordering::SeqCst);
         let deadline = *self
             .closing
             .get_or_insert_with(|| Instant::now() + SHUTDOWN_GRACE);

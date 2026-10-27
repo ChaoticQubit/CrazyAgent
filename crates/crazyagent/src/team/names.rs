@@ -101,7 +101,6 @@ pub fn handle(text: &str) -> Option<String> {
 /// Takes the role, team agent id and kept name. Returns the label.
 pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
     match (role, name) {
-        (AgentRole::Master, _) => "Master".into(),
         (
             AgentRole::Sub,
             Some(AgentName {
@@ -118,7 +117,7 @@ pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
                 handle: None,
             }),
         ) => persona.clone(),
-        (AgentRole::Sub, None) => format!("Sub-agent {id}"),
+        (AgentRole::Master, _) | (AgentRole::Sub, None) => role.agent_label(id),
     }
 }
 

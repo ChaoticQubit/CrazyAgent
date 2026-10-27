@@ -1,10 +1,13 @@
 use super::{AgentRole, AgentStatus, TaskSource, TaskStatus, TeamAgent, TeamStatus};
 use crate::protocol::ProjectId;
-use crate::terminal::AgentId;
+use crate::terminal::{AgentId, PANES_PER_PROJECT_MAX};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const MASTER_NODE: &str = "master";
+/// How many stopped sub-agents the graph keeps listed, newest first: one full round of a
+/// project's terminals, so the agents of the latest work stay beside their tasks.
+pub const STOPPED_SHOWN_MAX: usize = PANES_PER_PROJECT_MAX;
 
 /// What one graph node stands for: the master, one sub-agent harness group, or one sub-agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,14 +80,27 @@ fn edge_state(status: TaskStatus) -> EdgeState {
     }
 }
 
-fn shown(agent: &TeamAgent) -> bool {
-    agent.role == AgentRole::Sub && (agent.status.live() || agent.status == AgentStatus::Failed)
+fn stopped_shown(agents: &[TeamAgent]) -> Vec<i64> {
+    let mut stopped: Vec<i64> = agents
+        .iter()
+        .filter(|agent| agent.role == AgentRole::Sub && agent.status == AgentStatus::Stopped)
+        .map(|agent| agent.id)
+        .collect();
+    stopped.sort_unstable_by(|a, b| b.cmp(a));
+    stopped.truncate(STOPPED_SHOWN_MAX);
+    stopped
 }
 
 /// Builds a project's team graph from its team status, with no extra read.
-/// Takes the status; live and failed sub-agents become nodes and every listed task an edge.
+/// Takes the status; live and failed sub-agents and the `STOPPED_SHOWN_MAX` newest stopped
+/// ones become nodes, and every listed task an edge.
 /// Returns the master first, then harness groups, then agents, and edges in task order.
 pub fn graph(status: &TeamStatus) -> TeamGraph {
+    let stopped = stopped_shown(&status.agents);
+    let shown = |agent: &TeamAgent| {
+        agent.role == AgentRole::Sub
+            && (agent.status != AgentStatus::Stopped || stopped.contains(&agent.id))
+    };
     let masters = || {
         status
             .agents
@@ -150,7 +166,7 @@ pub fn graph(status: &TeamStatus) -> TeamGraph {
             id: terminal.to_string(),
             kind: NodeKind::Agent,
             parent: Some(parent),
-            label: agent.name.clone(),
+            label: agent.label.clone(),
             harness: agent.harness.clone(),
             status: Some(agent.status),
             status_label: Some(agent.status_label.clone()),

@@ -6,7 +6,7 @@ import { Button, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton, Status
 import { displayText } from "../conversation";
 import {
   DRAG_SLOP, NODE_HEIGHT, NODE_WIDTH, arrowMove, edgeStatus, graphLive, graphSummary, keepOffsets,
-  layoutGraph, moveNode, nodeDetail, nodeLine, nodeStatus, type Offsets, type PlacedEdge, type PlacedNode,
+  layoutGraph, moveNode, namedAccounts, nodeDetail, nodeLine, nodeStatus, type Offsets, type PlacedEdge, type PlacedNode,
 } from "./graph";
 import { TerminalPanel } from "./terminal-panel";
 import "./team-graph.css";
@@ -150,9 +150,11 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
 /** The live team graph of one project: the master, one box per harness group with its agent
  * count, each agent with status and account, and the tasks the master handed out as live
  * edges. Boxes drag; a click on an edge shows the task and its reply; a click on the master
- * or an agent opens its terminal beside the graph. Inputs: the project id and an optional
- * harness name lookup. Output: the graph section. */
-export function TeamGraphView({ projectId, harness }: { projectId: string; harness?: (id: string) => string }) {
+ * or an agent opens its terminal beside the graph. Inputs: the project id and optional
+ * harness and account name lookups. Output: the graph section. */
+export function TeamGraphView({ projectId, harness, account }: {
+  projectId: string; harness?: (id: string) => string; account?: (id: string) => string;
+}) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
   const [offsets, setOffsets] = useState<Offsets>(() => new Map());
@@ -174,12 +176,13 @@ export function TeamGraphView({ projectId, harness }: { projectId: string; harne
   if (graph === undefined) return <section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>;
   if (graph.kind === "not_ready") return <NotReady what="The team graph" compact />;
   if (graph.kind === "error") return <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />;
-  if (graph.value.nodes.length === 0) {
+  const team = account ? namedAccounts(graph.value, account) : graph.value;
+  if (team.nodes.length === 0) {
     return <EmptyState icon="users" title="No team yet" compact>
       Add a team in the project settings, then ask the master to build something.
     </EmptyState>;
   }
-  const layout = layoutGraph(graph.value, offsets);
+  const layout = layoutGraph(team, offsets);
   const openNode = layout.nodes.find((item) => item.node.id === open)?.node;
   const shownTask = layout.edges.find((item) => item.edge.task_id === task);
   const move = (id: string, dx: number, dy: number) => setOffsets((current) => moveNode(current, id, dx, dy));
@@ -187,7 +190,7 @@ export function TeamGraphView({ projectId, harness }: { projectId: string; harne
   return <section className="tg" aria-labelledby={`${ids}-title`}>
     <div className="tg-head">
       <h3 id={`${ids}-title`}>Team graph</h3>
-      <span className="tg-summary" role="status">{graphSummary(graph.value)}</span>
+      <span className="tg-summary" role="status">{graphSummary(team)}</span>
     </div>
     {read.stale && <Notice tone="warn" alert>
       <span className="grow">{displayText(`Couldn't refresh the team graph. ${read.stale} Showing the last read.`)}</span>
@@ -213,6 +216,6 @@ export function TeamGraphView({ projectId, harness }: { projectId: string; harne
       </div>
       {openNode && <TerminalPanel key={openNode.id} node={openNode} harness={harness} onClose={() => setOpen(null)} />}
     </div>
-    {shownTask && <TaskDetail placed={shownTask} nodes={graph.value.nodes} id={taskRegion} onClose={() => setTask(null)} />}
+    {shownTask && <TaskDetail placed={shownTask} nodes={team.nodes} id={taskRegion} onClose={() => setTask(null)} />}
   </section>;
 }

@@ -398,7 +398,7 @@ impl NativeBridge {
 
     fn prepare(&mut self, ticket: &str, revoke: bool) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         let selected = self
@@ -569,7 +569,8 @@ impl NativeBridge {
                 | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
                     ("master", Some(project_id.as_str().to_owned()), None)
                 }
-                crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
+                crazyagent::master_session::MasterOwnerAction::Resolve { .. }
+                | crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
                     return Err(failure("unexpected_pending_intent"));
                 }
             },
@@ -599,6 +600,39 @@ impl NativeBridge {
 
     pub async fn retry_intent(&mut self) -> Result<IntentReceipt, BridgeError> {
         self.deliver_intent(false).await
+    }
+
+    /// Drops the kept change when no copy of it can be recorded: it was never sent, or the
+    /// engine's last answer was that it never recorded it. Output: the connection after the
+    /// drop, `change_may_be_recorded` while a send of it may still land, or `no_pending_intent`.
+    pub fn drop_intent(&mut self) -> Result<ConnectionStatus, BridgeError> {
+        self.controller
+            .as_mut()
+            .ok_or_else(|| failure("no_pending_intent"))?
+            .discard_refused()
+            .map_err(|error| match error.0.as_str() {
+                "controller_no_pending_intent" => failure("no_pending_intent"),
+                other => caused("change_may_be_recorded", other),
+            })?;
+        self.selected = None;
+        self.next = None;
+        assert!(self.pending_intent()?.is_none());
+        Ok(self.status())
+    }
+
+    /// Reports whether a kept change still holds up a new one, first dropping a change the
+    /// engine answered it never recorded, so that answer never blocks the next change.
+    /// Output: true while a kept change may still be recorded or is unsent.
+    pub(crate) fn blocked(&mut self) -> bool {
+        if let Some(controller) = self.controller.as_mut()
+            && controller
+                .pending()
+                .is_some_and(|pending| pending.unrecorded())
+        {
+            let dropped = controller.discard_refused();
+            assert!(dropped.is_ok(), "an unrecorded change can be dropped");
+        }
+        self.status().pending
     }
 
     /// Sends or reconciles the kept owner change and reports what the engine settled.
@@ -718,7 +752,7 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -881,7 +915,7 @@ impl NativeBridge {
         brief: bool,
     ) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {

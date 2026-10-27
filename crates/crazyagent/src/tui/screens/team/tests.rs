@@ -1,11 +1,11 @@
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
-use crate::tui::ctx::{Ctx, Link};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::screens::{Place, open};
-use crate::tui::seam::{Arrival, NOT_READY, Request};
+use crate::tui::seam::{AccountRow, Arrival, NOT_READY, Request};
 use crate::tui::shell::Shell;
 use crate::tui::terminal_pane::LEADER;
 use crate::tui::theme::{Appearance, Colors, Depth};
@@ -59,7 +59,7 @@ fn graph() -> Box<TeamGraph> {
             None,
             "Master",
             AgentStatus::Working,
-            Some("ChatGPT Pro - main"),
+            Some("acct-pro"),
             Some("team-1"),
         )
     };
@@ -91,7 +91,7 @@ fn graph() -> Box<TeamGraph> {
                 Some("group-claude"),
                 "claude-1",
                 AgentStatus::Working,
-                Some("Claude Max - work"),
+                Some("acct-max"),
                 Some("team-2"),
             ),
             agent(
@@ -108,7 +108,7 @@ fn graph() -> Box<TeamGraph> {
                 Some("group-codex"),
                 "codex-1",
                 AgentStatus::Starting,
-                Some("ChatGPT Plus"),
+                Some("acct-plus"),
                 Some("team-5"),
             ),
         ],
@@ -146,6 +146,21 @@ fn fresh(width: u16, height: u16) -> Shell {
     ctx.width = width;
     ctx.height = height;
     ctx.link = Link::Ready;
+    ctx.store.accounts = Load::Ready(
+        [
+            ("acct-pro", "ChatGPT Pro - main"),
+            ("acct-max", "Claude Max - work"),
+            ("acct-plus", "ChatGPT Plus"),
+        ]
+        .into_iter()
+        .map(|(id, name)| AccountRow {
+            id: CredentialRef::new(id).unwrap(),
+            name: name.into(),
+            provider: String::new(),
+            status: String::new(),
+        })
+        .collect(),
+    );
     let place = Place::Team {
         id: project(),
         name: "Tidepool".into(),
@@ -744,4 +759,96 @@ fn an_ended_terminal_is_not_opened_again_when_the_engine_comes_back() {
     let sent = requests(&mut shell);
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(matches!(&sent[0], Request::TeamGraph { .. }));
+}
+
+#[test]
+fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_tasks() {
+    use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamHarness, TeamStatus, TeamTask};
+    let harness = |role: AgentRole, agents_max: u8| TeamHarness {
+        harness: "codex".into(),
+        role,
+        agents_max,
+        tools: true,
+        live: 0,
+        delegation: None,
+        delegation_label: None,
+        runnable: true,
+    };
+    let status = TeamStatus {
+        project_id: project(),
+        keep_warm: false,
+        paused: false,
+        min_agents: 1,
+        max_agents: 5,
+        harnesses: vec![harness(AgentRole::Master, 1), harness(AgentRole::Sub, 4)],
+        agents: (1..=4)
+            .map(|id| TeamAgent {
+                id,
+                role: AgentRole::Sub,
+                label: AgentRole::Sub.agent_label(id),
+                harness: "codex".into(),
+                tools: true,
+                account: Some("acct-plus".into()),
+                worktree: Some(format!(".crazyagent/worktrees/agent-{id}")),
+                status: AgentStatus::Stopped,
+                status_label: AgentStatus::Stopped.label().into(),
+                task: None,
+                turns: 1,
+                problem: None,
+                process_group: None,
+                created_ms: 1,
+                heartbeat_ms: 1,
+                stopped_ms: Some(2),
+                persona: None,
+                handle: None,
+            })
+            .collect(),
+        tasks: [1, 2, 3, 4, 3]
+            .into_iter()
+            .zip(1..)
+            .map(|(agent, id)| TeamTask {
+                id,
+                source: TaskSource::Master,
+                harness: "codex".into(),
+                tools: true,
+                prompt: format!("Browsky task {id}"),
+                status: TaskStatus::Done,
+                status_label: TaskStatus::Done.label().into(),
+                agent: Some(agent),
+                attempts: 1,
+                result: Some(format!("Result {id}")),
+                problem: None,
+                delivered: true,
+                output_bytes: 0,
+                created_ms: 1,
+                started_ms: Some(1),
+                finished_ms: Some(2),
+            })
+            .collect(),
+        messages: Vec::new(),
+        plan: Vec::new(),
+    };
+    let mut shell = fresh(160, 40);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(Box::new(crate::team::graph(&status))),
+    });
+    let rows = render(&mut shell);
+    let text = rows.join("\n");
+    for id in 1..=4 {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(&format!("Sub-agent {id} ")))
+            .unwrap_or_else(|| panic!("Sub-agent {id} is listed:\n{text}"));
+        assert!(row.contains("Stopped"), "{row}");
+    }
+    assert_eq!(text.matches("ChatGPT Plus").count(), 4, "{text}");
+    assert!(!text.contains("acct-plus"), "{text}");
+    for (id, agent) in [(1, 1), (2, 2), (3, 3), (4, 4), (5, 3)] {
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("Master → Sub-agent {agent}  Browsky task {id}"))),
+            "task {id} points at Sub-agent {agent}:\n{text}"
+        );
+    }
 }

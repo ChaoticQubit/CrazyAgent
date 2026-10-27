@@ -16,7 +16,7 @@ const edge = (task_id, from, to, state, extra = {}) => ({ from, to, task_id, sou
 const team = {
   project_id: "chores",
   nodes: [
-    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "Work ChatGPT", terminal: "team-2" }),
+    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "acct-work", terminal: "team-2" }),
     node("g-codex", "harness_group", { parent: "m", label: "Codex", agents: 2 }),
     node("m", "master", { label: "Master", status: "idle", terminal: "team-9" }),
     node("team-1", "agent", { parent: "g-codex", label: "codex-1", status: "idle", terminal: "team-1" }),
@@ -28,6 +28,14 @@ const team = {
     edge(8, "m", "g-claude", "sent", { source: "owner" }),
   ],
 };
+
+const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? "An account in the pool");
+
+test("graph nodes name their account as the Team panel does, never by its id", () => {
+  assert.deepEqual(named.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
+  assert.equal(team.nodes[0].account, "acct-work", "the engine's graph is left as it was");
+  assert.deepEqual(graph.namedAccounts(team, () => "x").edges, team.edges);
+});
 
 const at = (layout, id) => {
   const placed = layout.nodes.find((item) => item.node.id === id);
@@ -144,7 +152,8 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[1], name), "Codex, 2 agents");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1 })), "codex, 1 agent");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1, status_label: "1 of 2 agents" }), name), "Codex, 1 of 2 agents");
-  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, Work ChatGPT");
+  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, acct-work");
+  assert.equal(graph.nodeDetail(named.nodes[0], name), "Codex, Work ChatGPT");
   assert.equal(graph.nodeDetail(team.nodes[3], name), "Codex");
   const ada = node("team-7", "agent", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
   assert.equal(graph.nodeLine(ada, name), "Ada (@onboarding-fix) \u00b7 Claude Code \u00b7 working");
@@ -253,7 +262,7 @@ test("edge and node labels read as plain sentences", () => {
   const layout = graph.layoutGraph({ ...team, edges: [edge(4, "m", "team-1", "running", { text: "Write   the chores list\nfor every helper in the house" })] });
   assert.equal(view.edgeLabel(layout.edges[0]), "Running: Write the chores list for e...");
   assert.equal(view.edgeLabel(graph.layoutGraph(team).edges[2]), "Done: Task 3");
-  assert.equal(view.nodeLabel(team.nodes[0]), "codex-2, codex, Work ChatGPT, Working. Opens its terminal. Arrow keys move it.");
+  assert.equal(view.nodeLabel(named.nodes[0]), "codex-2, codex, Work ChatGPT, Working. Opens its terminal. Arrow keys move it.");
   assert.equal(view.nodeLabel(team.nodes[1]), "Codex, codex, 2 agents. Arrow keys move it.");
 });
 
