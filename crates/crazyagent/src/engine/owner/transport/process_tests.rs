@@ -232,11 +232,163 @@ fn a_mismatched_or_oversized_request_is_refused() {
     );
 }
 
+fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
+             VALUES (?1, ?2, ?3, 1, 'stopped', 1, 1)",
+            [project, role, harness],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
+}
+
+#[cfg(unix)]
+fn launched_home(root: &Path, id: i64) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = crate::team::runtime::agent_home(&root.join("team"), id);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    home
+}
+
+#[cfg(unix)]
+#[test]
+fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
+    use crate::agent_home::{AgentProject, Harness, prepare, record_skills};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    assert_eq!(
+        agent_instructions(&root, &project, None).unwrap_err().0,
+        "process_agent_unknown",
+        "a project whose team never started has no agents"
+    );
+    let first_master = team_agent(&root, project.as_str(), "master", "codex");
+    let master = team_agent(&root, project.as_str(), "master", "claude-code");
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    let other = team_agent(&root, "another-project", "sub", "codex");
+    let unsupported = team_agent(&root, project.as_str(), "sub", "opencode");
+    assert!(first_master < master);
+
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub)).unwrap(),
+        AgentInstructions {
+            agent: sub,
+            harness: "codex".into(),
+            launched: false,
+            text: String::new(),
+            skills: Vec::new(),
+        }
+    );
+
+    let given = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+    };
+    let sub_home = launched_home(&root, sub);
+    prepare(&sub_home, Harness::Codex, &given, "# Sub rules\n").unwrap();
+    record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub)).unwrap(),
+        AgentInstructions {
+            agent: sub,
+            harness: "codex".into(),
+            launched: true,
+            text: "# Sub rules\n".into(),
+            skills: vec!["tdd".into(), "code-review".into()],
+        }
+    );
+
+    let master_home = launched_home(&root, master);
+    prepare(&master_home, Harness::Claude, &given, "# Master rules\n").unwrap();
+    let shown = agent_instructions(&root, &project, None).unwrap();
+    assert_eq!(
+        shown.agent, master,
+        "the master card reads the newest master"
+    );
+    assert_eq!(shown.harness, "claude-code");
+    assert_eq!(shown.text, "# Master rules\n");
+
+    assert_eq!(
+        agent_instructions(&root, &project, Some(other))
+            .unwrap_err()
+            .0,
+        "process_agent_unknown",
+        "another project's agent is never read through this project"
+    );
+    assert_eq!(
+        agent_instructions(&root, &project, Some(unsupported))
+            .unwrap_err()
+            .0,
+        "process_agent_unsupported"
+    );
+    assert_eq!(
+        agent_instructions(&root, &project, Some(0)).unwrap_err().0,
+        "process_request_invalid"
+    );
+
+    let secret = root.join("owner-secret");
+    fs::write(&secret, "OWNER-SECRET-77").unwrap();
+    fs::remove_file(sub_home.join("AGENTS.md")).unwrap();
+    std::os::unix::fs::symlink(&secret, sub_home.join("AGENTS.md")).unwrap();
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap_err()
+            .0,
+        "agent_instructions_unsafe",
+        "a link the agent planted in its home is never followed"
+    );
+}
+
+#[test]
+fn a_received_payload_holds_the_rendered_bound() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let full = "x".repeat(crate::agent_home::PROCESS_BYTES_MAX);
+    let mut payload = full.as_bytes();
+    let bytes = u32::try_from(full.len()).unwrap();
+    assert_eq!(
+        runtime
+            .block_on(read_payload(
+                &mut payload,
+                bytes,
+                crate::agent_home::PROCESS_BYTES_MAX
+            ))
+            .unwrap()
+            .len(),
+        crate::agent_home::PROCESS_BYTES_MAX
+    );
+    let mut none: &[u8] = &[];
+    assert_eq!(
+        runtime
+            .block_on(read_payload(
+                &mut none,
+                bytes + 1,
+                crate::agent_home::PROCESS_BYTES_MAX
+            ))
+            .unwrap_err()
+            .0,
+        "process_text_too_large"
+    );
+}
+
 /// Reads the plain codes a source file refuses with, before its tests.
 /// Input: the file text. Output: each `process_` code once.
 fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
     let code = source.split("#[cfg(test)]").next().unwrap();
-    code.match_indices("\"process_")
+    ["\"process_", "\"agent_instructions_"]
+        .into_iter()
+        .flat_map(|prefix| code.match_indices(prefix))
         .filter_map(|(at, _)| {
             let rest = &code[at + 1..];
             rest.find('"').map(|end| &rest[..end])

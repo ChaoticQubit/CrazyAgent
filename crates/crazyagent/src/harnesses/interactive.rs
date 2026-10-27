@@ -1,7 +1,7 @@
 use super::launch::{
-    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_MCP, CODEX_KEY_VARIABLE,
-    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
-    TOOLS_ON_PATH, codex_configuration, failure, harness_id, validate,
+    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY,
+    LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH,
+    codex_configuration, failure, harness_id, key_file_text, validate,
 };
 use crate::launch_context::Installed;
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -19,8 +19,6 @@ const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
-const KEY_SCRIPT: &str = "CRAZYAGENT_API_KEY=\"$(/bin/cat -- \"$1\")\" || exit 1; export CRAZYAGENT_API_KEY; shift; exec \"$@\"";
-const KEY_SCRIPT_NAME: &str = "crazyagent-key";
 const CLAUDE_TOOLS_ON: [&str; 4] = [
     "--tools",
     "default",
@@ -59,12 +57,15 @@ pub enum Support {
     Unavailable { reason: &'static str },
 }
 
-/// What one run adds to a launch request: the session id the harness records under and
-/// the key file `write_key` made for a keyed account, which only its path reaches argv.
+/// What one run adds to a launch request: the session id the harness records under, the
+/// key file `write_key` made for a keyed account, which only its path reaches argv, and
+/// whether the app resumes the conversation it recorded under that id instead of starting
+/// one. Codex records under its own id, so a fresh Codex run does not use `session_id`.
 #[derive(Clone, Copy, Debug)]
 pub struct Run<'a> {
     pub session_id: &'a str,
     pub key_file: Option<&'a Path>,
+    pub resume: bool,
 }
 
 /// One harness without a CrazyAgent launch adapter: its interactive subcommand and the
@@ -211,7 +212,7 @@ pub fn command(
     if request.account.key().is_some() != run.key_file.is_some() {
         return Err(failure("launch_key_file_invalid"));
     }
-    let key_file = run.key_file.map(plain_key_file).transpose()?;
+    let key_file = run.key_file.map(key_file_text).transpose()?;
     let home = text(request.account.home())?;
     let cwd = request
         .working_dir
@@ -246,21 +247,19 @@ pub fn command(
     let executable = text(&request.executable)?;
     let transcript = match harness_id(request) {
         "codex" => {
-            if let Some(key_file) = &key_file {
-                assert!(KEY_SCRIPT.starts_with(CODEX_KEY_VARIABLE));
-                argv.extend(
-                    [
-                        "/bin/sh",
-                        "-c",
-                        KEY_SCRIPT,
-                        KEY_SCRIPT_NAME,
-                        key_file.as_str(),
-                    ]
-                    .map(str::to_owned),
-                );
-            }
             argv.push(executable);
-            argv.extend(codex(request, installed.is_some(), &cwd)?);
+            argv.extend(codex(
+                request,
+                installed.is_some(),
+                &cwd,
+                key_file.as_deref(),
+            )?);
+            if run.resume {
+                argv.extend([
+                    "resume".to_owned(),
+                    session_id_checked(run.session_id)?.to_owned(),
+                ]);
+            }
             env.extend([
                 ("CODEX_HOME".to_owned(), home.clone()),
                 ("TMPDIR".to_owned(), home),
@@ -271,12 +270,7 @@ pub fn command(
         }
         "claude-code" => {
             argv.push(executable);
-            argv.extend(claude(
-                request,
-                installed,
-                run.session_id,
-                key_file.as_deref(),
-            )?);
+            argv.extend(claude(request, installed, run, key_file.as_deref())?);
             env.extend(claude_environment(request, &home));
             let folder = claude_project_folder(&cwd)
                 .ok_or_else(|| failure("launch_working_dir_too_long"))?;
@@ -348,22 +342,22 @@ fn text(path: &Path) -> Result<String, LaunchError> {
         .ok_or_else(|| failure("launch_path_invalid"))
 }
 
-fn plain_key_file(path: &Path) -> Result<String, LaunchError> {
-    let file = text(path)?;
-    if !path.is_absolute() || file.contains('\'') {
-        return Err(failure("launch_key_file_invalid"));
-    }
-    Ok(file)
-}
-
-fn codex(request: &LaunchRequest, context: bool, cwd: &Path) -> Result<Vec<String>, LaunchError> {
+fn codex(
+    request: &LaunchRequest,
+    context: bool,
+    cwd: &Path,
+    key_file: Option<&str>,
+) -> Result<Vec<String>, LaunchError> {
     let folder = serde_json::to_string(&text(cwd)?)
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context).into_iter().chain([
-        "check_for_update_on_startup=false".to_owned(),
-        format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
-    ]) {
+    for setting in codex_configuration(request, context, key_file)
+        .into_iter()
+        .chain([
+            "check_for_update_on_startup=false".to_owned(),
+            format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
+        ])
+    {
         arguments.push("-c".to_owned());
         arguments.push(setting);
     }
@@ -373,7 +367,7 @@ fn codex(request: &LaunchRequest, context: bool, cwd: &Path) -> Result<Vec<Strin
 fn claude(
     request: &LaunchRequest,
     installed: Option<&Installed>,
-    session_id: &str,
+    run: &Run<'_>,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let mut settings = serde_json::json!({
@@ -391,8 +385,13 @@ fn claude(
         String::new(),
         "--settings".to_owned(),
         settings.to_string(),
-        "--session-id".to_owned(),
-        session_id_checked(session_id)?.to_owned(),
+        if run.resume {
+            "--resume"
+        } else {
+            "--session-id"
+        }
+        .to_owned(),
+        session_id_checked(run.session_id)?.to_owned(),
     ];
     match installed {
         Some(installed) => {
@@ -508,6 +507,12 @@ pub fn session_id() -> Result<String, LaunchError> {
     );
     assert!(session_id_checked(&id).is_ok());
     Ok(id)
+}
+
+/// Tells whether a stored conversation id has the form Codex and Claude Code resume by.
+/// Input: the id. Output: true for a lowercase UUID.
+pub fn resumable(id: &str) -> bool {
+    session_id_checked(id).is_ok()
 }
 
 fn session_id_checked(id: &str) -> Result<&str, LaunchError> {

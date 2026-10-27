@@ -1,11 +1,14 @@
 use super::*;
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::screens::settings_accounts::tests::{ctx, render};
 use crate::tui::shell::Shell;
 
 fn reply(query: ProcessQuery, result: Result<&str, &str>) -> Arrival {
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query,
-        result: result.map(str::to_owned).map_err(str::to_owned),
+        result: result
+            .map(|text| ProcessReply::Text(text.to_owned()))
+            .map_err(str::to_owned),
     }))))
 }
 
@@ -250,4 +253,151 @@ fn a_failed_read_offers_a_retry_and_a_stale_reply_is_ignored() {
     assert_eq!(requests(&mut shell), vec![read.clone()]);
     shell.arrive(reply(read, Ok("Back.")));
     assert!(screen(&mut shell).contains("│ █ack."));
+}
+
+fn skill(id: &str, name: &str, line: &str) -> crate::plugins::SkillView {
+    crate::plugins::SkillView {
+        id: id.into(),
+        name: name.into(),
+        description: format!("{line} More detail."),
+        line: line.into(),
+        scope: crate::plugins::Scope::Global,
+        scope_label: "Every project".into(),
+        enabled: true,
+        on_here: None,
+        source: String::new(),
+        folder: String::new(),
+    }
+}
+
+fn catalog(shell: &mut Shell) {
+    let skills = vec![
+        skill("skill-a", "tdd", "Write the failing test first."),
+        skill("skill-b", "code-review", "Review a diff for bugs."),
+    ];
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Plugins(Ok((skills, Vec::new()))),
+    )))));
+}
+
+fn drawn(shell: &mut Shell) -> ratatui::buffer::Buffer {
+    let mut screen = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    screen.draw(|frame| shell.draw(frame)).unwrap();
+    screen.backend().buffer().clone()
+}
+
+fn find(buffer: &ratatui::buffer::Buffer, text: &str) -> (u16, u16) {
+    for y in 0..buffer.area.height {
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        if let Some(at) = row.find(text) {
+            return (row[..at].chars().count() as u16, y);
+        }
+    }
+    panic!("{text} is not on screen");
+}
+
+fn settings_jobs(shell: &mut Shell) -> Vec<SettingsJob> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Settings(job) => Some(*job),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn catalog_skill_names_are_tagged_and_ctrl_o_opens_the_skill_at_the_cursor() {
+    use ratatui::style::Modifier;
+    let mut shell = Shell::with(ctx(80, 24), Box::new(ProcessPage::new(Scope::App)));
+    assert!(
+        settings_jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, SettingsJob::Plugins)),
+        "the page reads the skill catalog"
+    );
+    shell.arrive(reply(
+        ProcessQuery::Read { project: None },
+        Ok("Use tdd and code-review.\nNot tdd-ish or xtdd.\n"),
+    ));
+    catalog(&mut shell);
+
+    let buffer = drawn(&mut shell);
+    let tagged = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED);
+    let (x, y) = find(&buffer, "Use tdd and code-review.");
+    assert!((0..4).all(|at| !tagged(x + at, y)), "plain text is no tag");
+    assert!((4..7).all(|at| tagged(x + at, y)), "tdd is a tag");
+    assert!((7..12).all(|at| !tagged(x + at, y)));
+    assert!((12..23).all(|at| tagged(x + at, y)), "code-review is a tag");
+    assert!(!tagged(x + 23, y), "the full stop after a name is no tag");
+    let (x, y) = find(&buffer, "Not tdd-ish or xtdd.");
+    assert!(
+        (0..20).all(|at| !tagged(x + at, y)),
+        "a name inside a longer word is no tag"
+    );
+    assert!(
+        screen(&mut shell).contains("Ctrl-O"),
+        "{}",
+        screen(&mut shell)
+    );
+
+    shell.key(Key::Ctrl('o'));
+    assert!(
+        screen(&mut shell).contains("No skill name at the cursor."),
+        "{}",
+        screen(&mut shell)
+    );
+    assert!(settings_jobs(&mut shell).is_empty());
+    for _ in 0..5 {
+        shell.key(Key::Right);
+    }
+    shell.key(Key::Ctrl('o'));
+    assert!(
+        settings_jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, SettingsJob::SkillDetail { id } if id == "skill-a")),
+        "Ctrl-O opens that skill's detail page"
+    );
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        rows[0].contains("Plugins and skills  /  tdd"),
+        "{}",
+        rows[0]
+    );
+}
+
+#[test]
+fn ctrl_o_never_leaves_unsaved_instructions_behind() {
+    let mut shell = opened(Scope::App, "Use tdd.\n");
+    catalog(&mut shell);
+    shell.key(Key::Char('x'));
+    for _ in 0..4 {
+        shell.key(Key::Right);
+    }
+    shell.key(Key::Ctrl('o'));
+    let shown = screen(&mut shell);
+    assert!(shown.contains("Save first."), "{shown}");
+    assert!(
+        !settings_jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, SettingsJob::SkillDetail { .. }))
+    );
+    assert!(render(&mut shell, 80, 24)[0].contains("Settings  /  Process"));
+}
+
+#[test]
+fn a_project_page_tags_the_skills_of_its_own_catalog() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = Shell::with(ctx(80, 24), Box::new(ProcessPage::new(scope)));
+    assert!(
+        settings_jobs(&mut shell).iter().any(
+            |job| matches!(job, SettingsJob::ProjectPlugins { project: asked } if *asked == project)
+        ),
+        "a project page reads that project's catalog"
+    );
 }

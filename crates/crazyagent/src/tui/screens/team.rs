@@ -1,11 +1,18 @@
+use crate::agent_home::Harness;
 use crate::config::plain_problem;
+use crate::engine::owner::AgentInstructions;
+use crate::project_setup::SetupQuery;
 use crate::protocol::ProjectId;
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamGraph};
+use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph};
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
 use crate::tui::keys::Key;
+use crate::tui::screens::process::{message, size};
+use crate::tui::screens::project_markdown::sanitize;
 use crate::tui::screens::project_team::account_name;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
@@ -27,6 +34,9 @@ const TREE_MAX: u16 = 44;
 const BOX_MIN: u16 = 8;
 const ENDED: &str = "terminal_ended";
 const STOPPED: &str = "agent_stopped";
+const PAGE_STEP: usize = 10;
+const MASTER_WAITING: &str =
+    "Starting the master's terminal. It opens once the master signs in and starts.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -66,21 +76,34 @@ struct Attached {
     closed: Option<String>,
 }
 
+/// The read-only box with what one team card's agent received at its last launch.
+struct Instructions {
+    label: String,
+    query: ProcessQuery,
+    read: Load<Box<AgentInstructions>>,
+    top: usize,
+}
+
 /// A project's live team: a boxed tree of the master, one group per harness
 /// and each agent with its status and account, the tasks the master handed out
 /// under it, and the selected agent's live terminal beside it.
 /// Input: TeamGraph reads, terminal frames and keys; while the terminal has
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
+/// The master view is the same screen showing only the live master's terminal.
 pub struct Team {
     project: ProjectId,
     name: String,
+    master: bool,
+    asked: bool,
+    refused: Option<String>,
     graph: Load<Box<TeamGraph>>,
     cursor: usize,
     offset: usize,
     focus: Focus,
     attached: Option<Attached>,
     task: Option<i64>,
+    instructions: Option<Instructions>,
 }
 
 impl Team {
@@ -90,13 +113,102 @@ impl Team {
         Self {
             project,
             name,
+            master: false,
+            asked: false,
+            refused: None,
             graph: Load::Loading,
             cursor: 0,
             offset: 0,
             focus: Focus::Tree,
             attached: None,
             task: None,
+            instructions: None,
         }
+    }
+
+    /// The master view of one project: the live master's own terminal filling
+    /// the body, opened as soon as the team shows it. Showing it asks the
+    /// engine to keep the master running live.
+    /// Inputs: the project id and name. Output: the screen, waiting for the master.
+    pub fn master(project: ProjectId, name: String) -> Self {
+        Self {
+            master: true,
+            ..Self::new(project, name)
+        }
+    }
+
+    fn ask_live(&mut self, ctx: &mut Ctx) {
+        if !self.master || self.asked {
+            return;
+        }
+        self.asked = true;
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::LiveMaster {
+                project_id: self.project.clone(),
+                on: true,
+            },
+            generation,
+        }));
+    }
+
+    fn took_change(&mut self, query: &SetupQuery, result: &Result<impl Sized, String>) {
+        let SetupQuery::TeamChange {
+            action: TeamAction::LiveMaster { project_id, .. },
+            ..
+        } = query
+        else {
+            return;
+        };
+        if !self.master || *project_id != self.project {
+            return;
+        }
+        self.refused = result.as_ref().err().cloned();
+    }
+
+    /// Opens the master's terminal once the team lists it, and the new one
+    /// after the master moved to another account.
+    /// Input: the context. Output: none; attach and size requests are queued.
+    fn follow_master(&mut self, ctx: &mut Ctx) {
+        if !self.master {
+            return;
+        }
+        let Some((node, terminal)) = self.graph.ready().and_then(|graph| {
+            graph.nodes.iter().enumerate().find_map(|(index, node)| {
+                let live = node.status.is_none_or(|status| status.live());
+                (node.kind == NodeKind::Master && live)
+                    .then(|| node.terminal.clone().map(|terminal| (index, terminal)))
+                    .flatten()
+            })
+        }) else {
+            return;
+        };
+        let current = self
+            .attached
+            .as_ref()
+            .is_some_and(|attached| attached.agent == terminal && attached.closed.is_none());
+        if !current {
+            self.open(node, ctx);
+        }
+    }
+
+    fn master_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let open = self
+            .attached
+            .as_ref()
+            .is_some_and(|attached| attached.closed.is_none());
+        match key {
+            Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
+            Key::Char('r') => ctx.request(Request::TeamGraph {
+                project: self.project.clone(),
+            }),
+            Key::Esc => {
+                self.detach(ctx);
+                return Flow::Back;
+            }
+            _ => return Flow::Ignored,
+        }
+        Flow::Handled
     }
 
     fn items(&self, glyphs: &Glyphs) -> Vec<Item> {
@@ -163,6 +275,7 @@ impl Team {
         };
         if target.status.is_some_and(|status| !status.live()) {
             self.task = None;
+            self.instructions = None;
             ctx.say(Message::warning(
                 "This agent has stopped.",
                 "Its terminal is closed.",
@@ -178,6 +291,7 @@ impl Team {
         };
         let (id, label) = (target.id.clone(), target.label.clone());
         self.task = None;
+        self.instructions = None;
         if self
             .attached
             .as_ref()
@@ -187,7 +301,7 @@ impl Team {
             return;
         }
         self.detach(ctx);
-        let (rows, cols) = pane_size(ctx);
+        let (rows, cols) = pane_size(ctx, self.master);
         ctx.request(Request::TerminalAttach {
             agent: agent.clone(),
         });
@@ -223,7 +337,7 @@ impl Team {
     /// back; a terminal that ended stays closed.
     /// Input: the context. Output: none; attach and size requests are queued.
     fn reattach(&mut self, ctx: &mut Ctx) {
-        let (rows, cols) = pane_size(ctx);
+        let (rows, cols) = pane_size(ctx, self.master);
         let Some(attached) = self
             .attached
             .as_mut()
@@ -274,11 +388,64 @@ impl Team {
             .ready()
             .and_then(|graph| graph.edges.get(edge))
             .map(|edge| edge.task_id);
+        self.instructions = None;
         self.focus = Focus::Tree;
     }
 
+    /// Asks the engine what one card's agent received at its last launch and opens the
+    /// box for it: the master card reads the project's newest master.
+    /// Inputs: the node index and context. Output: none; a Process request is queued.
+    fn read_instructions(&mut self, node: usize, ctx: &mut Ctx) {
+        let Some(target) = self.graph.ready().and_then(|graph| graph.nodes.get(node)) else {
+            return;
+        };
+        let agent = match target.kind {
+            NodeKind::Master => None,
+            _ => match AgentId::new(&target.id).ok().and_then(|id| id.team_agent()) {
+                Some(agent) => Some(agent),
+                None => {
+                    ctx.say(Message::warning(
+                        "This card has no instructions to show.",
+                        "Only the master and team agents get instructions at launch.",
+                    ));
+                    return;
+                }
+            },
+        };
+        let label = target.label.clone();
+        let query = ProcessQuery::Agent {
+            project: self.project.clone(),
+            agent,
+        };
+        ctx.request(Request::Process(Box::new(query.clone())));
+        self.task = None;
+        self.instructions = Some(Instructions {
+            label,
+            query,
+            read: Load::Loading,
+            top: 0,
+        });
+    }
+
+    fn take_instructions(&mut self, event: &ProcessEvent) {
+        let Some(open) = self
+            .instructions
+            .as_mut()
+            .filter(|open| open.query == event.query)
+        else {
+            return;
+        };
+        open.read = match &event.result {
+            Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
+            Ok(ProcessReply::Text(_)) => return,
+            Err(code) if code == NOT_READY => Load::NotReady,
+            Err(code) => Load::Failed(code.clone()),
+        };
+        open.top = 0;
+    }
+
     fn sync(&mut self, ctx: &mut Ctx) {
-        let (rows, cols) = pane_size(ctx);
+        let (rows, cols) = pane_size(ctx, self.master);
         let Some(attached) = self.attached.as_mut() else {
             return;
         };
@@ -297,6 +464,10 @@ impl Team {
     }
 
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if *key == LEADER && self.master {
+            self.detach(ctx);
+            return Flow::Back;
+        }
         if *key == LEADER {
             self.focus = Focus::Tree;
             return Flow::Handled;
@@ -433,17 +604,43 @@ impl Team {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
+        if let Some(open) = self.instructions.as_mut() {
+            let lines = instruction_lines(&open.read, limit, ctx);
+            open.top = open
+                .top
+                .min(lines.len().saturating_sub(usize::from(inner.height)));
+            let title = format!("Instructions: {}", plain(&open.label));
+            let shown = lines.into_iter().skip(open.top).collect();
+            boxed(frame, area, &title, false, shown, ctx);
+            return None;
+        }
         if let Some(lines) = self.task_lines(limit, ctx) {
             boxed(frame, area, "Task", false, lines, ctx);
             return None;
         }
         let focused = self.focus == Focus::Terminal;
+        if let Some(code) = self.refused.as_deref().filter(|_| self.attached.is_none()) {
+            let mut lines = vec![Line::raw("The master terminal could not start.")];
+            lines.extend(
+                wrap(plain_problem(code).unwrap_or(code), limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
         let Some(attached) = self.attached.as_mut() else {
-            let lines = wrap("Enter on an agent opens its live terminal here.", limit)
+            let waiting = if self.master {
+                MASTER_WAITING
+            } else {
+                "Enter on an agent opens its live terminal here."
+            };
+            let lines = wrap(waiting, limit)
                 .into_iter()
                 .map(|text| styled(text, Role::Muted, theme))
                 .collect();
-            boxed(frame, area, "Terminal", false, lines, ctx);
+            let title = if self.master { "Master" } else { "Terminal" };
+            boxed(frame, area, title, false, lines, ctx);
             return None;
         };
         if let Some(code) = &attached.closed {
@@ -489,15 +686,36 @@ impl Team {
 
 impl Screen for Team {
     fn crumbs(&self) -> Vec<String> {
-        vec![self.name.clone(), "Team".into()]
+        let page = if self.master { "Master" } else { "Team" };
+        vec![self.name.clone(), page.into()]
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if self.focus == Focus::Terminal && self.master {
+            return vec![hint("Ctrl-]", "Back"), hint("Ctrl-J", "New line")];
+        }
         if self.focus == Focus::Terminal {
             return vec![hint("Ctrl-]", "Back to the team")];
         }
+        if self.master {
+            let mut hints = Vec::new();
+            if self
+                .attached
+                .as_ref()
+                .is_some_and(|attached| attached.closed.is_none())
+            {
+                hints.push(hint("Enter", "Terminal"));
+            }
+            hints.push(hint("r", "Refresh"));
+            hints.push(hint("Esc", "Back"));
+            return hints;
+        }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-        let mut hints = vec![hint(&vertical, "Move"), hint("Enter", "Open")];
+        let mut hints = vec![
+            hint(&vertical, "Move"),
+            hint("Enter", "Open"),
+            hint("i", "Instructions"),
+        ];
         if self
             .attached
             .as_ref()
@@ -506,7 +724,13 @@ impl Screen for Team {
             hints.push(hint("Tab", "Terminal"));
         }
         hints.push(hint("r", "Refresh"));
-        hints.push(hint("Esc", "Back"));
+        match self.instructions {
+            Some(_) => {
+                hints.push(hint("PgUp/PgDn", "Scroll"));
+                hints.push(hint("Esc", "Close"));
+            }
+            None => hints.push(hint("Esc", "Back")),
+        }
         hints
     }
 
@@ -517,6 +741,9 @@ impl Screen for Team {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if self.focus == Focus::Terminal {
             return self.terminal_key(key, ctx);
+        }
+        if self.master {
+            return self.master_key(key, ctx);
         }
         let items = self.items(ctx.glyphs);
         match key {
@@ -536,12 +763,29 @@ impl Screen for Team {
                     .is_some_and(|attached| attached.closed.is_none())
                 {
                     self.task = None;
+                    self.instructions = None;
                     self.focus = Focus::Terminal;
+                }
+            }
+            Key::Char('i') => {
+                if let Some(Item::Node(node)) = items.get(self.cursor) {
+                    self.read_instructions(*node, ctx);
+                }
+            }
+            Key::PageDown if self.instructions.is_some() => {
+                if let Some(open) = self.instructions.as_mut() {
+                    open.top = open.top.saturating_add(PAGE_STEP);
+                }
+            }
+            Key::PageUp if self.instructions.is_some() => {
+                if let Some(open) = self.instructions.as_mut() {
+                    open.top = open.top.saturating_sub(PAGE_STEP);
                 }
             }
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Esc if self.instructions.is_some() => self.instructions = None,
             Key::Esc => {
                 self.detach(ctx);
                 return Flow::Back;
@@ -556,8 +800,15 @@ impl Screen for Team {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
+                self.follow_master(ctx);
             }
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Process(event) => self.take_instructions(event),
+                OwnerEvent::Setup(event) => self.took_change(&event.query, &event.result),
+                _ => {}
+            },
+            Arrival::Connected(_) => self.asked = false,
             _ => {}
         }
         self.sync(ctx);
@@ -565,6 +816,7 @@ impl Screen for Team {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        self.ask_live(ctx);
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });
@@ -577,6 +829,9 @@ impl Screen for Team {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
+        if self.master {
+            return self.draw_right(frame, whole(area), ctx);
+        }
         let (left, right) = split(area);
         let inner = inside(left);
         let lines = self.tree_lines(usize::from(inner.width), usize::from(inner.height), ctx);
@@ -589,9 +844,11 @@ impl Screen for Team {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Team {
-            id: self.project.clone(),
-            name: self.name.clone(),
+        let (id, name) = (self.project.clone(), self.name.clone());
+        Some(if self.master {
+            Place::Master { id, name }
+        } else {
+            Place::Team { id, name }
         })
     }
 }
@@ -839,6 +1096,67 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
 }
 
+/// The lines of an agent's Instructions box: the instruction file with its size and
+/// text, then the skills installed for it, or why nothing can be shown.
+/// Inputs: the read, the box width and context. Output: the lines, unscrolled.
+fn instruction_lines(
+    read: &Load<Box<AgentInstructions>>,
+    limit: usize,
+    ctx: &Ctx,
+) -> Vec<Line<'static>> {
+    let theme = &ctx.theme;
+    let muted = |text: &str| -> Vec<Line<'static>> {
+        wrap(text, limit)
+            .into_iter()
+            .map(|line| styled(line, Role::Muted, theme))
+            .collect()
+    };
+    let view = match read {
+        Load::Idle | Load::Loading => return muted("Reading what this agent received..."),
+        Load::NotReady => return muted("Instructions aren't ready in this engine yet."),
+        Load::Failed(code) => {
+            return wrap(&message(code), limit)
+                .into_iter()
+                .map(Line::raw)
+                .collect();
+        }
+        Load::Ready(view) if !view.launched => {
+            return muted(
+                "This agent hasn't launched yet. What it receives shows here after its first launch.",
+            );
+        }
+        Load::Ready(view) => view,
+    };
+    let file = Harness::from_id(&view.harness).map_or("Instructions", Harness::instruction_file);
+    let mut lines = match view.text.is_empty() {
+        true => muted("No app or project instructions were given at its last launch."),
+        false => vec![Line::from(vec![
+            Span::styled(file, theme.heading),
+            Span::styled(format!("  {}", size(view.text.len())), theme.muted),
+        ])],
+    };
+    lines.push(Line::default());
+    for text in sanitize(&view.text).lines() {
+        match text.is_empty() {
+            true => lines.push(Line::default()),
+            false => lines.extend(wrap(text, limit).into_iter().map(Line::raw)),
+        }
+    }
+    if !view.text.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.push(styled("Skills", Role::Heading, theme));
+    match view.skills.is_empty() {
+        true => lines.extend(muted("No skills were installed at its last launch.")),
+        false => lines.extend(
+            view.skills
+                .iter()
+                .map(|skill| Line::raw(format!("{} {}", ctx.glyphs.dot, plain(skill)))),
+        ),
+    }
+    lines
+}
+
 /// Task text safe to draw in a terminal cell grid: tabs become spaces and
 /// other control characters but newlines are dropped, so nothing moves the
 /// cursor or overlaps. Input: the text. Output: the cleaned text.
@@ -887,6 +1205,17 @@ fn split(area: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
+/// The master view's terminal box: the whole body inside the side margins.
+/// Input: the body area. Output: the terminal rectangle.
+fn whole(area: Rect) -> Rect {
+    Rect::new(
+        area.x + MARGIN,
+        area.y,
+        area.width.saturating_sub(2 * MARGIN),
+        area.height,
+    )
+}
+
 fn inside(area: Rect) -> Rect {
     Rect::new(
         area.x + 1,
@@ -898,9 +1227,11 @@ fn inside(area: Rect) -> Rect {
 
 /// The terminal size the pane gets at the current window size, within the
 /// engine's terminal size bounds.
-/// Input: the context. Output: (rows, columns).
-fn pane_size(ctx: &Ctx) -> (u16, u16) {
-    let inner = inside(split(body_area(ctx)).1);
+/// Input: the context and whether the master view fills the body. Output:
+/// (rows, columns).
+fn pane_size(ctx: &Ctx, master: bool) -> (u16, u16) {
+    let body = body_area(ctx);
+    let inner = inside(if master { whole(body) } else { split(body).1 });
     (
         inner.height.clamp(SIZE_MIN, SIZE_MAX),
         inner.width.clamp(SIZE_MIN, SIZE_MAX),

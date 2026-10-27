@@ -6,6 +6,7 @@ use super::project_time::{clock, duration};
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
+use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, DelegationPath, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus,
     TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
@@ -91,6 +92,25 @@ pub(in crate::tui) struct Draft {
     pub harness: Option<String>,
 }
 
+/// Which wake rule the owner edits: the app's, this project's or one sub-agent's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum WakeLevel {
+    App,
+    Project,
+    Agent(i64),
+}
+
+/// The open wake rule editor: the level, the sub-agent it can switch to and the row with
+/// the cursor. Rows 0 to 4 are the event kinds in `EventKind::ALL` order, row 5 the limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct WakeEdit {
+    pub level: WakeLevel,
+    pub agent: Option<i64>,
+    pub row: usize,
+}
+
+const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
+
 /// The live team of one project: its agents, the tasks the master or the owner
 /// handed to sub-agents, cancel and the keep-warm switch.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
@@ -102,6 +122,8 @@ pub(in crate::tui) struct TeamView {
     pub task_cursor: usize,
     pub confirm: Option<i64>,
     pub draft: Option<Draft>,
+    pub wake: Option<WakeEdit>,
+    pub alerts: bool,
     pub notice: Option<Notice>,
     pub now_ms: i64,
     pub offset: i64,
@@ -123,6 +145,8 @@ impl TeamView {
             task_cursor: 0,
             confirm: None,
             draft: None,
+            wake: None,
+            alerts: false,
             notice: None,
             now_ms: 0,
             offset: 0,
@@ -170,7 +194,11 @@ impl TeamView {
                     Err(code) => self.notice = Some(Notice::problem(team_plain(&code))),
                 }
             }
-            SetupQuery::TeamChange { action, .. } if action.project() == &self.project => {
+            SetupQuery::TeamChange { action, .. }
+                if action
+                    .project()
+                    .map_or(self.changing.is_some(), |project| project == &self.project) =>
+            {
                 let done = self.changing.take();
                 match result {
                     Ok(SetupView::Changed(OwnerResult::Applied)) => {
@@ -283,12 +311,25 @@ impl TeamView {
         }
     }
 
-    /// Handles one key: move, switch list, cancel a task after asking, or the
-    /// keep-warm switch.
+    /// Handles one key: move, switch list, cancel a task after asking, the
+    /// keep-warm switch, or open the notifications and mark them seen.
     /// Takes the key event. Returns what the host should do next.
     pub fn key(&mut self, key: KeyEvent) -> TeamReply {
         if self.draft.is_some() {
             return self.draft_key(key);
+        }
+        if self.wake.is_some() {
+            return self.wake_key(key);
+        }
+        if self.alerts {
+            return match key.code {
+                KeyCode::Char('s') => self.mark_seen(),
+                KeyCode::Char('a') | KeyCode::Esc => {
+                    self.alerts = false;
+                    TeamReply::Handled
+                }
+                _ => TeamReply::Ignored,
+            };
         }
         if let Some(task) = self.confirm {
             return match key.code {
@@ -326,6 +367,15 @@ impl TeamView {
             KeyCode::Char('w') => self.keep_warm(),
             KeyCode::Char('n') => {
                 self.open_draft();
+                TeamReply::Handled
+            }
+            KeyCode::Char('e') => {
+                self.open_wake();
+                TeamReply::Handled
+            }
+            KeyCode::Char('s') => self.mark_seen(),
+            KeyCode::Char('a') => {
+                self.alerts = true;
                 TeamReply::Handled
             }
             _ => TeamReply::Ignored,
@@ -483,6 +533,272 @@ impl TeamView {
         })
     }
 
+    fn open_wake(&mut self) {
+        if self.status.is_none() {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return;
+        }
+        let agent = match self.focus {
+            TeamFocus::Agents => self
+                .agents()
+                .get(self.agent_cursor)
+                .filter(|agent| agent.role == AgentRole::Sub)
+                .map(|agent| agent.id),
+            TeamFocus::Tasks => None,
+        };
+        self.notice = None;
+        self.wake = Some(WakeEdit {
+            level: agent.map_or(WakeLevel::Project, WakeLevel::Agent),
+            agent,
+            row: 0,
+        });
+    }
+
+    /// Gives the rule a level sets itself, if any, and the rule shown for it: its own, else
+    /// the one it falls back to. Takes the level. Returns none before the first read.
+    pub fn wake_rule(&self, level: WakeLevel) -> Option<(Option<WakeRule>, WakeRule)> {
+        let wake = &self.status.as_ref()?.events.wake;
+        let (own, fallback) = match level {
+            WakeLevel::App => (wake.app, WakeRule::default()),
+            WakeLevel::Project => (wake.project, wake.app.unwrap_or_default()),
+            WakeLevel::Agent(id) => (
+                wake.agents
+                    .iter()
+                    .find(|rule| rule.agent == id)
+                    .map(|rule| rule.rule),
+                wake.effective,
+            ),
+        };
+        Some((own, own.unwrap_or(fallback)))
+    }
+
+    fn wake_key(&mut self, key: KeyEvent) -> TeamReply {
+        let Some(edit) = self.wake else {
+            return TeamReply::Ignored;
+        };
+        let Some((own, shown)) = self.wake_rule(edit.level) else {
+            self.wake = None;
+            return TeamReply::Handled;
+        };
+        let mut next = shown;
+        match key.code {
+            KeyCode::Esc => {
+                self.wake = None;
+                return TeamReply::Handled;
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let row = if key.code == KeyCode::Down {
+                    (edit.row + 1).min(WAKE_ROWS - 1)
+                } else {
+                    edit.row.saturating_sub(1)
+                };
+                self.wake = Some(WakeEdit { row, ..edit });
+                return TeamReply::Handled;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let levels: Vec<WakeLevel> = [WakeLevel::App, WakeLevel::Project]
+                    .into_iter()
+                    .chain(edit.agent.map(WakeLevel::Agent))
+                    .collect();
+                let at = levels
+                    .iter()
+                    .position(|level| *level == edit.level)
+                    .unwrap_or(0);
+                let next = if key.code == KeyCode::Tab {
+                    (at + 1) % levels.len()
+                } else {
+                    (at + levels.len() - 1) % levels.len()
+                };
+                self.wake = Some(WakeEdit {
+                    level: levels[next],
+                    ..edit
+                });
+                return TeamReply::Handled;
+            }
+            KeyCode::Char(' ') | KeyCode::Enter if edit.row < EventKind::ALL.len() => {
+                let kind = EventKind::ALL[edit.row];
+                let on = !shown.wakes(kind);
+                match kind {
+                    EventKind::Question => next.question = on,
+                    EventKind::Finished => next.finished = on,
+                    EventKind::Failed => next.failed = on,
+                    EventKind::ChangeSetReady => next.change_set_ready = on,
+                    EventKind::Progress => next.progress = on,
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::PageDown | KeyCode::PageUp
+                if edit.row == EventKind::ALL.len() =>
+            {
+                next.hourly_cap = match key.code {
+                    KeyCode::Left => shown.hourly_cap.saturating_sub(1),
+                    KeyCode::Right => shown.hourly_cap.saturating_add(1),
+                    KeyCode::PageDown => shown.hourly_cap.saturating_sub(10),
+                    _ => shown.hourly_cap.saturating_add(10),
+                }
+                .min(HOURLY_CAP_MAX);
+                if next.hourly_cap == shown.hourly_cap {
+                    return TeamReply::Handled;
+                }
+            }
+            KeyCode::Char('r') => {
+                if own.is_none() {
+                    self.notice = Some(Notice::plain("This level already uses the rule above it."));
+                    return TeamReply::Handled;
+                }
+                return self.wake_change(edit.level, None);
+            }
+            _ => return TeamReply::Handled,
+        }
+        self.wake_change(edit.level, Some(next))
+    }
+
+    fn wake_change(&mut self, level: WakeLevel, rule: Option<WakeRule>) -> TeamReply {
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let target = match level {
+            WakeLevel::App => RuleTarget::App,
+            WakeLevel::Project => RuleTarget::Project {
+                project_id: self.project.clone(),
+            },
+            WakeLevel::Agent(agent) => RuleTarget::Agent {
+                project_id: self.project.clone(),
+                agent,
+            },
+        };
+        self.changing = Some(match rule {
+            Some(_) => "Wake rule saved.".to_owned(),
+            None => "Wake rule reset. The rule above it applies.".to_owned(),
+        });
+        TeamReply::Change(TeamAction::Wake { target, rule })
+    }
+
+    fn mark_seen(&mut self) -> TeamReply {
+        let Some(upto) = self.status.as_ref().and_then(|status| {
+            status
+                .events
+                .notifications
+                .iter()
+                .filter(|item| item.seen_ms.is_none())
+                .map(|item| item.id)
+                .max()
+        }) else {
+            self.notice = Some(Notice::plain("There are no new notifications."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        self.changing = Some("Notifications marked as seen.".to_owned());
+        TeamReply::Change(TeamAction::Seen {
+            project_id: self.project.clone(),
+            upto,
+        })
+    }
+
+    fn alert_rows(&self, content: usize, room: usize, look: &Look) -> Vec<Row> {
+        let mut notifications: Vec<_> = self
+            .status
+            .iter()
+            .flat_map(|status| status.events.notifications.iter())
+            .collect();
+        notifications.sort_by_key(|item| std::cmp::Reverse(item.id));
+        let unseen = notifications
+            .iter()
+            .filter(|item| item.seen_ms.is_none())
+            .count();
+        let mut rows = vec![
+            Row::default(),
+            Row::of("Notifications", look.heading).push(format!("  {unseen} new"), look.muted),
+        ];
+        if notifications.is_empty() {
+            rows.push(Row::of(
+                "  No notifications yet. Sub-agents that need you show here.",
+                look.muted,
+            ));
+            return rows;
+        }
+        let fits = room.saturating_sub(rows.len());
+        let shown = if notifications.len() > fits {
+            fits.saturating_sub(1)
+        } else {
+            notifications.len()
+        };
+        for item in &notifications[..shown] {
+            let (word, style) = match item.seen_ms {
+                None => ("New", look.warning),
+                Some(_) => ("Seen", look.muted),
+            };
+            rows.push(spread(
+                content,
+                Row::of(format!("  {word}"), style)
+                    .pad(8)
+                    .push(title(&item.text), look.fg),
+                Row::of(
+                    format!("  {} ago", duration(self.now_ms - item.created_ms)),
+                    look.muted,
+                ),
+            ));
+        }
+        let hidden = notifications.len() - shown;
+        if hidden > 0 {
+            rows.push(Row::of(format!("  {hidden} older not shown"), look.muted));
+        }
+        rows
+    }
+
+    fn wake_rows(&self, edit: WakeEdit, content: usize, look: &Look) -> Vec<Row> {
+        let Some((own, shown)) = self.wake_rule(edit.level) else {
+            return Vec::new();
+        };
+        let whose = match edit.level {
+            WakeLevel::App => "every project".to_owned(),
+            WakeLevel::Project => "this project".to_owned(),
+            WakeLevel::Agent(id) => self
+                .agents()
+                .into_iter()
+                .find(|agent| agent.id == id)
+                .map_or_else(|| "this sub-agent".to_owned(), |agent| agent.label.clone()),
+        };
+        let source = match (own.is_some(), edit.level) {
+            (true, _) => "Set here",
+            (false, WakeLevel::App) => "Uses the default",
+            (false, WakeLevel::Project) => "Uses the app rule",
+            (false, WakeLevel::Agent(_)) => "Uses the project rule",
+        };
+        let mut rows = vec![spread(
+            content,
+            Row::of(format!("Wake the master for {whose}"), look.heading),
+            Row::of(source, look.muted),
+        )];
+        for (row, kind) in EventKind::ALL.into_iter().enumerate() {
+            let mark = if shown.wakes(kind) { "[x] " } else { "[ ] " };
+            rows.push(list_row(
+                Row::of(mark, look.fg).push(wake_kind_label(kind), look.fg),
+                content,
+                edit.row == row,
+                true,
+                look,
+            ));
+        }
+        rows.push(list_row(
+            Row::of("Wakes an hour before pausing  ", look.fg)
+                .push(shown.hourly_cap.to_string(), look.heading)
+                .push("  (0 never wakes)", look.muted),
+            content,
+            edit.row == EventKind::ALL.len(),
+            true,
+            look,
+        ));
+        rows
+    }
+
     fn keep_warm(&mut self) -> TeamReply {
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
@@ -557,17 +873,25 @@ impl TeamView {
         {
             lines.push(Row::of(label, look.muted));
         }
+        if self.alerts {
+            let notice: Vec<Row> = self.notice.iter().map(|notice| notice.row(look)).collect();
+            let room = room.saturating_sub(lines.len() + notice.len());
+            lines.extend(self.alert_rows(content, room, look));
+            lines.extend(notice);
+            return (lines, self.help(), None);
+        }
         if wide {
             lines.push(Row::default());
         }
         let agents = self.agents();
         let tasks = self.tasks();
-        let (panel, caret) = match &self.draft {
-            Some(draft) => {
+        let (panel, caret) = match (&self.draft, self.wake) {
+            (Some(draft), _) => {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
             }
-            None => (self.panel(content, accounts, look), None),
+            (None, Some(edit)) => (self.wake_rows(edit, content, look), None),
+            (None, None) => (self.panel(content, accounts, look), None),
         };
         let footer = self.footer(look);
         let fixed = lines.len() + 5 + panel.len() + footer.len();
@@ -697,6 +1021,17 @@ impl TeamView {
                     .push(format!("{number} {word}"), style);
             }
         }
+        let asking = status.events.waiting.len();
+        if asking > 0 {
+            left = left
+                .push("  ", Style::new())
+                .push(format!("{asking} waiting for an answer"), look.warning);
+        }
+        if status.events.paused {
+            left = left
+                .push("  ", Style::new())
+                .push("auto-wake paused", look.warning);
+        }
         let right = Row::of("Keep warm  ", look.muted)
             .push(if status.keep_warm { "On" } else { "Off" }, look.fg);
         spread(content, left, right)
@@ -732,6 +1067,19 @@ impl TeamView {
                     account_name(agent.account.as_deref(), accounts),
                 ));
                 rows.push(entry("Tools", tools_word(agent.tools).into()));
+                if let Some(waiting) = self
+                    .status
+                    .iter()
+                    .flat_map(|status| status.events.waiting.iter())
+                    .find(|item| item.agent == agent.id)
+                {
+                    rows.extend(
+                        wrap_words(&format!("Asks: {}", waiting.text), content)
+                            .into_iter()
+                            .take(PANEL_TEXT_LINES)
+                            .map(|line| Row::of(line, look.warning)),
+                    );
+                }
                 match agent.task.and_then(|id| self.task(id)) {
                     Some(task) => rows.push(entry("Task", title(&task.prompt))),
                     None => {
@@ -816,7 +1164,16 @@ impl TeamView {
                     .push(" Keep", look.fg),
             ];
         }
-        self.notice.iter().map(|notice| notice.row(look)).collect()
+        if let Some(notice) = &self.notice {
+            return vec![notice.row(look)];
+        }
+        self.status
+            .iter()
+            .flat_map(|status| status.events.notifications.iter())
+            .find(|item| item.seen_ms.is_none())
+            .map(|item| Row::of(title(&item.text), look.warning))
+            .into_iter()
+            .collect()
     }
 
     fn help(&self) -> Help {
@@ -831,15 +1188,51 @@ impl TeamView {
         if self.confirm.is_some() {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
-        vec![
+        if self.wake.is_some() {
+            return vec![
+                ("\u{2191}\u{2193}", "Move"),
+                ("Space", "Switch"),
+                ("\u{2190}\u{2192}", "Limit"),
+                ("Tab", "Level"),
+                ("r", "Reset"),
+                ("Esc", "Close"),
+            ];
+        }
+        let unseen = self.status.as_ref().is_some_and(|status| {
+            status
+                .events
+                .notifications
+                .iter()
+                .any(|item| item.seen_ms.is_none())
+        });
+        if self.alerts {
+            let mut help = Vec::new();
+            if unseen {
+                help.push(("s", "Seen"));
+            }
+            help.push(("Esc", "Close"));
+            return help;
+        }
+        let mut help = vec![
             ("\u{2191}\u{2193}", "Move"),
             ("Tab", "Agents or tasks"),
             ("n", "New task"),
             ("x", "Cancel task"),
             ("w", "Keep warm"),
-            TABS,
-            ("Esc", "Home"),
-        ]
+            ("e", "Wake rules"),
+        ];
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| !status.events.notifications.is_empty())
+        {
+            help.push(("a", "Notifications"));
+        }
+        if unseen {
+            help.push(("s", "Seen"));
+        }
+        help.extend([TABS, ("Esc", "Home")]);
+        help
     }
 }
 
@@ -863,6 +1256,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
             "Too much work is waiting already. Try again when some finishes.".into()
         }
         "team_task_limit" => "This project has reached its task limit.".into(),
+        "team_wake_cap_invalid" => "Set the hourly limit between 0 and 500 wakes.".into(),
+        "team_agent_not_found" => "That agent is no longer part of this team.".into(),
+        "team_notification_missing" => "There is no such notification to mark as seen.".into(),
         other => plain_problem(other),
     }
 }
@@ -964,6 +1360,16 @@ fn plan_line(status: &TeamStatus) -> String {
         agents_word(usize::from(status.max_agents))
     ));
     line
+}
+
+fn wake_kind_label(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Question => "A sub-agent asks a question",
+        EventKind::Finished => "A sub-agent finishes its task",
+        EventKind::Failed => "A sub-agent fails",
+        EventKind::ChangeSetReady => "A change set is ready",
+        EventKind::Progress => "A sub-agent reports progress",
+    }
 }
 
 fn agents_word(count: usize) -> String {

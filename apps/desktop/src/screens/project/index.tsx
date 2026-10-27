@@ -7,7 +7,7 @@ import { displayText } from "../conversation";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
-import { ConversationTab } from "./conversation";
+import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
 import { ProcessEditor } from "../process";
@@ -170,7 +170,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
-      {active === "conversation" && <TeamActivity data={data}><ConversationTab data={data} /></TeamActivity>}
+      {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}

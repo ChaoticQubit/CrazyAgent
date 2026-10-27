@@ -3,7 +3,7 @@ use super::{draw_page, step};
 use crate::config::{POOL_MEMBERS_MAX, plain_problem};
 use crate::pools::{MemberStatus, PoolSummary};
 use crate::protocol::CredentialRef;
-use crate::scheduling::Schedule;
+use crate::scheduling::{PoolRanking, Schedule};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
@@ -33,6 +33,7 @@ pub struct Pools {
     confirm: Option<Confirm>,
     deleting: Option<bool>,
     schedule: Option<Schedule>,
+    ranking: Option<Result<Vec<PoolRanking>, String>>,
     choice: Option<ChoiceEditor>,
 }
 
@@ -60,6 +61,7 @@ impl Pools {
             confirm: None,
             deleting: None,
             schedule: None,
+            ranking: None,
             choice: None,
         }
     }
@@ -241,7 +243,7 @@ impl Screen for Pools {
             _ => vec![
                 hint("a", "New pool"),
                 hint("Enter", "Edit"),
-                hint("o", "Account choice"),
+                hint("o", "Order"),
                 hint("d", "Delete"),
                 sections_hint(ctx.glyphs),
                 hint("Esc", "Home"),
@@ -335,7 +337,9 @@ impl Screen for Pools {
                     ));
                 }
                 ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
+                ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
             }
+            Some(SettingsEvent::Ranking(result)) => self.ranking = Some(result.clone()),
             _ => {}
         }
         match arrival {
@@ -364,7 +368,7 @@ impl Screen for Pools {
         if let (Some(editor), Some(schedule), Some(pool)) =
             (&self.choice, &self.schedule, self.chosen_pool(ctx))
         {
-            return Some(editor.modal(schedule, pool, ctx));
+            return Some(editor.modal(schedule, pool, self.ranking.as_ref(), ctx));
         }
         let confirm = self.confirm.as_ref()?;
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
@@ -416,6 +420,7 @@ impl Screen for Pools {
         ctx.request(Request::Pools);
         ctx.request(Request::Projects);
         ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
+        ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
@@ -811,6 +816,129 @@ mod tests {
                 ..AccountPlan::default()
             }),
             "Never used"
+        );
+    }
+
+    #[test]
+    fn account_choice_lists_the_next_accounts_in_order_with_why_each_waits() {
+        use crate::scheduling::{PoolRanking, RankedAccount, Standing, Strategy};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        let mut asked = Vec::new();
+        while let Some(request) = ctx.next_request() {
+            if let Request::Settings(job) = request {
+                asked.push(format!("{job:?}"));
+            }
+        }
+        assert!(asked.iter().any(|job| job.contains("Ranking")), "{asked:?}");
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let shown = body(&screen.modal(&ctx).expect("the editor shows").0);
+        assert!(shown.contains("Next accounts\n  Loading..."), "{shown}");
+        screen.arrive(
+            &settings(SettingsEvent::Ranking(Err("owner_read_failed".into()))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(
+            shown.contains("Could not read the next accounts."),
+            "{shown}"
+        );
+        let ranked = |id: &str, standing| RankedAccount {
+            connection: CredentialRef::new(id).unwrap(),
+            standing,
+        };
+        screen.arrive(
+            &settings(SettingsEvent::Ranking(Ok(vec![PoolRanking {
+                pool: CredentialRef::new("pool-main").unwrap(),
+                strategy: Strategy::UseItOrLoseIt,
+                accounts: vec![
+                    ranked(
+                        "member-1",
+                        Standing::Next {
+                            weekly_resets_ms: None,
+                            weekly_left_percent: Some(40),
+                            use_last: false,
+                        },
+                    ),
+                    ranked("member-9", Standing::NeverUse),
+                ],
+            }]))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(shown.contains(" 1. ChatGPT member-1"), "{shown}");
+        assert!(shown.contains("40% left"), "{shown}");
+        assert!(shown.contains("    member-9"), "{shown}");
+        assert!(shown.contains("never use"), "{shown}");
+        screen.arrive(&settings(SettingsEvent::ScheduleSet(Ok(()))), &mut ctx);
+        let mut asked = Vec::new();
+        while let Some(request) = ctx.next_request() {
+            if let Request::Settings(job) = request {
+                asked.push(format!("{job:?}"));
+            }
+        }
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(asked[1].contains("Ranking"), "{asked:?}");
+    }
+
+    #[test]
+    fn a_standing_reads_as_one_short_reason_in_local_time() {
+        use super::super::account_choice::{at_text, standing_line};
+        use crate::scheduling::Standing;
+        const HOUR: i64 = 3_600_000;
+        assert_eq!(at_text(14 * HOUR + 1_800_000, 0, 0), "14:30");
+        assert_eq!(at_text(4 * 24 * HOUR + 9 * HOUR, 0, 0), "Mon 09:00");
+        assert_eq!(at_text(23 * HOUR + 1_800_000, 0, 3600), "Fri 00:30");
+        let line = |standing| standing_line(&standing, 0, 0);
+        assert_eq!(
+            line(Standing::Next {
+                weekly_resets_ms: Some(4 * 24 * HOUR + 9 * HOUR),
+                weekly_left_percent: Some(40),
+                use_last: false,
+            }),
+            "resets Mon 09:00, 40% left"
+        );
+        assert_eq!(
+            line(Standing::Next {
+                weekly_resets_ms: None,
+                weekly_left_percent: None,
+                use_last: true,
+            }),
+            "no usage read yet, used last"
+        );
+        assert_eq!(
+            line(Standing::ReserveReached {
+                reserve_percent: 20,
+                until_ms: Some(HOUR),
+            }),
+            "reserve reached (20%)"
+        );
+        assert_eq!(
+            line(Standing::ReserveReached {
+                reserve_percent: 0,
+                until_ms: Some(14 * HOUR + 1_800_000),
+            }),
+            "weekly limit used up until 14:30"
+        );
+        assert_eq!(
+            line(Standing::FiveHourCap {
+                until_ms: Some(14 * HOUR + 1_800_000),
+            }),
+            "5-hour cap until 14:30"
+        );
+        assert_eq!(
+            line(Standing::FiveHourCap { until_ms: None }),
+            "5-hour cap reached"
+        );
+        assert_eq!(line(Standing::NeverUse), "never use");
+        assert_eq!(
+            line(Standing::Paused { until_ms: 2 * HOUR }),
+            "paused until 02:00"
         );
     }
 }

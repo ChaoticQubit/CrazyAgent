@@ -1313,7 +1313,7 @@ impl OwnerServer {
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
-        let upkeep = tokio::spawn(changes::upkeep(self.authority.clone()));
+        let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
             let dispatching = self.authority.native_auth_dispatch_pending();

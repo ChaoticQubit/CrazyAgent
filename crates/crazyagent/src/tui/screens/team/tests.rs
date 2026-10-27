@@ -1,6 +1,9 @@
+use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
@@ -32,6 +35,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         account: None,
         agents: None,
         terminal: None,
+        questions: None,
     }
 }
 
@@ -857,6 +861,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
             .collect(),
         messages: Vec::new(),
         plan: Vec::new(),
+        events: Default::default(),
     };
     let mut shell = fresh(160, 40);
     shell.arrive(Arrival::TeamGraph {
@@ -881,4 +886,363 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
             "task {id} points at Sub-agent {agent}:\n{text}"
         );
     }
+}
+
+fn received(query: &ProcessQuery, result: Result<AgentInstructions, &str>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
+        query: query.clone(),
+        result: result
+            .map(|view| ProcessReply::Agent(Box::new(view)))
+            .map_err(str::to_owned),
+    }))))
+}
+
+fn asked(shell: &mut Shell) -> Vec<ProcessQuery> {
+    requests(shell)
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Process(query) => Some(*query),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
+    let mut team = graph();
+    team.nodes[5].id = "team-5".into();
+    team.edges[1].to = "team-5".into();
+    let mut shell = fresh(100, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('i'));
+    let codex = ProcessQuery::Agent {
+        project: project(),
+        agent: Some(5),
+    };
+    assert_eq!(asked(&mut shell), [codex.clone()]);
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("Instructions: codex-1"), "{screen}");
+    assert!(
+        screen.contains("Reading what this agent received"),
+        "{screen}"
+    );
+
+    shell.arrive(received(
+        &codex,
+        Ok(AgentInstructions {
+            agent: 5,
+            harness: "codex".into(),
+            launched: true,
+            text: "# Instructions from CrazyAgent\n\nUse tdd.\u{1b}[31m red\n".into(),
+            skills: vec!["tdd".into(), "code-review".into()],
+        }),
+    ));
+    let screen = render(&mut shell).join("\n");
+    for shown in [
+        "AGENTS.md",
+        "50 bytes",
+        "# Instructions from CrazyAgent",
+        "Use tdd. red",
+        "Skills",
+        "tdd",
+        "code-review",
+    ] {
+        assert!(screen.contains(shown), "{shown} missing in\n{screen}");
+    }
+    assert!(
+        !screen.contains('\u{1b}'),
+        "stored text never reaches the terminal as a command"
+    );
+    assert!(
+        screen
+            .lines()
+            .any(|row| row.contains("│>") && row.contains("▸ codex-1")),
+        "the tree keeps its cursor while the box is open\n{screen}"
+    );
+
+    shell.key(Key::Home);
+    shell.key(Key::Char('i'));
+    let master = ProcessQuery::Agent {
+        project: project(),
+        agent: None,
+    };
+    assert_eq!(
+        asked(&mut shell),
+        [master.clone()],
+        "the master card reads the newest master"
+    );
+    shell.arrive(received(&codex, Err("agent_instructions_unsafe")));
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("Reading what this agent received"),
+        "a reply for another card is ignored\n{screen}"
+    );
+    shell.arrive(received(&master, Err("agent_instructions_unsafe")));
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("link or not a plain file"), "{screen}");
+    assert!(!screen.contains("agent_instructions_unsafe"), "{screen}");
+
+    shell.key(Key::Char('i'));
+    assert_eq!(
+        asked(&mut shell),
+        [master.clone()],
+        "i reads the card again"
+    );
+    shell.arrive(received(
+        &master,
+        Ok(AgentInstructions {
+            agent: 1,
+            harness: "claude-code".into(),
+            launched: false,
+            text: String::new(),
+            skills: Vec::new(),
+        }),
+    ));
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("hasn't launched yet"), "{screen}");
+
+    shell.key(Key::Esc);
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        !screen.contains("Instructions: Master"),
+        "Esc closes the box\n{screen}"
+    );
+    assert!(
+        screen.contains("Tidepool  /  Team"),
+        "and stays on the team\n{screen}"
+    );
+}
+
+#[test]
+fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
+    let mut team = graph();
+    team.nodes[5].id = "team-5".into();
+    let mut shell = fresh(100, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('i'));
+    let codex = ProcessQuery::Agent {
+        project: project(),
+        agent: Some(5),
+    };
+    assert_eq!(asked(&mut shell), [codex.clone()]);
+    let text: String = (1..=80).map(|line| format!("RULE-{line:02}\n")).collect();
+    shell.arrive(received(
+        &codex,
+        Ok(AgentInstructions {
+            agent: 5,
+            harness: "codex".into(),
+            launched: true,
+            text,
+            skills: Vec::new(),
+        }),
+    ));
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("RULE-01") && !screen.contains("RULE-40"),
+        "{screen}"
+    );
+    for _ in 0..3 {
+        shell.key(Key::PageDown);
+    }
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("RULE-40") && !screen.contains("RULE-01"),
+        "{screen}"
+    );
+    for _ in 0..20 {
+        shell.key(Key::PageDown);
+    }
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("No skills were installed at its last launch."),
+        "the end stays reachable and in view\n{screen}"
+    );
+    shell.key(Key::PageUp);
+    shell.key(Key::PageUp);
+
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("Task"), "{screen}");
+    assert!(
+        !screen.contains("RULE-"),
+        "a task replaces the box\n{screen}"
+    );
+}
+
+fn master_view(width: u16, height: u16) -> Shell {
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    ctx.width = width;
+    ctx.height = height;
+    ctx.link = Link::Ready;
+    let place = Place::Master {
+        id: project(),
+        name: "Tidepool".into(),
+    };
+    let screen = open(&place, &mut ctx);
+    Shell::with(ctx, screen)
+}
+
+fn live_master_change(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Setup(crate::project_setup::SetupQuery::TeamChange {
+            action: crate::team::TeamAction::LiveMaster { project_id, on: true },
+            ..
+        }) if *project_id == project()
+    )
+}
+
+#[test]
+fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body() {
+    let mut shell = master_view(80, 24);
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(live_master_change(&sent[0]), "{sent:?}");
+    assert!(matches!(&sent[1], Request::TeamGraph { project: asked } if *asked == project()));
+    let rows = render(&mut shell);
+    assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!("┌─ Master {}┐", "─".repeat(65))
+    );
+    assert_eq!(
+        chars(&rows[3], 2, 78),
+        format!(
+            "│{:<74}│",
+            "Starting the master's terminal. It opens once the master signs in and"
+        )
+    );
+
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(matches!(&sent[0], Request::TerminalAttach { agent } if agent.as_str() == "team-1"));
+    assert!(matches!(
+        &sent[1],
+        Request::TerminalResize { agent, cols: 74, rows: 18 } if agent.as_str() == "team-1"
+    ));
+
+    shell.refresh();
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "only the graph is read again: {sent:?}");
+    assert!(matches!(&sent[0], Request::TeamGraph { .. }));
+
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 18,
+        },
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Output {
+            bytes: b"> what next?".to_vec(),
+        },
+    });
+    let rows = render(&mut shell);
+    assert_eq!(chars(&rows[3], 3, 77), format!("{:<74}", "> what next?"));
+    assert!(rows[23].contains("Ctrl-] Back"), "{}", rows[23]);
+    assert!(rows[23].contains("Ctrl-J New line"), "{}", rows[23]);
+
+    for (key, bytes) in [
+        (Key::Char('y'), &b"y"[..]),
+        (Key::Ctrl('j'), &b"\n"[..]),
+        (Key::Esc, &b"\x1b"[..]),
+        (Key::Enter, &b"\r"[..]),
+    ] {
+        shell.key(key);
+        let sent = requests(&mut shell);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(input(&sent[0]), Some(("team-1", bytes)));
+    }
+
+    shell.key(LEADER);
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [Request::TerminalDetach { agent }] if agent.as_str() == "team-1"),
+        "{sent:?}"
+    );
+    shell.key(Key::Char('z'));
+    assert!(
+        requests(&mut shell)
+            .iter()
+            .all(|sent| input(sent).is_none())
+    );
+}
+
+#[test]
+fn the_master_view_follows_the_master_to_its_new_terminal_and_says_when_it_cannot_start() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    let mut moved = graph();
+    moved.nodes[0].terminal = Some(terminal("team-9"));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(moved),
+    });
+    let sent = requests(&mut shell);
+    assert!(matches!(&sent[0], Request::TerminalDetach { agent } if agent.as_str() == "team-1"));
+    assert!(matches!(&sent[1], Request::TerminalAttach { agent } if agent.as_str() == "team-9"));
+
+    let mut refused = master_view(80, 24);
+    requests(&mut refused);
+    refused.arrive(Arrival::Owner(Box::new(
+        crate::tui::client::OwnerEvent::Setup(Box::new(crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::TeamChange {
+                action: crate::team::TeamAction::LiveMaster {
+                    project_id: project(),
+                    on: true,
+                },
+                generation: 1,
+            },
+            result: Err("team_master_no_terminal".into()),
+        })),
+    )));
+    let rows = render(&mut refused);
+    assert_eq!(
+        chars(&rows[3], 2, 78),
+        format!("│{:<74}│", "The master terminal could not start.")
+    );
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "This master harness has no terminal app. Its conversation stays on the"
+        )
+    );
+    refused.key(Key::Esc);
+    assert!(requests(&mut refused).is_empty());
 }

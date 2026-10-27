@@ -423,7 +423,7 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
         },
     ];
 
-    let text = master_tools_section(&setup);
+    let text = master_tools_section(&setup, &["codex"]);
 
     assert!(text.contains("Your tools are on in this conversation"));
     assert!(text.contains("`delegate` tool of the `crazyagent-team` MCP server"));
@@ -441,10 +441,36 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
     assert!(!text.contains("tools are off"));
     assert!(!text.contains("no sub-agents"));
 
+    assert!(!text.contains("any harness"));
+
     setup.team.sub_harnesses.clear();
-    let alone = master_tools_section(&setup);
-    assert!(alone.contains("Your tools are on in this conversation"));
-    assert!(alone.contains("This project's team plan has no sub-agents"));
+    setup.team.max_agents = crate::project_setup::TEAM_AGENTS_MAX;
+    let any = master_tools_section(&setup, &["codex", "claude-code"]);
+    assert!(any.contains("Your tools are on in this conversation"));
+    assert!(!any.contains("no sub-agents"));
+    assert!(!any.contains("refuses every task"));
+    assert!(
+        any.contains("The team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\n"),
+        "{any}"
+    );
+    assert!(any.contains(
+        "There is no per-harness limit, only the team maximum of 64 agents, counting you.\n"
+    ));
+    let waiting = master_tools_section(&setup, &[]);
+    assert!(
+        waiting.contains("no harness has an account in the project's pool yet"),
+        "{waiting}"
+    );
+    assert!(waiting.contains("only the team maximum of 64 agents"));
+    setup.team.max_agents = 1;
+    let alone = master_tools_section(&setup, &["codex"]);
+    assert!(
+        alone.contains(
+            "The team maximum is 1 agent, you, so CrazyAgent refuses every task you hand over."
+        ),
+        "{alone}"
+    );
+    assert!(!alone.contains("- codex\n"));
 
     setup.team.sub_harnesses = (0..200)
         .map(|index| HarnessSlot {
@@ -453,7 +479,7 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
             tools: true,
         })
         .collect();
-    let crowded = master_tools_section(&setup);
+    let crowded = master_tools_section(&setup, &[]);
     assert!(
         crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK,
         "{}",
@@ -501,9 +527,15 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     );
     assert!(!claude.join("AGENTS.md").exists());
     drop(installed);
-    assert!(
-        !claude.join("CLAUDE.md").exists(),
-        "the launch's file goes with it"
+    assert_eq!(
+        crate::agent_home::received(&claude, crate::agent_home::Harness::Claude)
+            .unwrap()
+            .unwrap(),
+        crate::agent_home::Received {
+            text: written.clone(),
+            skills: Vec::new(),
+        },
+        "the owner sees what the last launch received after it ends"
     );
 
     let codex = home("codex");

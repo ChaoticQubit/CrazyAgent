@@ -77,6 +77,17 @@ type LimitsRow<'a> = (&'a str, f64, Option<i64>, f64, Option<i64>);
 /// Records synthetic limits through the usage store the poll writes.
 /// Takes the connection and the rows.
 fn limits(connection: &Connection, rows: &[LimitsRow<'_>]) {
+    readings(connection, rows, crate::usage::LimitSource::Poll, NOW_MS);
+}
+
+/// Records synthetic limits through the usage store as read from `source` at `at_ms`.
+/// Takes the connection, the rows, the source and the time.
+fn readings(
+    connection: &Connection,
+    rows: &[LimitsRow<'_>],
+    source: crate::usage::LimitSource,
+    at_ms: i64,
+) {
     crate::usage::initialize(connection).unwrap();
     for (id, five, five_resets, weekly, weekly_resets) in rows {
         crate::usage::record_observation(
@@ -93,8 +104,8 @@ fn limits(connection: &Connection, rows: &[LimitsRow<'_>]) {
                     resets_at_ms: *weekly_resets,
                 }),
             },
-            crate::usage::LimitSource::Poll,
-            NOW_MS,
+            source,
+            at_ms,
         )
         .unwrap();
     }
@@ -371,6 +382,180 @@ fn a_reserve_or_a_full_five_hour_window_leaves_the_account_out_until_it_resets()
 }
 
 #[test]
+fn a_transcript_reading_orders_an_account_after_the_others_but_never_leaves_it_out() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b", "c", "d"]);
+    limits(
+        &connection,
+        &[
+            ("c", 20.0, None, 50.0, Some(NOW_MS + 24 * HOUR_MS)),
+            (
+                "d",
+                100.0,
+                Some(NOW_MS + 3 * HOUR_MS),
+                10.0,
+                Some(NOW_MS + 5 * HOUR_MS),
+            ),
+        ],
+    );
+    readings(
+        &connection,
+        &[
+            (
+                "a",
+                100.0,
+                Some(NOW_MS + HOUR_MS),
+                10.0,
+                Some(NOW_MS + HOUR_MS),
+            ),
+            ("b", 0.0, None, 100.0, Some(NOW_MS + 2 * HOUR_MS)),
+        ],
+        crate::usage::LimitSource::Transcript,
+        NOW_MS,
+    );
+    let choice = read(&connection, &access);
+    let list = candidates(&["a", "b", "c", "d"]);
+    assert_eq!(
+        choice.order(&list).excluded,
+        [(
+            3,
+            Excluded::FiveHourCap {
+                resets_ms: Some(NOW_MS + 3 * HOUR_MS)
+            }
+        )]
+    );
+    assert_eq!(ordered(&choice, &list), ["c", "a", "b"]);
+    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(
+        standings(&pools[0]),
+        [
+            ("c", next(Some(NOW_MS + 24 * HOUR_MS), Some(50), false)),
+            ("a", next(Some(NOW_MS + HOUR_MS), Some(90), false)),
+            ("b", next(Some(NOW_MS + 2 * HOUR_MS), Some(0), false)),
+            (
+                "d",
+                Standing::FiveHourCap {
+                    until_ms: Some(NOW_MS + 3 * HOUR_MS),
+                }
+            ),
+        ]
+    );
+    plan(
+        &mut connection,
+        &access,
+        "c",
+        AccountPlan {
+            pin: Some(Pin::UseLast),
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(ordered(&read(&connection, &access), &list), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_transcript_reading_never_frees_an_account_a_poll_left_out() {
+    let (_directory, mut connection) = database();
+    let access = access(&["e", "f", "g", "h"]);
+    readings(
+        &connection,
+        &[
+            (
+                "e",
+                100.0,
+                Some(NOW_MS + HOUR_MS),
+                30.0,
+                Some(NOW_MS + 48 * HOUR_MS),
+            ),
+            (
+                "f",
+                10.0,
+                Some(NOW_MS + HOUR_MS),
+                95.0,
+                Some(NOW_MS + 48 * HOUR_MS),
+            ),
+        ],
+        crate::usage::LimitSource::Poll,
+        NOW_MS - 2 * HOUR_MS,
+    );
+    readings(
+        &connection,
+        &[(
+            "g",
+            100.0,
+            Some(NOW_MS - HOUR_MS),
+            20.0,
+            Some(NOW_MS + 48 * HOUR_MS),
+        )],
+        crate::usage::LimitSource::Poll,
+        NOW_MS - 6 * HOUR_MS,
+    );
+    limits(
+        &connection,
+        &[("h", 10.0, None, 60.0, Some(NOW_MS + 72 * HOUR_MS))],
+    );
+    readings(
+        &connection,
+        &[
+            (
+                "e",
+                0.0,
+                Some(NOW_MS + 5 * HOUR_MS),
+                0.0,
+                Some(NOW_MS + 48 * HOUR_MS),
+            ),
+            (
+                "f",
+                10.0,
+                Some(NOW_MS + HOUR_MS),
+                96.0,
+                Some(NOW_MS + 48 * HOUR_MS),
+            ),
+            (
+                "g",
+                100.0,
+                Some(NOW_MS + 4 * HOUR_MS),
+                25.0,
+                Some(NOW_MS + 48 * HOUR_MS),
+            ),
+        ],
+        crate::usage::LimitSource::Transcript,
+        NOW_MS,
+    );
+    plan(
+        &mut connection,
+        &access,
+        "f",
+        AccountPlan {
+            reserve_percent: 10,
+            ..AccountPlan::default()
+        },
+    );
+    let choice = read(&connection, &access);
+    let newest = |id: &str| choice.limits[&reference(id)].five_hour_at(NOW_MS);
+    assert_eq!(newest("e").map(|window| window.used_percent), Some(0.0));
+    assert_eq!(newest("g").map(|window| window.used_percent), Some(100.0));
+    let list = candidates(&["e", "f", "g", "h"]);
+    assert_eq!(
+        choice.order(&list).excluded,
+        [
+            (
+                0,
+                Excluded::FiveHourCap {
+                    resets_ms: Some(NOW_MS + HOUR_MS)
+                }
+            ),
+            (
+                1,
+                Excluded::WeeklyReserve {
+                    resets_ms: Some(NOW_MS + 48 * HOUR_MS)
+                }
+            ),
+        ]
+    );
+    assert_eq!(ordered(&choice, &list), ["h", "g"]);
+}
+
+#[test]
 fn never_use_is_left_out_and_use_last_goes_after_every_other_account() {
     let (_directory, mut connection) = database();
     let access = access(&["a", "b", "c"]);
@@ -499,4 +684,131 @@ fn limits_come_from_the_usage_store_with_the_owners_manual_reset_applied() {
         })
     );
     assert_eq!(ordered(&choice, &list), ["a", "b"]);
+}
+
+fn next(resets_ms: Option<i64>, left: Option<u8>, use_last: bool) -> Standing {
+    Standing::Next {
+        weekly_resets_ms: resets_ms,
+        weekly_left_percent: left,
+        use_last,
+    }
+}
+
+fn standings(pool: &PoolRanking) -> Vec<(&str, Standing)> {
+    pool.accounts
+        .iter()
+        .map(|account| (account.connection.as_str(), account.standing))
+        .collect()
+}
+
+#[test]
+fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b", "c", "d", "e", "f"]);
+    crate::team::initialize(&connection).unwrap();
+    limits(
+        &connection,
+        &[
+            ("a", 10.0, None, 40.0, Some(NOW_MS + 72 * HOUR_MS)),
+            ("b", 10.0, None, 30.0, Some(NOW_MS + 24 * HOUR_MS)),
+            ("c", 10.0, None, 85.0, Some(NOW_MS + 48 * HOUR_MS)),
+            (
+                "d",
+                100.0,
+                Some(NOW_MS + 2 * HOUR_MS),
+                5.0,
+                Some(NOW_MS + 6 * HOUR_MS),
+            ),
+        ],
+    );
+    for (id, reserve_percent, pin) in [
+        ("a", 0, Some(Pin::UseLast)),
+        ("b", 10, None),
+        ("c", 20, None),
+        ("e", 0, Some(Pin::NeverUse)),
+    ] {
+        plan(
+            &mut connection,
+            &access,
+            id,
+            AccountPlan {
+                rank: None,
+                reserve_percent,
+                pin,
+            },
+        );
+    }
+    connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('f',?1),('a',?2)",
+            params![NOW_MS + HOUR_MS, NOW_MS - 1],
+        )
+        .unwrap();
+    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(pools.len(), 1);
+    assert_eq!(pools[0].pool, reference("pool-a"));
+    assert_eq!(pools[0].strategy, Strategy::UseItOrLoseIt);
+    assert_eq!(
+        standings(&pools[0]),
+        [
+            ("b", next(Some(NOW_MS + 24 * HOUR_MS), Some(60), false)),
+            ("a", next(Some(NOW_MS + 72 * HOUR_MS), Some(60), true)),
+            (
+                "c",
+                Standing::ReserveReached {
+                    reserve_percent: 20,
+                    until_ms: Some(NOW_MS + 48 * HOUR_MS),
+                }
+            ),
+            (
+                "d",
+                Standing::FiveHourCap {
+                    until_ms: Some(NOW_MS + 2 * HOUR_MS),
+                }
+            ),
+            ("e", Standing::NeverUse),
+            (
+                "f",
+                Standing::Paused {
+                    until_ms: NOW_MS + HOUR_MS,
+                }
+            ),
+        ]
+    );
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::PoolStrategy {
+            pool: reference("pool-a"),
+            strategy: Some(Strategy::Balanced),
+        },
+    );
+    let balanced = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(balanced[0].strategy, Strategy::Balanced);
+    assert_eq!(
+        standings(&balanced[0])[..2],
+        [
+            ("b", next(Some(NOW_MS + 24 * HOUR_MS), Some(60), false)),
+            ("a", next(Some(NOW_MS + 72 * HOUR_MS), Some(60), true)),
+        ]
+    );
+}
+
+#[test]
+fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
+    let (_directory, connection) = database();
+    let access = access(&["a", "b"]);
+    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(
+        standings(&pools[0]),
+        [
+            ("a", next(None, None, false)),
+            ("b", next(None, None, false))
+        ]
+    );
+    assert!(
+        ranking(&connection, &ModelAccess::default(), NOW_MS)
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -49,8 +49,8 @@ enum Planned {
 
 /// True for the owner requests that touch folders outside the engine data:
 /// AddExistingFolder, MoveProjectsHome that moves the projects, SetupProject
-/// (New Project) and FolderSize. These run their slow disk work here, off the
-/// storage actor, and only then reach the engine database.
+/// (New Project), FolderSize and ProjectFiles. These run their slow disk work
+/// here, off the storage actor, and only then reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
     matches!(
         &request.operation,
@@ -62,7 +62,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                 }
                 | OwnerMutation::SetupProject { .. }
         } | OwnerOperation::Read {
-            query: OwnerRead::FolderSize { .. }
+            query: OwnerRead::FolderSize { .. } | OwnerRead::ProjectFiles { .. }
         }
     )
 }
@@ -154,6 +154,18 @@ async fn plan(
         OwnerOperation::Read {
             query: OwnerRead::FolderSize { path },
         } => return measure(path, deadline).await.map(Planned::Step),
+        OwnerOperation::Read {
+            query:
+                OwnerRead::ProjectFiles {
+                    project_id,
+                    query,
+                    limit,
+                },
+        } => {
+            return files(engine, a, project_id, query, *limit, deadline)
+                .await
+                .map(Planned::Step);
+        }
         OwnerOperation::Apply { mutation } => mutation,
         _ => return Err(failure("owner_request_invalid")),
     };
@@ -248,6 +260,59 @@ async fn measure(path: &str, deadline: Instant) -> Result<Step, EngineError> {
         Ok(bytes) => Ok(Step::Size(bytes)),
         Err(e) => Ok(Step::Reply(Box::new(OwnerResponse::Rejected { code: e.0 }))),
     }
+}
+
+/// Lists a set-up project's files off the storage actor: reads the stored setup for the
+/// folder, then runs the bounded git listing on a blocking thread for at most
+/// `project_files::LISTING_TIME`. Inputs: the engine, the admission, the project, the
+/// query, the limit and the exchange deadline. Output: the read reply with the paths, or
+/// a refusal: `project_setup_missing` for a project with no setup, or the listing's code.
+async fn files(
+    engine: &Arc<Engine>,
+    a: &Admission,
+    project_id: &ProjectId,
+    query: &str,
+    limit: u16,
+    deadline: Instant,
+) -> Result<Step, EngineError> {
+    let read = OwnerRead::ProjectSetup {
+        project_id: project_id.clone(),
+    };
+    let mut state = engine
+        .owner_job(|reply| Job::OwnerRead(a.clone(), read, reply))
+        .await?;
+    let folder = match &state.data {
+        OwnerData::ProjectSetup {
+            setup: Some(setup), ..
+        } => setup.project_folder(),
+        _ => return Ok(rejected("project_setup_missing")),
+    };
+    let query = query.to_owned();
+    let now = std::time::Instant::now();
+    let stop = deadline
+        .into_std()
+        .checked_sub(SIZE_MARGIN)
+        .unwrap_or(now)
+        .min(now + crate::project_files::LISTING_TIME);
+    let listed = tokio::task::spawn_blocking(move || {
+        crate::project_files::list(&folder, &query, limit, stop)
+    })
+    .await
+    .map_err(|_| failure("project_files_interrupted"))?;
+    Ok(match listed {
+        Ok(paths) => {
+            state.data = OwnerData::ProjectFiles {
+                project_id: project_id.clone(),
+                paths,
+            };
+            Step::Reply(Box::new(OwnerResponse::Read { state }))
+        }
+        Err(e) => rejected(&e.0),
+    })
+}
+
+fn rejected(code: &str) -> Step {
+    Step::Reply(Box::new(OwnerResponse::Rejected { code: code.into() }))
 }
 
 async fn finish(

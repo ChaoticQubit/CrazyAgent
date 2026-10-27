@@ -70,6 +70,7 @@ pub(in crate::tui) enum SettingsJob {
     },
     SkillDetail {
         id: String,
+        project: Option<ProjectId>,
     },
     ImportScan,
     ImportSkills {
@@ -82,6 +83,7 @@ pub(in crate::tui) enum SettingsJob {
         change: crate::scheduling::ScheduleChange,
         generation: u64,
     },
+    Ranking,
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -163,6 +165,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::AppSetup(job) => job.name(),
             Self::Schedule => "Schedule",
             Self::SetSchedule { .. } => "SetSchedule",
+            Self::Ranking => "Ranking",
         })
     }
 }
@@ -270,6 +273,7 @@ pub(in crate::tui) enum SettingsEvent {
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
     ScheduleSet(Result<(), String>),
+    Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
 }
 
 impl SettingsEvent {
@@ -303,6 +307,7 @@ impl SettingsEvent {
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
             SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
+            SettingsJob::Ranking => Self::Ranking(Err(problem)),
         }
     }
 }
@@ -441,10 +446,10 @@ impl NativeOwner {
                 project.clone(),
                 self.plugins(Some(project), lost).await,
             ),
-            SettingsJob::SkillDetail { id } => {
+            SettingsJob::SkillDetail { id, project } => {
                 SettingsEvent::SkillDetail(match self.settings_controller() {
                     Ok(controller) => controller
-                        .skill_detail(id, None)
+                        .skill_detail(id, project)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),
@@ -482,6 +487,13 @@ impl NativeOwner {
             SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {
                 Ok(controller) => controller
                     .account_schedule()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::Ranking => SettingsEvent::Ranking(match self.settings_controller() {
+                Ok(controller) => controller
+                    .account_ranking()
                     .await
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
@@ -1630,6 +1642,7 @@ mod tests {
         match native
             .settings(SettingsJob::SkillDetail {
                 id: skills[0].id.clone(),
+                project: None,
             })
             .await
         {

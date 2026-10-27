@@ -99,3 +99,11 @@ test("the master view keeps its content and adds the strip beside it", () => {
   assert.match(html, /<div class="ta-split"><div class="ta-main"><p>Master conversation<\/p><\/div><aside class="ta-side" aria-label="Team activity">/);
   assert.match(html, /aria-busy="true"/);
 });
+
+test("an agent name holding a direction override is shown without it in the activity list", () => {
+  const evil = { project_id: "p-1", nodes: [node("m", "master", { label: "Master" }), node("team-1", "agent", { parent: "m", label: "Ada\u202etxt.exe (@x)", status: "working", status_label: "Working" })], edges: [edge("t-1", "team-1", "running", "Rename \u2067a\u2069 file")] };
+  const rows = activity.activityRows(evil, null);
+  const html = renderToStaticMarkup(createElement(activity.TeamActivityList, { rows, now: 10_000, open: null, onOpen() {} }));
+  assert.doesNotMatch(html, /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u);
+  assert.match(html, /Ada\\u202etxt\.exe/);
+});

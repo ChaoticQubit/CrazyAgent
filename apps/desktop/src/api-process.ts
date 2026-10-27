@@ -1,6 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
+import type { GraphNode } from "./engine-client";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -31,6 +32,12 @@ const REFUSALS: Record<string, string> = {
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
+  process_agent_unknown: "This agent isn't part of this project's team.",
+  process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",
+  agent_instructions_unsafe: "This agent's instructions file is a link or not a plain file, so CrazyAgent won't read it.",
+  agent_instructions_too_large: "This agent's instructions file is larger than CrazyAgent writes, so it isn't shown.",
+  agent_instructions_invalid: "This agent's instructions file has characters CrazyAgent doesn't write, so it isn't shown.",
+  agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
 };
 
 /** The refusal codes of the process protocol that have their own sentence. */
@@ -128,4 +135,31 @@ export function skillSegments(text: string, skills: readonly SkillEntry[]): Proc
  * Output: the hash. */
 export function skillHref(id: string): string {
   return formatRoute({ name: "settings", tab: "plugins", skill: id });
+}
+
+/** What one team agent received at its last launch, read back from its private home: its
+ * harness, whether it has launched, the instruction file text and the installed skill names. */
+export interface AgentInstructions {
+  agent: number;
+  harness: string;
+  launched: boolean;
+  text: string;
+  skills: string[];
+}
+
+const TEAM_AGENT = /^team-([1-9][0-9]{0,14})$/u;
+
+/** Names the team agent whose instructions a graph card shows. Input: the card's node.
+ * Output: null for the master card, which the engine reads as the project's newest master,
+ * the agent id for an agent card, or undefined for a card with no agent. */
+export function agentOf(node: Pick<GraphNode, "id" | "kind">): number | null | undefined {
+  if (node.kind === "master") return null;
+  const id = node.kind === "agent" ? TEAM_AGENT.exec(node.id)?.[1] : undefined;
+  return id === undefined ? undefined : Number(id);
+}
+
+/** Reads what one team agent received at its last launch. Inputs: the project id and the
+ * agent id, or null for the project's master. Output: the read-only view. */
+export function loadAgentInstructions(projectId: string, agent: number | null): Promise<Result<AgentInstructions>> {
+  return call<AgentInstructions>("desktop_agent_instructions", { projectId, agent });
 }

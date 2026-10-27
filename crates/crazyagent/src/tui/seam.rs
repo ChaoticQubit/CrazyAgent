@@ -90,6 +90,10 @@ pub enum Request {
     TeamGraph {
         project: ProjectId,
     },
+    ProjectFiles {
+        project: ProjectId,
+        query: String,
+    },
     TerminalAttach {
         agent: AgentId,
     },
@@ -142,6 +146,7 @@ impl std::fmt::Debug for Request {
             Self::Wire { .. } => "Wire",
             Self::Settings(_) => "Settings",
             Self::TeamGraph { .. } => "TeamGraph",
+            Self::ProjectFiles { .. } => "ProjectFiles",
             Self::TerminalAttach { .. } => "TerminalAttach",
             Self::TerminalInput { .. } => "TerminalInput",
             Self::TerminalResize { .. } => "TerminalResize",
@@ -205,6 +210,11 @@ pub enum Arrival {
     TeamGraph {
         project: ProjectId,
         result: Result<Box<TeamGraph>, String>,
+    },
+    ProjectFiles {
+        project: ProjectId,
+        query: String,
+        result: Result<Vec<String>, String>,
     },
     Terminal {
         agent: AgentId,
@@ -273,13 +283,15 @@ impl ResearchCounts {
     }
 }
 
-/// A project's live team work and memory suggestions for its Home card.
-/// `working` is None when the team read failed or is not ready, so the card
-/// shows only research; `suggestions` counts memories waiting for review.
+/// A project's live team work, memory suggestions and new team notifications
+/// for its Home card. `working` is None when the team read failed or is not
+/// ready, so the card shows only research; `suggestions` counts memories
+/// waiting for review; `notifications` counts the team's unseen notifications.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Activity {
     pub working: Option<usize>,
     pub suggestions: usize,
+    pub notifications: usize,
 }
 
 /// One project as Home shows it, built only from engine data.

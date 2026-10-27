@@ -129,7 +129,9 @@ pub(crate) fn update(
     }
     let agent = state.join("agents").join(name);
     if std::fs::symlink_metadata(&agent).is_ok() {
-        return Err(RunError::Invalid("graph run name already used".into()));
+        return Err(RunError::Invalid(
+            crate::research::runner::RUN_NAME_USED.into(),
+        ));
     }
     private_directory(&agent)?;
     let home = agent.join("home");

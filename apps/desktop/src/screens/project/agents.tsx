@@ -13,6 +13,7 @@ import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
 import { TeamControls } from "../team/controls";
+import { TeamEventsPanel } from "../team/wake-rules";
 import { cardActivity } from "../dashboard";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -115,6 +116,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
+    {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
     <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     {list.length > 0 && <h3>Research</h3>}

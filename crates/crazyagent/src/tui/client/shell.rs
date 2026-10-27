@@ -132,20 +132,25 @@ impl NativeOwner {
             .ok_or_else(|| "trusted_connection_unavailable".into())
     }
 
-    /// Reads one project's working team agents and suggested memories for its
-    /// Home card; a read that fails leaves its part unknown or zero.
+    /// Reads one project's working team agents, unseen team notifications and
+    /// suggested memories for its Home card; a read that fails leaves its part
+    /// unknown or zero.
     /// Inputs: the owner controller and the project. Output: the activity.
     async fn activity(controller: &mut OwnerController, project: &ProjectId) -> Activity {
-        let working = controller
-            .team_status(project.clone())
-            .await
-            .ok()
-            .map(|team| {
-                team.agents
-                    .iter()
-                    .filter(|agent| agent.status == AgentStatus::Working)
-                    .count()
-            });
+        let team = controller.team_status(project.clone()).await.ok();
+        let working = team.as_ref().map(|team| {
+            team.agents
+                .iter()
+                .filter(|agent| agent.status == AgentStatus::Working)
+                .count()
+        });
+        let notifications = team.as_ref().map_or(0, |team| {
+            team.events
+                .notifications
+                .iter()
+                .filter(|item| item.seen_ms.is_none())
+                .count()
+        });
         let suggestions = controller
             .project_memories(project.clone(), None)
             .await
@@ -160,6 +165,7 @@ impl NativeOwner {
         Activity {
             working,
             suggestions,
+            notifications,
         }
     }
 

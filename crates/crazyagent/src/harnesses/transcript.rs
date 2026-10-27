@@ -3,7 +3,7 @@ use super::launch::{LaunchError, failure, rate_limited};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 pub const READ_BYTES_MAX: usize = 1024 * 1024;
@@ -13,6 +13,9 @@ const ROLLOUTS_SCANNED_MAX: usize = 512;
 const ROLLOUT_HEAD_BYTES_MAX: usize = 256 * 1024;
 const ROLLOUT_CLOCK_SLACK: Duration = Duration::from_secs(5);
 const CLAUDE_INTERRUPTED: &str = "[Request interrupted by user";
+const CONVERSATION_ID_BYTES_MAX: usize = 128;
+const EXCERPT_TAIL_BYTES_MAX: u64 = 4 * 1024 * 1024;
+const EXCERPT_MESSAGES_MAX: usize = 256;
 
 /// One fact read from a harness's own session record, whatever the harness.
 /// `Waiting` means the harness waits for the owner, such as an approval or a question.
@@ -36,6 +39,8 @@ pub struct TranscriptReader {
     since: SystemTime,
     earlier: Vec<FileKey>,
     file: Option<File>,
+    found: Option<(String, PathBuf)>,
+    start: u64,
     pending: Vec<u8>,
     in_turn: bool,
     consumed: u64,
@@ -81,10 +86,65 @@ impl TranscriptReader {
             since,
             earlier,
             file: None,
+            found: None,
+            start: 0,
             pending: Vec::new(),
             in_turn: false,
             consumed: 0,
         }
+    }
+
+    /// Follows the record of a conversation the harness resumes and appends to: a Codex
+    /// rollout under the source's sessions folder that started in `cwd`, or the Claude Code
+    /// transcript the source names. Reading starts at `from`, or at the record's current end
+    /// when none, so the earlier turns are not reported again. Inputs: the source, the
+    /// canonical working folder, the record and the offset. Output: the reader, or
+    /// `launch_resume_unavailable` for a record that is missing, a link, elsewhere, of
+    /// another folder or shorter than `from`.
+    pub fn resumed(
+        source: Transcript,
+        cwd: &Path,
+        record: &Path,
+        from: Option<u64>,
+    ) -> Result<Self, LaunchError> {
+        let unavailable = || failure("launch_resume_unavailable");
+        let mut reader = Self::with_earlier(source, cwd, SystemTime::now(), Vec::new());
+        let (mut file, id) = match &reader.source {
+            Transcript::CodexRollouts { sessions } if plain_below(sessions, record) => {
+                let file = open_plain(record).ok_or_else(unavailable)?;
+                let id = rollout_id(&file, &reader.cwd).ok_or_else(unavailable)?;
+                (file, id)
+            }
+            Transcript::ClaudeSession { file } if file == record => {
+                let id = claude_id(record).ok_or_else(unavailable)?;
+                (open_plain(record).ok_or_else(unavailable)?, id)
+            }
+            _ => return Err(unavailable()),
+        };
+        let end = file.seek(SeekFrom::End(0)).map_err(|_| unavailable())?;
+        let start = from.unwrap_or(end);
+        if start > end {
+            return Err(unavailable());
+        }
+        reader.start = file
+            .seek(SeekFrom::Start(start))
+            .map_err(|_| unavailable())?;
+        assert_eq!(reader.start, start);
+        reader.file = Some(file);
+        reader.found = Some((id, record.to_path_buf()));
+        Ok(reader)
+    }
+
+    /// Names the conversation this reader follows once its record is open: the id the
+    /// harness resumes it by and the record's path. Output: none before the record exists.
+    pub fn conversation(&self) -> Option<(String, PathBuf)> {
+        self.found.clone()
+    }
+
+    /// Where in its record this reader started, the end of the earlier turns for a resumed
+    /// conversation. Output: the byte offset, 0 for a record read from its start.
+    pub fn start(&self) -> u64 {
+        self.start
     }
 
     /// Counts the bytes read from the record so far, so a caller can bound a session's output.
@@ -98,13 +158,19 @@ impl TranscriptReader {
     /// code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
-            self.file = match &self.source {
+            let opened = match &self.source {
                 Transcript::CodexRollouts { sessions } => {
                     find_rollout(sessions, &self.cwd, self.since, &self.earlier)
                 }
-                Transcript::ClaudeSession { file } => open_plain(file),
+                Transcript::ClaudeSession { file } => {
+                    open_plain(file).map(|opened| (opened, claude_id(file), file.clone()))
+                }
                 Transcript::Unavailable => None,
             };
+            if let Some((file, id, path)) = opened {
+                self.found = id.map(|id| (id, path));
+                self.file = Some(file);
+            }
         }
         let Some(file) = self.file.as_mut() else {
             return Ok(Vec::new());
@@ -239,7 +305,7 @@ fn find_rollout(
     cwd: &str,
     since: SystemTime,
     earlier: &[FileKey],
-) -> Option<File> {
+) -> Option<(File, Option<String>, PathBuf)> {
     let earliest = since.checked_sub(ROLLOUT_CLOCK_SLACK).unwrap_or(since);
     let mut candidates: Vec<(SystemTime, PathBuf)> = rollouts(sessions)
         .into_iter()
@@ -247,18 +313,14 @@ fn find_rollout(
         .map(|(modified, path, _)| (modified, path))
         .collect();
     candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
-    candidates
-        .into_iter()
-        .find_map(|(_, path)| {
-            open_plain(&path)
-                .filter(|file| {
-                    file.metadata().is_ok_and(|metadata| {
-                        earlier.binary_search(&file_key(&metadata, &path)).is_err()
-                    })
-                })
-                .filter(|file| started_in(file, cwd))
-        })
-        .and_then(rewound)
+    candidates.into_iter().find_map(|(_, path)| {
+        let file = open_plain(&path).filter(|file| {
+            file.metadata()
+                .is_ok_and(|metadata| earlier.binary_search(&file_key(&metadata, &path)).is_err())
+        })?;
+        let meta = session_meta(&file).filter(|meta| meta["cwd"].as_str() == Some(cwd))?;
+        Some((rewound(file)?, conversation_id(&meta["id"]), path))
+    })
 }
 
 fn rewound(mut file: File) -> Option<File> {
@@ -280,19 +342,66 @@ fn newest(folder: &Path, keep: usize) -> Vec<PathBuf> {
     folders.into_iter().rev().take(keep).collect()
 }
 
-fn started_in(file: &File, cwd: &str) -> bool {
-    let mut head = Vec::new();
-    if file
-        .take(ROLLOUT_HEAD_BYTES_MAX as u64)
-        .read_to_end(&mut head)
-        .is_err()
-    {
+/// Tells whether a record lies inside a folder through plain folders only: no `..`, no
+/// link between the folder and the record. Takes the folder and the record. Returns true
+/// when every step is a plain name and every folder on the way is a real folder.
+fn plain_below(folder: &Path, record: &Path) -> bool {
+    let Ok(rest) = record.strip_prefix(folder) else {
         return false;
+    };
+    let mut path = folder.to_path_buf();
+    let mut parts = rest.components().peekable();
+    while let Some(part) = parts.next() {
+        let Component::Normal(name) = part else {
+            return false;
+        };
+        path.push(name);
+        if parts.peek().is_some()
+            && !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir())
+        {
+            return false;
+        }
     }
+    path != folder
+}
+
+/// Reads the payload of a rollout's first line when that line is its `session_meta`.
+/// Takes the rollout opened at its start. Returns the payload, or none.
+fn session_meta(file: &File) -> Option<Value> {
+    let mut head = Vec::new();
+    file.take(ROLLOUT_HEAD_BYTES_MAX as u64)
+        .read_to_end(&mut head)
+        .ok()?;
     let first = head.split(|byte| *byte == b'\n').next().unwrap_or_default();
-    serde_json::from_slice::<Value>(first).is_ok_and(|value| {
-        value["type"] == "session_meta" && value["payload"]["cwd"].as_str() == Some(cwd)
-    })
+    let mut value = serde_json::from_slice::<Value>(first).ok()?;
+    (value["type"] == "session_meta").then(|| value["payload"].take())
+}
+
+/// The id a resumed Codex rollout is known by, when the rollout started in `cwd`.
+/// Takes the rollout opened at its start and the folder. Returns the id, or none.
+fn rollout_id(file: &File, cwd: &str) -> Option<String> {
+    session_meta(file)
+        .filter(|meta| meta["cwd"].as_str() == Some(cwd))
+        .and_then(|meta| conversation_id(&meta["id"]))
+}
+
+/// The id of a Claude Code transcript, its file name without `.jsonl`.
+/// Takes the transcript path. Returns the id, or none for a name that cannot be one.
+fn claude_id(file: &Path) -> Option<String> {
+    conversation_id(&Value::from(file.file_stem()?.to_str()?))
+}
+
+/// Keeps a conversation id a harness wrote only when it is short plain text.
+/// Takes the JSON value. Returns the id, or none.
+fn conversation_id(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= CONVERSATION_ID_BYTES_MAX
+                && !id.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
 }
 
 fn line_text(text: &str) -> TranscriptEvent {
@@ -416,6 +525,107 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Who said one message of a harness conversation: what was typed into the app, by the
+/// owner or the engine, or the agent's reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Speaker {
+    Input,
+    Agent,
+}
+
+/// Reads the newest typed messages and replies of a harness conversation from its record,
+/// for a fresh conversation that carries it on: Codex rollout `message` items and Claude
+/// Code `user` and `assistant` text, without tool output, interrupts or the harness's own
+/// context blocks. Reads at most the record's last `EXCERPT_TAIL_BYTES_MAX` bytes and
+/// never follows a link. Takes the harness and the record. Returns the messages oldest
+/// first, at most `EXCERPT_MESSAGES_MAX`, none when the record cannot be read.
+pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, String)> {
+    let Some(mut file) = open_plain(record) else {
+        return Vec::new();
+    };
+    let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        return Vec::new();
+    };
+    let skip = length.saturating_sub(EXCERPT_TAIL_BYTES_MAX);
+    let mut tail = Vec::new();
+    if file.seek(SeekFrom::Start(skip)).is_err()
+        || file
+            .take(EXCERPT_TAIL_BYTES_MAX)
+            .read_to_end(&mut tail)
+            .is_err()
+    {
+        return Vec::new();
+    }
+    let mut lines = tail.split(|byte| *byte == b'\n');
+    if skip > 0 {
+        lines.next();
+    }
+    let mut messages = std::collections::VecDeque::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let said = match harness {
+            "codex" => codex_message(&value),
+            "claude-code" => claude_message(&value),
+            _ => None,
+        };
+        if let Some(said) = said {
+            if messages.len() == EXCERPT_MESSAGES_MAX {
+                messages.pop_front();
+            }
+            messages.push_back(said);
+        }
+    }
+    assert!(messages.len() <= EXCERPT_MESSAGES_MAX);
+    messages.into()
+}
+
+fn codex_message(value: &Value) -> Option<(Speaker, String)> {
+    let payload = &value["payload"];
+    if value["type"] != "response_item" || payload["type"] != "message" {
+        return None;
+    }
+    let speaker = match payload["role"].as_str()? {
+        "user" => Speaker::Input,
+        "assistant" => Speaker::Agent,
+        _ => return None,
+    };
+    let text: String = payload["content"]
+        .as_array()?
+        .iter()
+        .filter(|part| part["type"] == "input_text" || part["type"] == "output_text")
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    said(speaker, text)
+}
+
+fn claude_message(value: &Value) -> Option<(Speaker, String)> {
+    let speaker = match value["type"].as_str()? {
+        "user" if value["isMeta"] != true => Speaker::Input,
+        "assistant" if value["isApiErrorMessage"] != true => Speaker::Agent,
+        _ => return None,
+    };
+    let text = match &value["message"]["content"] {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    said(speaker, text)
+}
+
+fn said(speaker: Speaker, text: String) -> Option<(Speaker, String)> {
+    let start = text.trim_start();
+    (!start.is_empty() && !start.starts_with('<') && !start.starts_with(CLAUDE_INTERRUPTED))
+        .then_some((speaker, text))
 }
 
 #[cfg(all(test, unix))]

@@ -67,6 +67,26 @@ impl std::error::Error for BridgeError {}
 pub type Unlocked<T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, BridgeError>> + Send>>;
 
+/// Shows the owner's unseen team notifications on the app icon: the count as the badge, removed
+/// at zero, and one attention request when a new notification arrived.
+/// Takes the main window, the unseen count and whether one is new.
+/// Returns a plain failure where the platform has no app badge.
+pub fn attention(
+    window: &tauri::WebviewWindow,
+    unseen: u32,
+    alert: bool,
+) -> Result<(), BridgeError> {
+    window
+        .set_badge_count((unseen > 0).then_some(i64::from(unseen)))
+        .map_err(|_| failure("attention_unavailable"))?;
+    if alert && unseen > 0 {
+        window
+            .request_user_attention(Some(tauri::UserAttentionType::Informational))
+            .map_err(|_| failure("attention_unavailable"))?;
+    }
+    Ok(())
+}
+
 fn failure(code: &'static str) -> BridgeError {
     BridgeError { code, cause: None }
 }
@@ -589,9 +609,11 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
-            OwnerMutation::Team { action } => {
-                ("team", Some(action.project().as_str().to_owned()), None)
-            }
+            OwnerMutation::Team { action } => (
+                "team",
+                action.project().map(|project| project.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::AccountSchedule { .. } => ("account_schedule", None, None),
             OwnerMutation::UpdateProjectSetup { project_id, .. } => (
                 "project_setup_update",
@@ -656,6 +678,10 @@ impl NativeBridge {
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::NewSession {
+                    project_id, ..
+                }
+                | crazyagent::master_session::MasterOwnerAction::Resume { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Cancel { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {

@@ -537,6 +537,30 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+export type AccountStanding =
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "paused"; until_ms: number }
+  | { kind: "never_use" }
+  | { kind: "five_hour_cap"; until_ms: number | null }
+  | { kind: "reserve_reached"; reserve_percent: number; until_ms: number | null };
+
+export interface RankedAccount {
+  connection: string;
+  standing: AccountStanding;
+}
+
+export interface PoolRanking {
+  pool: string;
+  strategy: AccountStrategy;
+  accounts: RankedAccount[];
+}
+
+/** Reads each pool's account ranking: the order work would try its accounts now, then each
+ * held account with why. Output: one ranking per pool. */
+export function accountRanking(): Promise<Result<PoolRanking[]>> {
+  return call<PoolRanking[]>("desktop_account_ranking");
+}
+
 /** Saves one account choice change. Input: the change. Output: ok once the engine applied
  * it, or a plain error. */
 export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
@@ -913,6 +937,13 @@ export function detachTerminal(agent: string): Promise<Result<void>> {
  * and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Turns the project's live master on or off; on, the engine keeps the master's own app running
+ * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
+ * or a plain error. */
+export function setLiveMaster(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_live_master", { id, on, generation: nextGeneration() });
 }
 
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan

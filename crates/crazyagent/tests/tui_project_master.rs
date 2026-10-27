@@ -166,8 +166,8 @@ async fn unavailable_catalog_retains_setup_fields_and_project_draft() {
             ("cpu_millis", 1000),
             ("memory_mib", 512),
             ("processes", 4),
-            ("output_bytes", 1048576),
-            ("wall_time_ms", 60000),
+            ("output_bytes", 67108864),
+            ("wall_time_ms", 600000),
             ("spend_microunits", 0),
         ] {
             assert!(screen.contains(&format!("{field}: {value}")), "{screen}");
@@ -390,7 +390,7 @@ async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
             .zip(["api-account", "codex-account", "claude-account"])
             .zip(["sandbox-profile", "codex-connection", "claude-connection"]) {
             assert_eq!(session.project_id.as_str(), "p");
-            assert_eq!(session.phase, MasterSessionPhase::Closed);
+            assert_eq!(session.phase, MasterSessionPhase::Parked);
             assert_eq!(session.selection.backend, backend);
             assert_eq!(session.selection.pool_ref.as_str(), "master-pool");
             assert_eq!(session.selection.route.account_ref.as_str(), account);

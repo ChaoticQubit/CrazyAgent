@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "pack", "home", "github", "memory", "usage", "profile", "updates"] as const;
+export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "pack", "home", "github", "memory", "usage", "alerts", "profile", "updates"] as const;
 export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "context", "process", "settings"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new", "sign_in"] as const;

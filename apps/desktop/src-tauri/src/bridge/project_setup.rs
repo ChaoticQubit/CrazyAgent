@@ -54,6 +54,9 @@ fn read_failure(code: &str) -> BridgeError {
             "context_offset_invalid" => "context_offset_invalid",
             "project_missing" => "project_missing",
             "research_job_missing" => "research_job_missing",
+            "project_files_query_invalid" => "project_files_query_invalid",
+            "project_files_folder_missing" => "project_files_folder_missing",
+            "project_files_no_repository" => "project_files_no_repository",
             _ => "owner_read_failed",
         },
         code,
@@ -326,6 +329,26 @@ impl NativeBridge {
         let paths = self
             .controller()?
             .project_read_paths(project(id)?)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(paths)
+    }
+
+    /// Lists a set-up project's files for the console's `@` completion: tracked and
+    /// untracked, not ignored paths relative to its folder that contain the query.
+    /// Takes the project id and the query. Returns at most 200 paths in git's order.
+    pub async fn project_files(
+        &mut self,
+        id: &str,
+        query: &str,
+    ) -> Result<Vec<String>, BridgeError> {
+        let paths = self
+            .controller()?
+            .project_files(
+                project(id)?,
+                query.to_owned(),
+                crazyagent::project_files::FILES_MAX,
+            )
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(paths)

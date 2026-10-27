@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::agent_home::{self, Harness};
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
@@ -105,7 +106,8 @@ impl Case {
         .unwrap();
         let tx = connection.unchecked_transaction().unwrap();
         let switch = launch_context::master_tools(&tx, project).map_err(|problem| problem.0)?;
-        let text = launch_context::for_master(&tx, project, tools).map_err(|problem| problem.0)?;
+        let text =
+            launch_context::for_master(&tx, project, tools, None).map_err(|problem| problem.0)?;
         drop(tx);
         Ok((switch, text))
     }
@@ -625,6 +627,19 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     );
     assert!(!mcp_path.exists());
     assert!(!codex_skills.exists());
+    let received = |home: &Path, harness| {
+        let received = agent_home::received(home, harness).unwrap().unwrap();
+        received.skills.into_iter().collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        received(&codex_home, Harness::Codex),
+        BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()]),
+        "the skill names of the last launch outlive its copies"
+    );
+    assert_eq!(
+        received(&claude_home, Harness::Claude),
+        BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()])
+    );
 
     let off_home = private_directory(&agents.join("off-home"));
     let (off_command, off_files) =
@@ -650,6 +665,11 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     );
     assert!(!off_home.join("skills/crazyagent").exists());
     drop(off_files);
+    assert_eq!(
+        received(&off_home, Harness::Codex),
+        BTreeSet::new(),
+        "tools off installs and records no skill"
+    );
     let claude_off = private_directory(&agents.join("claude-off"));
     let (claude_off_command, claude_off_files) =
         command_with_context(&request(&case, "claude-code", &claude_off, false), &context).unwrap();

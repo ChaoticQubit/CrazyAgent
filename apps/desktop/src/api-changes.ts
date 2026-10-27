@@ -21,6 +21,7 @@ export interface ChangeSet {
   restorable_until_ms: number | null;
   conflicts: string[];
   message: string;
+  waiting: boolean;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -59,6 +60,7 @@ const REFUSALS: Record<string, string> = {
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
+  changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",
@@ -73,6 +75,7 @@ const REFUSALS: Record<string, string> = {
   changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
   changes_master_tools_off: "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
   changes_master_closed: "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.",
+  team_agent_not_found: "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.",
   changes_master_not_started: "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends.",
 };
 
