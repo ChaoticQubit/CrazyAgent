@@ -1709,7 +1709,7 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
             reply.provenance.runtime_ref.as_str(),
             reply.provenance.capture_ref.as_str(),
             reply.provenance.capture_sequence,
-            super::views::safe_text(&reply.text, 8192)
+            super::views::safe_text(&reply.text, crate::master_session::REPLY_BYTES_MAX)
         ));
     }
 }
@@ -2631,9 +2631,42 @@ fn reason_text(reason: &MasterReason) -> &'static str {
 mod turn_line_tests {
     use super::{turn_holds, turn_lines};
     use crate::master_session::{
-        MasterAccountState, MasterReason, MasterTurnPhase, MasterTurnView,
+        MasterAccountState, MasterReason, MasterReply, MasterReplyProvenance, MasterTurnPhase,
+        MasterTurnView,
     };
     use crate::protocol::{CredentialRef, Cursor, RequestId, SessionId};
+
+    #[test]
+    fn a_long_reply_shows_whole_in_its_turn() {
+        let text = "The README now covers setup, tests and the release steps.\n".repeat(190);
+        assert!(text.len() > 8192);
+        let turn = MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Succeeded,
+            reason: None,
+            attempt: None,
+            runtime: None,
+            reply: Some(MasterReply {
+                text: text.clone(),
+                provenance: MasterReplyProvenance {
+                    attempt_id: RequestId::new("attempt-1").unwrap(),
+                    runtime_ref: RequestId::new("runtime-1").unwrap(),
+                    capture_ref: RequestId::new("capture-1").unwrap(),
+                    capture_sequence: 1,
+                },
+            }),
+            accounts: Vec::new(),
+            tasks: Vec::new(),
+            detail: None,
+            cause: None,
+        };
+        let mut lines = Vec::new();
+        turn_lines(&turn, &mut lines);
+        assert!(lines.last().unwrap().ends_with(&text), "{lines:?}");
+    }
 
     #[test]
     fn only_a_live_current_turn_holds_the_conversation() {

@@ -10,7 +10,7 @@ use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::engine::codex_host::CodexHost;
 use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
-    MasterTurnPhase, MasterTurnView,
+    MasterTurnPhase, MasterTurnView, REPLY_BYTES_MAX, fitted_reply,
 };
 use crate::protocol::{ProjectId, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
@@ -26,7 +26,6 @@ use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::time::Duration;
 
-const REPLY_BYTES_MAX: usize = 8192;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
@@ -764,24 +763,25 @@ impl OwnerRuntimeHandle {
                     item_id,
                     text: delta,
                 } => {
-                    reply.push(Some(&item_id), &delta, prepared.tools)?;
+                    reply.push(Some(&item_id), &delta, prepared.tools);
                     assert!(active.capture.sequence > 0);
                 }
                 EventKind::AssistantText { text: delta, .. } => {
-                    reply.push(None, &delta, prepared.tools)?;
+                    reply.push(None, &delta, prepared.tools);
                     assert!(active.capture.sequence > 0);
                 }
                 EventKind::TurnFinished {
                     outcome: TurnOutcome::Success,
                     ..
                 } => {
-                    if reply.text.trim().is_empty() || active.runtime.native_session_id.is_none() {
+                    let text = std::mem::take(&mut reply).finish();
+                    if text.trim().is_empty() || active.runtime.native_session_id.is_none() {
                         return Err(failure("master_capture_incomplete"));
                     }
                     active.capture.finish()?;
                     return Ok(MasterRuntimeObservation::Response {
                         reply: MasterReply {
-                            text: reply.text,
+                            text,
                             provenance: MasterReplyProvenance {
                                 attempt_id: prepared.attempt.request.id.clone(),
                                 runtime_ref: active.runtime.runtime_ref.clone(),
@@ -858,41 +858,43 @@ fn keep_stream_diagnostic(
 #[derive(Default)]
 pub(super) struct ReplyText {
     pub(super) text: String,
+    dropped: usize,
     message: Option<String>,
 }
 
 impl ReplyText {
+    /// Ends the reply as its turn stores it, fitted by `fitted_reply`. Input: none.
+    /// Output: the reply text.
+    pub(super) fn finish(self) -> String {
+        fitted_reply(&self.text, self.dropped)
+    }
+
     /// Starts the reply over after a top-level tool step of a tools-on master.
     pub(super) fn tool_step(&mut self) {
         self.text.clear();
+        self.dropped = 0;
         self.message = None;
     }
 
     /// Adds streamed reply text. With tools on, text of a new agent message replaces what an
     /// earlier message said; with tools off every message adds to the reply, as before.
+    /// Past `REPLY_BYTES_MAX` the rest is only counted, for the note `finish` adds.
     /// Inputs: the agent message the text belongs to when the harness names one, the text and
-    /// the tools switch. Output: Ok, or `codex_host_output_limit` past `REPLY_BYTES_MAX`.
-    pub(super) fn push(
-        &mut self,
-        message: Option<&str>,
-        part: &str,
-        tools: bool,
-    ) -> Result<(), EngineError> {
+    /// the tools switch. Output: none.
+    pub(super) fn push(&mut self, message: Option<&str>, part: &str, tools: bool) {
         if tools && message.is_some() && message != self.message.as_deref() {
             self.text.clear();
+            self.dropped = 0;
             self.message = message.map(str::to_owned);
         }
-        if self
-            .text
-            .len()
-            .checked_add(part.len())
-            .is_none_or(|length| length > REPLY_BYTES_MAX)
-        {
-            return Err(failure("codex_host_output_limit"));
-        }
-        self.text.push_str(part);
+        let keep = if self.dropped == 0 {
+            part.floor_char_boundary(REPLY_BYTES_MAX - self.text.len())
+        } else {
+            0
+        };
+        self.text.push_str(&part[..keep]);
+        self.dropped = self.dropped.saturating_add(part.len() - keep);
         assert!(self.text.len() <= REPLY_BYTES_MAX);
-        Ok(())
     }
 }
 
@@ -999,34 +1001,60 @@ mod tests {
     #[test]
     fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {
         let mut reply = ReplyText::default();
-        reply
-            .push(Some("message-1"), "I will write ", true)
-            .unwrap();
-        reply.push(Some("message-1"), "the note.", true).unwrap();
-        reply.push(Some("message-2"), "DO", true).unwrap();
-        reply.push(Some("message-2"), "NE", true).unwrap();
+        reply.push(Some("message-1"), "I will write ", true);
+        reply.push(Some("message-1"), "the note.", true);
+        reply.push(Some("message-2"), "DO", true);
+        reply.push(Some("message-2"), "NE", true);
         assert_eq!(reply.text, "DONE");
-        reply.push(None, " more", true).unwrap();
+        reply.push(None, " more", true);
         assert_eq!(reply.text, "DONE more");
         reply.tool_step();
         assert_eq!(reply.text, "");
-        reply.push(None, "After the step.", true).unwrap();
+        reply.push(None, "After the step.", true);
         assert_eq!(reply.text, "After the step.");
 
         let mut reply = ReplyText::default();
-        reply.push(Some("message-1"), "First. ", false).unwrap();
-        reply.push(Some("message-2"), "Second.", false).unwrap();
+        reply.push(Some("message-1"), "First. ", false);
+        reply.push(Some("message-2"), "Second.", false);
         assert_eq!(reply.text, "First. Second.");
+    }
 
+    #[test]
+    fn a_master_reply_past_its_stored_room_keeps_its_start_and_says_what_it_left_out() {
+        use crate::master_session::reply_bytes;
+        let part = "A long plan line that the master keeps on writing.\n";
+        let whole = part.repeat(400);
+        let quotes = "\"".repeat(7000);
+        for (parts, tools) in [
+            (vec![part; 400], true),
+            (vec![part; 400], false),
+            (vec![quotes.as_str()], false),
+        ] {
+            let said = parts.concat();
+            let mut reply = ReplyText::default();
+            for part in parts {
+                reply.push(Some("message-1"), part, tools);
+            }
+            let text = reply.finish();
+            assert!(
+                reply_bytes(&text) <= REPLY_BYTES_MAX,
+                "{}",
+                reply_bytes(&text)
+            );
+            let (kept, note) = text.rsplit_once("\n\n").unwrap();
+            assert!(said.starts_with(kept));
+            assert_eq!(
+                note,
+                format!(
+                    "[{} more bytes of this reply were left out.]",
+                    said.len() - kept.len()
+                )
+            );
+        }
         let mut reply = ReplyText::default();
-        let long = "x".repeat(REPLY_BYTES_MAX);
-        reply.push(Some("message-1"), &long, true).unwrap();
-        assert_eq!(
-            reply.push(Some("message-1"), "y", true),
-            Err(failure("codex_host_output_limit"))
-        );
-        reply.push(Some("message-2"), "z", true).unwrap();
-        assert_eq!(reply.text, "z");
+        reply.push(Some("message-1"), &whole, true);
+        reply.push(Some("message-2"), "DONE", true);
+        assert_eq!(reply.finish(), "DONE");
     }
 
     fn protocol_input() -> ObservedEvent {
