@@ -17,7 +17,7 @@ const lines = [
   { id: "3", kind: "delegate", text: "Ada (@onboarding-fix): Fix the login" },
 ];
 
-export function mount() {
+export function mount(labels = ["Ada (@onboarding-fix)", "Grace"], files = null) {
   root?.unmount();
   sent.length = 0;
   routes.length = 0;
@@ -26,7 +26,7 @@ export function mount() {
   document.body.innerHTML = '<div id="root" style="height:480px;width:720px"></div>';
   root = createRoot(document.getElementById("root"));
   flushSync(() => root.render(createElement(Console, {
-    projectId: "p-1", lines, agents: agentMentions([graphNode("team-1", "Ada (@onboarding-fix)"), graphNode("team-2", "Grace")]), files: null,
+    projectId: "p-1", lines, agents: agentMentions(labels.map((label, index) => graphNode(`team-${index + 1}`, label))), files,
     onSend: (text) => sent.push(text), onStop: () => { stops += 1; }, onNavigate: (route) => routes.push(route),
     onTagQuery: (query) => queries.push(query),
   })));

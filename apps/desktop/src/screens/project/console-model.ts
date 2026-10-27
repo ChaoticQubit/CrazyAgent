@@ -1,6 +1,7 @@
 import type { GraphNode } from "../../engine-client";
 import type { Route } from "../../ui";
 import { sendsMessage, type ComposerKeyEvent } from "../../ui/keys";
+import { displayText } from "../conversation";
 
 export const PROMPT_ROWS_MAX = 8;
 export const HISTORY_MAX = 100;
@@ -171,10 +172,11 @@ export function agentMentions(nodes: readonly GraphNode[]): Mention[] {
   return mentions;
 }
 
-/** The files `@` completes, at most FILES_MAX; a path with whitespace cannot be one tag and is
- * left out. Input: project-relative paths. Output: the mentions. */
+/** The files `@` completes, at most FILES_MAX; a path with whitespace cannot be one tag, and
+ * one with a hidden or direction character would show reordered in the prompt once inserted,
+ * so both are left out. Input: project-relative paths. Output: the mentions. */
 export function fileMentions(paths: readonly string[]): Mention[] {
-  return paths.filter((path) => path && !/\s/.test(path)).slice(0, FILES_MAX).map((path) => ({ handle: path, label: path, kind: "file" as const }));
+  return paths.filter((path) => path && !/\s/.test(path) && displayText(path) === path).slice(0, FILES_MAX).map((path) => ({ handle: path, label: path, kind: "file" as const }));
 }
 
 /** The `@` word the caret is in: an `@` at the start of the prompt or after whitespace, with no
