@@ -1,6 +1,6 @@
 use super::{
-    ASKED_BYTES_MAX, Interrupted, LastTurn, REASON_BYTES_MAX, RUNS_PER_PROJECT_MAX, RunState,
-    unavailable,
+    ASKED_BYTES_MAX, HeldItem, Interrupted, LastTurn, REASON_BYTES_MAX, RUNS_PER_PROJECT_MAX,
+    RunState, unavailable,
 };
 use crate::engine::EngineError;
 use crate::harnesses::interactive::Transcript;
@@ -9,6 +9,7 @@ use crate::harnesses::transcript::TranscriptReader;
 use crate::protocol::ProjectId;
 use crate::team::{AgentRole, bound_text, now_ms};
 use rusqlite::{Connection, Row, Transaction, TransactionBehavior, params};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -438,6 +439,80 @@ pub(super) fn retry(db: &Connection, agent: i64) -> Result<bool, EngineError> {
         )
         .map_err(storage)?;
     Ok(changed == 1)
+}
+
+fn column(item: HeldItem) -> (&'static str, i64) {
+    match item {
+        HeldItem::Task(task) => ("task", task),
+        HeldItem::Message(message) => ("message", message),
+    }
+}
+
+/// Tells whether a run holds the item: one in an open or failed resume state, or a
+/// `stopped` one whose agent does not run again, as `settle` keeps it.
+/// Inputs: the store and the item. Output: the answer, or `recovery_unavailable`.
+pub(super) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError> {
+    initialize(db)?;
+    let (column, id) = column(item);
+    db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM recovery_runs r WHERE r.{column}=?1 AND (
+                 r.state IN ('interrupted','resuming','failed')
+                 OR (r.state='stopped' AND NOT EXISTS(
+                     SELECT 1 FROM team_agents a WHERE a.id=r.agent
+                     AND a.status IN ('starting','idle','working')))))"
+        ),
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(storage)
+}
+
+/// Drops every `stopped` run holding the item and clears the item from every other run, in
+/// the caller's transaction when it has one. Inputs: the store and the item. Output: done.
+pub(super) fn release(db: &Connection, item: HeldItem) -> Result<(), EngineError> {
+    initialize(db)?;
+    let (column, id) = column(item);
+    db.execute(
+        &format!("DELETE FROM recovery_runs WHERE {column}=?1 AND state='stopped'"),
+        [id],
+    )
+    .map_err(storage)?;
+    db.execute(
+        &format!("UPDATE recovery_runs SET {column}=NULL WHERE {column}=?1"),
+        [id],
+    )
+    .map_err(storage)?;
+    assert!(!holds(db, item)?);
+    Ok(())
+}
+
+/// Reads the kept per-turn session records, of one agent or of all, at most `SCANNED_MAX`;
+/// a record that does not decode is left out. Inputs: the store and the agent or none.
+/// Output: the records by agent.
+pub(super) fn sessions(
+    db: &Connection,
+    agent: Option<i64>,
+) -> Result<BTreeMap<i64, PaneRecord>, EngineError> {
+    initialize(db)?;
+    let limit = i64::try_from(super::SCANNED_MAX).map_err(|_| unavailable())?;
+    let mut statement = db
+        .prepare(
+            "SELECT agent,record FROM recovery_sessions WHERE ?1 IS NULL OR agent=?1
+             ORDER BY agent LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![agent, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, text)| PaneRecord::decode(&text).map(|record| (id, record)))
+        .collect())
 }
 
 /// Keeps the session record of the agent's running per-turn harness session.

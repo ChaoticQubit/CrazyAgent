@@ -740,12 +740,15 @@ impl TeamRuntime {
     }
 
     /// Settles the runs the last engine stop cut short once, on the first tick after the
-    /// runtime adopted the panes it could, and on each later tick until that succeeds. Until
-    /// then the tick does nothing else, so no report, owner restart or dispatch changes which
-    /// agents run again, and no task or message such a run holds starts fresh.
+    /// runtime adopted the panes it could, and on each later tick until that succeeds: first
+    /// the deliveries whose run is dropped because its agent runs again in its pane, as
+    /// deliveries no run holds, then the runs. Until then the tick does nothing else, so no
+    /// report, owner restart or dispatch changes which agents run again, and no task or
+    /// message such a run holds starts fresh or reaches an agent twice.
     /// Returns `recovery_unavailable` while the store cannot be written.
     fn settle(&mut self) -> Result<(), EngineError> {
         if !self.settled {
+            delivery::settle(&self.connection)?;
             crate::recovery::settle(&self.connection)?;
             self.settled = true;
         }
@@ -1882,15 +1885,13 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let (typed, noted) = live_input(&heard, &author, &text);
         let newest = newest.filter(|_| noted);
-        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
-            return Ok(());
-        }
-        let state = match super::master::master_input(
+        let state = match super::master::master_input_when(
             &self.connection,
             host.as_ref(),
             self.agents.as_deref().map(Agents::typing),
             project,
             &typed,
+            || delivery::intend(&self.connection, Busy::Message(message), id, &text, newest),
         ) {
             Ok(()) => "answered",
             Err(super::master::InputRefused::Invalid) => "failed",

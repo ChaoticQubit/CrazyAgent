@@ -3,6 +3,7 @@ use crate::harnesses::terminal_session::PaneRecord;
 use crate::protocol::ProjectId;
 use crate::team::AgentRole;
 use rusqlite::Connection;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -181,6 +182,38 @@ pub(crate) fn mark(
     reason: Option<&str>,
 ) -> Result<bool, EngineError> {
     store::mark(db, run, from, to, reason)
+}
+
+/// One team task or owner message an interrupted run can hold back for its resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldItem {
+    Task(i64),
+    Message(i64),
+}
+
+/// Tells whether a run still holds an item back for its resume: a run waiting, resuming or
+/// failed, or one just noted whose agent does not run again, which `settle` keeps.
+/// Inputs: the team runtime's connection and the item. Output: the answer.
+pub(crate) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError> {
+    store::holds(db, item)
+}
+
+/// Lets go of an item whose delivery never reached its agent, so it is handed out as usual
+/// and never resumed: a run just noted for it is dropped, any other run keeps its record
+/// without the item, in the caller's transaction when it has one. Inputs: the connection and
+/// the item. Output: done.
+pub(crate) fn release(db: &Connection, item: HeldItem) -> Result<(), EngineError> {
+    store::release(db, item)
+}
+
+/// Reads the session record each agent that starts its harness for each turn keeps for its
+/// running turn ([`remember`]). Inputs: the connection and the team agent, none for all.
+/// Output: the records by team agent, at most `SCANNED_MAX`.
+pub(crate) fn sessions(
+    db: &Connection,
+    agent: Option<i64>,
+) -> Result<BTreeMap<i64, PaneRecord>, EngineError> {
+    store::sessions(db, agent)
 }
 
 /// Keeps the session record of an agent that starts its harness for each turn while that
