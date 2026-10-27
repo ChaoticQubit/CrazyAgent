@@ -439,6 +439,19 @@ pub fn unconfined_command<'a>(
     Ok(command)
 }
 
+/// Refuses a Full access agent on Windows (DEC-102): the level is unavailable there, so no
+/// command starts without the Windows boundary. Inputs: as the Unix version. Output:
+/// always `Unavailable` with [`FULL_ACCESS_NEEDS_MACOS`].
+#[cfg(target_os = "windows")]
+pub fn unconfined_command<'a>(
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    let _ = (program, base, harness.into_iter().count());
+    Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
+}
+
 /// Builds the one command every Windows agent process starts from: the boundary helper next
 /// to the engine's executable with `--profile <profile> -- <program>`, and a cleared
 /// environment holding exactly [`agent_env`]. Inputs: the installed boundary profile, the
@@ -1252,6 +1265,14 @@ impl ProjectSandbox {
         command.args(harness.get_args()).current_dir(cwd);
         assert_ne!(command.get_program(), SANDBOX_EXEC);
         Ok(command)
+    }
+
+    /// Refuses a Full access harness command on Windows, where the level is unavailable.
+    /// Input: the harness command. Output: always `Unavailable`.
+    #[cfg(not(unix))]
+    pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
+        let _ = harness;
+        Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
     }
 
     fn harness_start<'a>(
