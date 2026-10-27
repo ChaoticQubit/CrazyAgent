@@ -1,6 +1,7 @@
 import { call } from "./api";
-import type { Result } from "./api";
+import type { Failure, Result } from "./api";
 import { failureCopy } from "./api-projects";
+import { isMac } from "./ui/keys";
 
 /** How often a shown IDE tab tells the engine the owner still uses it, in milliseconds. */
 export const HEARTBEAT_MS = 60_000;
@@ -33,6 +34,7 @@ const MEGABYTE = 1024 * 1024;
 const UNQUALIFIED = "The IDE is unavailable on this platform.";
 const NOT_SUPPORTED = "The IDE isn't supported on this platform yet.";
 const NO_BUILD = "This CrazyAgent version has no IDE build for this platform.";
+const ENGINE_NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";
 
 const BUILD_FAILURES: Record<string, string> = {
   ide_build_hash_mismatch: "The IDE download didn't match its published checksum, so it was deleted and never run.",
@@ -84,16 +86,39 @@ export function ideStatus(state: IdeTabState): IdeStatus {
 }
 
 /** Whether the IDE takes the place of Context and Changes: the platform is qualified and the
- * build is ready or on its way. Input: the view, undefined until read. Output: true then. */
+ * build is ready, so the IDE can open. Input: the view, undefined until read. Output: true then. */
 export function ideReplacesTabs(view: IdeView | undefined): boolean {
-  if (view === undefined || view.state.unqualified !== null) return false;
-  const build = view.state.build.state;
-  return build === "ready" || build === "downloading" || build === "verifying";
+  return view !== undefined && ideStatus(view.state).ready;
 }
 
-/** The page's line while Context and Changes stay because the IDE can't open: the platform,
- * the reason and the build's one action. Input: the view, undefined until read. Output: the
- * line and action, or null while unread or when the IDE replaces the tabs. */
+/** Whether a qualified platform's build is downloading or being checked, so the page keeps
+ * reading until it is Ready or Failed. Input: the view, undefined until read. Output: true then. */
+export function ideFetching(view: IdeView | undefined): boolean {
+  if (view === undefined || view.state.unqualified !== null) return false;
+  return view.state.build.state === "downloading" || view.state.build.state === "verifying";
+}
+
+/** The page's line when the IDE state couldn't be read: the platform, the reason and Retry.
+ * Inputs: the failed read and this desktop's platform. Output: the line and its action. */
+export function ideReadFailed(failure: Failure, platform: string): { line: string; action: "retry" } {
+  const reason = failure.kind === "error" ? failureCopy(failure) : ENGINE_NOT_READY;
+  return { line: `IDE unavailable on ${PLATFORMS[platform] ?? platform}: ${reason}`, action: "retry" };
+}
+
+/** This desktop's platform in the engine's names, for a line the engine couldn't give one.
+ * Input: the browser's platform string, by default the window's. Output: macos, windows,
+ * linux, or the string itself. */
+export function desktopPlatform(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): string {
+  if (isMac(platform)) return "macos";
+  if (/^Win/i.test(platform)) return "windows";
+  if (/^Linux/i.test(platform)) return "linux";
+  return platform;
+}
+
+/** The page's line while Context and Changes stay: the build's progress while it downloads
+ * or is checked, else why the IDE can't open on this platform and the build's one action.
+ * Input: the view, undefined until read. Output: the line and action, or null while unread
+ * or when the IDE replaces the tabs. */
 export function ideUnavailable(view: IdeView | undefined): { line: string; action: IdeStatus["action"] } | null {
   if (view === undefined || ideReplacesTabs(view)) return null;
   const { build, unqualified } = view.state;
@@ -102,6 +127,7 @@ export function ideUnavailable(view: IdeView | undefined): { line: string; actio
   if (unqualified !== null) return { line: `${unavailable} ${NOT_SUPPORTED}`, action: null };
   if (build.state === "failed" && build.code === "ide_build_unsupported_platform") return { line: `${unavailable} ${NO_BUILD}`, action: null };
   const status = ideStatus(view.state);
+  if (ideFetching(view)) return { line: status.line, action: null };
   return { line: `${unavailable} ${status.line}`, action: status.action };
 }
 

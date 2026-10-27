@@ -4,12 +4,12 @@ import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, load
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
-import { closeIde, ideReplacesTabs, ideView } from "../../api-ide";
+import { closeIde, ideFetching, ideReplacesTabs, ideView } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
-import { IdeTab, IdeUnavailable } from "./ide";
+import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { IdeConfirm } from "./ide-confirm";
@@ -41,20 +41,29 @@ export type TabId = typeof TABS[number]["id"] | typeof IDE_TAB.id;
 const REPLACED: readonly TabId[] = ["changes", "context"];
 
 /** The project page's tabs: the fixed ones, with the IDE in place of Changes and Context
- * once the engine's IDE can open. Input: the IDE view, undefined until it is read. Output:
- * the tabs in order. */
-export function projectTabs(view: IdeView | undefined): readonly { id: TabId; label: string; icon: IconName }[] {
+ * once the engine's IDE can open. A replaced tab the route opens stays listed after the IDE.
+ * Inputs: the IDE view, undefined until it is read, and the route's tab. Output: the tabs
+ * in order. */
+export function projectTabs(view: IdeView | undefined, route = ""): readonly { id: TabId; label: string; icon: IconName }[] {
   if (!ideReplacesTabs(view)) return TABS;
-  return TABS.flatMap<{ id: TabId; label: string; icon: IconName }>((item) => item.id === "changes" ? [IDE_TAB] : REPLACED.includes(item.id) ? [] : [item]);
+  return TABS.flatMap<{ id: TabId; label: string; icon: IconName }>((item) => {
+    const kept = !REPLACED.includes(item.id) || item.id === route ? [item] : [];
+    return item.id === "changes" ? [IDE_TAB, ...kept] : kept;
+  });
 }
 
-/** The tab a route shows: itself when listed; Changes or Context lead to the IDE that
- * replaced them, and the IDE to Changes where it can't open; anything else to Overview.
- * Inputs: the route's tab and the listed tabs. Output: the tab to show. */
+/** The tabs the IDE replaced, which the project menu still opens, since the IDE has not every
+ * action they have. Input: the IDE view, undefined until read. Output: the tabs, or none. */
+export function replacedTabs(view: IdeView | undefined): readonly { id: TabId; label: string; icon: IconName }[] {
+  return ideReplacesTabs(view) ? TABS.filter((item) => REPLACED.includes(item.id)) : [];
+}
+
+/** The tab a route shows: itself when listed, the IDE route to Changes where the IDE can't
+ * open, anything else to Overview. Inputs: the route's tab and the listed tabs. Output: the
+ * tab to show. */
 export function routedTab(tab: string, tabs: readonly { id: TabId }[]): TabId {
   const listed = (id: string) => tabs.some((item) => item.id === id);
   if (listed(tab)) return tab as TabId;
-  if (REPLACED.includes(tab as TabId) && listed("ide")) return "ide";
   if (tab === "ide" && listed("changes")) return "changes";
   return "overview";
 }
@@ -112,7 +121,7 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   return { data, toast, session };
 }
 
-function ProjectMenu({ data }: { data: ProjectData }) {
+function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly { id: TabId; label: string; icon: IconName }[] }) {
   const [pausing, setPausing] = useState(false);
   const [busy, setBusy] = useState(false);
   const team = data.team.result;
@@ -143,6 +152,7 @@ function ProjectMenu({ data }: { data: ProjectData }) {
   }
   return <>
     <Menu label="Project actions" items={[
+      ...replaced.map((item) => ({ label: `Open ${item.label}`, icon: item.icon, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/${item.id}`) })),
       { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
       { label: "Pause all agents", icon: "circle-pause", onSelect: askPause },
       { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`) },
@@ -172,9 +182,12 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   navigate?: (path: string) => void;
 }) {
   const { data, toast, session } = useProject(projectId, navigate, name);
-  const [ide, setIde] = useState<IdeView>();
-  const [fetching, setFetching] = useState(false);
-  const tabs = projectTabs(ide);
+  const [ide, setIde] = useState<Result<IdeView>>();
+  const [busy, setBusy] = useState(false);
+  const view = ide?.kind === "ok" ? ide.value : undefined;
+  const failure = ide !== undefined && ide.kind !== "ok" ? ide : undefined;
+  const fetching = ideFetching(view);
+  const tabs = projectTabs(view, tab);
   const active = routedTab(tab, tabs);
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
@@ -184,15 +197,23 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
 
   useEffect(() => {
     let live = true;
-    void ideView().then((result) => { if (live && result.kind === "ok") setIde(result.value); });
-    return () => { live = false; };
-  }, [projectId, session?.revision]);
+    const read = () => void ideView().then((result) => { if (live) setIde(result); });
+    read();
+    const timer = fetching ? window.setInterval(read, IDE_POLL_MS) : 0;
+    return () => { live = false; window.clearInterval(timer); };
+  }, [projectId, session?.revision, fetching]);
+
+  async function readIde() {
+    setBusy(true);
+    setIde(await ideView());
+    setBusy(false);
+  }
 
   async function fetchIde() {
-    setFetching(true);
+    setBusy(true);
     const result = await ideView(true);
-    setFetching(false);
-    if (result.kind === "ok") setIde(result.value);
+    setBusy(false);
+    if (result.kind === "ok") setIde(result);
     else data.notify(result.kind === "error" ? `The IDE couldn't be fetched. ${failureCopy(result)}` : "CrazyAgent's engine isn't ready yet. Try again in a moment.");
   }
 
@@ -207,14 +228,14 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [projectId, tabs.length]);
+  }, [projectId, tabs.map((item) => item.id).join(" ")]);
 
   return <div className="pj pj-project">
     <PageHeader title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
       description={setup?.about ? <span className="pj-truncate" title={setup.about}>{displayText(setup.about.split("\n")[0])}</span> : undefined}
-      actions={<ProjectMenu data={data} />} />
+      actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} />
     <RecoveryBanner key={projectId} project={projectId} />
-    <IdeUnavailable view={ide} busy={fetching} onAction={() => void fetchIde()} />
+    <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
     <Tabs label="Project" current={active}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
@@ -225,7 +246,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
-      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={setIde} />}
+      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} />}
     </div>
     <IdeConfirm data={data} />
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}

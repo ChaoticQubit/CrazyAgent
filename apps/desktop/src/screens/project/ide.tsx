@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, bounds, hideIde, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, bounds, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, touchIde } from "../../api-ide";
 import type { IdeTabState, IdeView } from "../../api-ide";
 import { Button } from "../../ui";
 import "./ide.css";
 
-const POLL_MS = 1_000;
+/** How often a page waiting on the IDE build reads its state again, in milliseconds. */
+export const IDE_POLL_MS = 1_000;
 const NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";
 
 function failureLine(failure: Failure, sentence: (code: string) => string = () => ""): string {
@@ -23,11 +24,12 @@ export function IdeStatus({ state, busy, onAction }: { state: IdeTabState; busy:
   </div>;
 }
 
-/** The project page's line while the IDE can't open and Context and Changes stay: the
- * platform, the reason and the build's one action, Download or Retry. Inputs: the view, whether
- * the action runs, and its handler. Output: the line, or nothing when the IDE opens. */
-export function IdeUnavailable({ view, busy = false, onAction }: { view: IdeView | undefined; busy?: boolean; onAction: () => void }) {
-  const unavailable = ideUnavailable(view);
+/** The project page's line while Context and Changes stay: the build's progress, or why the
+ * IDE can't open on this platform with the build's one action, Download or Retry, or a failed
+ * read of the IDE state with Retry. Inputs: the view, the failed read if the last one failed,
+ * whether the action runs, and its handler. Output: the line, or nothing when the IDE opens. */
+export function IdeUnavailable({ view, failure, busy = false, onAction }: { view: IdeView | undefined; failure?: Failure; busy?: boolean; onAction: () => void }) {
+  const unavailable = failure ? ideReadFailed(failure, desktopPlatform()) : ideUnavailable(view);
   if (unavailable === null) return null;
   return <div className="row pj-ide-unavailable" role="status">
     <span className="secondary">{unavailable.line}</span>
@@ -63,7 +65,7 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
       }
     };
     void read();
-    const timer = window.setInterval(() => void read(), POLL_MS);
+    const timer = window.setInterval(() => void read(), IDE_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
   }, [projectId, waiting]);
 
