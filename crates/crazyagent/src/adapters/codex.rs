@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
-use super::LINE_BYTES_MAX;
+use super::{LINE_BYTES_MAX, clip_text};
 
 pub const FRAME_BYTES_MAX: usize = 65_536;
 const EVENTS_MAX: usize = 128;
@@ -1567,12 +1567,15 @@ fn frame_name(frame: &[u8]) -> String {
     )
 }
 
+/// Reads a message, delta or error text from Codex, clipped past `FIELD_BYTES_MAX` so that
+/// one large message never fails the turn. Input: the JSON value. Output: the text, or
+/// invalid for a value that is not text or holds a NUL.
 fn message_text(value: &Value) -> Result<String, ProtocolError> {
     let text = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
-    if text.len() > FRAME_BYTES_MAX || text.contains('\0') {
+    if text.contains('\0') {
         return Err(ProtocolError::InvalidMessage);
     }
-    Ok(text.into())
+    Ok(clip_text(text))
 }
 
 fn wire_id(value: Value) -> Result<WireId, ProtocolError> {
