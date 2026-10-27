@@ -114,6 +114,27 @@ export interface ContextChunk {
   next_offset: number | null;
 }
 
+/** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
+export type AgentAccess = "sandboxed" | "own_branch" | "full";
+
+/** A toolchain family the engine detects in the owner's home folder and the project. */
+export type Toolchain = "rust" | "node" | "python";
+
+/** A project's saved agent policy: the level and the toolchain switches that differ from the
+ * project's own use. */
+export interface AgentPolicy {
+  access: AgentAccess;
+  toolchains: { toolchain: Toolchain; allowed: boolean }[];
+}
+
+/** The engine's view of a project's agent policy: the level, the levels this computer offers
+ * with the reason one can't run, and every detected toolchain. */
+export interface PolicyView {
+  access: AgentAccess;
+  levels: { access: AgentAccess; label: string; unavailable: string | null }[];
+  toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
+}
+
 export interface PoolChoice {
   pool: AccountPool;
   members: ModelConnection[];
@@ -446,6 +467,19 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
  * Inputs: project id, the folders and a generation. Output: the receipt. */
 export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
+/** Reads this project's agent access level and the toolchains its agents may use.
+ * Input: project id. Output: the engine's view of the saved policy. */
+export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
+  return call<PolicyView>("desktop_project_agent_policy", { id });
+}
+
+/** Replaces this project's agent access level and toolchain switches; the engine refuses a
+ * level this computer can't enforce. Inputs: project id, the policy and a generation.
+ * Output: the receipt. */
+export function saveAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
 }
 
 /** Deletes one document or research report from the project folder.

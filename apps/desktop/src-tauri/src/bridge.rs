@@ -627,6 +627,11 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectAgentPolicy { project_id, .. } => (
+                "project_agent_policy",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::Team { action } => (
                 "team",
                 action.project().map(|project| project.as_str().to_owned()),
