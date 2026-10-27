@@ -11,8 +11,10 @@ mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
+pub(in crate::tui) mod process;
 pub mod profile_form;
 pub(in crate::tui) mod project;
+pub(in crate::tui) mod project_activity;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
@@ -68,17 +70,19 @@ pub enum SettingsSection {
     Pools,
     Harnesses,
     Plugins,
+    Process,
     Memory,
     Profile,
 }
 
 impl SettingsSection {
     /// Every section in tab order.
-    pub const ALL: [SettingsSection; 6] = [
+    pub const ALL: [SettingsSection; 7] = [
         Self::Accounts,
         Self::Pools,
         Self::Harnesses,
         Self::Plugins,
+        Self::Process,
         Self::Memory,
         Self::Profile,
     ];
@@ -91,6 +95,7 @@ impl SettingsSection {
             Self::Pools => "Pools",
             Self::Harnesses => "Harnesses",
             Self::Plugins => "Plugins and skills",
+            Self::Process => "Process",
             Self::Memory => "Memory",
             Self::Profile => "Profile",
         }
@@ -174,6 +179,10 @@ pub enum Place {
         first_run: bool,
     },
     Team {
+        id: ProjectId,
+        name: String,
+    },
+    ProjectProcess {
         id: ProjectId,
         name: String,
     },
@@ -334,6 +343,12 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::ProjectProcess { id, name } => {
+            Box::new(process::ProcessPage::new(process::Scope::Project {
+                id: id.clone(),
+                name: name.clone(),
+            }))
+        }
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),

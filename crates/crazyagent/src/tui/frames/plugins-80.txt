@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Plugins and skills                          
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-────────────────────────────────────━━━━━━━━━━━━━━━━━━━━────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+─────────────────────────────────━━━━━━━━━━━━━━━━━━─────────────────────────────
   Plugins and skills                                         For every project  
   Skills teach agents how to do a task. MCP servers give agents new tools. A    
   project can add its own in its settings.                                      
