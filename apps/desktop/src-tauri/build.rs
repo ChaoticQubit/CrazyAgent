@@ -27,6 +27,7 @@ fn main() {
         "desktop_team_keep_warm",
         "desktop_team_pause",
         "desktop_team_hand_off",
+        "desktop_team_rename",
         "desktop_team_graph",
         "desktop_terminal_attach",
         "desktop_terminal_input",

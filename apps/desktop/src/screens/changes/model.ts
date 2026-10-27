@@ -36,9 +36,10 @@ const MARKS: Record<string, string> = {
 
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
-/** Names the agent whose work a change set holds. Input: the change set. Output: the name. */
+/** Names the agent whose work a change set holds, a sub-agent by the engine's label such as
+ * "Ada (@onboarding-fix) · Claude Code". Input: the change set. Output: the name. */
 export function agentName(set: ChangeSet): string {
-  return set.agent.kind === "master" ? "Master" : `Sub-agent ${displayText(set.agent.label)}`;
+  return set.agent.kind === "master" ? "Master" : displayText(set.agent.label);
 }
 
 /** The size of a change set in files and lines. Input: the change set. Output: the line. */

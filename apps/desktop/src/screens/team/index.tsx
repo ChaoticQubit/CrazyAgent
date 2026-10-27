@@ -6,7 +6,7 @@ import { Button, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton, Status
 import { displayText } from "../conversation";
 import {
   DRAG_SLOP, NODE_HEIGHT, NODE_WIDTH, arrowMove, edgeStatus, graphLive, graphSummary, keepOffsets,
-  layoutGraph, moveNode, nodeDetail, nodeStatus, type Offsets, type PlacedEdge, type PlacedNode,
+  layoutGraph, moveNode, nodeDetail, nodeLine, nodeStatus, type Offsets, type PlacedEdge, type PlacedNode,
 } from "./graph";
 import { TerminalPanel } from "./terminal-panel";
 import "./team-graph.css";
@@ -53,6 +53,7 @@ function NodeBox({ placed, harness, open, onOpen, onMove }: {
   return <button type="button" className={`tg-node ${node.kind}${open ? " open" : ""}`}
     style={{ left: placed.x, top: placed.y, width: NODE_WIDTH, height: NODE_HEIGHT }}
     aria-label={displayText(nodeLabel(node, harness))} aria-pressed={opens ? open : undefined}
+    title={node.kind === "harness_group" ? undefined : displayText(nodeLine(node, harness))}
     onPointerDown={(event) => {
       if (event.button !== 0) return;
       event.currentTarget.setPointerCapture(event.pointerId);

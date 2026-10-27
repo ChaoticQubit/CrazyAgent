@@ -89,6 +89,7 @@ export interface TeamAgentRow {
   word: string;
   task: string;
   folder: string;
+  rename: { agent: number; handle: string } | null;
 }
 
 export interface TeamTaskRow {
@@ -104,6 +105,7 @@ export interface TeamTaskRow {
 }
 
 const WAITING: TeamTaskStatus[] = ["queued", "needs_pool"];
+const LIVE_AGENT: TeamAgentStatus[] = ["starting", "idle", "working"];
 const SUMMARY_MAX = 200;
 const MARKER = /^(?:#{1,6}|[-*+]|>|\d+\.)\s+/u;
 
@@ -118,7 +120,8 @@ export function resultSummary(text: string): string {
 /** Builds the Team panel: each agent with its role, plain name, harness, account, current task and
  * the folder it works in (the master in the project folder, a sub-agent in its own worktree),
  * then the tasks handed from the master or the owner to a sub-agent. "running" hides stopped agents
- * and finished tasks. Sub-agents are named by harness and order, such as "Codex 2", never by id.
+ * and finished tasks. Sub-agents carry the engine's persona and role name, such as "Ada (@onboarding-fix)";
+ * one without it is named by harness and order, such as "Codex 2", never by id.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
  * Output: the agent rows and task rows in engine order. */
 export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
@@ -129,7 +132,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
     if (agent.role === "master") { names.set(agent.id, "Master"); continue; }
     const count = (counts.get(agent.harness) ?? 0) + 1;
     counts.set(agent.harness, count);
-    names.set(agent.id, `${harnessLabel(agent.harness)} ${count}`);
+    names.set(agent.id, agent.name?.trim() || `${harnessLabel(agent.harness)} ${count}`);
   }
   const account = (id: string | null) => id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
   const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
@@ -143,6 +146,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (held ? firstLine(held.prompt) : agent.status === "idle" ? "Waiting for work" : ""),
       folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
+      rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({

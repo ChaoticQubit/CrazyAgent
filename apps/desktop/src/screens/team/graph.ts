@@ -184,6 +184,14 @@ export function edgeStatus(edge: GraphEdge): { word: string; tone: Tone } {
   return EDGE_WORDS[edge.state];
 }
 
+/** One line naming an agent or the master with its harness and status, such as
+ * "Ada (@onboarding-fix) · Claude Code · working". Inputs: the node and a harness display
+ * name lookup. Output: the line; a node without a status leaves that part out. */
+export function nodeLine(node: GraphNode, harness: (id: string) => string = (id) => id): string {
+  const status = nodeStatus(node);
+  return [node.label, harness(node.harness), status?.word.toLowerCase()].filter(Boolean).join(" · ");
+}
+
 /** The second line of a node box: the master's harness, a group's agent count, or an
  * agent's harness and account. Inputs: the node and a harness display name lookup.
  * Output: one short line. */
