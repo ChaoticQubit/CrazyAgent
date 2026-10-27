@@ -1,6 +1,8 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{AgentInstructions, OwnerClient, PROCESS_CODES};
+use crazyagent::engine::owner::{
+    AgentInstructions, OwnerClient, PROCESS_CODES, ProcessText, SavedText,
+};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
@@ -37,11 +39,12 @@ impl NativeBridge {
     }
 
     /// Reads the owner's instructions, run without the bridge lock. Input: none for the
-    /// app-wide text, or the project id. Output: the text, empty when none is saved.
+    /// app-wide text, or the project id. Output: the text, empty when none is saved, and the
+    /// version a save names.
     pub fn process_text(
         &self,
         project_id: Option<String>,
-    ) -> Result<Unlocked<String>, BridgeError> {
+    ) -> Result<Unlocked<ProcessText>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
@@ -49,18 +52,23 @@ impl NativeBridge {
         }))
     }
 
-    /// Saves the owner's instructions whole, run without the bridge lock. Inputs: none for
-    /// the app-wide text, or the project id, and the text. Output: unit once stored.
+    /// Saves the owner's instructions whole, run without the bridge lock, when no other save
+    /// landed since they were read. Inputs: none for the app-wide text, or the project id;
+    /// the text; the version read; and only for "Keep mine" after a stale reply, the older
+    /// version the owner opened. Output: the saved version, or the stale reply with the
+    /// newer text.
     pub fn save_process_text(
         &self,
         project_id: Option<String>,
         text: String,
-    ) -> Result<Unlocked<()>, BridgeError> {
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<Unlocked<SavedText>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .save_process_text(project, text)
+                .save_process_text(project, text, version, opened)
                 .await
                 .map_err(process_error)
         }))

@@ -665,8 +665,8 @@ export function saveSelectionToMemory(id: string, path: string, text: string, ge
   return invoke<IntentReceipt>("desktop_save_selection_to_memory", { id, path, text, generation });
 }
 
-export function forgetMemory(project: string, memory: string, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_forget_memory", { project, memory, generation });
+export function forgetMemory(project: string, memory: string, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_forget_memory", { project, memory, version, generation });
 }
 
 export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {

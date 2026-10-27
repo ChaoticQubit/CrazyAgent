@@ -2766,8 +2766,9 @@ impl TeamRuntime {
     ) -> Result<AgentContext, String> {
         let unread =
             |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
-        let context =
-            crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
+        let context = crate::launch_context::for_project(&self.connection, project)
+            .and_then(|context| context.for_agent(&self.connection, project, id))
+            .map_err(unread)?;
         let master = role == AgentRole::Master;
         let live = master
             && self

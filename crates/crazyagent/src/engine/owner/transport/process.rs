@@ -1,7 +1,8 @@
 use super::*;
 use crate::agent_home::{PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
 use crate::protocol::encode_frame;
-use rusqlite::OptionalExtension;
+use crate::storage::versioned::{self, LastWriter, Refusal, Writer};
+use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
@@ -55,12 +56,24 @@ enum Action {
     },
     Save {
         project: Option<ProjectId>,
+        version: u64,
+        opened: Option<u64>,
     },
     ImportGlobal,
     Default,
     Agent {
         project: ProjectId,
         agent: Option<i64>,
+    },
+    AgentText {
+        project: ProjectId,
+        agent: i64,
+    },
+    SaveAgentText {
+        project: ProjectId,
+        agent: i64,
+        version: u64,
+        opened: Option<u64>,
     },
 }
 
@@ -77,7 +90,19 @@ enum Reply {
     Text {
         bytes: u32,
     },
-    Saved,
+    Current {
+        bytes: u32,
+        version: u64,
+    },
+    Saved {
+        version: u64,
+    },
+    Stale {
+        version: u64,
+        current: u64,
+        writer: LastWriter,
+        bytes: u32,
+    },
     Received {
         agent: i64,
         harness: String,
@@ -103,9 +128,35 @@ pub struct AgentInstructions {
     pub skills: Vec<String>,
 }
 
+/// One instructions text and the version it was read at. A save names that version, so it
+/// never replaces a text saved since without the owner seeing that text first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessText {
+    pub text: String,
+    pub version: u64,
+}
+
+/// What a save of instructions did: stored as the next version, or refused as stale because
+/// another save landed after the version it named. A stale reply carries the newer text, its
+/// version and who saved it, so the owner can reload it or keep their own text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SavedText {
+    Saved {
+        version: u64,
+    },
+    Stale {
+        version: u64,
+        current: ProcessText,
+        writer: LastWriter,
+    },
+}
+
 enum Answer {
     Text(String),
-    Saved,
+    Current(ProcessText),
+    Saved(SavedText),
     Agent(AgentInstructions),
 }
 
@@ -115,25 +166,61 @@ fn unknown() -> EngineError {
 
 impl OwnerClient {
     /// Reads the owner's instructions: the app-wide text, or one project's text.
-    /// Input: none for the app, or the project. Output: the text, empty when none is saved.
-    pub async fn process_text(&self, project: Option<ProjectId>) -> Result<String, EngineError> {
-        self.process_text_reply(Action::Read { project }).await
+    /// Input: none for the app, or the project. Output: the text, empty when none is saved,
+    /// and the version a save names.
+    pub async fn process_text(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<ProcessText, EngineError> {
+        match self
+            .process_exchange(Action::Read { project }, None)
+            .await?
+        {
+            (Reply::Current { version, .. }, Some(text)) => Ok(ProcessText { text, version }),
+            _ => Err(unknown()),
+        }
     }
 
     /// Saves the owner's instructions whole: the app-wide text, or one project's text.
-    /// Inputs: none for the app, or the project, and the text, at most
-    /// `agent_home::TEXT_BYTES_MAX` bytes. Output: unit, or a `PROCESS_CODES` refusal.
+    /// Inputs: none for the app, or the project; the text, at most
+    /// `agent_home::TEXT_BYTES_MAX` bytes; the version it was read at; and only for "Keep
+    /// mine" after a stale reply, the version the owner opened, older than `version`.
+    /// Output: the saved version, the stale reply with the newer text, or a refusal.
     pub async fn save_process_text(
         &self,
         project: Option<ProjectId>,
         text: String,
-    ) -> Result<(), EngineError> {
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<SavedText, EngineError> {
         crate::agent_home::validate(&text).map_err(|problem| EngineError(problem.0))?;
-        match self
-            .process_exchange(Action::Save { project }, Some(text))
-            .await?
-        {
-            (Reply::Saved, None) => Ok(()),
+        let action = Action::Save {
+            project,
+            version,
+            opened,
+        };
+        self.save_reply(action, text).await
+    }
+
+    async fn save_reply(&self, action: Action, text: String) -> Result<SavedText, EngineError> {
+        match self.process_exchange(action, Some(text)).await? {
+            (Reply::Saved { version }, None) => Ok(SavedText::Saved { version }),
+            (
+                Reply::Stale {
+                    version,
+                    current,
+                    writer,
+                    ..
+                },
+                Some(text),
+            ) => Ok(SavedText::Stale {
+                version,
+                current: ProcessText {
+                    text,
+                    version: current,
+                },
+                writer,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -148,6 +235,45 @@ impl OwnerClient {
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
     pub async fn default_process(&self) -> Result<String, EngineError> {
         self.process_text_reply(Action::Default).await
+    }
+
+    /// Reads the owner's own instructions for one team agent, which its next launch gets
+    /// after the app and project text. Inputs: the project and the agent id. Output: the
+    /// text, empty when none is saved, and the version a save names.
+    pub async fn agent_text(
+        &self,
+        project: ProjectId,
+        agent: i64,
+    ) -> Result<ProcessText, EngineError> {
+        match self
+            .process_exchange(Action::AgentText { project, agent }, None)
+            .await?
+        {
+            (Reply::Current { version, .. }, Some(text)) => Ok(ProcessText { text, version }),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Saves the owner's own instructions for one team agent whole when no other save landed
+    /// since they were read. Inputs: the project, the agent id, the text, the version read
+    /// and, only for "Keep mine" after a stale reply, the older version the owner opened.
+    /// Output: the saved version, the stale reply with the newer text, or a refusal.
+    pub async fn save_agent_text(
+        &self,
+        project: ProjectId,
+        agent: i64,
+        text: String,
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<SavedText, EngineError> {
+        crate::agent_home::validate(&text).map_err(|problem| EngineError(problem.0))?;
+        let action = Action::SaveAgentText {
+            project,
+            agent,
+            version,
+            opened,
+        };
+        self.save_reply(action, text).await
     }
 
     /// Reads what one team agent of a project received at its last launch. Inputs: the
@@ -230,6 +356,25 @@ impl OwnerClient {
                 Reply::Text { bytes } => {
                     let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
                     Ok((Reply::Text { bytes }, Some(text)))
+                }
+                Reply::Current { bytes, version } => {
+                    let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
+                    Ok((Reply::Current { bytes, version }, Some(text)))
+                }
+                Reply::Stale {
+                    version,
+                    current,
+                    writer,
+                    bytes,
+                } => {
+                    let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
+                    let reply = Reply::Stale {
+                        version,
+                        current,
+                        writer,
+                        bytes,
+                    };
+                    Ok((reply, Some(text)))
                 }
                 Reply::Received {
                     agent,
@@ -314,7 +459,29 @@ pub(super) async fn serve(
             },
             Some(text),
         ),
-        Ok(Answer::Saved) => (Reply::Saved, None),
+        Ok(Answer::Current(current)) => {
+            assert!(current.text.len() <= TEXT_BYTES_MAX);
+            let reply = Reply::Current {
+                bytes: current.text.len() as u32,
+                version: current.version,
+            };
+            (reply, Some(current.text))
+        }
+        Ok(Answer::Saved(SavedText::Saved { version })) => (Reply::Saved { version }, None),
+        Ok(Answer::Saved(SavedText::Stale {
+            version,
+            current,
+            writer,
+        })) => {
+            assert!(current.text.len() <= TEXT_BYTES_MAX);
+            let reply = Reply::Stale {
+                version,
+                current: current.version,
+                writer,
+                bytes: current.text.len() as u32,
+            };
+            (reply, Some(current.text))
+        }
         Ok(Answer::Agent(view)) => {
             assert!(view.text.len() <= PROCESS_BYTES_MAX);
             let reply = Reply::Received {
@@ -364,7 +531,8 @@ async fn handle(
         process: action,
         text_bytes,
     } = serde_json::from_slice(bytes).map_err(|_| failure("process_request_invalid"))?;
-    if text_bytes.is_some() != matches!(action, Action::Save { .. }) {
+    if text_bytes.is_some() != matches!(action, Action::Save { .. } | Action::SaveAgentText { .. })
+    {
         return Err(failure("process_request_invalid"));
     }
     let text = match text_bytes {
@@ -389,8 +557,7 @@ async fn handle(
         Action::Agent { project, agent } if text.is_none() => {
             agent_instructions(&root, &project, agent).map(Answer::Agent)
         }
-        action => run(&root, home.as_deref(), action, text)
-            .map(|text| text.map_or(Answer::Saved, Answer::Text)),
+        action => run(&root, home.as_deref(), action, text),
     })
     .await
     .map_err(|_| failure("process_unavailable"))?
@@ -398,45 +565,241 @@ async fn handle(
 
 /// Runs one Process request against the engine root. Inputs: the root holding
 /// `engine.db`, the owner's home for an import, the action and a save's text.
-/// Output: the text read, none for a save, or a plain code.
+/// Output: the text read with its version, a seed text, what a save did, or a plain code.
 fn run(
     root: &Path,
     home: Option<&Path>,
     action: Action,
     text: Option<String>,
-) -> Result<Option<String>, EngineError> {
-    let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
+) -> Result<Answer, EngineError> {
     Ok(match (action, text) {
-        (Action::Read { project: None }, None) => {
-            Some(crate::agent_home::read_app(root).map_err(code)?)
-        }
-        (
-            Action::Read {
-                project: Some(project),
-            },
-            None,
-        ) => Some(crate::agent_home::read_project(&project_folder(root, &project)?).map_err(code)?),
-        (Action::Save { project: None }, Some(text)) => {
-            crate::agent_home::save_app(root, &text).map_err(code)?;
-            None
-        }
+        (Action::Read { project }, None) => Answer::Current(current_text(root, project.as_ref())?),
         (
             Action::Save {
-                project: Some(project),
+                project,
+                version,
+                opened,
             },
             Some(text),
-        ) => {
-            crate::agent_home::save_project(&project_folder(root, &project)?, &text)
-                .map_err(code)?;
-            None
-        }
+        ) => Answer::Saved(save_text(root, project.as_ref(), &text, version, opened)?),
         (Action::ImportGlobal, None) => {
             let home = home.ok_or_else(|| failure("process_import_missing"))?;
-            Some(crate::agent_home::import_global(home).map_err(code)?)
+            Answer::Text(
+                crate::agent_home::import_global(home).map_err(|problem| EngineError(problem.0))?,
+            )
         }
-        (Action::Default, None) => Some(crate::agent_home::DEFAULT_PROCESS.to_owned()),
+        (Action::Default, None) => Answer::Text(crate::agent_home::DEFAULT_PROCESS.to_owned()),
+        (Action::AgentText { project, agent }, None) => {
+            Answer::Current(current_agent_text(root, &project, agent)?)
+        }
+        (
+            Action::SaveAgentText {
+                project,
+                agent,
+                version,
+                opened,
+            },
+            Some(text),
+        ) => Answer::Saved(save_agent_text(
+            root, &project, agent, &text, version, opened,
+        )?),
         _ => return Err(failure("process_request_invalid")),
     })
+}
+
+/// Tells whether a team agent belongs to a project. Inputs: a connection to `engine.db`,
+/// the project and the agent id, above 0. Output: true for an agent of that project.
+fn team_member(
+    connection: &rusqlite::Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    assert!(agent > 0);
+    let unavailable = |_| failure("process_unavailable");
+    let team: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'team_agents')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !team {
+        return Ok(false);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id = ?1 AND project = ?2)",
+            rusqlite::params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)
+}
+
+/// Reads the owner's own instructions for one team agent of a project with their version.
+/// Inputs: the engine root, the project and the agent id. Output: the text and version,
+/// `process_agent_unknown` for another project's agent, or another plain code.
+fn current_agent_text(
+    root: &Path,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<ProcessText, EngineError> {
+    if agent <= 0 {
+        return Err(failure("process_request_invalid"));
+    }
+    let connection = read_only(root)?;
+    if !team_member(&connection, project, agent)? {
+        return Err(failure("process_agent_unknown"));
+    }
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| failure("process_unavailable"))?;
+    let (text, version) = crate::storage::agent_text::read(&tx, project, agent)
+        .map_err(|_| failure("process_unavailable"))?;
+    Ok(ProcessText { text, version })
+}
+
+/// Saves the owner's own instructions for one team agent as their next version only when
+/// the save names the current one; the text and its version commit together, so racing
+/// saves queue and every loser gets the stale reply with the text that landed. "Keep mine"
+/// (`opened`) must name an older version than `version` and is recorded. Inputs: the engine
+/// root, the project, the agent id, the text, the version read and the version first
+/// opened. Output: what the save did, or a plain code.
+fn save_agent_text(
+    root: &Path,
+    project: &ProjectId,
+    agent: i64,
+    text: &str,
+    version: u64,
+    opened: Option<u64>,
+) -> Result<SavedText, EngineError> {
+    crate::agent_home::validate(text).map_err(|problem| EngineError(problem.0))?;
+    if agent <= 0 || opened.is_some_and(|opened| opened >= version) {
+        return Err(failure("process_request_invalid"));
+    }
+    let mut connection = versioned::open(root).map_err(|_| failure("process_unavailable"))?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| failure("process_unavailable"))?;
+    if !team_member(&tx, project, agent)? {
+        return Err(failure("process_agent_unknown"));
+    }
+    let writer = Writer::Owner {
+        force_after_conflict: opened.is_some(),
+    };
+    match crate::storage::agent_text::save(&tx, project, agent, text, version, &writer) {
+        Ok(next) => {
+            tx.commit().map_err(|_| unknown())?;
+            assert_eq!(next, version + 1);
+            Ok(SavedText::Saved { version: next })
+        }
+        Err(Refusal::Stale(stale)) => {
+            let (text, current) = crate::storage::agent_text::read(&tx, project, agent)
+                .map_err(|_| failure("process_unavailable"))?;
+            assert_eq!(current, stale.current);
+            Ok(SavedText::Stale {
+                version: stale.version,
+                current: ProcessText {
+                    text,
+                    version: current,
+                },
+                writer: stale.writer,
+            })
+        }
+        Err(Refusal::Failed(_)) => Err(failure("process_unavailable")),
+    }
+}
+
+/// Reads the instructions' version first and their text second, so a text saved between
+/// the two reads is shown with the older version and its next save is refused instead of
+/// replacing a text the owner never saw. Inputs: the engine root and the project, none for
+/// the app. Output: the text and its version, or a plain code.
+fn current_text(root: &Path, project: Option<&ProjectId>) -> Result<ProcessText, EngineError> {
+    let folder = project
+        .map(|project| project_folder(root, project))
+        .transpose()?;
+    let item = versioned::process_text_item(project);
+    let connection = read_only(root)?;
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| failure("process_unavailable"))?;
+    let version = versioned::current(&tx, &item)
+        .map_err(|_| failure("process_unavailable"))?
+        .version;
+    drop(tx);
+    let text = stored_text(root, folder.as_deref())?;
+    Ok(ProcessText { text, version })
+}
+
+/// Saves the instructions as their next version only when the save names the current one.
+/// The version moves in an immediate transaction, the file is written while that write lock
+/// is held, and the version commits last, so a failed file write keeps the old version and
+/// racing saves queue: one lands, the others get the stale reply with the text that landed.
+/// "Keep mine" (`opened`) must name an older version than `version`, the one the conflict
+/// showed, and is recorded. Inputs: the engine root, the project (none for the app), the
+/// text, the version read and the version first opened. Output: what the save did.
+fn save_text(
+    root: &Path,
+    project: Option<&ProjectId>,
+    text: &str,
+    version: u64,
+    opened: Option<u64>,
+) -> Result<SavedText, EngineError> {
+    crate::agent_home::validate(text).map_err(|problem| EngineError(problem.0))?;
+    if opened.is_some_and(|opened| opened >= version) {
+        return Err(failure("process_request_invalid"));
+    }
+    let folder = project
+        .map(|project| project_folder(root, project))
+        .transpose()?;
+    let item = versioned::process_text_item(project);
+    let mut connection = versioned::open(root).map_err(|_| failure("process_unavailable"))?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| failure("process_unavailable"))?;
+    let writer = Writer::Owner {
+        force_after_conflict: opened.is_some(),
+    };
+    match versioned::write_if(&tx, &item, version, &writer) {
+        Ok(next) => {
+            store_text(root, folder.as_deref(), text)?;
+            tx.commit().map_err(|_| unknown())?;
+            assert_eq!(next, version + 1);
+            Ok(SavedText::Saved { version: next })
+        }
+        Err(Refusal::Stale(stale)) => {
+            assert_ne!(stale.current, version);
+            let text = stored_text(root, folder.as_deref())?;
+            Ok(SavedText::Stale {
+                version: stale.version,
+                current: ProcessText {
+                    text,
+                    version: stale.current,
+                },
+                writer: stale.writer,
+            })
+        }
+        Err(Refusal::Failed(_)) => Err(failure("process_unavailable")),
+    }
+}
+
+/// Reads the stored instructions. Inputs: the engine root and the project folder, none for
+/// the app. Output: the text, empty when none is saved, or a plain code.
+fn stored_text(root: &Path, folder: Option<&Path>) -> Result<String, EngineError> {
+    match folder {
+        None => crate::agent_home::read_app(root),
+        Some(folder) => crate::agent_home::read_project(folder),
+    }
+    .map_err(|problem| EngineError(problem.0))
+}
+
+/// Writes the instructions whole. Inputs: the engine root, the project folder (none for
+/// the app) and the text. Output: unit, or a plain code.
+fn store_text(root: &Path, folder: Option<&Path>, text: &str) -> Result<(), EngineError> {
+    match folder {
+        None => crate::agent_home::save_app(root, text),
+        Some(folder) => crate::agent_home::save_project(folder, text),
+    }
+    .map_err(|problem| EngineError(problem.0))
 }
 
 /// Reads what one team agent of a project received at its last launch from its private

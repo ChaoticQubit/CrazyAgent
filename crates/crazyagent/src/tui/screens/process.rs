@@ -2,6 +2,7 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
+use crate::engine::owner::{ProcessText, SavedText};
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -44,7 +45,7 @@ enum Seed {
 enum State {
     Loading,
     Failed(String),
-    Ready { saved: String },
+    Ready { saved: String, version: u64 },
 }
 
 /// One catalog skill the editor tags: its name as characters, its engine id and its name.
@@ -172,6 +173,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_text_unsafe" => "The instructions file is a link or not a plain file, so CrazyAgent won't read it. Replace it with a plain file.".into(),
         "process_text_unreadable" => "The instructions file couldn't be read. Check it, then try again.".into(),
         "process_text_unwritable" => "The instructions couldn't be saved. Check the folder, then try again.".into(),
+        "process_text_stale" => "These instructions changed since you opened them, so yours were not saved. Your text is still here; copy it, then reopen this page to see the saved version.".into(),
         "process_project_folder_missing" => "This project keeps its files without a .crazyagent folder, so it can't hold project instructions.".into(),
         "process_project_unknown" => "This project has no setup yet, so it can't hold instructions.".into(),
         "process_import_missing" => "There is no ~/.claude/CLAUDE.md to import.".into(),
@@ -422,7 +424,7 @@ impl ProcessPage {
     }
 
     fn changed(&self) -> bool {
-        matches!(&self.state, State::Ready { saved } if *saved != self.editor.text())
+        matches!(&self.state, State::Ready { saved, .. } if *saved != self.editor.text())
     }
 
     fn invalid(&self) -> Option<String> {
@@ -437,9 +439,14 @@ impl ProcessPage {
         if !self.changed() {
             return;
         }
+        let State::Ready { version, .. } = self.state else {
+            return;
+        };
         let query = ProcessQuery::Save {
             project: self.project(),
             text: self.editor.text(),
+            version,
+            opened: None,
         };
         self.send(query, ctx);
     }
@@ -479,22 +486,26 @@ impl ProcessPage {
             return;
         }
         self.pending = None;
-        let result = match &event.result {
-            Ok(ProcessReply::Text(text)) => Ok(text),
-            Ok(ProcessReply::Agent(_)) => return,
-            Err(code) => Err(code),
-        };
-        match (&event.query, result) {
-            (ProcessQuery::Read { .. }, Ok(text)) => {
+        match (&event.query, &event.result) {
+            (
+                ProcessQuery::Read { .. },
+                Ok(ProcessReply::Current(ProcessText { text, version })),
+            ) => {
                 self.editor = Editor::new(text);
                 self.state = State::Ready {
                     saved: text.clone(),
+                    version: *version,
                 };
             }
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
-            (ProcessQuery::Save { text, .. }, Ok(_)) => {
-                if let State::Ready { saved } = &mut self.state {
+            (
+                ProcessQuery::Save { text, .. },
+                Ok(ProcessReply::Saved(SavedText::Saved { version: next })),
+            ) => {
+                if let State::Ready { saved, version } = &mut self.state {
+                    assert!(*next > *version);
                     saved.clone_from(text);
+                    *version = *next;
                 }
                 self.problem = None;
                 ctx.say(Message::success(
@@ -502,13 +513,20 @@ impl ProcessPage {
                     "Agents started from now on get them.",
                 ));
             }
+            (ProcessQuery::Save { .. }, Ok(ProcessReply::Saved(SavedText::Stale { .. }))) => {
+                self.problem = Some(message("process_text_stale"));
+            }
             (ProcessQuery::Save { .. }, Err(code)) => self.problem = Some(message(code)),
-            (ProcessQuery::ImportGlobal, Ok(text)) => self.open_preview(Seed::Import, text),
-            (ProcessQuery::Default, Ok(text)) => self.open_preview(Seed::Default, text),
+            (ProcessQuery::ImportGlobal, Ok(ProcessReply::Text(text))) => {
+                self.open_preview(Seed::Import, text);
+            }
+            (ProcessQuery::Default, Ok(ProcessReply::Text(text))) => {
+                self.open_preview(Seed::Default, text);
+            }
             (ProcessQuery::ImportGlobal | ProcessQuery::Default, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
-            (ProcessQuery::Agent { .. }, _) => {}
+            _ => {}
         }
     }
 

@@ -283,3 +283,68 @@ fn two_connections_never_both_win_one_version() {
     );
     assert_eq!(read(&mut first, &shared).version, 1);
 }
+
+#[test]
+fn a_forgotten_item_starts_again_at_version_0_without_its_records() {
+    let (_directory, path) = database();
+    let mut connection = connect(&path);
+    let item = Item::new("agent-instructions:tidepool:team-3").unwrap();
+    let other = Item::new("agent-instructions:tidepool:team-4").unwrap();
+    assert_eq!(write(&mut connection, &item, 0, &agent(3)), Ok(1));
+    assert_eq!(write(&mut connection, &item, 1, &keep_mine()), Ok(2));
+    assert_eq!(write(&mut connection, &other, 0, &owner()), Ok(1));
+
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(forget(&tx, &item), Ok(true));
+    assert_eq!(
+        forget(&tx, &item),
+        Ok(false),
+        "forgetting twice finds nothing"
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        read(&mut connection, &item),
+        Current {
+            version: 0,
+            writer: LastWriter::Nobody,
+        }
+    );
+    assert!(
+        forced(&mut connection, &item).is_empty(),
+        "its Keep mine records go with it"
+    );
+    assert_eq!(
+        read(&mut connection, &other).version,
+        1,
+        "other items keep their version"
+    );
+    assert_eq!(
+        stale(write(&mut connection, &item, 2, &owner())).current,
+        0,
+        "a holder of the old version re-reads"
+    );
+    assert_eq!(write(&mut connection, &item, 0, &owner()), Ok(1));
+
+    let (_untouched, fresh) = database();
+    let mut empty = connect(&fresh);
+    let tx = empty.transaction().unwrap();
+    assert_eq!(
+        forget(&tx, &item),
+        Ok(false),
+        "a store never written has nothing to forget"
+    );
+    drop(tx);
+
+    assert_eq!(
+        open(Path::new("relative")).unwrap_err(),
+        EngineError("versioned_unavailable".into())
+    );
+    let missing = tempfile::tempdir().unwrap();
+    let missing = missing.path().canonicalize().unwrap();
+    assert!(open(&missing).is_err(), "open never creates engine.db");
+    assert!(!missing.join("engine.db").exists());
+    let mut opened = open(&path).unwrap();
+    assert_eq!(read(&mut opened, &item).version, 1);
+}
