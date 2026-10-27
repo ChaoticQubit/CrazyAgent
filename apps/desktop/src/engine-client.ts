@@ -1179,9 +1179,9 @@ export function teamGraph(id: string): Promise<TeamGraph> {
 
 /** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
  * and then live output until the terminal closes or the view detaches. Inputs: the terminal
- * name and the channel. Output: resolves once the engine accepted the attach. */
-export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<void> {
-  return invoke<void>("desktop_terminal_attach", { agent, output });
+ * name and the channel. Output: the view's serial once the engine accepted the attach. */
+export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<number> {
+  return invoke<number>("desktop_terminal_attach", { agent, output });
 }
 
 /** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name
@@ -1203,10 +1203,11 @@ export function terminalResize(agent: string, cols: number, rows: number): Promi
   return invoke<void>("desktop_terminal_resize", { agent, cols, rows });
 }
 
-/** Closes this window's view of an agent terminal; the agent keeps running. Input: the
- * terminal name. Output: resolves once the view is gone. */
-export function terminalDetach(agent: string): Promise<void> {
-  return invoke<void>("desktop_terminal_detach", { agent });
+/** Closes this window's view of an agent terminal; the agent keeps running and a newer view
+ * of it stays open. Inputs: the terminal name and the serial its attach returned. Output:
+ * resolves once the view is gone. */
+export function terminalDetach(agent: string, serial: number): Promise<void> {
+  return invoke<void>("desktop_terminal_detach", { agent, serial });
 }
 
 export function openProject(id: string): Promise<ProjectDetail> {

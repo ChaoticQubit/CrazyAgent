@@ -938,9 +938,10 @@ export function loadTeamGraph(id: string): Promise<Result<TeamGraph>> {
 }
 
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
- * then live output. Inputs: the terminal name and the channel. Output: ok once attached. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<void>> {
-  return call<void>("desktop_terminal_attach", { agent, output });
+ * then live output. Inputs: the terminal name and the channel. Output: the view's serial
+ * once attached, which its detach names. */
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, output });
 }
 
 /** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
@@ -962,10 +963,11 @@ export function resizeTerminal(agent: string, cols: number, rows: number): Promi
   return call<void>("desktop_terminal_resize", { agent, cols, rows });
 }
 
-/** Closes this window's view of an agent terminal; the agent keeps running.
- * Input: the terminal name. Output: ok once closed. */
-export function detachTerminal(agent: string): Promise<Result<void>> {
-  return call<void>("desktop_terminal_detach", { agent });
+/** Closes this window's view of an agent terminal; the agent keeps running. A newer view
+ * of the same agent stays open. Inputs: the terminal name and the serial its attach
+ * returned. Output: ok once closed. */
+export function detachTerminal(agent: string, serial: number): Promise<Result<void>> {
+  return call<void>("desktop_terminal_detach", { agent, serial });
 }
 
 /** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id

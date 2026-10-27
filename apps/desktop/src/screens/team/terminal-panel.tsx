@@ -6,7 +6,7 @@ import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeLine } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, jobQueue, keyOverride, keyQueue, muteQueries, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { encodeBinary, encodeTyped, endCopy, jobQueue, keyOverride, keyQueue, muteQueries, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -81,17 +81,27 @@ export function Composer({ node, live, onSend }: { node: GraphNode; live: boolea
   </form>;
 }
 
-/** Routes a terminal's keys to the agent: what xterm types, and Shift+Enter as one new line
- * that xterm never also reads as Enter. Inputs: the terminal and the typing action. Output:
- * the subscription for xterm's typed text. */
+/** Routes an opened terminal's keys to the agent: what xterm types, Shift+Enter as one new
+ * line that xterm never also reads as Enter, and clipboard pastes with their control
+ * characters dropped before xterm brackets them. Inputs: the terminal and the typing action.
+ * Output: the subscription for typed text and pastes. */
 export function typeKeys(terminal: Terminal, type: (data: string) => void): IDisposable {
+  const element = terminal.element;
+  if (!element) throw new Error("typeKeys needs an opened terminal");
   const typed = terminal.onData(type);
   terminal.attachCustomKeyEventHandler((event) => {
     const override = keyOverride(event);
     if (override.typed !== null) type(override.typed);
     return override.xterm;
   });
-  return typed;
+  const paste = (event: ClipboardEvent) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    if (text) terminal.paste(pasteText(text));
+  };
+  element.addEventListener("paste", paste, true);
+  return { dispose: () => { typed.dispose(); element.removeEventListener("paste", paste, true); } };
 }
 
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
@@ -114,6 +124,7 @@ export function TerminalPanel({ node, harness, onClose }: {
     if (!name || !element) return;
     setView({ kind: "connecting" });
     let disposed = false;
+    let serial: number | null = null;
     let release = () => {};
     void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -198,16 +209,17 @@ export function TerminalPanel({ node, harness, onClose }: {
       };
       const result = await attachTerminal(name, channel);
       if (disposed) {
-        if (result.kind === "ok") void detachTerminal(name);
+        if (result.kind === "ok") void detachTerminal(name, result.value);
         return;
       }
-      if (result.kind === "not_ready") setView({ kind: "not_ready" });
+      if (result.kind === "ok") serial = result.value;
+      else if (result.kind === "not_ready") setView({ kind: "not_ready" });
       else if (result.kind === "error") end(result.code.startsWith("terminal_") ? endCopy(result.code) : result.message);
     })();
     return () => {
       disposed = true;
       release();
-      void detachTerminal(name);
+      if (serial !== null) void detachTerminal(name, serial);
     };
   }, [name, round]);
 

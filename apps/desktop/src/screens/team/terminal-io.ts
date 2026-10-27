@@ -159,14 +159,28 @@ const QUERY_CSI: IFunctionIdentifier[] = [
   { intermediates: "$", final: "p" }, { prefix: "?", intermediates: "$", final: "p" },
 ];
 const QUERY_DCS: IFunctionIdentifier[] = [{ intermediates: "$", final: "q" }];
+const QUERY_OSC = [4, 10, 11, 12];
+const PASTE_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 /** Stops a view answering the terminal queries an agent's app writes (device attributes,
- * status and cursor reports, mode and setting requests). tmux owns the agent's terminal and
- * answers them already; a second answer from the view would be typed into the agent.
- * Input: the view's terminal. Output: none; the handlers end with the terminal. */
-export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandler" | "registerDcsHandler"> }): void {
+ * status and cursor reports, mode and setting requests, and color queries). tmux owns the
+ * agent's terminal and answers them already; a second answer from the view would be typed
+ * into the agent. A color sequence that only sets colors still applies. Input: the view's
+ * terminal. Output: none; the handlers end with the terminal. */
+export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandler" | "registerDcsHandler" | "registerOscHandler"> }): void {
   for (const id of QUERY_CSI) terminal.parser.registerCsiHandler(id, () => true);
   for (const id of QUERY_DCS) terminal.parser.registerDcsHandler(id, () => true);
+  for (const id of QUERY_OSC) terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"));
+}
+
+/** The text a clipboard paste may type into an agent: every control character is dropped
+ * except tab, new line and carriage return, so pasted text can never end the app's
+ * bracketed paste or press Escape, Ctrl keys or other keys inside it. Input: the clipboard
+ * text. Output: the text to paste. */
+export function pasteText(text: string): string {
+  const kept = text.replace(PASTE_CONTROLS, "");
+  assert(!kept.includes("\x1b"), "pasted text keeps no Escape");
+  return kept;
 }
 
 /** What one terminal channel message means for the view. */
@@ -183,6 +197,7 @@ const END_COPY: Record<string, string> = {
   terminal_agent_mismatch: "The engine opened a different agent's terminal, so the view closed.",
   terminal_connection_lost: "Lost the connection to this terminal. Open it again to reconnect.",
   terminal_connection_closed: "The engine closed this terminal view. Open it again to reconnect.",
+  terminal_view_replaced: "This terminal opened in a newer view, so this one closed. Open it again to bring it back here.",
   exited: "The agent's app exited.",
 };
 

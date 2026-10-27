@@ -832,7 +832,7 @@ async fn desktop_terminal_attach(
     terminals: State<'_, TerminalState>,
     agent: String,
     output: Channel<InvokeResponseBody>,
-) -> Result<(), BridgeError> {
+) -> Result<u64, BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     let room = terminals.0.room(&agent)?;
@@ -891,10 +891,11 @@ fn desktop_terminal_detach(
     window: WebviewWindow,
     terminals: State<'_, TerminalState>,
     agent: String,
+    serial: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
-    terminals.0.detach(&agent)
+    terminals.0.detach(&agent, serial)
 }
 
 #[tauri::command]
