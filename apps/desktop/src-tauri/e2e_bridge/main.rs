@@ -1,11 +1,14 @@
 mod routes;
 
+use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
+use crazyagent::protocol::ProjectId;
 use crazyagent_desktop::bridge::{BridgeError, BridgeQueue, NativeBridge};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::ffi::OsString;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -14,6 +17,8 @@ use tokio::sync::MutexGuard;
 const HEAD_BYTES_MAX: usize = 16 * 1024;
 const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
+const RECORD_MODE: &str = "record-turn-end";
+const RECORD_ARGS_MAX: usize = 10;
 
 /// The one bridge every route shares, as the app's `NativeState` does.
 type Shared = Arc<BridgeQueue>;
@@ -140,12 +145,75 @@ async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
     let _ = stream.shutdown().await;
 }
 
+/// Ends one sub-agent turn in a worktree the way the engine's turn hooks do, through the
+/// engine's own `landing::record_turn_end` on its database, so the end-to-end test reviews
+/// a real worktree edit. Inputs: engine root, project, agent id and label, owner checkout,
+/// agent worktree, its git folder and the prompt line. Output: the change set id or `none`.
+fn record_turn_end(args: &[OsString]) -> Result<String, String> {
+    let [
+        root,
+        project,
+        agent,
+        label,
+        repository,
+        worktree,
+        git_dir,
+        prompt,
+    ] = args
+    else {
+        return Err(format!(
+            "usage: desktop-e2e-bridge {RECORD_MODE} <engine root> <project> <agent> <label> <repository> <worktree> <git dir> <prompt>"
+        ));
+    };
+    let text = |value: &OsString| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "arguments must be UTF-8".to_owned())
+    };
+    let agent = text(agent)?;
+    let workspace = Workspace {
+        project: ProjectId::new(text(project)?).map_err(|_| "invalid project id".to_owned())?,
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: agent.clone(),
+            label: text(label)?,
+        },
+        repository: PathBuf::from(repository),
+        worktree: PathBuf::from(worktree),
+        git_dir: PathBuf::from(git_dir),
+    };
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: format!("turn-{agent}"),
+        prompt_line: text(prompt)?,
+    };
+    let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
+    let recorded =
+        crazyagent::landing::record_turn_end(&db, &workspace, &turn).map_err(|error| error.0)?;
+    Ok(recorded.map_or_else(|| "none".to_owned(), String::from))
+}
+
 /// Serves the app's `desktop_*` commands to the end-to-end test on 127.0.0.1 for as long as
-/// stdin stays open. Input: the engine socket path as the only argument. Output: prints
-/// `ready <port> <token>` once listening; exits non-zero when it cannot start.
+/// stdin stays open, or with `record-turn-end` first, records one ended agent turn. Input:
+/// the engine socket path. Output: prints `ready <port> <token>` once listening, or the
+/// recorded change set; exits non-zero when it cannot.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let mut args = std::env::args_os().skip(1);
+    let all: Vec<OsString> = std::env::args_os().skip(1).take(RECORD_ARGS_MAX).collect();
+    if all.first().is_some_and(|mode| mode == RECORD_MODE) {
+        return match record_turn_end(&all[1..]) {
+            Ok(recorded) => {
+                println!("{recorded}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("record-turn-end: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    let mut args = all.into_iter();
     let (Some(socket), None) = (args.next(), args.next()) else {
         eprintln!("usage: desktop-e2e-bridge <engine socket>");
         return std::process::ExitCode::FAILURE;

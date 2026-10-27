@@ -4,6 +4,7 @@ import { cancelTeamTask, failureCopy, loadContext, loadPools, loadProjects, load
 import { SessionContext } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
+import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
 import { ConversationTab } from "./conversation";
@@ -20,6 +21,7 @@ export const TABS = [
   { id: "overview", label: "Overview", icon: "house" },
   { id: "conversation", label: "Conversation", icon: "message-square" },
   { id: "agents", label: "Agents", icon: "bot" },
+  { id: "changes", label: "Changes", icon: "git-branch" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
@@ -191,6 +193,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <ConversationTab data={data} />}
       {active === "agents" && <AgentsTab data={data} />}
+      {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>

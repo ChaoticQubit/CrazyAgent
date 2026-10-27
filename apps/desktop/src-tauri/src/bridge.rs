@@ -18,6 +18,7 @@ mod account_profile;
 mod account_setup;
 mod accounts;
 mod agents;
+mod changes;
 mod harnesses;
 pub mod intake;
 pub mod master;

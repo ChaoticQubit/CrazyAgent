@@ -169,7 +169,7 @@ test("a project page for an unknown engine renders its loading shell without bri
   const page = await import("../src/screens/project/index.tsx");
   const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
   assert.match(markup, /role="tablist"/);
-  for (const tab of ["Overview", "Conversation", "Agents", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
+  for (const tab of ["Overview", "Conversation", "Agents", "Changes", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
   assert.match(markup, /id="tab-overview" role="tab" class="tab" href="#\/projects\/p-1\/overview" aria-selected="true" tabindex="0"><svg[\s\S]*?<\/svg>Overview</);
   assert.match(markup, /role="tabpanel" aria-labelledby="tab-overview"/);
   assert.doesNotMatch(markup, /<h1><div/);

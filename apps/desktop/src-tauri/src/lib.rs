@@ -24,6 +24,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView};
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
@@ -1639,6 +1640,75 @@ async fn desktop_restart_agent(
 }
 
 #[tauri::command]
+async fn desktop_changes(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Vec<ChangeSetView>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.change_sets(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_change_diff(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    page: u16,
+) -> Result<ChangeDiff, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.change_diff(id, page)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_accept_change(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    expected_head: String,
+) -> Result<AcceptOutcome, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.accept_change(id, expected_head)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_discard_change(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    expected_head: String,
+) -> Result<u64, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.discard_change(id, expected_head)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_restore_change(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.restore_change(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_update_change(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.update_change(id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
     Ok(
@@ -1999,6 +2069,12 @@ pub fn run() {
             desktop_release_account,
             desktop_interrupt_agent,
             desktop_restart_agent,
+            desktop_changes,
+            desktop_change_diff,
+            desktop_accept_change,
+            desktop_discard_change,
+            desktop_restore_change,
+            desktop_update_change,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,
