@@ -175,14 +175,20 @@ fn a_master_s_question_box_is_asked_once_and_answered_when_it_leaves_its_screen(
         seen.extend(watch.scan(host.as_ref(), &masters, &[]));
         !seen.is_empty()
     });
+    let asked = Change::Asked {
+        project: project(),
+        agent: 41,
+        text: CLAUDE_LINE.to_owned(),
+    };
     assert_eq!(
         seen,
-        vec![Change::Asked {
-            project: project(),
-            agent: 41,
-            text: CLAUDE_LINE.to_owned(),
-        }],
+        vec![asked.clone()],
         "the permission prompt on the other master is never asked"
+    );
+    assert_eq!(
+        watch.scan(host.as_ref(), &masters, &[]),
+        vec![asked],
+        "a question the log does not hold yet, such as one it refused, is asked again"
     );
 
     let logged = [pending(7, 41)];
@@ -195,6 +201,13 @@ fn a_master_s_question_box_is_asked_once_and_answered_when_it_leaves_its_screen(
             restarted.scan(host.as_ref(), &masters, &logged),
             vec![],
             "a box the log already holds is not asked again after a restart"
+        );
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            restarted.scan(host.as_ref(), &masters, &[]),
+            vec![],
+            "a box the owner dismissed is not asked again while it stays on screen"
         );
     }
 
@@ -232,7 +245,15 @@ fn a_logged_question_whose_master_left_or_whose_terminal_ended_is_answered() {
     let masters = [master(44)];
     let logged = [pending(8, 43), pending(9, 44)];
     let mut watch = MasterWatch::default();
+    assert!(watch.due());
+    assert!(!watch.due(), "a second scan waits for SCAN_EVERY");
+    assert_eq!(watch.askers(&masters), vec![(project(), 44)]);
     assert_eq!(watch.scan(host.as_ref(), &masters, &logged), vec![]);
+    assert_eq!(
+        watch.askers(&masters),
+        vec![(project(), 43), (project(), 44)],
+        "a master that left is read while the log holds a question of its"
+    );
     assert_eq!(
         watch.scan(host.as_ref(), &masters, &logged),
         vec![Change::Answered(8)],
@@ -240,6 +261,11 @@ fn a_logged_question_whose_master_left_or_whose_terminal_ended_is_answered() {
     );
     let logged = [pending(9, 44)];
     assert_eq!(watch.scan(host.as_ref(), &masters, &logged), vec![]);
+    assert_eq!(
+        watch.askers(&masters),
+        vec![(project(), 44)],
+        "a master that left is forgotten once its questions are closed"
+    );
 
     host.kill(&AgentId::team(44).unwrap()).unwrap();
     until("the terminal to end", || {
