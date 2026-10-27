@@ -309,6 +309,7 @@ impl ManagedAgent {
                 true,
                 &account,
                 false,
+                crate::agent_git::Layout::Linked,
             )
             .unwrap();
         let home = match mode {
