@@ -1,0 +1,148 @@
+.cs {
+  --cs-line: 20px;
+  --cs-dim: rgba(238, 234, 226, 0.66);
+  --cs-rule: rgba(238, 234, 226, 0.14);
+  --cs-tag-bg: rgba(255, 106, 69, 0.16);
+  --cs-error: #ff8a73;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 240px;
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: var(--cs-line);
+}
+
+.cs:focus-within {
+  border-color: var(--focus);
+}
+
+.cs ::selection {
+  background: var(--terminal-selection);
+}
+
+.cs-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.cs-line {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cs-line + .cs-owner {
+  margin-top: 10px;
+}
+
+.cs-mark {
+  color: var(--terminal-cursor);
+  user-select: none;
+}
+
+.cs-engine,
+.cs-tool,
+.cs-delegate {
+  color: var(--cs-dim);
+}
+
+.cs-error {
+  color: var(--cs-error);
+}
+
+.cs-tag {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--cs-tag-bg);
+  color: var(--terminal-cursor);
+}
+
+.cs-entry {
+  position: relative;
+  border-top: 1px solid var(--cs-rule);
+}
+
+.cs-input {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 14px 4px;
+}
+
+.cs-input textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: calc(var(--cs-line) * 8);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: var(--cs-line);
+  caret-color: var(--terminal-cursor);
+}
+
+.cs-status {
+  margin: 0;
+  padding: 0 14px 8px;
+  color: var(--cs-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.cs-menu {
+  position: absolute;
+  right: 14px;
+  bottom: calc(100% + 4px);
+  left: 14px;
+  z-index: 2;
+  max-height: calc(var(--cs-line) * 8 + 16px);
+  margin: 0;
+  padding: 4px;
+  overflow: auto;
+  border: 1px solid var(--cs-rule);
+  border-radius: var(--radius-control);
+  background: var(--terminal-bg);
+  box-shadow: var(--elev-1);
+  list-style: none;
+}
+
+.cs-option {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  min-width: 0;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.cs-option[aria-selected="true"] {
+  background: var(--cs-tag-bg);
+}
+
+.cs-name {
+  flex: none;
+  color: var(--terminal-fg);
+}
+
+.cs-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--cs-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
