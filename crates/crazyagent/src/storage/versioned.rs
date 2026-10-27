@@ -1,0 +1,333 @@
+use crate::engine::EngineError;
+use crate::terminal::AgentId;
+use rusqlite::{OptionalExtension, Transaction, params};
+
+#[cfg(test)]
+mod tests;
+
+/// The longest item name a versioned write accepts, in bytes.
+pub const ITEM_BYTES_MAX: usize = 256;
+/// How many owner force records one item keeps; older ones are dropped first.
+pub const FORCES_PER_ITEM_MAX: usize = 100;
+const VERSION_MAX: u64 = i64::MAX as u64;
+const OWNER: &str = "owner";
+const AGENT_PREFIX: &str = "agent:";
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS versioned_items (
+    item TEXT PRIMARY KEY NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    writer TEXT NOT NULL,
+    written_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS versioned_forces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item TEXT NOT NULL,
+    replaced_version INTEGER NOT NULL,
+    replaced_writer TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS versioned_forces_item ON versioned_forces(item, id);
+";
+
+/// Names one shared item whose writes are versioned, such as `process:app` or
+/// `memory:<project>:<entry>`: 1 to `ITEM_BYTES_MAX` printable ASCII bytes, no spaces.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Item(String);
+
+impl Item {
+    /// Checks an item name. Input: the name. Output: the item, or `versioned_item_invalid`
+    /// for an empty, long, spaced or non-ASCII name.
+    pub fn new(name: &str) -> Result<Self, EngineError> {
+        let valid = !name.is_empty()
+            && name.len() <= ITEM_BYTES_MAX
+            && name.bytes().all(|byte| byte.is_ascii_graphic());
+        if !valid {
+            return Err(failure("versioned_item_invalid"));
+        }
+        Ok(Self(name.to_owned()))
+    }
+
+    /// Gives the item name as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Who asks to write a shared item. The owner may keep their own text after being shown a
+/// conflict (`force_after_conflict`), which is recorded; an agent has no way to force.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Writer {
+    Owner { force_after_conflict: bool },
+    Agent(AgentId),
+}
+
+/// Who wrote an item's current version: nobody yet, the owner, or one agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastWriter {
+    Nobody,
+    Owner,
+    Agent(AgentId),
+}
+
+/// An item's current version and who wrote it; version 0 means nobody wrote it yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Current {
+    pub version: u64,
+    pub writer: LastWriter,
+}
+
+/// The reply to a write that named a version other than the item's current one: the version
+/// the write named, the current version to re-read, and who wrote it. The item's value is read
+/// by the caller from the item's own store in the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stale {
+    pub version: u64,
+    pub current: u64,
+    pub writer: LastWriter,
+}
+
+/// Why a versioned write did not land: it was stale, or the store could not be used
+/// (`versioned_unavailable`, also when another connection holds the write lock).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    Stale(Stale),
+    Failed(EngineError),
+}
+
+/// One recorded owner "Keep mine": the version it replaced, who wrote that version, the
+/// version the owner's write became and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Force {
+    pub replaced_version: u64,
+    pub replaced_writer: LastWriter,
+    pub version: u64,
+    pub at_ms: i64,
+}
+
+/// Writes one shared item's next version when the writer read the current one, so no write
+/// silently replaces a version its writer never saw. A stale write is refused with the current
+/// version and its writer. An owner's write with `force_after_conflict` is recorded as the
+/// owner keeping their text over the version they were shown; it is refused like any other
+/// write when a newer version landed since. Inputs: a transaction on `engine.db` (immediate,
+/// so racing writers queue), the item, the version the writer read (0 for an item never
+/// written) and the writer. Output: the new version, or the refusal.
+pub fn write_if(
+    tx: &Transaction<'_>,
+    item: &Item,
+    expected: u64,
+    writer: &Writer,
+) -> Result<u64, Refusal> {
+    ensure(tx).map_err(Refusal::Failed)?;
+    let now = current(tx, item).map_err(Refusal::Failed)?;
+    if now.version != expected {
+        return Err(Refusal::Stale(Stale {
+            version: expected,
+            current: now.version,
+            writer: now.writer,
+        }));
+    }
+    if expected >= VERSION_MAX {
+        return Err(Refusal::Failed(failure("versioned_unavailable")));
+    }
+    let version = expected + 1;
+    let at_ms = crate::team::now_ms();
+    let stored = writer_text(writer);
+    let changed = match expected {
+        0 => tx.execute(
+            "INSERT INTO versioned_items(item, version, writer, written_ms) VALUES (?1, 1, ?2, ?3)
+             ON CONFLICT(item) DO NOTHING",
+            params![item.as_str(), stored, at_ms],
+        ),
+        _ => tx.execute(
+            "UPDATE versioned_items SET version = ?3, writer = ?4, written_ms = ?5
+             WHERE item = ?1 AND version = ?2",
+            params![
+                item.as_str(),
+                to_column(expected),
+                to_column(version),
+                stored,
+                at_ms
+            ],
+        ),
+    }
+    .map_err(|_| Refusal::Failed(failure("versioned_unavailable")))?;
+    if changed != 1 {
+        let now = current(tx, item).map_err(Refusal::Failed)?;
+        assert_ne!(now.version, expected);
+        return Err(Refusal::Stale(Stale {
+            version: expected,
+            current: now.version,
+            writer: now.writer,
+        }));
+    }
+    if matches!(
+        writer,
+        Writer::Owner {
+            force_after_conflict: true
+        }
+    ) {
+        record_force(tx, item, &now, version, at_ms).map_err(Refusal::Failed)?;
+    }
+    assert_eq!(current(tx, item).map_err(Refusal::Failed)?.version, version);
+    Ok(version)
+}
+
+/// Reads one shared item's current version and its writer. Input: a transaction on
+/// `engine.db` and the item. Output: the version (0 for an item never written), or
+/// `versioned_unavailable`.
+pub fn current(tx: &Transaction<'_>, item: &Item) -> Result<Current, EngineError> {
+    if !exists(tx)? {
+        return Ok(Current {
+            version: 0,
+            writer: LastWriter::Nobody,
+        });
+    }
+    let row = tx
+        .query_row(
+            "SELECT version, writer FROM versioned_items WHERE item = ?1",
+            [item.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|_| failure("versioned_unavailable"))?;
+    let Some((version, writer)) = row else {
+        return Ok(Current {
+            version: 0,
+            writer: LastWriter::Nobody,
+        });
+    };
+    let version = from_column(version)?;
+    assert!(version >= 1);
+    Ok(Current {
+        version,
+        writer: parse_writer(&writer)?,
+    })
+}
+
+/// Reads the recorded owner "Keep mine" writes of one item, oldest first, at most
+/// `FORCES_PER_ITEM_MAX`. Input: a transaction on `engine.db` and the item. Output: the
+/// records, or `versioned_unavailable`.
+pub fn forces(tx: &Transaction<'_>, item: &Item) -> Result<Vec<Force>, EngineError> {
+    if !exists(tx)? {
+        return Ok(Vec::new());
+    }
+    let mut statement = tx
+        .prepare(
+            "SELECT replaced_version, replaced_writer, version, at_ms FROM versioned_forces
+             WHERE item = ?1 ORDER BY id",
+        )
+        .map_err(|_| failure("versioned_unavailable"))?;
+    let rows = statement
+        .query_map([item.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|_| failure("versioned_unavailable"))?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (replaced_version, replaced_writer, version, at_ms) =
+            row.map_err(|_| failure("versioned_unavailable"))?;
+        records.push(Force {
+            replaced_version: from_column(replaced_version)?,
+            replaced_writer: parse_writer(&replaced_writer)?,
+            version: from_column(version)?,
+            at_ms,
+        });
+    }
+    assert!(records.len() <= FORCES_PER_ITEM_MAX);
+    Ok(records)
+}
+
+fn record_force(
+    tx: &Transaction<'_>,
+    item: &Item,
+    replaced: &Current,
+    version: u64,
+    at_ms: i64,
+) -> Result<(), EngineError> {
+    assert_eq!(replaced.version + 1, version);
+    tx.execute(
+        "INSERT INTO versioned_forces(item, replaced_version, replaced_writer, version, at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            item.as_str(),
+            to_column(replaced.version),
+            last_writer_text(&replaced.writer),
+            to_column(version),
+            at_ms
+        ],
+    )
+    .map_err(|_| failure("versioned_unavailable"))?;
+    tx.execute(
+        "DELETE FROM versioned_forces WHERE item = ?1 AND id NOT IN
+         (SELECT id FROM versioned_forces WHERE item = ?1 ORDER BY id DESC LIMIT ?2)",
+        params![item.as_str(), to_column(FORCES_PER_ITEM_MAX as u64)],
+    )
+    .map_err(|_| failure("versioned_unavailable"))?;
+    Ok(())
+}
+
+fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if exists(tx)? {
+        return Ok(());
+    }
+    tx.execute_batch(SCHEMA)
+        .map_err(|_| failure("versioned_unavailable"))
+}
+
+fn exists(tx: &Transaction<'_>) -> Result<bool, EngineError> {
+    tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+         AND name IN ('versioned_items', 'versioned_forces')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|tables| tables == 2)
+    .map_err(|_| failure("versioned_unavailable"))
+}
+
+fn writer_text(writer: &Writer) -> String {
+    match writer {
+        Writer::Owner { .. } => OWNER.to_owned(),
+        Writer::Agent(agent) => format!("{AGENT_PREFIX}{}", agent.as_str()),
+    }
+}
+
+fn last_writer_text(writer: &LastWriter) -> String {
+    match writer {
+        LastWriter::Nobody => String::new(),
+        LastWriter::Owner => OWNER.to_owned(),
+        LastWriter::Agent(agent) => format!("{AGENT_PREFIX}{}", agent.as_str()),
+    }
+}
+
+fn parse_writer(text: &str) -> Result<LastWriter, EngineError> {
+    if text.is_empty() {
+        return Ok(LastWriter::Nobody);
+    }
+    if text == OWNER {
+        return Ok(LastWriter::Owner);
+    }
+    text.strip_prefix(AGENT_PREFIX)
+        .and_then(|agent| AgentId::new(agent).ok())
+        .map(LastWriter::Agent)
+        .ok_or_else(|| failure("versioned_unavailable"))
+}
+
+fn to_column(value: u64) -> i64 {
+    assert!(value <= VERSION_MAX);
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn from_column(value: i64) -> Result<u64, EngineError> {
+    u64::try_from(value).map_err(|_| failure("versioned_unavailable"))
+}
+
+fn failure(code: &str) -> EngineError {
+    EngineError(code.to_owned())
+}

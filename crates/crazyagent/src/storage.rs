@@ -33,6 +33,7 @@ mod native_auth;
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
+pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
