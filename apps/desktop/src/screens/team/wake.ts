@@ -66,14 +66,11 @@ export function eventState(state: TeamEvent["state"]): string {
   return STATES[state];
 }
 
-/** Counts the unseen notifications of each project for the sidebar. Input: the app events.
+/** The unseen notification count of each project for the sidebar, as the engine counts it,
+ * so a busy project's newer notifications never hide another's. Input: the app events.
  * Output: a map from project id to its unseen count, without projects at zero. */
-export function unseenByProject(events: Pick<AppTeamEvents, "notifications">): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const item of events.notifications) {
-    if (item.seen_ms === null) counts.set(item.project_id, (counts.get(item.project_id) ?? 0) + 1);
-  }
-  return counts;
+export function unseenByProject(events: Pick<AppTeamEvents, "projects">): Map<string, number> {
+  return new Map(events.projects.filter((item) => item.unseen > 0).map((item) => [item.project_id, item.unseen]));
 }
 
 /** Finds the notifications that arrived since the window last looked. The first read only

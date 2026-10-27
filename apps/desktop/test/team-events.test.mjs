@@ -40,7 +40,7 @@ test("an event reads like the line the master gets and says where it went", () =
 });
 
 test("the sidebar counts each project's unseen notifications and the first read never alerts", () => {
-  const events = { notifications: [note(5, "b"), note(4, "a"), note(3, "a"), note(2, "a", 9)] };
+  const events = { notifications: [note(5, "b"), note(4, "a"), note(3, "a"), note(2, "a", 9)], projects: [{ project_id: "b", unseen: 1 }, { project_id: "a", unseen: 2 }] };
   assert.deepEqual([...wake.unseenByProject(events)], [["b", 1], ["a", 2]]);
   const first = wake.freshAlerts(null, events);
   assert.deepEqual(first, { last: 5, fresh: [] });
@@ -48,6 +48,14 @@ test("the sidebar counts each project's unseen notifications and the first read 
   assert.equal(later.last, 7);
   assert.deepEqual(later.fresh.map((item) => item.id), [7]);
   assert.deepEqual(wake.freshAlerts(7, { notifications: [] }), { last: 7, fresh: [] });
+});
+
+test("a project's sidebar count comes from the engine, not from the newest notifications of every project", () => {
+  const flood = Array.from({ length: 50 }, (_, at) => note(100 - at, "b"));
+  const events = { notifications: flood, projects: [{ project_id: "a", unseen: 1 }, { project_id: "b", unseen: 60 }] };
+  assert.ok(!events.notifications.some((item) => item.project_id === "a"), "a's notification is outside the window");
+  assert.deepEqual([...wake.unseenByProject(events)], [["a", 1], ["b", 60]]);
+  assert.deepEqual([...wake.unseenByProject({ projects: [] })], []);
 });
 
 test("the Agents tab shows the paused notice, waiting agents, events and the project and agent rules", () => {

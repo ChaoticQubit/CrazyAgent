@@ -790,6 +790,7 @@ export interface AppTeamEvents {
   effective: WakeRule;
   notifications: TeamNotification[];
   unseen: number;
+  projects: { project_id: string; unseen: number }[];
 }
 
 export interface TeamPlanStep {

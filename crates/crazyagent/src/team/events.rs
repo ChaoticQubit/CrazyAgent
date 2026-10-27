@@ -29,6 +29,7 @@ pub const STATUS_EVENTS_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
+pub const UNSEEN_PROJECTS_MAX: i64 = 200;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 const SCREEN_ROWS_SCANNED: usize = 40;
@@ -351,12 +352,22 @@ pub struct AgentQuestions {
 }
 
 /// What the app shows across projects: the app-level wake rule, the rule in force without a
-/// project rule, the newest notifications of every project and how many are unseen.
+/// project rule, the newest notifications of every project, how many are unseen and how many
+/// of them each project has.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AppEvents {
     pub rule: Option<WakeRule>,
     pub effective: WakeRule,
     pub notifications: Vec<Notification>,
+    pub unseen: i64,
+    #[serde(default)]
+    pub projects: Vec<ProjectUnseen>,
+}
+
+/// How many of one project's owner notifications are unseen, for its sidebar count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectUnseen {
+    pub project_id: ProjectId,
     pub unseen: i64,
 }
 
@@ -1051,26 +1062,81 @@ pub fn notifications(
     project: Option<&ProjectId>,
     limit: i64,
 ) -> Result<Vec<Notification>, EngineError> {
+    read_notifications(
+        connection,
+        "SELECT id,project,kind,text,created_ms,seen_ms FROM team_notifications
+         WHERE ?1 IS NULL OR project=?1 ORDER BY id DESC LIMIT ?2",
+        params![project.map(ProjectId::as_str), limit.max(0)],
+    )
+}
+
+/// Reads the app's notifications, newest first. Every project gets its newest one before
+/// any project gets a second, so a busy project never pushes another's out of the window.
+/// Takes the connection. Returns at most `APP_NOTIFICATIONS_MAX`, at most
+/// `VIEW_NOTIFICATIONS_MAX` of one project.
+fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, EngineError> {
+    let read = read_notifications(
+        connection,
+        "SELECT id,project,kind,text,created_ms,seen_ms FROM (
+             SELECT id,project,kind,text,created_ms,seen_ms,place FROM (
+                 SELECT id,project,kind,text,created_ms,seen_ms,
+                        ROW_NUMBER() OVER (PARTITION BY project ORDER BY id DESC) AS place
+                 FROM team_notifications)
+             WHERE place<=?1 ORDER BY place, id DESC LIMIT ?2)
+         ORDER BY id DESC",
+        params![VIEW_NOTIFICATIONS_MAX, APP_NOTIFICATIONS_MAX],
+    )?;
+    assert!(read.len() as i64 <= APP_NOTIFICATIONS_MAX);
+    assert!(read.windows(2).all(|pair| pair[0].id > pair[1].id));
+    Ok(read)
+}
+
+/// Counts the unseen notifications of each project that has any, by project id, so a
+/// project's count never depends on what fits in the app window. Takes the connection.
+/// Returns at most `UNSEEN_PROJECTS_MAX` projects, each with a count above zero.
+fn unseen_by_project(connection: &Connection) -> Result<Vec<ProjectUnseen>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT id,project,kind,text,created_ms,seen_ms FROM team_notifications
-             WHERE ?1 IS NULL OR project=?1 ORDER BY id DESC LIMIT ?2",
+            "SELECT project, COUNT(*) FROM team_notifications WHERE seen_ms IS NULL
+             GROUP BY project ORDER BY project LIMIT ?1",
         )
         .map_err(error)?;
+    let rows: Vec<(String, i64)> = statement
+        .query_map([UNSEEN_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let projects: Vec<ProjectUnseen> = rows
+        .into_iter()
+        .filter_map(|(project, unseen)| {
+            Some(ProjectUnseen {
+                project_id: ProjectId::new(project).ok()?,
+                unseen,
+            })
+        })
+        .collect();
+    assert!(projects.len() as i64 <= UNSEEN_PROJECTS_MAX);
+    assert!(projects.iter().all(|item| item.unseen > 0));
+    Ok(projects)
+}
+
+fn read_notifications(
+    connection: &Connection,
+    sql: &str,
+    values: impl rusqlite::Params,
+) -> Result<Vec<Notification>, EngineError> {
+    let mut statement = connection.prepare(sql).map_err(error)?;
     let rows: Vec<(i64, String, String, String, i64, Option<i64>)> = statement
-        .query_map(
-            params![project.map(ProjectId::as_str), limit.max(0)],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
+        .query_map(values, |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
@@ -1473,7 +1539,8 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
 }
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
-/// Takes the connection. Returns the view with the unseen count for the badge.
+/// Takes the connection. Returns the view with the unseen count for the badge and the
+/// unseen count of each project for the sidebar.
 pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     let rule = stored_rules(connection, "")?
         .into_iter()
@@ -1489,8 +1556,9 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     Ok(AppEvents {
         rule,
         effective: rule.unwrap_or_default(),
-        notifications: notifications(connection, None, APP_NOTIFICATIONS_MAX)?,
+        notifications: app_notifications(connection)?,
         unseen,
+        projects: unseen_by_project(connection)?,
     })
 }
 
