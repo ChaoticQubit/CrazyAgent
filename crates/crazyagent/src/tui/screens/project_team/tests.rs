@@ -162,6 +162,7 @@ fn team() -> TeamStatus {
         tasks: vec![setup, charts, api],
         messages: Vec::new(),
         plan: Vec::new(),
+        events: Default::default(),
     }
 }
 

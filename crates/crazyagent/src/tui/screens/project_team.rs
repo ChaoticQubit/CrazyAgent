@@ -170,7 +170,7 @@ impl TeamView {
                     Err(code) => self.notice = Some(Notice::problem(team_plain(&code))),
                 }
             }
-            SetupQuery::TeamChange { action, .. } if action.project() == &self.project => {
+            SetupQuery::TeamChange { action, .. } if action.project() == Some(&self.project) => {
                 let done = self.changing.take();
                 match result {
                     Ok(SetupView::Changed(OwnerResult::Applied)) => {

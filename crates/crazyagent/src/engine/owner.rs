@@ -560,6 +560,7 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    TeamEvents,
     ProjectContext {
         project_id: ProjectId,
     },
@@ -655,6 +656,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -999,6 +1001,9 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    TeamEvents {
+        events: Box<crate::team::events::AppEvents>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,
