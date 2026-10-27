@@ -1680,6 +1680,49 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_set_reset(account, window_kind, at_ms)?; call.await }.await;
             routed(result)
         }
+        "desktop_ide_extension_asks" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.ide_extension_asks(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_ide_extension_approve" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                id: String,
+                version: String,
+            }
+            let Args { project_id, id, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .ide_extension_approve(project_id, id, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_ide_extension_decline" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                id: String,
+                version: String,
+            }
+            let Args { project_id, id, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .ide_extension_decline(project_id, id, version)?; call.await }.await;
+            routed(result)
+        }
         "desktop_finished_agents" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

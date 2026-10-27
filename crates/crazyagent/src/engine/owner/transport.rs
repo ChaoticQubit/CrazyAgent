@@ -42,6 +42,7 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide_extensions;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
@@ -1967,6 +1968,7 @@ enum Protocol {
     Changes,
     Cleanup,
     Usage,
+    IdeExtensions,
     NativeAuth,
     Process,
     Owner,
@@ -1994,6 +1996,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
+        ("ide_extensions", Protocol::IdeExtensions),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
     ];
@@ -2054,6 +2057,7 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
+            Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => {
                 let served = cleanup::serve(stream, engine, authority, auth, &a, body);
                 return tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served)
@@ -2214,6 +2218,10 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::IdeExtensions(a) => {
+            let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2258,15 +2266,17 @@ struct Tasks {
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
-/// agent's process group or its host to end it, and Changes requests, which run git on
-/// the owner's checkout. Each carries the admission, and the projects home its validated
-/// request; the others read the request frame.
+/// agent's process group or its host to end it, Changes requests, which run git on the
+/// owner's checkout, and IDE extension approvals, which download and check a VSIX. Each
+/// carries the admission, and the projects home its validated request; the others read
+/// the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    IdeExtensions(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2305,6 +2315,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
+        Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         #[cfg(test)]

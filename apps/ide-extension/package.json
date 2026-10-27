@@ -17,6 +17,18 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "crazyagent.extensions.request",
+        "title": "Install Extension from Open VSX",
+        "category": "CrazyAgent"
+      },
+      {
+        "command": "crazyagent.extensions.updates",
+        "title": "Show Extension Updates",
+        "category": "CrazyAgent"
+      }
+    ],
     "themes": [
       {
         "label": "CrazyAgent Dark",

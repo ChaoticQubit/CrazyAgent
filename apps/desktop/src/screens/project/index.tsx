@@ -7,6 +7,7 @@ import { displayText } from "../conversation";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
+import { IdeExtensionConfirm } from "./ide-extensions";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
@@ -177,6 +178,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
+    <IdeExtensionConfirm data={data} />
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
   </div>;
 }

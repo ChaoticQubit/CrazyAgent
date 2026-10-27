@@ -31,7 +31,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 4] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -43,6 +43,10 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
     (
         "out/extension.js",
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
+    ),
+    (
+        "out/extensions.js",
+        include_bytes!("../../../../apps/ide-extension/out/extensions.js"),
     ),
 ];
 
@@ -107,6 +111,8 @@ pub enum IdeCall {
     },
     #[serde(rename = "ide.agents")]
     Agents {},
+    #[serde(rename = "ide.extensions")]
+    Extensions {},
     #[serde(rename = "ide.extension_request")]
     ExtensionRequest { id: String, version: String },
     #[serde(rename = "ide.extension_decide")]
@@ -194,6 +200,7 @@ impl IdeRequest {
             | IdeCall::Memories {}
             | IdeCall::MemoryDecide { .. }
             | IdeCall::Agents {}
+            | IdeCall::Extensions {}
             | IdeCall::RevealAck { .. }
             | IdeCall::Events {} => true,
         };
@@ -215,7 +222,7 @@ fn relative(path: &str) -> bool {
 
 /// Whether an extension id is `publisher.name`, each part 1 to `NAME_BYTES_MAX` ASCII
 /// letters, digits, hyphens or underscores.
-fn extension_id(id: &str) -> bool {
+pub(super) fn extension_id(id: &str) -> bool {
     let part = |text: &str| {
         !text.is_empty()
             && text.len() <= NAME_BYTES_MAX
@@ -229,7 +236,7 @@ fn extension_id(id: &str) -> bool {
 
 /// Whether an extension version is 1 to `VERSION_BYTES_MAX` ASCII letters, digits, dots,
 /// hyphens or plus signs.
-fn extension_version(version: &str) -> bool {
+pub(super) fn extension_version(version: &str) -> bool {
     !version.is_empty()
         && version.len() <= VERSION_BYTES_MAX
         && version
@@ -537,6 +544,15 @@ async fn answer(
     let data = match call {
         IdeCall::Workspace {} => workspace(runtime, project, None).await?,
         IdeCall::ShowAllAgents { on } => workspace(runtime, project, Some(on)).await?,
+        IdeCall::Extensions {} => extensions::listing(runtime, project).await?,
+        IdeCall::ExtensionRequest { id, version } => {
+            extensions::request(runtime, project, id, version).await?
+        }
+        IdeCall::ExtensionDecide {
+            id,
+            version,
+            approve,
+        } => extensions::decide(runtime, project, id, version, approve).await?,
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
@@ -548,8 +564,6 @@ async fn answer(
         | IdeCall::Memories {}
         | IdeCall::MemoryDecide { .. }
         | IdeCall::Agents {}
-        | IdeCall::ExtensionRequest { .. }
-        | IdeCall::ExtensionDecide { .. }
         | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
@@ -643,7 +657,7 @@ async fn write(
 }
 
 /// Lowercase hexadecimal text of some bytes.
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -734,6 +748,8 @@ fn remove_capability(path: &Path, identity: (u64, u64)) -> Result<(), EngineErro
 fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineError> {
     Ok(())
 }
+
+mod extensions;
 
 #[cfg(all(test, unix))]
 mod tests;
