@@ -2379,7 +2379,12 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     );
     for agent in &live.agents {
         assert_eq!(agent.role, AgentRole::Sub);
-        assert_eq!(agent.label, format!("Sub-agent {}", agent.id));
+        let name = names::name(&connection, agent.id).unwrap();
+        assert!(name.is_some(), "{agent:?}");
+        assert_eq!(
+            agent.label,
+            names::label(AgentRole::Sub, agent.id, name.as_ref())
+        );
         assert!(agent.account.is_some(), "{agent:?}");
     }
 

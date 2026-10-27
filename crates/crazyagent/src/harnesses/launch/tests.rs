@@ -510,13 +510,14 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         "[user]\n\tname = Repo Owner\n\temail = owner@example.invalid\n",
     )
     .unwrap();
-    let initialized = Command::new("/usr/bin/git")
-        .env_clear()
-        .env("HOME", &owner)
-        .args(["init", "-q", "--template="])
-        .arg(&repo)
-        .status()
-        .unwrap();
+    let initialized = crate::spawn_gate::status(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("HOME", &owner)
+            .args(["init", "-q", "--template="])
+            .arg(&repo),
+    )
+    .unwrap();
     assert!(initialized.success());
     let profile = base.join("project.sb");
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
