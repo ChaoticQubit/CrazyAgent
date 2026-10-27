@@ -66,6 +66,24 @@ impl TextInput {
         self.cursor
     }
 
+    /// Gives the text before the cursor.
+    /// Takes the field.
+    /// Returns the text from the start up to the cursor.
+    pub fn head(&self) -> &str {
+        &self.text[..self.byte_at(self.cursor)]
+    }
+
+    /// Replaces the characters just before the cursor, as a completion does.
+    /// Takes how many characters to replace, at most the cursor, and the untrusted text.
+    /// Returns nothing; the cursor ends after the inserted text.
+    pub fn replace_back(&mut self, count: usize, with: &str) {
+        assert!(count <= self.cursor);
+        let (start, end) = (self.byte_at(self.cursor - count), self.byte_at(self.cursor));
+        self.text.replace_range(start..end, "");
+        self.cursor -= count;
+        self.insert_str(with);
+    }
+
     /// Replaces the text and puts the cursor at its end.
     /// Takes untrusted text; control characters are dropped.
     /// Returns nothing.

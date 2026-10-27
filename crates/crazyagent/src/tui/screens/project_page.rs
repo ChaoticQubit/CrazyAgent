@@ -831,6 +831,7 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Usage => Flow::Open(Place::Usage),
         };
         self.sync_master(ctx);
         self.pump(ctx);

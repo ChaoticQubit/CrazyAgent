@@ -1,11 +1,12 @@
+use super::console;
 use super::new_project::{display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
 use super::project::{
-    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, REVIEW_ROWS, Speaker, Tab,
-    Transcript, memory_source, research_kind,
+    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS, Speaker,
+    Tab, Transcript, memory_source, research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
@@ -841,37 +842,56 @@ fn recent(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
         .collect()
 }
 
-fn transcript_lines(transcript: &Transcript, content: usize, now_ms: i64, look: &Look) -> Vec<Row> {
+/// Draws the master console's transcript: the owner's lines after `> `, the master's replies
+/// as plain wrapped text, engine lines dimmed and team task lines after a bullet, with `@`
+/// tags highlighted in the owner's lines.
+/// Takes the screen, the transcript, the width and the look.
+/// Returns the rows, a blank row between turns.
+fn transcript_lines(
+    screen: &ProjectScreen,
+    transcript: &Transcript,
+    content: usize,
+    look: &Look,
+) -> Vec<Row> {
     let mut lines = Vec::new();
-    for message in &transcript.messages {
-        let (name, style) = match message.speaker {
-            Speaker::You => ("You".to_owned(), look.accent),
-            Speaker::Master => (transcript.harness.clone(), look.heading),
-            Speaker::Notice => (String::new(), look.fg),
-        };
-        if message.speaker != Speaker::Notice {
-            let mut head = Row::of(name, style);
-            if let Some(time) = &message.time {
-                head = head.push(format!("  {time}"), look.muted);
+    let width = content.saturating_sub(2).max(1);
+    for message in screen.shown_messages(transcript) {
+        match message.speaker {
+            Speaker::You => {
+                if !lines.is_empty() {
+                    lines.push(Row::default());
+                }
+                for (index, line) in wrap_words(&message.text, width).iter().enumerate() {
+                    lines.push(tagged(lead(index, ">", look.accent), line, look.fg, look));
+                }
             }
-            lines.push(head);
+            Speaker::Master => {
+                let plain = if message.error { look.error } else { look.fg };
+                lines.extend(
+                    render(&message.text, content)
+                        .iter()
+                        .map(|line| md_row(line, plain, look)),
+                );
+            }
+            Speaker::Notice => {
+                let style = if message.error {
+                    look.error
+                } else {
+                    look.muted
+                };
+                lines.extend(
+                    wrap_words(&message.text, content)
+                        .into_iter()
+                        .map(|line| Row::of(line, style)),
+                );
+            }
+            Speaker::Task => {
+                for (index, line) in wrap_words(&message.text, width).iter().enumerate() {
+                    let bullet = look.glyph("\u{2022}");
+                    lines.push(lead(index, bullet, look.accent).push(line.clone(), look.muted));
+                }
+            }
         }
-        let body: Vec<MdLine> = if message.speaker == Speaker::Master {
-            render(&message.text, content)
-        } else {
-            render(&message.text.replace('\n', "\n\n"), content)
-                .into_iter()
-                .filter(|line| !line.is_empty())
-                .collect()
-        };
-        for line in body {
-            lines.push(md_row(
-                &line,
-                if message.error { look.error } else { look.fg },
-                look,
-            ));
-        }
-        lines.push(Row::default());
     }
     if let MasterStatus::Thinking { since_ms } = transcript.status {
         lines.push(
@@ -879,15 +899,97 @@ fn transcript_lines(transcript: &Transcript, content: usize, now_ms: i64, look: 
                 .push(" Thinking...", look.fg)
                 .push(
                     since_ms
-                        .map(|since| format!("  {}", duration(now_ms - since)))
+                        .map(|since| format!("  {}", duration(screen.now_ms - since)))
                         .unwrap_or_default(),
                     look.muted,
                 ),
         );
-    } else if lines.last().is_some_and(|line| line.width() == 0) {
-        lines.pop();
     }
     lines
+}
+
+/// Starts one console row: the marker on a message's first line, two spaces on the rest.
+/// Takes the line index, the marker and its style.
+/// Returns the row.
+fn lead(index: usize, marker: &str, style: Style) -> Row {
+    if index == 0 {
+        Row::of(marker.to_owned(), style).push(" ", Style::new())
+    } else {
+        Row::of("  ", Style::new())
+    }
+}
+
+/// Appends one line to a row with its `@` tags in the accent style.
+/// Takes the row, the line, the style for plain text and the look.
+/// Returns the row.
+fn tagged(row: Row, line: &str, plain: Style, look: &Look) -> Row {
+    console::tag_parts(line)
+        .into_iter()
+        .fold(row, |row, (part, tag)| {
+            row.push(part.to_owned(), if tag { look.accent } else { plain })
+        })
+}
+
+/// Draws the console prompt: `> ` and the typed text, wrapped, at most `PROMPT_LINES_MAX`
+/// lines around the cursor; empty, it shows what the prompt takes.
+/// Takes the screen, the width and the look.
+/// Returns the rows and the cursor's row in them and column.
+fn prompt_rows(screen: &ProjectScreen, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
+    if screen.input.value().is_empty() {
+        let row = lead(0, ">", look.accent)
+            .push("Message the master, / for commands, @ to tag", look.muted);
+        return (vec![row], (0, 2));
+    }
+    let (wrapped, (line, column)) = screen.input.wrap(content.saturating_sub(2).max(1));
+    let top = (line + 1).saturating_sub(console::PROMPT_LINES_MAX);
+    let rows: Vec<Row> = wrapped
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(console::PROMPT_LINES_MAX)
+        .map(|(index, text)| tagged(lead(index, ">", look.accent), text, look.fg, look))
+        .collect();
+    assert!(!rows.is_empty() && rows.len() <= console::PROMPT_LINES_MAX);
+    assert!(line >= top && line - top < rows.len());
+    (rows, (line - top, 2 + column))
+}
+
+/// Draws the prompt's inline menu: at most `MENU_SHOWN_MAX` commands or tags around the
+/// chosen one, which is marked, or one line when no command matches.
+/// Takes the screen and the look.
+/// Returns the rows, none while no menu is open.
+fn menu_rows(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
+    let picks = screen.picks();
+    let at = screen.menu_cursor.min(picks.len().saturating_sub(1));
+    let entries: Vec<(String, &str)> = match &picks {
+        Picks::None => return Vec::new(),
+        Picks::Commands(commands) if commands.is_empty() => {
+            return vec![Row::of("  Unknown command", look.muted)];
+        }
+        Picks::Commands(commands) => commands
+            .iter()
+            .map(|command| (format!("/{:<8}", command.name), command.about))
+            .collect(),
+        Picks::Tags { tags, .. } => tags.iter().map(|tag| (tag.clone(), "")).collect(),
+    };
+    let first = (at + 1).saturating_sub(console::MENU_SHOWN_MAX);
+    entries
+        .into_iter()
+        .enumerate()
+        .skip(first)
+        .take(console::MENU_SHOWN_MAX)
+        .map(|(index, (name, about))| {
+            let chosen = index == at;
+            let mark = if chosen { look.glyph("\u{25b8}") } else { " " };
+            let row = Row::of(format!("{mark} "), look.accent)
+                .push(name, if chosen { look.accent } else { look.fg });
+            if about.is_empty() {
+                row
+            } else {
+                row.push(format!(" {about}"), look.muted)
+            }
+        })
+        .collect()
 }
 
 /// Converts one rendered Markdown line into a styled row.
@@ -1001,14 +1103,26 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         master_status(&status, look)
     };
     let mut lines = vec![spread(content, head, badge), Row::default()];
-    let available = room.saturating_sub(4);
-    let (body, top, input, help): (Vec<Row>, bool, Row, Help) = if live {
+    let (prompt, at) = prompt_rows(screen, content, look);
+    let typed = screen.typing && assigned && screen.transcript.is_some() && !live;
+    let below: Vec<Row> = if typed {
+        let note = screen
+            .console_note
+            .iter()
+            .map(|line| Row::of(line.clone(), look.muted));
+        note.chain(menu_rows(screen, look)).collect()
+    } else {
+        Vec::new()
+    };
+    let prompt_extra = if typed { prompt.len() - 1 } else { 0 };
+    let available = room.saturating_sub(4 + prompt_extra + below.len());
+    let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if live {
         let earlier = screen
             .transcript
             .as_ref()
             .filter(|transcript| !transcript.messages.is_empty());
         let body = match earlier {
-            Some(transcript) => transcript_lines(transcript, content, screen.now_ms, look),
+            Some(transcript) => transcript_lines(screen, transcript, content, look),
             None => std::iter::once(Row::of("No earlier conversation.", look.fg))
                 .chain(
                     wrap_words(
@@ -1023,10 +1137,10 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         (
             body,
             earlier.is_none(),
-            Row::of(
+            vec![Row::of(
                 "> The master runs live in its terminal. Enter opens it.",
                 look.muted,
-            ),
+            )],
             vec![
                 ("Enter", "Live master"),
                 ("PgUp", "Scroll"),
@@ -1041,7 +1155,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
                 look.fg,
             )],
             true,
-            Row::of("> Not ready yet", look.muted),
+            vec![Row::of("> Not ready yet", look.muted)],
             vec![TABS, ("Esc", "Home")],
         )
     } else if !assigned {
@@ -1054,7 +1168,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
                 Row::of("Press s to open project settings and pick one.", look.fg),
             ],
             true,
-            Row::of("> Pick a pool to start", look.muted),
+            vec![Row::of("> Pick a pool to start", look.muted)],
             vec![("s", "Project settings"), TABS, ("Esc", "Home")],
         )
     } else if let Some(transcript) = screen.transcript.as_ref() {
@@ -1069,17 +1183,36 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
             );
             body
         } else {
-            transcript_lines(transcript, content, screen.now_ms, look)
+            transcript_lines(screen, transcript, content, look)
         };
         let empty = transcript.messages.is_empty();
-        let mut help = if screen.typing {
+        let picks = screen.picks();
+        let mut help = if screen.typing && picks.len() > 0 {
+            let enter = if matches!(picks, Picks::Commands(_)) {
+                "Run"
+            } else {
+                "Insert"
+            };
+            vec![
+                ("Up/Down", "Pick"),
+                ("Tab", "Complete"),
+                ("Enter", enter),
+                ("Esc", "Clear"),
+            ]
+        } else if screen.typing {
+            let esc = if screen.input.value().is_empty() {
+                "Leave input"
+            } else {
+                "Clear"
+            };
             vec![
                 ("Enter", "Send"),
                 ("Ctrl-J", "New line"),
-                ("Ctrl-X", "Stop turn"),
+                ("/", "Commands"),
+                ("@", "Tag"),
                 ("PgUp", "Scroll"),
                 TABS,
-                ("Esc", "Leave input"),
+                ("Esc", esc),
             ]
         } else if transcript.status.retryable() {
             vec![
@@ -1099,7 +1232,12 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         if transcript.open && !screen.typing {
             help.insert(1, ("e", "End conversation"));
         }
-        (body, empty, input_row(screen, look), help)
+        let input = if screen.typing {
+            prompt
+        } else {
+            vec![input_row(screen, look)]
+        };
+        (body, empty, input, help)
     } else {
         (
             vec![Row::of(
@@ -1107,7 +1245,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
                 look.muted,
             )],
             true,
-            Row::of("> Not ready yet", look.muted),
+            vec![Row::of("> Not ready yet", look.muted)],
             vec![TABS, ("Esc", "Home")],
         )
     };
@@ -1126,13 +1264,10 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
     if top {
         lines.extend(std::iter::repeat_n(Row::default(), gap));
     }
+    lines.extend(below);
     lines.push(Row::of(look.glyph("\u{2500}").repeat(content), look.muted));
-    let cursor = (screen.typing && assigned && screen.transcript.is_some()).then(|| {
-        let (input_lines, (_, column)) = screen.input.wrap(content.saturating_sub(2).max(1));
-        let _ = input_lines;
-        (2 + column, lines.len())
-    });
-    lines.push(input);
+    let cursor = typed.then(|| (at.1, lines.len() + at.0));
+    lines.extend(input);
     (lines, cursor, help)
 }
 

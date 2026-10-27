@@ -3,6 +3,7 @@ pub mod add_project;
 pub mod app_setup;
 pub(in crate::tui) mod changes;
 pub mod clone_repo;
+pub(in crate::tui) mod console;
 pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;

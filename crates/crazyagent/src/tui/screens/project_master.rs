@@ -66,7 +66,7 @@ pub(in crate::tui) fn transcript_from(
         }
         for task in &turn.tasks {
             messages.push(Message {
-                speaker: Speaker::Notice,
+                speaker: Speaker::Task,
                 time: None,
                 text: task.line(),
                 error: false,
@@ -702,8 +702,8 @@ mod tests {
             [
                 (Speaker::You, "Plan the page.", false),
                 (Speaker::Master, "I handed it to a sub-agent.", false),
-                (Speaker::Notice, done, false),
-                (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+                (Speaker::Task, done, false),
+                (Speaker::Task, "Task 8 is still with a sub-agent.", false),
             ]
         );
     }
@@ -739,7 +739,7 @@ mod tests {
             [
                 (Speaker::You, "Fix the README.", false),
                 (Speaker::Master, "I fixed the README.", false),
-                (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
+                (Speaker::Task, "Task 8 is still with a sub-agent.", false),
                 (Speaker::Notice, waiting, false),
             ]
         );
