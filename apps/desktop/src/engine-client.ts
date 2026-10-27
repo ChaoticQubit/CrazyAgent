@@ -717,6 +717,8 @@ export interface TeamAgent {
   stopped_ms: number | null;
   persona?: string | null;
   handle?: string | null;
+  finished?: boolean;
+  register?: string | null;
 }
 
 export interface TeamTask {
@@ -749,6 +751,7 @@ export interface TeamMessage {
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  show_finished?: boolean;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
@@ -855,6 +858,12 @@ export function teamCancel(id: string, task: number | null, generation: number):
 
 export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
+/** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
+ * agents list and team graph) or false for Hide (the Finished fold-out only) and a generation. */
+export function teamFinishedAgents(id: string, show: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, generation });
 }
 
 /** Turns the project's live master on or off. Inputs: the project id, the switch and a
