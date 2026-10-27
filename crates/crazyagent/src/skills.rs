@@ -239,6 +239,7 @@ mod tests {
             on_here: None,
             source: "/picked/notes".into(),
             folder: folder.display().to_string(),
+            refused: None,
         }
     }
 

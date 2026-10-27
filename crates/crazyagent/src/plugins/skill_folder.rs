@@ -130,16 +130,18 @@ pub fn frontmatter(text: &str) -> Result<(String, String), &'static str> {
 /// Reads the description agents are given from a stored skill's SKILL.md: its first 64 KiB
 /// through the same frontmatter checks an add makes, so a description with hidden
 /// characters is never handed on. Input: the SKILL.md path. Output: the description, or
-/// none when the file cannot be read or its frontmatter is refused.
-pub fn stored_description(skill_md: &Path) -> Option<String> {
-    let file = std::fs::File::open(skill_md).ok()?;
+/// `skill_unreadable` or the frontmatter's refusal code; agents get no skill refused here.
+pub fn stored_description(skill_md: &Path) -> Result<String, &'static str> {
+    let unreadable = |_| "skill_unreadable";
+    let file = std::fs::File::open(skill_md).map_err(unreadable)?;
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(file, STORED_READ_MAX), &mut bytes).ok()?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, STORED_READ_MAX), &mut bytes)
+        .map_err(unreadable)?;
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text,
-        Err(cut) => std::str::from_utf8(&bytes[..cut.valid_up_to()]).ok()?,
+        Err(cut) => std::str::from_utf8(&bytes[..cut.valid_up_to()]).map_err(unreadable)?,
     };
-    frontmatter(text).ok().map(|(_, description)| description)
+    frontmatter(text).map(|(_, description)| description)
 }
 
 fn field(header: &[&str], key: &str) -> Option<String> {
@@ -595,7 +597,7 @@ mod tests {
         fs::write(&clean, GOOD).unwrap();
         assert_eq!(
             stored_description(&clean).as_deref(),
-            Some("Writes release notes from merged changes.")
+            Ok("Writes release notes from merged changes.")
         );
         let hidden = root.path().join("hidden.md");
         fs::write(
@@ -603,16 +605,19 @@ mod tests {
             "---\nname: fmt\ndescription: Formats changed files.\u{e0041}\u{e0042}\n---\nbody",
         )
         .unwrap();
-        assert_eq!(stored_description(&hidden), None);
+        assert_eq!(stored_description(&hidden), Err("skill_description_hidden"));
         let long = root.path().join("long.md");
         let body = "\u{e9}".repeat(40 * 1024);
         fs::write(&long, format!("{GOOD}{body}")).unwrap();
         assert_eq!(
             stored_description(&long).as_deref(),
-            Some("Writes release notes from merged changes."),
+            Ok("Writes release notes from merged changes."),
             "a cut inside a character past 64 KiB keeps the frontmatter"
         );
-        assert_eq!(stored_description(&root.path().join("missing.md")), None);
+        assert_eq!(
+            stored_description(&root.path().join("missing.md")),
+            Err("skill_unreadable")
+        );
     }
 
     #[test]

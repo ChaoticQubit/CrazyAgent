@@ -1,4 +1,4 @@
-use super::{back_to, crumbs_of, draw_form, place_of, plugin_plain, tilde};
+use super::{back_to, crumbs_of, draw_form, place_of, plugin_plain, tilde, unused};
 use crate::protocol::ProjectId;
 use crate::skills::SkillDetail;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
@@ -205,6 +205,7 @@ impl SkillDetailPage {
         let skill = &detail.skill;
         let on = skill.enabled && skill.on_here.unwrap_or(true);
         let state = match (on, self.project.is_some()) {
+            _ if skill.refused.is_some() => styled("Not given to agents", Role::Error, theme),
             (true, true) => styled("On for this project", Role::Success, theme),
             (true, false) => styled("On for every project", Role::Success, theme),
             (false, true) => styled("Off for this project", Role::Muted, theme),
@@ -220,6 +221,17 @@ impl SkillDetailPage {
                 .into_iter()
                 .map(Line::raw),
         );
+        if let Some(code) = &skill.refused {
+            let reason = format!(
+                "{} Remove it in Settings, Plugins and skills.",
+                unused(code)
+            );
+            lines.extend(
+                wrap(&reason, limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Error, theme)),
+            );
+        }
         lines.push(styled(
             cut(
                 &printable(format!("From {}", tilde(&skill.source, ctx))),

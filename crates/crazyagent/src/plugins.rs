@@ -209,6 +209,7 @@ pub struct SkillView {
     pub on_here: Option<bool>,
     pub source: String,
     pub folder: String,
+    pub refused: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

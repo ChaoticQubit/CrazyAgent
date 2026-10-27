@@ -7,13 +7,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 const api = await import("../src/api.ts");
 const plugins = await import("../src/screens/settings/plugins.tsx");
 const { SkillsView, SkillDetailView, ServersView, serverSpecInput, serverNameError, secretNameError, skillFolderError, serverWord, pluginSwitch, serverFacts, secretsInput,
-  skillBody, fileSize, ImportSkillsView, importable, importWord, importSentence } = plugins;
+  skillBody, fileSize, ImportSkillsView, importable, importWord, importSentence, skillUnused } = plugins;
 const router = await import("../src/ui/router.ts");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const skill = (patch = {}) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", line: "Builds polished front ends.", scope: { kind: "global" },
   scope_label: "For every project", enabled: true, on_here: null, source: "/Users/owner/skills/frontend-design",
-  folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", ...patch });
+  folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", refused: null, ...patch });
 const server = (patch = {}) => ({ id: "server-1", name: "github", scope: { kind: "global" }, scope_label: "For every project",
   spec: { kind: "stdio", command: "/opt/homebrew/bin/npx", args: ["-y", "@modelcontextprotocol/server-github"] },
   runs: "/opt/homebrew/bin/npx -y @modelcontextprotocol/server-github", enabled: true, status: "approved", status_label: "Approved",
@@ -76,6 +76,21 @@ test("a skill's detail in a project uses the project switch and says when Settin
   const html = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail({ text: "<script>alert(1)</script>" }) })));
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;/);
+});
+
+test("a stored skill agents no longer get says why on the list and its page, and can still be removed", () => {
+  const why = "Agents don&#x27;t get this skill\\. The description in SKILL\\.md has characters you cannot see";
+  assert.equal(skillUnused("skill_description_hidden"), `Agents don't get this skill. ${api.plainError("skill_description_hidden")}`);
+  const refused = skill({ refused: "skill_description_hidden" });
+  const list = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [refused, skill({ id: "skill-2", name: "pdf" })] })));
+  assert.equal(list.match(/Not given to agents/g)?.length, 1);
+  assert.match(list, new RegExp(why));
+  assert.match(list, /aria-label="More for frontend-design"/);
+  const page = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail({ skill: refused }) })));
+  assert.match(page, new RegExp(why));
+  assert.match(page, /Remove it in Settings, Plugins and skills\./);
+  const clean = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail() })));
+  assert.doesNotMatch(clean, /Agents don&#x27;t get this skill/);
 });
 
 test("a skill's detail shows plain loading, not ready and error states", () => {

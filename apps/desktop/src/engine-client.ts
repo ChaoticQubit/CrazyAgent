@@ -1435,6 +1435,7 @@ export interface SkillView {
   on_here: boolean | null;
   source: string;
   folder: string;
+  refused: string | null;
 }
 
 export interface SkillFile {

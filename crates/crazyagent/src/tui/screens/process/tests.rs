@@ -267,6 +267,7 @@ fn skill(id: &str, name: &str, line: &str) -> crate::plugins::SkillView {
         on_here: None,
         source: String::new(),
         folder: String::new(),
+        refused: None,
     }
 }
 

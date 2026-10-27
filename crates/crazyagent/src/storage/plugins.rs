@@ -522,6 +522,10 @@ fn on_here(scope: &Scope, id: &str, project: Option<&ProjectId>, off: &[String])
 
 fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> SkillView {
     let description = crate::memory::visible_text(&record.description);
+    let folder = root.join(&record.folder);
+    let refused = crate::plugins::skill_folder::stored_description(&folder.join("SKILL.md"))
+        .err()
+        .map(str::to_owned);
     SkillView {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -532,7 +536,8 @@ fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> Skill
         enabled: record.enabled,
         on_here,
         source: crate::memory::visible_text(&record.source),
-        folder: root.join(&record.folder).display().to_string(),
+        folder: folder.display().to_string(),
+        refused,
     }
 }
 
@@ -832,7 +837,7 @@ pub(crate) fn effective(
                 .any(|other| local(&other.scope) && other.name == skill.name);
         let folder = root.join(&skill.folder);
         let described =
-            crate::plugins::skill_folder::stored_description(&folder.join("SKILL.md")).is_some();
+            crate::plugins::skill_folder::stored_description(&folder.join("SKILL.md")).is_ok();
         if !shadowed && described {
             plugins.skills.push(EffectiveSkill {
                 name: skill.name.clone(),

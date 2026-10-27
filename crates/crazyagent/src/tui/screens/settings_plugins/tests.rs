@@ -21,6 +21,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         on_here: None,
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
+        refused: None,
     }
 }
 
@@ -1220,4 +1221,47 @@ fn hidden_characters_in_a_skill_or_a_found_folder_are_drawn_as_escapes() {
         lines.iter().all(|line| !crate::memory::hidden_text(line)),
         "{lines:?}"
     );
+}
+
+#[test]
+fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
+    let (mut skills, servers) = lists();
+    skills[0].refused = Some("skill_description_hidden".into());
+    let mut shell = Shell::with(
+        plugin_ctx(120, 36),
+        Box::new(Plugins::with(skills, servers)),
+    );
+    let rows = render(&mut shell, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("frontend-design")
+                && row.contains("Agents don't get this skill.")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("tiger-style") && row.contains("~/Skills/tiger-style")),
+        "a skill agents get still shows its folder: {rows:?}"
+    );
+
+    let ctx = plugin_ctx(80, 24);
+    let mut refused = detail(true);
+    refused.skill.refused = Some("skill_description_hidden".into());
+    let lines = texts(&SkillDetailPage::with(refused).lines(70, &ctx));
+    assert!(
+        lines[0].starts_with("frontend-design  Not given to agents"),
+        "{lines:?}"
+    );
+    let said = lines.join(" ");
+    assert!(said.contains("Agents don't get this skill."), "{lines:?}");
+    assert!(
+        said.contains(plugin_plain("skill_description_hidden")),
+        "{lines:?}"
+    );
+    assert!(
+        said.contains("Remove it in Settings, Plugins and skills."),
+        "{lines:?}"
+    );
+    let shown = texts(&SkillDetailPage::with(detail(true)).lines(70, &ctx));
+    assert!(shown.iter().all(|line| !line.contains("Agents don't get")));
 }

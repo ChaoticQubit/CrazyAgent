@@ -320,6 +320,7 @@ async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches
         .add_skill(Scope::Global, skill_folder(&root, "fmt", "fmt"))
         .await
         .unwrap();
+    assert_eq!(added.refused, None);
     let effective = controller.project_plugins(project.clone()).await.unwrap();
     assert!(effective.skills.iter().any(|skill| skill.name == "fmt"));
     let stored = PathBuf::from(&added.folder).join("SKILL.md");
@@ -333,6 +334,23 @@ async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches
     assert!(
         effective.skills.iter().all(|skill| skill.name != "fmt"),
         "a stored skill whose SKILL.md hides text is not given to agents"
+    );
+    let listed = controller.plugin_skills(None).await.unwrap();
+    let fmt = listed.iter().find(|skill| skill.name == "fmt").unwrap();
+    assert_eq!(
+        fmt.refused.as_deref(),
+        Some("skill_description_hidden"),
+        "the skill list says why agents no longer get it"
+    );
+    controller.remove_skill(fmt.id.clone()).await.unwrap();
+    assert!(
+        controller
+            .plugin_skills(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|skill| skill.name != "fmt"),
+        "the refused skill can still be removed"
     );
     case.close().await;
 }

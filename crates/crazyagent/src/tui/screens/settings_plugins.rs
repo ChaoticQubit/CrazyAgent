@@ -82,6 +82,12 @@ pub fn tilde(path: &str, ctx: &Ctx) -> String {
     }
 }
 
+/// Says that agents do not get a stored skill the engine refuses now, and why.
+/// Input: the refusal code. Output: the sentence.
+pub fn unused(code: &str) -> String {
+    format!("Agents don't get this skill. {}", plugin_plain(code))
+}
+
 /// A plain sentence for an engine problem code about skills and MCP servers.
 /// Input: the code. Output: the sentence.
 pub fn plugin_plain(code: &str) -> &'static str {
@@ -551,7 +557,10 @@ impl Plugins {
                     let values = vec![
                         styled(printable(skill.name.clone()), Role::Accent, theme),
                         Line::raw(if skill.enabled { "On" } else { "Off" }),
-                        Line::raw(printable(tilde(&skill.source, ctx))),
+                        match &skill.refused {
+                            Some(code) => styled(unused(code), Role::Error, theme),
+                            None => Line::raw(printable(tilde(&skill.source, ctx))),
+                        },
                     ];
                     list_row(
                         cells(&widths, values, 2, glyphs),
