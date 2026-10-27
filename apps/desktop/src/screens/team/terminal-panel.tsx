@@ -1,11 +1,12 @@
 import { Channel } from "@tauri-apps/api/core";
+import type { ITerminalOptions } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, StatusBadge, keyLabel, shortcutKey } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, terminalEvent, terminalSize } from "./terminal-io";
+import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -16,6 +17,26 @@ type View = { kind: "connecting" } | { kind: "live" } | { kind: "ended"; copy: s
 function token(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
+}
+
+/** The view's xterm settings: the app's mono font and terminal colors, Option as Meta and
+ * `SCROLLBACK_LINES` of scrollback for the history the engine sends on attach. Output: the
+ * options for a new terminal. */
+export function terminalOptions(): ITerminalOptions {
+  return {
+    cursorBlink: true,
+    fontFamily: token("--mono", "ui-monospace, Menlo, monospace"),
+    fontSize: 13,
+    macOptionIsMeta: true,
+    scrollback: SCROLLBACK_LINES,
+    theme: {
+      background: token("--terminal-bg", "#161513"),
+      foreground: token("--terminal-fg", "#eeeae2"),
+      cursor: token("--terminal-cursor", "#ff6a45"),
+      cursorAccent: token("--terminal-bg", "#161513"),
+      selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
+    },
+  };
 }
 
 /** The note under a live terminal: who reads what the owner types. Input: the node.
@@ -84,20 +105,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         import("@xterm/xterm/css/xterm.css"),
       ]);
       if (disposed) return;
-      const terminal = new Terminal({
-        cursorBlink: true,
-        fontFamily: token("--mono", "ui-monospace, Menlo, monospace"),
-        fontSize: 13,
-        macOptionIsMeta: true,
-        scrollback: SCROLLBACK_LINES,
-        theme: {
-          background: token("--terminal-bg", "#161513"),
-          foreground: token("--terminal-fg", "#eeeae2"),
-          cursor: token("--terminal-cursor", "#ff6a45"),
-          cursorAccent: token("--terminal-bg", "#161513"),
-          selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
-        },
-      });
+      const terminal = new Terminal(terminalOptions());
       muteQueries(terminal);
       const fit = new FitAddon();
       terminal.loadAddon(fit);
@@ -118,6 +126,17 @@ export function TerminalPanel({ node, harness, onClose }: {
         window.cancelAnimationFrame(frame);
         frame = window.requestAnimationFrame(() => { if (fitted && !disposed) fit.fit(); });
       };
+      let unsettle = () => {};
+      const wrote = settleAfterWrites((run) => {
+        const id = window.requestAnimationFrame(run);
+        unsettle = () => window.cancelAnimationFrame(id);
+        return unsettle;
+      }, () => {
+        if (disposed) return;
+        fitted = true;
+        fit.fit();
+        sendSize();
+      });
       const run = jobQueue(() => end(STOPPED_TYPING));
       const type = keyQueue(run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok");
       const typed = terminal.onData((data) => { if (live) type(encodeTyped(data)); });
@@ -137,12 +156,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         if (disposed) return;
         const event = terminalEvent(message);
         if (event.kind === "output") {
-          terminal.write(event.bytes, () => {
-            if (fitted || disposed) return;
-            fitted = true;
-            fit.fit();
-            sendSize();
-          });
+          terminal.write(event.bytes, wrote());
         } else if (event.kind === "attached") {
           const size = terminalSize(event.cols, event.rows);
           if (size) terminal.resize(size.cols, size.rows);
@@ -162,6 +176,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         resized.dispose();
         window.clearTimeout(timer);
         window.cancelAnimationFrame(frame);
+        unsettle();
         terminal.dispose();
       };
       const result = await attachTerminal(name, channel);

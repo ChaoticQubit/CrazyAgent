@@ -67,6 +67,7 @@ impl LastScreens {
             agent: kept.agent.clone(),
             cols: kept.cols,
             rows: kept.rows,
+            history: Vec::new(),
             screen: kept.screen.clone(),
             chunks,
         })
