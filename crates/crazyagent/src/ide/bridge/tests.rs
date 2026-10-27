@@ -429,6 +429,35 @@ fn ide_request_bounds_are_refused() {
     fine.validate().unwrap();
 }
 
+/// Every file tsc compiled into the extension's `out` folder ships in the embedded
+/// extension, so an import between its modules never fails inside the IDE.
+#[test]
+fn every_compiled_extension_file_is_embedded() {
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension/out");
+    let mut compiled = Vec::new();
+    let mut folders = vec![out.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else {
+                let name = path.strip_prefix(&out).unwrap().to_str().unwrap();
+                compiled.push(format!("out/{name}"));
+            }
+        }
+    }
+    compiled.sort();
+    let mut embedded: Vec<String> = EXTENSION_FILES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .filter(|name| name.starts_with("out/"))
+        .collect();
+    embedded.sort();
+    assert!(compiled.len() > 2, "{compiled:?}");
+    assert_eq!(embedded, compiled);
+}
+
 /// The extension installs as one folder named `publisher.name-version` from its
 /// `package.json`, holding exactly the embedded files; a changed file is put back and an
 /// unchanged folder is left as it is.
