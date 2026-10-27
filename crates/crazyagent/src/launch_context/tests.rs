@@ -462,6 +462,15 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
         "{waiting}"
     );
     assert!(waiting.contains("only the team maximum of 64 agents"));
+    setup.team.max_agents = 1;
+    let alone = master_tools_section(&setup, &["codex"]);
+    assert!(
+        alone.contains(
+            "The team maximum is 1 agent, you, so CrazyAgent refuses every task you hand over."
+        ),
+        "{alone}"
+    );
+    assert!(!alone.contains("- codex\n"));
 
     setup.team.sub_harnesses = (0..200)
         .map(|index| HarnessSlot {

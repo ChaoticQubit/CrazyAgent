@@ -562,6 +562,39 @@ fn an_empty_plan_hands_work_to_any_runnable_harness_with_an_account() {
         ],
         "an empty plan lists every runnable harness under the team maximum"
     );
+
+    let mut solo = any.clone();
+    solo.project_id = ProjectId::new("team-any-solo").unwrap();
+    solo.team.max_agents = 1;
+    let solo_access = access("team-any-solo", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    for harness in [None, Some("codex")] {
+        assert_eq!(
+            admit(
+                &tx,
+                &solo_access,
+                &solo,
+                harness,
+                "Alone",
+                TaskSource::Owner,
+                None,
+                30
+            )
+            .unwrap(),
+            Err("team_has_no_sub_agents"),
+            "a team maximum of one agent leaves room for the master only"
+        );
+    }
+    tx.commit().unwrap();
+    assert_eq!(
+        status(&connection, &solo)
+            .unwrap()
+            .harnesses
+            .iter()
+            .map(|h| h.role)
+            .collect::<Vec<_>>(),
+        [AgentRole::Master]
+    );
 }
 
 #[test]
