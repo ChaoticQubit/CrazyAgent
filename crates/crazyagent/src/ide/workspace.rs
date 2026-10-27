@@ -45,10 +45,12 @@ pub struct Section {
     pub path: PathBuf,
 }
 
-/// The workspace settings: `readonly_include` holds the globs the IDE opens read only.
+/// The workspace settings: `readonly_include` holds the globs the IDE opens read only and
+/// `readonly_exclude` the globs it opens writable even inside those.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceSettings {
     pub readonly_include: Vec<String>,
+    pub readonly_exclude: Vec<String>,
 }
 
 /// A written workspace: its file, how many agents the cap left out and whether every
@@ -140,7 +142,7 @@ fn refresh(
         .or(kept.as_ref().map(|(on, _)| *on))
         .unwrap_or(false);
     let (sections, hidden) = sections(db, project, show_all)?;
-    let body = render(&sections, &WorkspaceSettings::default())?;
+    let body = render(&sections, &super::readonly::settings(db, project)?)?;
     let folder = root.join("ide").join(project.as_str());
     if always || kept.is_none_or(|(on, kept)| on != show_all || kept != body) {
         super::bridge::private_folder(&root.join("ide"))?;
@@ -244,14 +246,18 @@ fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, 
             Ok(serde_json::json!({ "name": section.name, "path": path }))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let readonly: serde_json::Map<String, serde_json::Value> = settings
-        .readonly_include
-        .iter()
-        .map(|glob| (glob.clone(), serde_json::Value::Bool(true)))
-        .collect();
+    let globs = |globs: &[String]| -> serde_json::Map<String, serde_json::Value> {
+        globs
+            .iter()
+            .map(|glob| (glob.clone(), serde_json::Value::Bool(true)))
+            .collect()
+    };
     let body = serde_json::json!({
         "folders": folders,
-        "settings": { "files.readonlyInclude": readonly },
+        "settings": {
+            "files.readonlyInclude": globs(&settings.readonly_include),
+            "files.readonlyExclude": globs(&settings.readonly_exclude),
+        },
     });
     serde_json::to_string_pretty(&body).map_err(unavailable)
 }

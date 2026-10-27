@@ -70,13 +70,15 @@ pub struct TeamEvents {
 
 /// What the engine answers a live master's team calls with: the live model access and
 /// stored setup `admit` checks a task against, the engine runtime folder that holds the
-/// change sets, the team event handlers and the terminal host, when the engine has them.
+/// change sets, the team event handlers, the terminal host and the engine settings memory
+/// calls read, when the engine has them.
 pub struct Answering<'a> {
     pub access: &'a ModelAccess,
     pub stored: &'a StoredSetup,
     pub landing: &'a Path,
     pub events: Option<&'a TeamEvents>,
     pub host: Option<&'a dyn Host>,
+    pub config: Option<&'a super::runtime::ConfigSource>,
 }
 
 fn state(problem: impl std::fmt::Display) -> EngineError {
@@ -735,7 +737,8 @@ fn keys(bytes: &[u8]) -> (bool, bool) {
 /// Answers the calls a live master's team server left in its mailbox, at most
 /// `CALLS_PER_TICK_MAX` per call, each checked again before it takes effect: `delegate`
 /// admits the task at once, `message`, `answer` and `status` go to the team event handlers,
-/// `changes` lists the pending change sets and `escalate` notifies the owner. Takes the
+/// `changes` lists the pending change sets, `escalate` notifies the owner and `memories`
+/// and `remember` read and write the project's memories at the version the master read. Takes the
 /// engine database, what the answers need and the mailbox. Returns how many calls were
 /// answered, or a SQLite failure.
 pub fn serve_calls(
@@ -801,6 +804,22 @@ fn answer(
         },
         Call::Changes => changes(answering),
         Call::Escalate { text } => escalate(connection, project, &text)?,
+        Call::Memories => tool::answer_memories(connection, project),
+        Call::Remember {
+            text,
+            memory,
+            version,
+        } => {
+            let config = answering.config.and_then(|source| source());
+            tool::answer_remember(
+                connection,
+                project,
+                config.as_ref(),
+                memory.as_deref(),
+                version,
+                &text,
+            )
+        }
     })
 }
 

@@ -21,6 +21,7 @@ mod owner_setup;
 mod plugins;
 mod process;
 mod project_setup;
+mod recovery;
 mod scheduling;
 mod setup;
 mod team;

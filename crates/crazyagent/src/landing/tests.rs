@@ -1609,3 +1609,95 @@ fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     assert_eq!(again, first);
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
 }
+
+fn ledger_rows(case: &Case) -> Vec<(String, String, Option<String>)> {
+    let engine = Path::new(case.db.path().unwrap()).parent().unwrap();
+    crate::ledger::open(engine)
+        .unwrap()
+        .prepare("SELECT kind,action_key,outcome FROM ledger_actions ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// An Accept an engine stop interrupted is listed once in the action ledger after the
+/// engine settles it, for the recovery banner: a pending notice saying whether it landed,
+/// kept across later runs until the owner dismisses it with the outcome it showed.
+#[test]
+fn an_interrupted_accept_is_listed_in_the_ledger_once_settled() {
+    for (step, landed, outcome) in [
+        (owner::Step::Recorded, false, crate::ledger::Outcome::Failed),
+        (
+            owner::Step::FilesWritten,
+            true,
+            crate::ledger::Outcome::Done,
+        ),
+        (owner::Step::BranchMoved, true, crate::ledger::Outcome::Done),
+    ] {
+        let case = Case::new();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+        reconcile(&case.db).unwrap();
+        reconcile(&case.db).unwrap();
+        let listed: (String, String, Option<String>) =
+            ("landing_accept".to_owned(), id.as_str().to_owned(), None);
+        assert_eq!(ledger_rows(&case), vec![listed], "{step:?}");
+        let engine = Path::new(case.db.path().unwrap()).parent().unwrap();
+        let ledger = crate::ledger::open(engine).unwrap();
+        let shown =
+            crate::ledger::pending(&ledger, crate::ledger::ActionKind::LandingAccept).unwrap();
+        assert_eq!(shown.len(), 1, "{step:?}");
+        let notice: serde_json::Value = serde_json::from_str(&shown[0].payload).unwrap();
+        assert_eq!(notice["change_set"], id.as_str(), "{step:?}");
+        assert_eq!(notice["landed"], landed, "{step:?}");
+        let dismissed = crate::ledger::dismiss(
+            &ledger,
+            crate::ledger::ActionKind::LandingAccept,
+            shown[0].id.get(),
+        );
+        assert_eq!(dismissed.unwrap(), outcome, "{step:?}");
+        reconcile(&case.db).unwrap();
+        let name = if landed { "done" } else { "failed" };
+        let dismissed = (
+            "landing_accept".to_owned(),
+            id.as_str().to_owned(),
+            Some(name.to_owned()),
+        );
+        assert_eq!(ledger_rows(&case), vec![dismissed], "{step:?}");
+    }
+}
+
+/// An Accept that finishes while upkeep's reconcile waits for the repository is a normal
+/// Accept: reconcile decides from the record it loads under the hold, so it lists nothing.
+/// The test holds the repository, lets reconcile take its list of in-flight change sets
+/// and wait, then settles the change set as the live Accept does before letting go.
+#[test]
+fn an_accept_settled_while_reconcile_waits_is_not_listed_as_interrupted() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| {
+        at == owner::Step::Recorded
+    });
+    assert_eq!(refused(stopped), "changes_git_failed");
+    let repository = store::load(&case.db, &id).unwrap().repository;
+    let held = flow::hold(&repository);
+    let path = PathBuf::from(case.db.path().unwrap());
+    let upkeep = std::thread::spawn(move || {
+        let db = Connection::open(&path).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        reconcile(&db)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(owner::settled(&case.db, &id).unwrap().intent.is_none());
+    drop(held);
+    upkeep.join().unwrap().unwrap();
+    assert!(ledger_rows(&case).is_empty());
+    assert!(store::in_flight(&case.db).unwrap().is_empty());
+}

@@ -556,7 +556,7 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
 }
 
 #[test]
-fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_eight_tools() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
@@ -581,7 +581,9 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
             ANSWER_TOOL,
             STATUS_TOOL,
             CHANGES_TOOL,
-            ESCALATE_TOOL
+            ESCALATE_TOOL,
+            MEMORIES_TOOL,
+            REMEMBER_TOOL
         ]
     );
 }

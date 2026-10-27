@@ -6,7 +6,7 @@ use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024 + 4 * MESSAGE_BYTES_MAX;
-pub(super) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
 const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Every code a Changes request can answer an owner client with: the landing engine's

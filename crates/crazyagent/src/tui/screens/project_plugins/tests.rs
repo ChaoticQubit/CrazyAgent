@@ -826,6 +826,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 Request::Projects => connection.shell(ShellRequest::Projects).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
+                Request::Recovery(query) => connection.recovery(*query).unwrap(),
                 Request::Settings(job) => {
                     sent.push(match job.as_ref() {
                         SettingsJob::ProjectPlugins { .. } => "project plugins",

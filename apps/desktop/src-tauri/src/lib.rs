@@ -458,6 +458,16 @@ async fn desktop_project_memories(
 }
 
 #[tauri::command]
+async fn desktop_ide_asks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<MemoryItem>, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.ide_asks(&id).await
+}
+
+#[tauri::command]
 async fn desktop_review_memory(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2146,6 +2156,40 @@ async fn desktop_agent_instructions(
 }
 
 #[tauri::command]
+async fn desktop_recovery_banner(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::RecoveryBanner, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.recovery_banner(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_retry_recovery(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    agent: i64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.retry_recovery(agent)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_dismiss_recovery(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    action_kind: crazyagent::ledger::ActionKind,
+    id: i64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.dismiss_recovery(action_kind, id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_default_process(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2460,6 +2504,7 @@ pub fn run() {
             desktop_set_pack_entry,
             desktop_remove_pack_entry,
             desktop_project_memories,
+            desktop_ide_asks,
             desktop_review_memory,
             desktop_memories,
             desktop_memory,
@@ -2550,6 +2595,9 @@ pub fn run() {
             desktop_import_global_instructions,
             desktop_default_process,
             desktop_agent_instructions,
+            desktop_recovery_banner,
+            desktop_retry_recovery,
+            desktop_dismiss_recovery,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

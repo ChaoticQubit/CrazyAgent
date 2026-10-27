@@ -1,4 +1,5 @@
 use crate::engine::EngineError;
+use crate::engine::owner::transport::changes::CHANGES_TIMEOUT;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
@@ -13,6 +14,10 @@ use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
+
+pub mod agents;
+pub mod memory;
+mod owner_edit;
 
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
@@ -31,7 +36,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 4] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 16] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -45,6 +50,54 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 4] = [
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
     ),
     (
+        "out/sidebar/agents.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/agents.js"),
+    ),
+    (
+        "out/sidebar/changes.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/changes.js"),
+    ),
+    (
+        "out/sidebar/context.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/context.js"),
+    ),
+    (
+        "out/sidebar/memories.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/memories.js"),
+    ),
+    (
+        "out/sidebar/model.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/model.js"),
+    ),
+    (
+        "out/sidebar/tree.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/tree.js"),
+    ),
+    (
+        "out/base-content.js",
+        include_bytes!("../../../../apps/ide-extension/out/base-content.js"),
+    ),
+    (
+        "out/comments.js",
+        include_bytes!("../../../../apps/ide-extension/out/comments.js"),
+    ),
+    (
+        "out/scm-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm-model.js"),
+    ),
+    (
+        "out/scm.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm.js"),
+    ),
+    (
+        "out/readonly.js",
+        include_bytes!("../../../../apps/ide-extension/out/readonly.js"),
+    ),
+    (
+        "out/worktree.js",
+        include_bytes!("../../../../apps/ide-extension/out/worktree.js"),
+    ),
+    (
         "out/extensions.js",
         include_bytes!("../../../../apps/ide-extension/out/extensions.js"),
     ),
@@ -56,6 +109,9 @@ const EVENTS_QUEUED: usize = 64;
 const WRITE_TIME: Duration = Duration::from_secs(10);
 const PATH_BYTES_MAX: usize = 4096;
 const TEXT_BYTES_MAX: usize = 16384;
+/// The most bytes one diff comment may hold, so with its file and line it fits one typed
+/// agent prompt and one team conversation message.
+pub(super) const COMMENT_BYTES_MAX: usize = 2048;
 const NAME_BYTES_MAX: usize = 128;
 const VERSION_BYTES_MAX: usize = 64;
 const CAPABILITY: &str = "capability";
@@ -85,11 +141,19 @@ pub enum IdeCall {
     #[serde(rename = "ide.change_diff")]
     ChangeDiff { id: ChangeSetId, page: u16 },
     #[serde(rename = "ide.base_blob")]
-    BaseBlob { id: ChangeSetId, path: String },
+    BaseBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
     #[serde(rename = "ide.accept")]
-    Accept { id: ChangeSetId, message: String },
+    Accept {
+        id: ChangeSetId,
+        head: String,
+        message: String,
+    },
     #[serde(rename = "ide.discard")]
-    Discard { id: ChangeSetId },
+    Discard { id: ChangeSetId, head: String },
     #[serde(rename = "ide.restore")]
     Restore { id: ChangeSetId },
     #[serde(rename = "ide.comment")]
@@ -102,7 +166,10 @@ pub enum IdeCall {
     #[serde(rename = "ide.owner_edit")]
     OwnerEdit { agent: AgentId, path: String },
     #[serde(rename = "ide.memories")]
-    Memories {},
+    Memories {
+        #[serde(default)]
+        after: Option<RequestId>,
+    },
     #[serde(rename = "ide.memory_decide")]
     MemoryDecide {
         id: RequestId,
@@ -111,6 +178,8 @@ pub enum IdeCall {
     },
     #[serde(rename = "ide.agents")]
     Agents {},
+    #[serde(rename = "ide.agent_message")]
+    AgentMessage { agent: i64, text: String },
     #[serde(rename = "ide.extensions")]
     Extensions {},
     #[serde(rename = "ide.extension_request")]
@@ -172,8 +241,9 @@ pub enum IdeEvent {
 
 impl IdeRequest {
     /// Checks every argument's bounds before any handler runs: paths are relative, at most
-    /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX` and a
-    /// comment is not blank on a line from 1; extension ids are `publisher.name`.
+    /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX`, a comment
+    /// fits `COMMENT_BYTES_MAX` and is not blank on a line from 1; extension ids are
+    /// `publisher.name`.
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
@@ -183,10 +253,11 @@ impl IdeRequest {
             } => {
                 relative(path)
                     && *line > 0
-                    && text.len() <= TEXT_BYTES_MAX
+                    && text.len() <= COMMENT_BYTES_MAX
                     && !text.trim().is_empty()
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
+            IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
             IdeCall::ExtensionRequest { id, version }
             | IdeCall::ExtensionDecide { id, version, .. } => {
                 extension_id(id) && extension_version(version)
@@ -197,7 +268,7 @@ impl IdeRequest {
             | IdeCall::ChangeDiff { .. }
             | IdeCall::Discard { .. }
             | IdeCall::Restore { .. }
-            | IdeCall::Memories {}
+            | IdeCall::Memories { .. }
             | IdeCall::MemoryDecide { .. }
             | IdeCall::Agents {}
             | IdeCall::Extensions {}
@@ -476,8 +547,11 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 
 /// Serves one IDE capability connection after its handshake: admits the token, reads one
 /// request for the capability's own project and answers it, or turns the connection into
-/// the project's event subscription. The handshake deadline bounds everything but the
-/// subscription. Inputs: the stream, handshake packet, owner runtime and deadline.
+/// the project's event subscription. The handshake deadline bounds the request and every
+/// call but the subscription and the Changes calls, which run git under the desktop's
+/// Changes bound. Accept, Discard or Restore past that bound is `changes_outcome_unknown`,
+/// and what one did is reported even when its capability was revoked while it ran.
+/// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
     mut stream: UnixStream,
     packet: [u8; 37],
@@ -485,27 +559,41 @@ pub(crate) async fn serve(
     deadline: Instant,
 ) {
     let opened = tokio::time::timeout_at(deadline, open(&mut stream, &packet, &runtime)).await;
-    let reply = match opened {
-        Err(_) => None,
-        Ok(Err(error)) => Some(refusal(&error)),
+    let (reply, wrote) = match opened {
+        Err(_) => (None, false),
+        Ok(Err(error)) => (Some(refusal(&error)), false),
         Ok(Ok((_, IdeCall::Events {}))) => {
             events(&mut stream, &packet, &runtime).await;
-            None
+            (None, false)
         }
         Ok(Ok((project, call))) => {
-            let answered =
-                tokio::time::timeout_at(deadline, answer(&runtime, &project, call)).await;
-            Some(match answered {
+            let writes = matches!(
+                call,
+                IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. }
+            );
+            let reads = matches!(
+                call,
+                IdeCall::ChangeSets {} | IdeCall::ChangeDiff { .. } | IdeCall::BaseBlob { .. }
+            );
+            let bound = if writes || reads {
+                deadline.max(Instant::now() + CHANGES_TIMEOUT)
+            } else {
+                deadline
+            };
+            let answered = tokio::time::timeout_at(bound, answer(&runtime, &project, call)).await;
+            let reply = match answered {
                 Ok(Ok(reply)) => reply,
                 Ok(Err(error)) => refusal(&error),
+                Err(_) if writes => refusal(&failure("changes_outcome_unknown")),
                 Err(_) => refusal(&failure("ide_request_timeout")),
-            })
+            };
+            (Some(reply), writes)
         }
     };
     if let Some(reply) = reply {
         let reply = match runtime.ide_grants().admit(&packet) {
-            Ok(_) => reply,
-            Err(error) => refusal(&error),
+            Err(error) if !wrote => refusal(&error),
+            _ => reply,
         };
         let _ = write(&mut stream, &reply).await;
     }
@@ -553,21 +641,62 @@ async fn answer(
             version,
             approve,
         } => extensions::decide(runtime, project, id, version, approve).await?,
+        IdeCall::Memories { after } => memory::memories(runtime, project, after).await?,
+        IdeCall::MemoryDecide {
+            id,
+            revision,
+            decision,
+        } => {
+            let decide = memory::Decide {
+                id,
+                revision,
+                decision,
+            };
+            return memory::decide(runtime, project, &decide).await;
+        }
+        IdeCall::Agents {} => agents::listed(runtime, project).await?,
+        IdeCall::AgentMessage { agent, text } => {
+            agents::sent(runtime, project, agent, text).await?
+        }
+        IdeCall::OwnerEdit { agent, path } => {
+            owner_edit::answer(runtime, project, agent, path).await?
+        }
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }
-        | IdeCall::Comment { .. }
-        | IdeCall::OwnerEdit { .. }
-        | IdeCall::Memories {}
-        | IdeCall::MemoryDecide { .. }
-        | IdeCall::Agents {}
-        | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
+        | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
+        IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
     Ok(IdeReply::Ok { data })
+}
+
+/// Answers a Changes call or a diff comment where the engine lands change sets; elsewhere
+/// it is unavailable. Inputs: the owner runtime, the project and the call. Output: the
+/// reply data.
+async fn change_call(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    call: IdeCall,
+) -> Result<serde_json::Value, EngineError> {
+    #[cfg(unix)]
+    {
+        let root = runtime.ide()?.root;
+        match call {
+            IdeCall::Comment { .. } => {
+                comments::answer(root, runtime.terminal().ok(), project.clone(), call).await
+            }
+            call => changes::answer(root, project.clone(), call).await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (runtime, project, call);
+        Err(failure("ide_request_unavailable"))
+    }
 }
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
@@ -749,7 +878,10 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
     Ok(())
 }
 
+#[cfg(unix)]
+mod changes;
+#[cfg(unix)]
+mod comments;
 mod extensions;
-
 #[cfg(all(test, unix))]
 mod tests;

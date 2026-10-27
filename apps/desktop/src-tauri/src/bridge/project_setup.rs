@@ -265,6 +265,19 @@ impl NativeBridge {
         Ok(entries.into_iter().map(MemoryItem::from).collect())
     }
 
+    /// Lists the memories the project's IDE asked the owner to approve, still waiting at the
+    /// asked version. The desktop draws the confirm, which the IDE cannot click, and approves
+    /// through `review_memory` with Keep. Takes the project id. Returns the memories.
+    pub async fn ide_asks(&self, id: &str) -> Result<Vec<MemoryItem>, BridgeError> {
+        let project_id = project(id)?;
+        let entries = self
+            .reader()?
+            .ide_asks(project_id)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        Ok(entries.into_iter().map(MemoryItem::from).collect())
+    }
+
     /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.
     /// Takes the project id, memory id, the version shown, the decision and the client generation.
     /// Returns the actual commit receipt; a stale version is a plain rejection.

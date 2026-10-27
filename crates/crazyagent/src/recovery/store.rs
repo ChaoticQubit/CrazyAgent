@@ -1,4 +1,7 @@
-use super::{ASKED_BYTES_MAX, Interrupted, LastTurn, RUNS_PER_PROJECT_MAX, unavailable};
+use super::{
+    ASKED_BYTES_MAX, Interrupted, LastTurn, REASON_BYTES_MAX, RUNS_PER_PROJECT_MAX, RunState,
+    unavailable,
+};
 use crate::engine::EngineError;
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::terminal_session::{PaneRecord, RecordSource};
@@ -26,14 +29,19 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS recovery_runs (
     cwd TEXT,
     record_file TEXT,
     paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1)),
-    state TEXT NOT NULL CHECK(state IN ('stopped','interrupted')),
-    recorded_ms INTEGER
+    state TEXT NOT NULL CHECK(state IN ('stopped','interrupted','resuming','resumed','failed')),
+    recorded_ms INTEGER,
+    reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS recovery_runs_once ON recovery_runs(agent, at_ms);
-CREATE INDEX IF NOT EXISTS recovery_runs_state ON recovery_runs(state, project, id);";
+CREATE INDEX IF NOT EXISTS recovery_runs_state ON recovery_runs(state, project, id);
+CREATE INDEX IF NOT EXISTS recovery_runs_agent ON recovery_runs(agent, state, id);
+CREATE TABLE IF NOT EXISTS recovery_sessions (
+    agent INTEGER PRIMARY KEY,
+    record TEXT NOT NULL
+);";
 
-const COLUMNS: &str =
-    "id,agent,project,kind,harness,at_ms,turn,task,message,asked,record,cwd,record_file,paused";
+const COLUMNS: &str = "id,agent,project,kind,harness,at_ms,turn,task,message,asked,record,cwd,record_file,paused,state,reason";
 
 /// One team agent in a turn as the engine stops: its row, the prompt of the task it ran,
 /// the owner message a master answered and its stored pane record.
@@ -68,6 +76,8 @@ struct Stored {
     cwd: Option<String>,
     record_file: Option<String>,
     paused: bool,
+    state: String,
+    reason: Option<String>,
 }
 
 fn storage(_: rusqlite::Error) -> EngineError {
@@ -134,7 +144,8 @@ fn noted(row: &Row<'_>) -> rusqlite::Result<Noted> {
 
 /// Stores one `stopped` run for every team agent marked in a turn, keyed by the agent and
 /// the time it was last seen running, so noting the same stop twice keeps one run. The
-/// run's folder is its pane's working folder, else the agent's worktree.
+/// run's session is its pane record, else the record of the turn's own harness session;
+/// its folder is that session's working folder, else the agent's worktree.
 /// Inputs: the team runtime's connection and the stop time, none after a crash.
 /// Output: done, or `recovery_unavailable`.
 pub(super) fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), EngineError> {
@@ -143,12 +154,13 @@ pub(super) fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), En
         let mut statement = db
             .prepare(
                 "SELECT a.id,a.project,a.role,a.harness,a.heartbeat_ms,a.turns,a.task,a.worktree,
-                        t.prompt,m.id,m.text,p.record
+                        t.prompt,m.id,m.text,COALESCE(p.record,s.record)
                  FROM team_agents a
                  LEFT JOIN team_tasks t ON t.id=a.task
                  LEFT JOIN team_messages m ON a.role='master' AND m.id=(
                      SELECT MAX(id) FROM team_messages WHERE project=a.project AND state='sent')
                  LEFT JOIN team_panes p ON p.agent=a.id
+                 LEFT JOIN recovery_sessions s ON s.agent=a.id
                  WHERE a.status='working' AND a.role IN ('master','sub')
                  ORDER BY a.id LIMIT ?1",
             )
@@ -198,7 +210,8 @@ pub(super) fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), En
 /// Settles every `stopped` run: dropped when its agent runs again, as an agent the team
 /// runtime took over in its live pane does, else recorded `interrupted` with the session
 /// record file its pane names and whether its project's team is paused now. Keeps the
-/// newest `RUNS_PER_PROJECT_MAX` interrupted runs of each project.
+/// newest `RUNS_PER_PROJECT_MAX` resumed runs of each project; a run still open or failed
+/// is kept until it resumes, since it holds its task or message back.
 /// Input: the engine database with the team tables. Output: done.
 pub(super) fn settle(db: &Connection) -> Result<(), EngineError> {
     let waiting: Vec<(i64, Option<String>)> = {
@@ -245,7 +258,7 @@ pub(super) fn settle(db: &Connection) -> Result<(), EngineError> {
         "DELETE FROM recovery_runs WHERE id IN (
              SELECT id FROM (
                  SELECT id, ROW_NUMBER() OVER (PARTITION BY project ORDER BY id DESC) AS newer
-                 FROM recovery_runs WHERE state='interrupted')
+                 FROM recovery_runs WHERE state='resumed')
              WHERE newer > ?1)",
         [i64::try_from(RUNS_PER_PROJECT_MAX).map_err(|_| unavailable())?],
     )
@@ -269,6 +282,8 @@ fn stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
         cwd: row.get(11)?,
         record_file: row.get(12)?,
         paused: row.get(13)?,
+        state: row.get(14)?,
+        reason: row.get(15)?,
     })
 }
 
@@ -282,7 +297,8 @@ fn absolute(text: Option<String>) -> Result<Option<PathBuf>, EngineError> {
 }
 
 /// Reads one stored interrupted run. Input: its columns. Output: the run, or
-/// `recovery_record_invalid` for a project, kind, path or pane record the store never writes.
+/// `recovery_record_invalid` for a project, kind, state, path or pane record the store
+/// never writes.
 fn decode(stored: Stored) -> Result<Interrupted, EngineError> {
     let kind = match stored.kind.as_str() {
         "master" => AgentRole::Master,
@@ -310,31 +326,142 @@ fn decode(stored: Stored) -> Result<Interrupted, EngineError> {
         cwd: absolute(stored.cwd)?,
         record_file: absolute(stored.record_file)?,
         paused: stored.paused,
+        state: RunState::parse(&stored.state).ok_or_else(invalid)?,
+        reason: stored.reason,
     })
 }
 
-/// Reads the interrupted runs not yet handled, oldest first, of one project or of all.
-/// Inputs: the store, the project or none, and the most runs to read.
-/// Output: the runs, or a plain code.
-pub(super) fn interrupted(
+fn read(
     db: &Connection,
-    project: Option<&ProjectId>,
-    max: usize,
+    sql: &str,
+    values: impl rusqlite::Params,
 ) -> Result<Vec<Interrupted>, EngineError> {
-    let limit = i64::try_from(max).map_err(|_| unavailable())?;
     let rows: Vec<Stored> = {
-        let mut statement = db
-            .prepare(&format!(
-                "SELECT {COLUMNS} FROM recovery_runs
-                 WHERE state='interrupted' AND (?1 IS NULL OR project=?1)
-                 ORDER BY id LIMIT ?2"
-            ))
-            .map_err(storage)?;
+        let mut statement = db.prepare(sql).map_err(storage)?;
         statement
-            .query_map(params![project.map(ProjectId::as_str), limit], stored)
+            .query_map(values, stored)
             .map_err(storage)?
             .collect::<Result<_, _>>()
             .map_err(storage)?
     };
     rows.into_iter().map(decode).collect()
+}
+
+/// Reads the runs in the given resume states, oldest first, of one project or of all.
+/// Inputs: the store, the project or none, the states and the most runs to read.
+/// Output: the runs, or a plain code.
+pub(super) fn runs(
+    db: &Connection,
+    project: Option<&ProjectId>,
+    states: &[RunState],
+    max: usize,
+) -> Result<Vec<Interrupted>, EngineError> {
+    assert!(!states.is_empty() && states.len() <= 4);
+    let limit = i64::try_from(max).map_err(|_| unavailable())?;
+    let names: Vec<&str> = states.iter().map(|state| state.name()).collect();
+    read(
+        db,
+        &format!(
+            "SELECT {COLUMNS} FROM recovery_runs
+             WHERE state IN ('{}') AND (?1 IS NULL OR project=?1)
+             ORDER BY id LIMIT ?2",
+            names.join("','")
+        ),
+        params![project.map(ProjectId::as_str), limit],
+    )
+}
+
+/// Reads a project's newest settled runs in every state, oldest first.
+/// Inputs: the store, the project and the most runs to read. Output: the runs.
+pub(super) fn newest(
+    db: &Connection,
+    project: &ProjectId,
+    max: usize,
+) -> Result<Vec<Interrupted>, EngineError> {
+    let limit = i64::try_from(max).map_err(|_| unavailable())?;
+    read(
+        db,
+        &format!(
+            "SELECT {COLUMNS} FROM (
+                 SELECT {COLUMNS} FROM recovery_runs WHERE project=?1 AND state<>'stopped'
+                 ORDER BY id DESC LIMIT ?2)
+             ORDER BY id"
+        ),
+        params![project.as_str(), limit],
+    )
+}
+
+/// Reads the newest run of one agent whose resume started and has not settled.
+/// Inputs: the store and the agent. Output: the run, or none.
+pub(super) fn resuming(db: &Connection, agent: i64) -> Result<Option<Interrupted>, EngineError> {
+    let mut found = read(
+        db,
+        &format!(
+            "SELECT {COLUMNS} FROM recovery_runs WHERE agent=?1 AND state='resuming'
+             ORDER BY id DESC LIMIT 1"
+        ),
+        [agent],
+    )?;
+    Ok(found.pop())
+}
+
+/// Moves a run between resume states, keeping a failure's reason bounded and clearing it
+/// otherwise. Inputs: the store, the run, its expected state, the new state and the reason.
+/// Output: whether the run was in the expected state.
+pub(super) fn mark(
+    db: &Connection,
+    run: i64,
+    from: RunState,
+    to: RunState,
+    reason: Option<&str>,
+) -> Result<bool, EngineError> {
+    assert_ne!(from, to);
+    assert_eq!(reason.is_some(), to == RunState::Failed);
+    let reason = reason.map(|reason| bound_text(reason, REASON_BYTES_MAX));
+    let changed = db
+        .execute(
+            "UPDATE recovery_runs SET state=?3, reason=?4 WHERE id=?1 AND state=?2",
+            params![run, from.name(), to.name(), reason],
+        )
+        .map_err(storage)?;
+    Ok(changed == 1)
+}
+
+/// Sets the agent's newest failed run waiting to resume again, without its reason.
+/// Inputs: the store and the agent. Output: whether a failed run was found.
+pub(super) fn retry(db: &Connection, agent: i64) -> Result<bool, EngineError> {
+    let changed = db
+        .execute(
+            "UPDATE recovery_runs SET state='interrupted', reason=NULL
+             WHERE id=(SELECT MAX(id) FROM recovery_runs WHERE agent=?1 AND state='failed')",
+            [agent],
+        )
+        .map_err(storage)?;
+    Ok(changed == 1)
+}
+
+/// Keeps the session record of the agent's running per-turn harness session.
+/// Inputs: the store, the agent and the record. Output: done.
+pub(super) fn remember(
+    db: &Connection,
+    agent: i64,
+    record: &PaneRecord,
+) -> Result<(), EngineError> {
+    let Some(text) = record.encode() else {
+        return Err(invalid());
+    };
+    db.execute(
+        "INSERT OR REPLACE INTO recovery_sessions(agent,record) VALUES (?1,?2)",
+        params![agent, text],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Drops the agent's kept per-turn session record. Inputs: the store and the agent.
+/// Output: done.
+pub(super) fn forget(db: &Connection, agent: i64) -> Result<(), EngineError> {
+    db.execute("DELETE FROM recovery_sessions WHERE agent=?1", [agent])
+        .map_err(storage)?;
+    Ok(())
 }

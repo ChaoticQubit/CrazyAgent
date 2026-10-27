@@ -1,8 +1,13 @@
-use super::{KnowledgeEntry, KnowledgeStatus, ReviewDecision, error, hash, live_entry, load_entry};
+use super::{
+    ActivityInput, CaptureCategory, KnowledgeEntry, KnowledgeRole, KnowledgeStatus,
+    NominationInput, Principal, ReviewDecision, error, hash, live_entry, load_entry,
+};
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
-use crate::protocol::{FRAME_BYTES_MAX, Outcome, ProjectId, RequestId};
+use crate::protocol::{Cursor, FRAME_BYTES_MAX, Outcome, ProjectId, RequestId, SessionId, TaskId};
+use crate::storage::versioned::{LastWriter, Stale};
+use crate::terminal::AgentId;
 #[cfg(unix)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -17,6 +22,12 @@ pub const SCOPE_ITEMS_MAX: usize = 200;
 pub const LIBRARY_ITEMS_MAX: usize = 2000;
 pub const LAUNCH_ITEMS_MAX: usize = 24;
 pub const LAUNCH_BYTES_MAX: usize = 12288;
+/// The most memories one agent read lists.
+pub const AGENT_MEMORIES_MAX: usize = 64;
+/// The most suggestions agents keep waiting for the owner's review in one project.
+pub const AGENT_SUGGESTIONS_MAX: usize = 16;
+/// The most versions agents write of one suggestion before the owner reviews it.
+pub const AGENT_VERSIONS_MAX: u64 = 8;
 const TEXT_BYTES_MAX: usize = 4096;
 const PAGE_BYTES_MAX: usize = FRAME_BYTES_MAX - 8192;
 const RENDER_HEADER_BYTES_MAX: usize = 1024;
@@ -173,6 +184,27 @@ pub struct ApprovedMemory {
     pub scope: ApprovedScope,
     pub kind: ApprovedKind,
     pub text: String,
+}
+
+/// One project memory as an agent reads it: the id and version a change names, its text
+/// and whether the owner wrote or reviewed it, which agents never change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMemory {
+    pub id: RequestId,
+    pub version: u64,
+    pub text: String,
+    pub reviewed: bool,
+}
+
+/// What one agent memory write became: saved as a suggestion at a version, stale with the
+/// version it named, the current one and its writer, refused because the owner wrote or
+/// reviewed the memory, or refused with a plain code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentWrite {
+    Saved { id: RequestId, version: u64 },
+    Stale { id: RequestId, stale: Stale },
+    Reviewed { id: RequestId, version: u64 },
+    Refused { code: String },
 }
 
 /// The bounded set of approved memories for one project launch.
@@ -541,6 +573,227 @@ fn remember(
     assert_eq!(kept.status, KnowledgeStatus::Confirmed);
     assert!(kept.human_reviewed);
     Ok(Outcome::Applied)
+}
+
+/// Lists the memories an agent of one project reads, in id order, at most
+/// `AGENT_MEMORIES_MAX`: suggested and owner-reviewed memories whose sources are still
+/// there, each with the version a change names. Input: a transaction on `engine.db` and the
+/// project. Output: the memories.
+pub(crate) fn agent_memories(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<Vec<AgentMemory>, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT e.body FROM knowledge_entries e JOIN knowledge_heads h
+             ON e.id=h.id AND e.version=h.version WHERE h.project=?1 ORDER BY h.id",
+        )
+        .map_err(error)?;
+    let mut rows = statement.query([project.as_str()]).map_err(error)?;
+    let mut memories = Vec::new();
+    while let Some(row) = rows.next().map_err(error)? {
+        if memories.len() == AGENT_MEMORIES_MAX {
+            break;
+        }
+        let entry: KnowledgeEntry =
+            serde_json::from_str(&row.get::<_, String>(0).map_err(error)?).map_err(error)?;
+        entry.assert_consistent();
+        assert_eq!(&entry.project_id, project);
+        if !live_entry(tx, &entry)? {
+            continue;
+        }
+        memories.push(AgentMemory {
+            reviewed: owner_holds(&entry),
+            id: entry.id,
+            version: entry.version,
+            text: entry.text,
+        });
+    }
+    assert!(memories.len() <= AGENT_MEMORIES_MAX);
+    Ok(memories)
+}
+
+/// Saves one agent's memory as a suggestion the owner keeps or rejects: a new memory, or
+/// the next version of an agent's suggestion when the write names the version it read. A
+/// write naming any other version is stale and changes nothing; a memory the owner wrote or
+/// reviewed is never changed by an agent. The caller commits only a saved write. Inputs: an
+/// immediate transaction on `engine.db`, the config, the project, the agent, the memory and
+/// version read (none for a new memory), the text and the engine revision. Output: what the
+/// write became.
+pub(crate) fn agent_remember(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project: &ProjectId,
+    agent: &AgentId,
+    read: Option<(&RequestId, u64)>,
+    text: &str,
+    revision: u64,
+) -> Result<AgentWrite, EngineError> {
+    let text = text.trim();
+    if text.len() > NOTE_BYTES_MAX
+        || !super::memory_text_valid(text, config.settings.knowledge.text_bytes_max)
+    {
+        return Ok(AgentWrite::Refused {
+            code: "memory_text_invalid".into(),
+        });
+    }
+    let session = SessionId::new(agent.as_str()).map_err(error)?;
+    let Some((id, version)) = read else {
+        return suggest(tx, config, project, agent, session, text, revision);
+    };
+    let Some(entry) = load_entry(tx, id)?.filter(|entry| &entry.project_id == project) else {
+        return Ok(AgentWrite::Refused {
+            code: "memory_missing".into(),
+        });
+    };
+    if entry.version != version {
+        return Ok(AgentWrite::Stale {
+            id: id.clone(),
+            stale: Stale {
+                version,
+                current: entry.version,
+                writer: entry_writer(&entry),
+            },
+        });
+    }
+    if owner_holds(&entry) {
+        return Ok(AgentWrite::Reviewed {
+            id: id.clone(),
+            version,
+        });
+    }
+    if !live_entry(tx, &entry)? {
+        return Ok(AgentWrite::Refused {
+            code: "memory_source_removed".into(),
+        });
+    }
+    if version >= AGENT_VERSIONS_MAX {
+        return Ok(AgentWrite::Refused {
+            code: "memory_versions_full".into(),
+        });
+    }
+    let mut next = entry;
+    next.version = version + 1;
+    next.text = text.to_owned();
+    next.content_hash = hash(text.as_bytes());
+    next.curator_session = session;
+    next.revision = Cursor::new(revision + 1);
+    super::save_entry(tx, &config.settings.knowledge, &next)?;
+    assert_eq!(load_entry(tx, id)?.as_ref(), Some(&next));
+    Ok(AgentWrite::Saved {
+        id: id.clone(),
+        version: next.version,
+    })
+}
+
+fn suggest(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project: &ProjectId,
+    agent: &AgentId,
+    session: SessionId,
+    text: &str,
+    revision: u64,
+) -> Result<AgentWrite, EngineError> {
+    let digest = hash(format!("{}\n{}\n{text}", project.as_str(), agent.as_str()).as_bytes());
+    let id = RequestId::new(format!("agent-{}", &digest[..32])).map_err(error)?;
+    let taken: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_heads WHERE id=?1)
+             OR EXISTS(SELECT 1 FROM knowledge_activity WHERE id=?1)
+             OR EXISTS(SELECT 1 FROM knowledge_nominations WHERE id=?1)",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if taken {
+        return Ok(AgentWrite::Refused {
+            code: "memory_duplicate".into(),
+        });
+    }
+    if pending_suggestions(tx, project)? >= AGENT_SUGGESTIONS_MAX {
+        return Ok(AgentWrite::Refused {
+            code: "memory_suggestions_full".into(),
+        });
+    }
+    let principal = Principal {
+        id: RequestId::new(format!("agent-{}", agent.as_str())).map_err(error)?,
+        project_id: project.clone(),
+        task_id: TaskId::new(agent.as_str()).map_err(error)?,
+        session_id: session,
+        role: KnowledgeRole::Contributor,
+    };
+    let activity = ActivityInput {
+        id: id.clone(),
+        source_id: id.clone(),
+        category: CaptureCategory::AssistantMessage,
+        text: text.into(),
+        gaps: Vec::new(),
+    };
+    let nomination = NominationInput {
+        id: id.clone(),
+        activity_ids: vec![id.clone()],
+        text: text.into(),
+    };
+    let captured = super::capture(tx, config, &principal, &activity)?;
+    let nominated = match captured {
+        Outcome::Applied => super::nominate(tx, config, &principal, &nomination)?,
+        refused => refused,
+    };
+    let published = match nominated {
+        Outcome::Applied => super::publish(tx, config, &principal, &id, &id, text, revision)?,
+        refused => refused,
+    };
+    if let Outcome::Rejected { code } = &published {
+        return Ok(AgentWrite::Refused { code: code.clone() });
+    }
+    assert_eq!(published, Outcome::Applied);
+    let entry = load_entry(tx, &id)?.ok_or_else(|| error("memory_insert_lost"))?;
+    assert_eq!((entry.version, entry.text.as_str()), (1, text));
+    assert_eq!(entry_writer(&entry), LastWriter::Agent(agent.clone()));
+    Ok(AgentWrite::Saved { id, version: 1 })
+}
+
+/// Counts the agent suggestions of one project still waiting for the owner's review,
+/// stopping at `AGENT_SUGGESTIONS_MAX`. Input: a transaction on `engine.db` and the project.
+/// Output: the count.
+fn pending_suggestions(tx: &Transaction<'_>, project: &ProjectId) -> Result<usize, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT e.body FROM knowledge_entries e JOIN knowledge_heads h
+             ON e.id=h.id AND e.version=h.version WHERE h.project=?1 ORDER BY h.id",
+        )
+        .map_err(error)?;
+    let mut rows = statement.query([project.as_str()]).map_err(error)?;
+    let mut pending = 0;
+    while pending < AGENT_SUGGESTIONS_MAX {
+        let Some(row) = rows.next().map_err(error)? else {
+            break;
+        };
+        let entry: KnowledgeEntry =
+            serde_json::from_str(&row.get::<_, String>(0).map_err(error)?).map_err(error)?;
+        entry.assert_consistent();
+        assert_eq!(&entry.project_id, project);
+        if !owner_holds(&entry) {
+            pending += 1;
+        }
+    }
+    assert!(pending <= AGENT_SUGGESTIONS_MAX);
+    Ok(pending)
+}
+
+fn entry_writer(entry: &KnowledgeEntry) -> LastWriter {
+    if entry.human_reviewed {
+        return LastWriter::Owner;
+    }
+    AgentId::new(entry.curator_session.as_str())
+        .ok()
+        .filter(|agent| agent.team_agent().is_some())
+        .map_or(LastWriter::Owner, LastWriter::Agent)
+}
+
+fn owner_holds(entry: &KnowledgeEntry) -> bool {
+    entry.status != KnowledgeStatus::Provisional || entry_writer(entry) == LastWriter::Owner
 }
 
 fn project_exists(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, EngineError> {

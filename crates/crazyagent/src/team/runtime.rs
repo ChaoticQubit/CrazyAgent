@@ -296,6 +296,10 @@ struct Worker {
 /// Reads the live model access on every tick; none means no pool is configured.
 pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
 
+/// Reads the engine settings when a live master's memory call needs them; none means the
+/// settings could not be read.
+pub type ConfigSource = Box<dyn Fn() -> Option<crate::config::EffectiveConfig> + Send>;
+
 /// Runs each project's team: the master on the team plan's master harness and
 /// sub-agents on its sub-harnesses, each in the project sandbox, sub-agents in
 /// their own git worktrees. The engine admits every task; agents only propose.
@@ -305,6 +309,7 @@ pub struct TeamRuntime {
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
+    config: Option<ConfigSource>,
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
@@ -401,6 +406,7 @@ impl TeamRuntime {
                  COMMIT;"
             ))
             .map_err(error)?;
+        delivery::settle(&connection)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
@@ -408,12 +414,14 @@ impl TeamRuntime {
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| EngineError("team_state_not_canonical".into()))?;
+        spawn_ledger::recover(&connection, &root);
         Ok(Self {
             connection,
             root,
             state: state.to_path_buf(),
             executables,
             access,
+            config: None,
             limits,
             workers: BTreeMap::new(),
             custody,
@@ -433,6 +441,14 @@ impl TeamRuntime {
     /// Takes the register of the same engine database. Returns the runtime.
     pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
         self.agents = Some(agents);
+        self
+    }
+
+    /// Gives a live master's `memories` and `remember` tools the engine settings, read only
+    /// when such a call arrives. Takes the source. Returns the runtime; without it those
+    /// calls answer that memories are not available.
+    pub fn with_config(mut self, config: ConfigSource) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -458,6 +474,7 @@ impl TeamRuntime {
             .into_iter()
             .filter_map(|agent| agent.team_agent().map(|id| (id, agent)))
             .collect();
+        spawn_ledger::recover_panes(&self.root, &records, &panes);
         for (id, agent) in panes {
             let refusal = match records.get(&id) {
                 Some(record) => self.adopt(&host, id, record, &access)?.err(),
@@ -1074,6 +1091,7 @@ impl TeamRuntime {
         self.retire_rejected(project, access);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
+        self.resume_interrupted(&stored, access, &paused)?;
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.feed_master(&stored, access, &paused)?;
@@ -1433,7 +1451,10 @@ impl TeamRuntime {
         let pending: Option<(i64, String, String)> = self
             .connection
             .query_row(
-                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' ORDER BY id LIMIT 1",
+                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' AND id NOT IN (
+                     SELECT message FROM recovery_runs WHERE message IS NOT NULL
+                     AND state IN ('interrupted','resuming','failed'))
+                 ORDER BY id LIMIT 1",
                 [project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -1525,12 +1546,15 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
+            return Ok(());
+        }
         if team_tool {
             tool::clear(&self.tool_record(id));
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
-            return Ok(());
+            return delivery::ended(&self.connection, Some(Busy::Message(message)), false);
         }
         worker.busy = Some(Busy::Message(message));
         self.connection
@@ -1805,6 +1829,7 @@ impl TeamRuntime {
             landing: &self.root,
             events: self.events.as_ref(),
             host: self.terminal.as_deref(),
+            config: self.config.as_ref(),
         };
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
     }
@@ -1826,7 +1851,10 @@ impl TeamRuntime {
         let pending: Option<(i64, String, String)> = self
             .connection
             .query_row(
-                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' ORDER BY id LIMIT 1",
+                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' AND id NOT IN (
+                     SELECT message FROM recovery_runs WHERE message IS NOT NULL
+                     AND state IN ('interrupted','resuming','failed'))
+                 ORDER BY id LIMIT 1",
                 [project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -1838,6 +1866,9 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let (typed, noted) = live_input(&heard, &author, &text);
         let newest = newest.filter(|_| noted);
+        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
+            return Ok(());
+        }
         let state = match super::master::master_input(
             &self.connection,
             host.as_ref(),
@@ -1855,6 +1886,11 @@ impl TeamRuntime {
                 params![message, state],
             )
             .map_err(error)?;
+        delivery::ended(
+            &self.connection,
+            Some(Busy::Message(message)),
+            state == "answered",
+        )?;
         if state == "failed" {
             return self.note(
                 project,
@@ -2018,7 +2054,10 @@ impl TeamRuntime {
                 .prepare(
                     "SELECT t.id,t.harness,t.prompt,p.agent FROM team_tasks t
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
-                     WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
+                     WHERE t.project=?1 AND t.status='queued' AND t.id NOT IN (
+                         SELECT task FROM recovery_runs WHERE task IS NOT NULL
+                         AND state IN ('interrupted','resuming','failed'))
+                     ORDER BY t.id LIMIT 64",
                 )
                 .map_err(error)?;
             statement
@@ -2151,6 +2190,9 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            if !delivery::intend(&self.connection, Busy::Task(task), agent, &prompt, None)? {
+                continue;
+            }
             let prompt = format!(
                 "You are a sub-agent of the project \"{}\". Work only inside {}.\nYour task: {}\nWhen you finish, reply with a short summary of what you did.",
                 stored.name,
@@ -2161,6 +2203,7 @@ impl TeamRuntime {
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
+                delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
                 continue;
             }
             worker.busy = Some(Busy::Task(task));
@@ -2358,13 +2401,34 @@ impl TeamRuntime {
         self.launch(stored, id, role, harness, tools, account, None, Some(kept))
     }
 
+    /// Prepares and starts the agent of one `team_agents` row as `start_agent` does, then
+    /// settles in the action ledger what the start left pending: its worktree intent, and
+    /// its harness start when no worker runs it. Takes and returns as `start_agent`.
+    #[allow(clippy::too_many_arguments)]
+    fn launch(
+        &mut self,
+        stored: &StoredSetup,
+        id: i64,
+        role: AgentRole,
+        harness: &str,
+        tools: bool,
+        account: &TeamAccount,
+        again: Option<&HostedRestart>,
+        kept: Option<[String; 3]>,
+    ) -> Result<Result<i64, String>, EngineError> {
+        let launched = self.start_agent(stored, id, role, harness, tools, account, again, kept);
+        let running = self.workers.contains_key(&id);
+        spawn_ledger::settle(&self.connection, &self.root, id, running);
+        launched
+    }
+
     /// Prepares and starts the agent of one `team_agents` row: a new agent in a new
     /// worktree, or with `kept` a revived one in the worktree recorded for it. Takes the
     /// setup, the row id, role, harness, tools switch, account, the register restart if any
     /// and the kept worktree. Returns the id, or the plain reason it failed, which the row
     /// then records.
     #[allow(clippy::too_many_arguments)]
-    fn launch(
+    fn start_agent(
         &mut self,
         stored: &StoredSetup,
         id: i64,
@@ -2385,7 +2449,7 @@ impl TeamRuntime {
             Ok((root, plan, mode)) => (
                 root,
                 Plan {
-                    resume: resume.filter(|_| plan.live),
+                    resume: resume.filter(|_| plan.live || plan.pane.is_some()),
                     ..plan
                 },
                 mode,
@@ -2462,7 +2526,9 @@ impl TeamRuntime {
                 return Ok(Err(problem));
             }
         }
-        let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
+        let hosted = match spawn_ledger::begin_spawn(&self.root, id, plan.pane.is_some())
+            .and_then(|()| self.host(stored, id, role, &plan.harness, &account.connection, again))
+        {
             Ok(hosted) => hosted,
             Err(problem) => {
                 self.connection
@@ -2666,6 +2732,7 @@ impl TeamRuntime {
             .join("worktrees")
             .join(format!("agent-{id}"));
         if !adopt {
+            spawn_ledger::begin_worktree(&self.root, id, &root, &worktree)?;
             add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
                 with_code("the agent worktree could not be added", Some(run_code(&e)))
             })?;
@@ -2893,9 +2960,15 @@ impl TeamRuntime {
     }
 
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
+        self.follow_resume(id, &report)?;
         match report {
             Report::Ready { group, pane } => {
-                if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
+                let per_turn = self.workers[&id].managed && !self.workers[&id].live;
+                if let Some(record) = pane
+                    .as_ref()
+                    .filter(|_| !per_turn)
+                    .and_then(PaneRecord::encode)
+                {
                     self.connection
                         .execute(
                             "INSERT OR REPLACE INTO team_panes(agent,record) VALUES (?1,?2)",
@@ -2903,6 +2976,7 @@ impl TeamRuntime {
                         )
                         .map_err(error)?;
                 }
+                spawn_ledger::spawned(&self.root, id, crate::ledger::Outcome::Done);
                 let busy = self.workers[&id].busy;
                 if let Some(hosted) = &self.workers[&id].hosted {
                     hosted.started(group);
@@ -3016,6 +3090,7 @@ impl TeamRuntime {
                     }
                     None => {}
                 }
+                delivery::ended(&self.connection, busy, true)?;
                 self.land(id, &project, busy, end)?;
                 if !matches!(
                     end,
@@ -3085,6 +3160,7 @@ impl TeamRuntime {
                 Ok(false)
             }
             Report::Ended { problem } => {
+                spawn_ledger::spawned(&self.root, id, crate::ledger::Outcome::Failed);
                 let mut worker = self.workers.remove(&id).expect("worker exists");
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
@@ -3115,6 +3191,7 @@ impl TeamRuntime {
                     )?,
                     None => {}
                 }
+                delivery::ended(&self.connection, worker.busy, true)?;
                 self.land(id, &worker.project, worker.busy, TurnEnd::Closed)?;
                 if worker.live
                     && let Some(started) = worker.turn_started.take()
@@ -3721,10 +3798,13 @@ fn work(
     let adopted_live = matches!(&launch, Launch::Adopt(adoption) if adoption.live);
     let started = match launch {
         Launch::Fresh(plan, mode) => match *mode {
-            Mode::Kept { account, context } => {
-                AgentSession::start(plan.request(account), context, plan.pane.clone())
-                    .map_err(|problem| with_code("The agent could not start", Some(&problem.0)))
-            }
+            Mode::Kept { account, context } => AgentSession::start_resuming(
+                plan.request(account),
+                context,
+                plan.pane.clone(),
+                plan.resume.as_ref(),
+            )
+            .map_err(|problem| with_code("The agent could not start", Some(&problem.0))),
             Mode::PerTurn { home } => {
                 let problem = per_turn(
                     &plan, &home, &orders, &reports, &cancel, &interrupt, turn_time,
@@ -4089,6 +4169,7 @@ fn per_turn(
     interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
+    let mut resume = plan.resume.as_ref();
     while let Next::Turn(prompt, grant) = next_turn(orders, cancel, None) {
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
@@ -4116,7 +4197,9 @@ fn per_turn(
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
-        let mut session = match AgentSession::start(request, context, plan.pane.clone()) {
+        let started =
+            AgentSession::start_resuming(request, context, plan.pane.clone(), resume.take());
+        let mut session = match started {
             Ok(session) => session,
             Err(problem) => {
                 let _ = reports.send(Report::Finished {
@@ -4129,7 +4212,7 @@ fn per_turn(
         };
         let _ = reports.send(Report::Ready {
             group: session.process_group(),
-            pane: None,
+            pane: session.pane_record(),
         });
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let stopped = session.stop();
@@ -4593,6 +4676,9 @@ pub fn start_for_engine(
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
     let (global, project) = (global.to_path_buf(), project.to_path_buf());
+    let (settings_global, settings_project) = (global.clone(), project.clone());
+    let config: ConfigSource =
+        Box::new(move || crate::config::resolve_config(&settings_global, &settings_project).ok());
     let access: AccessSource = Box::new(move || {
         crate::config::resolve_config(&global, &project)
             .ok()?
@@ -4607,7 +4693,8 @@ pub fn start_for_engine(
         TeamLimits::default(),
     )
     .map_err(|e| e.0)?
-    .with_events(super::master::EVENTS);
+    .with_events(super::master::EVENTS)
+    .with_config(config);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,
@@ -4696,6 +4783,15 @@ pub fn agents(
         .collect::<Result<_, _>>()
         .map_err(error)
 }
+
+#[path = "runtime/delivery.rs"]
+mod delivery;
+
+#[path = "runtime/resume.rs"]
+mod resume;
+
+#[path = "runtime/spawn_ledger.rs"]
+mod spawn_ledger;
 
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]

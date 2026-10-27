@@ -36,6 +36,7 @@ mod plugins;
 mod process;
 pub mod project_setup;
 mod queue;
+mod recovery;
 mod scheduling;
 mod team;
 pub mod terminal;
