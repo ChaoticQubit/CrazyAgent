@@ -1,10 +1,12 @@
 use crate::engine::EngineError;
-use crate::master_session::{MasterSessionPhase, MasterSessionView};
+use crate::master_session::MasterSessionPhase;
 use crate::protocol::{Cursor, ProjectId, SessionId};
 use crate::team::AgentRole;
+use crate::team::master::SessionConversation;
 use crate::team::names;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// The most sessions one list read returns, newest activity first.
 pub const SESSIONS_LISTED_MAX: usize = 50;
@@ -48,18 +50,31 @@ pub struct MasterSessionSummary {
     pub results_waiting: u64,
 }
 
-/// How the live master continues a session it resumes. `Fresh` starts a new harness
-/// conversation whose first input is `seed`, the engine-built transcript summary and
-/// state of the session, and shows `note` in the master view so history is never
-/// dropped silently.
+/// How the live master runs a project's live session. `Resume` continues the harness
+/// conversation the session kept, by its id, in the home of `agent` where `record` keeps
+/// it. `Fresh` starts a new harness conversation whose first input is `seed`, the
+/// engine-built summary of the session's earlier turns and its state, and shows `note` in
+/// the master view so history is never dropped silently. `New` starts a session that has
+/// no earlier turns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResumePlan {
-    Fresh { seed: String, note: String },
+    Resume {
+        agent: i64,
+        conversation: String,
+        record: PathBuf,
+    },
+    Fresh {
+        seed: String,
+        note: String,
+    },
+    New,
 }
 
 /// The note a resumed session shows when its harness conversation starts fresh.
 pub const FRESH_NOTE: &str = "This session continues in a new harness conversation, started with a summary of its earlier turns.";
+/// The note a resumed session shows when its earlier harness conversation can no longer be read.
+pub const LOST_NOTE: &str = "This session continues in a new harness conversation. Its earlier harness conversation could not be read, so only the session's state was passed on.";
 
 /// Creates the table of session wall-clock marks when the engine database opens.
 /// Takes the engine connection. Returns any SQLite failure.
@@ -487,11 +502,12 @@ fn listed(header: &str, lines: &[String]) -> String {
 
 /// Summarizes a session's own conversation for a fresh harness conversation: its owner
 /// messages and replies, oldest first, newest kept when the summary must be cut.
-/// Takes the connection and session. Returns the summary within `SUMMARY_BYTES_MAX`, or
-/// None when the session has no turns with text.
+/// Takes the connection, project and session. Returns the summary within
+/// `SUMMARY_BYTES_MAX`, or None when the session has no turns with text.
 pub fn transcript_summary(
     connection: &Connection,
-    session: &MasterSessionView,
+    project: &ProjectId,
+    session: &SessionId,
 ) -> Result<Option<String>, EngineError> {
     let mut statement = connection
         .prepare(
@@ -503,16 +519,13 @@ pub fn transcript_summary(
         )
         .map_err(error)?;
     let turns = statement
-        .query_map(
-            params![session.session_id.as_str(), session.project_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
+        .query_map(params![session.as_str(), project.as_str()], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
@@ -536,11 +549,22 @@ pub fn transcript_summary(
         }
         entries.push(entry);
     }
+    Ok(newest(
+        header,
+        "Summary of the newest turns of this session's conversation, oldest first:",
+        &entries,
+    ))
+}
+
+/// Keeps the newest entries of a summary that fit `SUMMARY_BYTES_MAX`, oldest first under
+/// `header`, or under `cut` when older entries had to go. Takes the two headers and the
+/// entries oldest first. Returns the summary, or None without entries.
+fn newest(header: &str, cut: &str, entries: &[String]) -> Option<String> {
     if entries.is_empty() {
-        return Ok(None);
+        return None;
     }
     let mut kept = Vec::new();
-    let mut used = header.len();
+    let mut used = header.len().max(cut.len());
     for entry in entries.iter().rev() {
         if used + entry.len() + 2 > SUMMARY_BYTES_MAX {
             break;
@@ -549,45 +573,132 @@ pub fn transcript_summary(
         kept.push(entry.as_str());
     }
     kept.reverse();
-    let mut text = String::from(header);
-    if kept.len() < entries.len() {
-        text = String::from(
-            "Summary of the newest turns of this session's conversation, oldest first:",
-        );
-    }
+    let mut text = String::from(if kept.len() < entries.len() {
+        cut
+    } else {
+        header
+    });
     for entry in kept {
         text.push_str("\n\n");
         text.push_str(entry);
     }
     let text = fit(text, SUMMARY_BYTES_MAX);
     assert!(text.len() <= SUMMARY_BYTES_MAX);
-    Ok(Some(text))
+    Some(text)
 }
 
-/// The engine hook the live master calls before it runs a session it resumed. Today it
-/// always starts a fresh harness conversation seeded with the session's transcript
-/// summary and state; the live master replaces this with a real harness resume.
-/// Takes the connection and the session. Returns the plan.
+/// Summarizes the harness conversation a session kept, read from its record: what was
+/// typed into the master and its replies, oldest first, newest kept when it must be cut.
+/// Takes the kept conversation. Returns the summary within `SUMMARY_BYTES_MAX`, or None
+/// when the record cannot be read or holds no messages.
+fn record_summary(kept: &SessionConversation) -> Option<String> {
+    let messages =
+        crate::harnesses::transcript::conversation_messages(&kept.harness, &kept.resume.record);
+    let entries: Vec<String> = messages
+        .iter()
+        .filter_map(|(speaker, text)| {
+            let said = flat(text, 600)?;
+            Some(match speaker {
+                crate::harnesses::transcript::Speaker::Input => format!("Typed to you: {said}"),
+                crate::harnesses::transcript::Speaker::Agent => format!("You: {said}"),
+            })
+        })
+        .collect();
+    newest(
+        "Your earlier harness conversation in this session, oldest first:",
+        "The newest part of your earlier harness conversation in this session, oldest first:",
+        &entries,
+    )
+}
+
+/// The engine hook the live master calls before it starts a project's live session. It
+/// continues the harness conversation the session kept when the master about to start
+/// can: the same harness and account, the session's master agent stopped with its own
+/// worktree, an id the harness resumes by and the record still a plain file. Otherwise
+/// the session starts as `fresh_harness` says. Takes the connection, project, session,
+/// the master's launch harness and the account connection. Returns the plan.
 pub fn resume_harness(
     connection: &Connection,
-    session: &MasterSessionView,
+    project: &ProjectId,
+    session: &SessionId,
+    harness: &str,
+    account: &str,
+) -> Result<ResumePlan, EngineError> {
+    let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
+    if let Some(kept) = &kept
+        && kept.harness == harness
+        && kept.connection == account
+        && crate::harnesses::interactive::resumable(&kept.resume.id)
+        && std::fs::symlink_metadata(&kept.resume.record).is_ok_and(|meta| meta.is_file())
+        && stopped_master(connection, project, kept.agent)?
+    {
+        return Ok(ResumePlan::Resume {
+            agent: kept.agent,
+            conversation: kept.resume.id.clone(),
+            record: kept.resume.record.clone(),
+        });
+    }
+    fresh_harness(connection, project, session, kept.as_ref())
+}
+
+/// How a session's master starts when its kept harness conversation cannot continue: a
+/// session with earlier turns starts a fresh harness conversation seeded with the summary
+/// of its engine turns, its kept harness conversation and its state, with a note saying
+/// so; a session without starts new. Takes the connection, project, session and the kept
+/// conversation. Returns `Fresh` or `New`.
+pub fn fresh_harness(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    kept: Option<&SessionConversation>,
 ) -> Result<ResumePlan, EngineError> {
     let mut parts = Vec::new();
-    if let Some(summary) = transcript_summary(connection, session)? {
+    if let Some(summary) = transcript_summary(connection, project, session)? {
         parts.push(summary);
     }
-    if let Some(state) = session_state(connection, &session.project_id, &session.session_id)? {
+    let read = kept.and_then(record_summary);
+    let lost = kept.is_some() && read.is_none();
+    parts.extend(read);
+    if parts.is_empty() && !lost {
+        return Ok(ResumePlan::New);
+    }
+    let note = if parts.is_empty() {
+        LOST_NOTE
+    } else {
+        FRESH_NOTE
+    };
+    if let Some(state) = session_state(connection, project, session)? {
         parts.push(state);
     }
     if parts.is_empty() {
-        parts.push(String::from("This session has no earlier turns."));
+        parts.push(String::from(
+            "This session's earlier conversation could not be read.",
+        ));
     }
     let seed = parts.join("\n\n");
-    assert!(seed.len() <= SUMMARY_BYTES_MAX + STATE_BYTES_MAX + 2);
+    assert!(seed.len() <= 2 * SUMMARY_BYTES_MAX + STATE_BYTES_MAX + 4);
     Ok(ResumePlan::Fresh {
         seed,
-        note: FRESH_NOTE.into(),
+        note: note.into(),
     })
+}
+
+/// Tells whether a team agent is a stopped master of the project with its worktree still
+/// recorded, so it can start again in the home that keeps its harness conversations.
+/// Takes the connection, project and agent. Returns the answer.
+fn stopped_master(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_agents a JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
+             WHERE a.id=?1 AND a.project=?2 AND a.role='master' AND a.status IN ('stopped','failed'))",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// The first line of a text with visible words, made one line by `flat`.

@@ -62,6 +62,14 @@ impl Drop for KeyFile {
     }
 }
 
+/// A harness conversation an agent continues: the id the harness resumes it by and the
+/// record the harness keeps it in, as a transcript reader named them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resume {
+    pub id: String,
+    pub record: PathBuf,
+}
+
 /// Writes a routed launch's relay token to the 0600 key file in its account home, the only
 /// place its harness reads it from, so the token is in no argument or variable of any agent
 /// process. Input: the request after [`route`]. Output: the file's guard, none for a
@@ -92,12 +100,28 @@ impl TerminalSession {
         request: LaunchRequest,
         context: Option<AgentContext>,
     ) -> Result<Self, LaunchError> {
+        Self::start_resuming(host, agent, request, context, None)
+    }
+
+    /// Starts an agent's interactive app as `start` does, continuing the harness
+    /// conversation `resume` names when given: the app resumes it by its id and the session
+    /// reads only the turns added from now on. Inputs: as for `start`, and the conversation.
+    /// Output: the running session, or a plain refusal code such as
+    /// `launch_resume_unavailable` when the record cannot be followed; nothing is left
+    /// behind on refusal.
+    pub fn start_resuming(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        request: LaunchRequest,
+        context: Option<AgentContext>,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
         validate(&request)?;
         let installed = context
             .as_ref()
             .map(|context| context.install(&request.harness, request.account.home(), request.tools))
             .transpose()?;
-        Self::open(host, agent, request, installed, context.as_ref())
+        Self::open(host, agent, request, installed, context.as_ref(), resume)
     }
 
     /// Starts an agent whose caller already installed the project context into its home,
@@ -110,7 +134,7 @@ impl TerminalSession {
         installed: Installed,
         context: &AgentContext,
     ) -> Result<Self, LaunchError> {
-        Self::open(host, agent, request, Some(installed), Some(context))
+        Self::open(host, agent, request, Some(installed), Some(context), None)
     }
 
     fn open(
@@ -119,6 +143,7 @@ impl TerminalSession {
         request: LaunchRequest,
         installed: Option<Installed>,
         context: Option<&AgentContext>,
+        resume: Option<&Resume>,
     ) -> Result<Self, LaunchError> {
         validate(&request)?;
         if interactive::support(&request.harness) != Support::Terminal {
@@ -135,13 +160,17 @@ impl TerminalSession {
         if claude {
             interactive::prepare_claude_home(&home, &cwd)?;
         }
-        let session_id = interactive::session_id()?;
+        let session_id = match resume {
+            Some(resume) => resume.id.clone(),
+            None => interactive::session_id()?,
+        };
         let command = interactive::command(
             &request,
             installed.as_ref(),
             &Run {
                 session_id: &session_id,
                 key_file: key.as_ref().map(|key| key.0.as_path()),
+                resume: resume.is_some(),
             },
         )?;
         if command.transcript == Transcript::Unavailable {
@@ -160,7 +189,16 @@ impl TerminalSession {
             }));
         }
         let since = SystemTime::now();
-        let reader = TranscriptReader::new(command.transcript.clone(), &command.cwd, since);
+        let reader = match resume {
+            Some(resume) => TranscriptReader::resumed(
+                command.transcript.clone(),
+                &command.cwd,
+                &resume.record,
+                None,
+            )?,
+            None => TranscriptReader::new(command.transcript.clone(), &command.cwd, since),
+        };
+        let resumed = resume.map(|resume| (resume.record.clone(), reader.start()));
         let pane = host.spawn(&agent, &command).map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
         let ready = LaunchEvent::Ready {
@@ -188,11 +226,20 @@ impl TerminalSession {
                 since,
                 pane.pid,
                 key.as_ref().map(|key| key.0.as_path()),
-            ),
+            )
+            .map(|record| PaneRecord { resumed, ..record }),
             _key: key,
             _context: installed,
             _relay: relay,
         })
+    }
+
+    /// Names the harness conversation this pane records, once its record exists: the id
+    /// the harness resumes it by and the record's path. Output: none before that.
+    pub fn conversation(&self) -> Option<Resume> {
+        self.reader
+            .conversation()
+            .map(|(id, record)| Resume { id, record })
     }
 
     /// Returns the pane's first process, which leads the process group of the harness.
@@ -493,9 +540,21 @@ impl AgentSession {
         context: AgentContext,
         pane: Option<(Arc<dyn Host>, AgentId)>,
     ) -> Result<Self, LaunchError> {
+        Self::start_resuming(request, context, pane, None)
+    }
+
+    /// Starts an agent as `start` does, a pane app continuing the harness conversation
+    /// `resume` names when given; a headless agent on pipes never resumes one.
+    /// Inputs: as for `start`, and the conversation. Output: the session.
+    pub fn start_resuming(
+        request: LaunchRequest,
+        context: AgentContext,
+        pane: Option<(Arc<dyn Host>, AgentId)>,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
         match pane {
             Some((host, agent)) if interactive::support(&request.harness) == Support::Terminal => {
-                TerminalSession::start(host, agent, request, Some(context))
+                TerminalSession::start_resuming(host, agent, request, Some(context), resume)
                     .map(|session| Self::Terminal(Box::new(session)))
             }
             _ => Session::start_with_context(request, context)

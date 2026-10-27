@@ -2,7 +2,7 @@ use super::tool::{self, Call};
 use super::{TaskSource, now_ms};
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
-use crate::harnesses::terminal_session::paste;
+use crate::harnesses::terminal_session::{Resume, paste};
 use crate::project_setup::StoredSetup;
 use crate::protocol::ProjectId;
 use crate::terminal::{AgentId, Host};
@@ -24,6 +24,7 @@ const TYPING_WRITE_EVERY: Duration = Duration::from_secs(1);
 const TYPED_AGENTS_MAX: usize = 4096;
 const CHANGES_LISTED_MAX: usize = 20;
 const MASTER_TURNS_KEPT: i64 = 2000;
+const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const NOT_WIRED: &str = "Team messaging is not available in this build yet.";
 const NO_TERMINALS: &str = "Not sent: the engine has no agent terminals right now.";
@@ -83,7 +84,8 @@ fn state(problem: impl std::fmt::Display) -> EngineError {
 }
 
 /// Creates the live master tables: the per-project live switch with its turn and owner
-/// typing state and the turns a live master ended. `names` keeps the role a delegation asked for.
+/// typing state, the turns a live master ended and the harness conversation each master
+/// session continues. `names` keeps the role a delegation asked for.
 /// Takes the engine database. Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -107,8 +109,90 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 finished_ms INTEGER NOT NULL,
                 outcome TEXT NOT NULL,
                 PRIMARY KEY (agent, turn)
+            );
+            CREATE TABLE IF NOT EXISTS team_master_conversations (
+                session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                harness TEXT NOT NULL,
+                connection TEXT NOT NULL,
+                conversation TEXT NOT NULL CHECK(length(conversation) BETWEEN 1 AND 128),
+                record TEXT NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)
             );",
         )
+        .map_err(state)
+}
+
+/// The harness conversation a master session continues: the team agent whose home keeps
+/// the record, its harness and account, and the id and record the harness resumes by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionConversation {
+    pub agent: i64,
+    pub harness: String,
+    pub connection: String,
+    pub resume: Resume,
+}
+
+/// Keeps the harness conversation a project's master session continues, replacing the one
+/// kept before, so resuming the session continues it. Takes the engine database, the
+/// project, the session and the conversation. Returns any SQLite failure; a record path
+/// that is not plain text or too long is not kept.
+pub(crate) fn keep_conversation(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    kept: &SessionConversation,
+) -> Result<(), EngineError> {
+    let Some(record) = kept.resume.record.to_str() else {
+        return Ok(());
+    };
+    if record.len() > RECORD_PATH_BYTES_MAX || session.is_empty() || session.len() > 128 {
+        return Ok(());
+    }
+    assert!(!kept.resume.id.is_empty() && kept.resume.id.len() <= 128);
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO team_master_conversations(session,project,agent,harness,connection,conversation,record)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                session,
+                project.as_str(),
+                kept.agent,
+                kept.harness,
+                kept.connection,
+                kept.resume.id,
+                record
+            ],
+        )
+        .map_err(state)?;
+    Ok(())
+}
+
+/// Reads the harness conversation a project's master session continues. Takes the engine
+/// database, the project and the session. Returns it, or none when none was kept.
+pub fn session_conversation(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+) -> Result<Option<SessionConversation>, EngineError> {
+    connection
+        .query_row(
+            "SELECT agent,harness,connection,conversation,record FROM team_master_conversations
+             WHERE session=?1 AND project=?2",
+            params![session, project.as_str()],
+            |row| {
+                Ok(SessionConversation {
+                    agent: row.get(0)?,
+                    harness: row.get(1)?,
+                    connection: row.get(2)?,
+                    resume: Resume {
+                        id: row.get(3)?,
+                        record: std::path::PathBuf::from(row.get::<_, String>(4)?),
+                    },
+                })
+            },
+        )
+        .optional()
         .map_err(state)
 }
 

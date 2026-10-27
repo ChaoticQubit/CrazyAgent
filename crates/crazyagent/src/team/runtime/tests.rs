@@ -1876,6 +1876,229 @@ fn a_live_master_that_cannot_start_turns_off_after_one_try() {
     team.shutdown().unwrap();
 }
 
+const RESUMING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+printf '%s\n' "$*" >> "$CODEX_HOME/launches"
+id=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "resume" ] && id="$a"
+  prev="$a"
+done
+if [ -n "$id" ]; then
+  f=""
+  for c in "$d"/rollout-*-"$id".jsonl; do [ -f "$c" ] && f="$c"; done
+  [ -n "$f" ] || { echo "no conversation $id"; exit 4; }
+else
+  id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
+  f="$d/rollout-2026-10-27T00-00-00-$id.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
+fi
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// Makes `to` the project's live master session, parking the live one first, as the
+/// owner's New session and Resume actions do. Takes the database and the session id.
+fn switch_session(connection: &Connection, to: &str) {
+    connection
+        .execute(
+            "UPDATE master_sessions SET phase='parked' WHERE project=?1 AND phase='configured'",
+            [PROJECT],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO master_sessions(id,project,created,version,phase,body)
+             VALUES (?1,?2,(SELECT COALESCE(MAX(created),0)+1 FROM master_sessions),
+                     (SELECT COALESCE(MAX(created),0)+1 FROM master_sessions),'configured','{}')
+             ON CONFLICT(id) DO UPDATE SET phase='configured'",
+            params![to, PROJECT],
+        )
+        .unwrap();
+}
+
+fn kept_conversation(connection: &Connection, session: &str) -> Option<(String, PathBuf)> {
+    connection
+        .query_row(
+            "SELECT conversation,record FROM team_master_conversations WHERE session=?1",
+            [session],
+            |row| Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?))),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn launches(fixture: &Fixture, master: i64) -> Vec<String> {
+    let log = fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{master}"))
+        .join("home/launches");
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn noted(fixture: &Fixture, text: &str) -> usize {
+    fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.state == MessageState::Note && message.text == text)
+        .count()
+}
+
+/// Each master session keeps its own harness conversation: switching sessions restarts the
+/// project's one live master in its worktree, a session it ran before continues by the
+/// stored conversation id and reads only the turns added after the resume, and a session
+/// whose conversation cannot continue, kept on another account or with its record gone,
+/// starts a fresh harness conversation seeded with what could be read, with a note saying so.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the first session's master is briefed and kept",
+        |f| {
+            live_turns(&f.connection) == (1, false)
+                && kept_conversation(&f.connection, "s-one").is_some()
+        },
+    );
+    let master = masters(&fixture.connection)[0];
+    let (first, first_record) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    assert!(crate::harnesses::interactive::resumable(&first), "{first}");
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's turn in the first session ends",
+        |f| live_turns(&f.connection) == (2, false),
+    );
+
+    switch_session(&fixture.connection, "s-two");
+    fixture.until(
+        &mut team,
+        "a new session starts its own conversation",
+        |f| {
+            live_turns(&f.connection) == (3, false)
+                && kept_conversation(&f.connection, "s-two").is_some()
+        },
+    );
+    let (second, _) = kept_conversation(&fixture.connection, "s-two").unwrap();
+    assert_ne!(second, first);
+    assert_eq!(launches(&fixture, master).len(), 2);
+    assert!(
+        launches(&fixture, master)
+            .iter()
+            .all(|line| !line.contains("resume"))
+    );
+
+    switch_session(&fixture.connection, "s-one");
+    fixture.until(&mut team, "the first session's master starts again", |f| {
+        launches(f, master).len() == 3 && host.alive().unwrap() == names(&[master])
+    });
+    assert!(
+        launches(&fixture, master)[2].ends_with(&format!(" resume {first}")),
+        "{:?}",
+        launches(&fixture, master)
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        live_turns(&fixture.connection),
+        (3, false),
+        "no briefing turn on resume"
+    );
+    host.input(&AgentId::team(master).unwrap(), b"again\r")
+        .unwrap();
+    fixture.until(&mut team, "the resumed conversation's new turn ends", |f| {
+        live_turns(&f.connection) == (4, false)
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        live_turns(&fixture.connection).0,
+        4,
+        "earlier turns are not read again"
+    );
+    assert_eq!(
+        kept_conversation(&fixture.connection, "s-one"),
+        Some((first.clone(), first_record.clone()))
+    );
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "one master serves every session"
+    );
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_master_conversations SET connection='another-account' WHERE session='s-two'",
+            [],
+        )
+        .unwrap();
+    switch_session(&fixture.connection, "s-two");
+    fixture.until(
+        &mut team,
+        "a session kept on another account starts fresh",
+        |f| {
+            noted(f, crate::master_sessions::FRESH_NOTE) == 1
+                && kept_conversation(&f.connection, "s-two").is_some_and(|(id, _)| id != second)
+                && live_turns(&f.connection) == (5, false)
+        },
+    );
+    assert!(!launches(&fixture, master)[3].contains("resume"));
+    let typed = std::fs::read_to_string(
+        fixture
+            .base
+            .join("team/agents")
+            .join(format!("agent-{master}"))
+            .join("home/typed"),
+    )
+    .unwrap();
+    assert!(
+        typed.contains("Your earlier harness conversation in this session"),
+        "{typed}"
+    );
+    assert!(typed.contains("You: Done."), "{typed}");
+
+    std::fs::remove_file(&first_record).unwrap();
+    switch_session(&fixture.connection, "s-one");
+    fixture.until(
+        &mut team,
+        "a session whose record is gone starts fresh",
+        |f| {
+            noted(f, crate::master_sessions::LOST_NOTE) == 1
+                && live_turns(&f.connection) == (6, false)
+        },
+    );
+    assert!(!launches(&fixture, master)[4].contains("resume"));
+    assert_eq!(masters(&fixture.connection), [master]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 fn live_turns(connection: &Connection) -> (i64, bool) {
     connection
         .query_row(
