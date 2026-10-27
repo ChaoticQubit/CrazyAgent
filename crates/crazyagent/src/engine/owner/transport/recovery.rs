@@ -6,6 +6,7 @@ use crate::team::AgentRole;
 use crate::team::names;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedRwLockWriteGuard;
 
 const REQUEST_BYTES_MAX: usize = 1024;
 /// The most runs one banner lists, so its reply fits one owner frame.
@@ -218,11 +219,12 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
-/// Serves one Recovery request. Under the owner barrier the grant is checked again, the
-/// notice is dismissed and the reply is written within REPLY_WRITE_TIME, so a revocation
-/// that returned saw every dismissal admitted before it and lets none through after, and a
-/// client that stops reading holds the barrier no longer than that. Inputs: the connection,
-/// engine, authority, packet, admission and body. Output: done once the reply is written.
+/// Serves one Recovery request past the owner exchange, under RECOVERY_TIMEOUT. The owner
+/// barrier is waited for at most the engine timeout, then held while the grant is checked
+/// again, the action runs and the reply is written within REPLY_WRITE_TIME, so a revocation
+/// that returned saw every dismissal admitted before it and lets none through after. Inputs:
+/// the connection, engine, authority, packet, admission and body. Output: done once the
+/// reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -232,10 +234,10 @@ pub(super) async fn serve(
     bytes: &[u8],
 ) -> Result<(), EngineError> {
     let action = parse(bytes);
-    let _barrier = engine.owner_egress.write().await;
-    let reply = match handle(authority, packet, admission, action).await {
-        Ok(reply) => reply,
-        Err(error) => Reply::Rejected { code: error.0 },
+    let barrier = Arc::clone(&engine.owner_egress).write_owned();
+    let (reply, _barrier) = match tokio::time::timeout(engine.timeout, barrier).await {
+        Ok(barrier) => answer(authority, packet, admission, action, barrier).await,
+        Err(_) => (rejected(failure("owner_busy")), None),
     };
     let frame = match encode_frame(&reply) {
         Ok(frame) => frame,
@@ -250,23 +252,38 @@ pub(super) async fn serve(
         .map_err(io_error)
 }
 
-/// Answers a parsed request under the owner barrier its caller holds: checks the grant
-/// again, then dismisses. Inputs: the authority, packet, admission and the parsed request.
-/// Output: the reply, or the refusal.
-async fn handle(
+/// Answers a parsed request under the owner barrier it is handed: checks the grant again,
+/// then runs the action on a blocking thread that owns the barrier until the action
+/// returns, so a request cut short never lets a revocation pass a dismissal still
+/// committing. Inputs: the authority, packet, admission, parsed request and barrier.
+/// Output: the reply or refusal, with the barrier to hold while it is written; no barrier
+/// when the blocking thread failed.
+async fn answer(
     authority: &Authority,
     packet: &[u8; 37],
     admission: &Admission,
     action: Result<Action, EngineError>,
-) -> Result<Reply, EngineError> {
-    let action = action?;
-    if &authority.authenticate(packet)? != admission {
-        return Err(failure("owner_grant_stale_or_revoked"));
+    barrier: OwnedRwLockWriteGuard<()>,
+) -> (Reply, Option<OwnedRwLockWriteGuard<()>>) {
+    let admitted = action.and_then(|action| {
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
+        Ok((super::changes::engine_root(authority)?, action))
+    });
+    let (root, action) = match admitted {
+        Ok(admitted) => admitted,
+        Err(error) => return (rejected(error), Some(barrier)),
+    };
+    match tokio::task::spawn_blocking(move || (run(&root, action), barrier)).await {
+        Ok((result, barrier)) => (result.unwrap_or_else(rejected), Some(barrier)),
+        Err(_) => (rejected(failure("recovery_unavailable")), None),
     }
-    let root = super::changes::engine_root(authority)?;
-    tokio::task::spawn_blocking(move || run(&root, action))
-        .await
-        .map_err(|_| failure("recovery_unavailable"))?
+}
+
+/// The refusal reply for one engine error. Input: the error. Output: the reply.
+fn rejected(error: EngineError) -> Reply {
+    Reply::Rejected { code: error.0 }
 }
 
 /// Reads one Recovery request from an owner frame body, at most REQUEST_BYTES_MAX bytes.

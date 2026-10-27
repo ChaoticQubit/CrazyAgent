@@ -49,6 +49,7 @@ const REFUSALS: Record<string, string> = {
   ledger_unavailable: "CrazyAgent couldn't read its records. Try again.",
   recovery_record_invalid: "A recovery record is damaged, so this list can't be shown.",
   recovery_outcome_unknown: "CrazyAgent couldn't confirm what happened. The list is read again.",
+  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
 };
 
 /** One plain sentence for a refused Recovery request. Input: the failed result.

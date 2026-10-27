@@ -169,6 +169,19 @@ fn a_waiting_run_is_read_again_and_a_failed_read_says_so_plainly() {
             ""
         ]
     );
+    let mut busy = ProjectRecovery::new(project());
+    let read = busy.next_query(NOW).unwrap();
+    busy.apply(&RecoveryEvent {
+        query: read,
+        result: Err("owner_busy".into()),
+    });
+    assert_eq!(
+        text(&busy, 80),
+        [
+            "Interrupted work couldn't be read. CrazyAgent is busy with other requests. Try again in a moment.",
+            ""
+        ]
+    );
     let mut offline = ProjectRecovery::new(project());
     let read = offline.next_query(NOW).unwrap();
     offline.apply(&RecoveryEvent {

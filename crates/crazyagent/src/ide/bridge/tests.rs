@@ -641,3 +641,62 @@ async fn an_ide_discard_answers_with_its_outcome_after_its_capability_is_revoked
     );
     case.stop().await;
 }
+
+#[test]
+fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_changes_bound() {
+    let extension = include_str!("../../../../../apps/ide-extension/src/engine.ts");
+    let request_ms: u64 = extension
+        .split("const REQUEST_TIME_MS = ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("the extension declares its request timer")
+        .replace('_', "")
+        .parse()
+        .unwrap();
+    assert!(READ_TIME < Duration::from_millis(request_ms));
+    assert!(READ_TIME < CHANGES_TIMEOUT);
+
+    let id = ChangeSetId::new("0123456789abcdef0123456789abcdef").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let reads = [
+        IdeCall::ChangeSets {},
+        IdeCall::ChangeDiff {
+            id: id.clone(),
+            page: 0,
+        },
+        IdeCall::BaseBlob {
+            id: id.clone(),
+            path: "src/lib.rs".into(),
+            page: 0,
+        },
+    ];
+    for call in &reads {
+        let before = Instant::now();
+        let answered_by = bound(call, deadline);
+        assert!(answered_by >= before + READ_TIME, "{call:?}");
+        assert!(answered_by <= Instant::now() + READ_TIME, "{call:?}");
+    }
+    let writes = [
+        IdeCall::Accept {
+            id: id.clone(),
+            head: "0".repeat(40),
+            message: "Land it".into(),
+        },
+        IdeCall::Discard {
+            id: id.clone(),
+            head: "0".repeat(40),
+        },
+        IdeCall::Restore { id },
+    ];
+    for call in &writes {
+        let before = Instant::now();
+        let answered_by = bound(call, deadline);
+        assert!(answered_by >= before + CHANGES_TIMEOUT, "{call:?}");
+        assert!(answered_by <= Instant::now() + CHANGES_TIMEOUT, "{call:?}");
+    }
+    for call in [IdeCall::Workspace {}, IdeCall::Agents {}] {
+        assert_eq!(bound(&call, deadline), deadline, "{call:?}");
+    }
+    let late = Instant::now() + CHANGES_TIMEOUT + READ_TIME;
+    assert_eq!(bound(&IdeCall::ChangeSets {}, late), late);
+}

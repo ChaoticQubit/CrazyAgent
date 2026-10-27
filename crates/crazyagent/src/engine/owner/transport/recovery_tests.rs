@@ -9,7 +9,10 @@ const PROJECT: &str = "banner-project";
 const STOPPED_MS: i64 = 1_800_000_000_000;
 
 const OWNER_WAIT_MS: u64 = 5000;
+const EXCHANGE_MS: u64 = 1000;
 const IN_FLIGHT: Duration = Duration::from_millis(300);
+const PAST_EXCHANGE: Duration = Duration::from_millis(1500);
+const BARRIER_FREED: Duration = Duration::from_secs(10);
 const FILL_WRITES_MAX: usize = 4096;
 
 /// A real engine with an owner client and the engine root its action ledger lives in.
@@ -23,17 +26,19 @@ struct Running {
 
 impl Running {
     async fn start() -> Self {
+        Self::start_with(OWNER_WAIT_MS).await
+    }
+
+    /// Starts the engine with one owner exchange timeout. Input: the timeout in
+    /// milliseconds. Output: the running engine.
+    async fn start_with(timeout_ms: u64) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-recovery-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(
-            &global,
-            format!("version = 1\ntimeout_ms = {OWNER_WAIT_MS}\n"),
-        )
-        .unwrap();
+        std::fs::write(&global, format!("version = 1\ntimeout_ms = {timeout_ms}\n")).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -551,6 +556,158 @@ async fn a_dismissal_holds_the_owner_barrier_until_it_commits_and_a_revoked_clie
     assert_eq!(
         left.iter().map(|action| action.id).collect::<Vec<_>>(),
         vec![second]
+    );
+    drop(held);
+    running.stop().await;
+}
+
+/// The owner's half of a connected socket pair, with the client's half kept open.
+/// Output: the server stream and the client stream.
+fn connection() -> (UnixStream, UnixStream) {
+    let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+    for end in [&server, &client] {
+        end.set_nonblocking(true).unwrap();
+    }
+    (
+        UnixStream::from_std(server).unwrap(),
+        UnixStream::from_std(client).unwrap(),
+    )
+}
+
+fn dismissal_body(id: ledger::ActionId) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "recovery": {"kind": "dismiss", "action_kind": "agent_spawn", "id": id.get()}
+    }))
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dismissal_slower_than_the_owner_exchange_deadline_still_answers_with_its_outcome() {
+    let running = Running::start_with(EXCHANGE_MS).await;
+    let held = ledger::open(&running.engine_root).unwrap();
+    let shown = notice(&held, 4);
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut dismissal = Box::pin(
+        running
+            .client
+            .recovery_dismiss(ActionKind::AgentSpawn, shown.get()),
+    );
+    assert!(PAST_EXCHANGE > Duration::from_millis(EXCHANGE_MS));
+    assert!(
+        tokio::time::timeout(PAST_EXCHANGE, &mut dismissal)
+            .await
+            .is_err(),
+        "the dismissal still waits past the owner exchange deadline"
+    );
+    held.execute_batch("ROLLBACK").unwrap();
+    dismissal
+        .await
+        .unwrap_or_else(|error| panic!("the slow dismissal answered {}", error.0));
+    assert!(
+        ledger::pending(&held, ActionKind::AgentSpawn)
+            .unwrap()
+            .is_empty()
+    );
+    drop(held);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dismissal_cut_short_keeps_the_owner_barrier_until_it_commits_so_a_revocation_returns_after_it()
+ {
+    let running = Running::start().await;
+    let held = ledger::open(&running.engine_root).unwrap();
+    let shown = notice(&held, 4);
+    let runtime = running.runtime();
+    let packet = running.packet();
+    let admission = runtime.authority.authenticate(&packet).unwrap();
+    let (mut server, _client) = connection();
+    let body = dismissal_body(shown);
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let served = serve(
+        &mut server,
+        &runtime.engine,
+        &runtime.authority,
+        &packet,
+        &admission,
+        &body,
+    );
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, served).await.is_err(),
+        "the dismissal is cut short while it waits behind the held write"
+    );
+    assert!(
+        runtime.engine.owner_egress.try_write().is_err(),
+        "the dismissal still owns the owner barrier after its request is cut"
+    );
+    let mut revoke = Box::pin(runtime.control(OwnerControl {
+        operation_id: RequestId::new("revoke-during-cut-recovery").unwrap(),
+        target: OwnerClientKind::Tui,
+        expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
+        decision: OwnerDecision::Revoke,
+    }));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
+        "the revocation waits for the dismissal it was ordered after"
+    );
+    held.execute_batch("ROLLBACK").unwrap();
+    let revoked = tokio::time::timeout(BARRIER_FREED, revoke)
+        .await
+        .expect("the revocation runs once the dismissal commits")
+        .unwrap();
+    assert!(!revoked.active);
+    assert!(
+        ledger::pending(&held, ActionKind::AgentSpawn)
+            .unwrap()
+            .is_empty(),
+        "the dismissal committed before the revocation returned"
+    );
+    assert!(runtime.engine.owner_egress.try_write().is_ok());
+    drop(server);
+    drop(held);
+    running.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_that_cannot_take_the_owner_barrier_within_the_engine_timeout_is_refused_busy() {
+    let running = Running::start_with(EXCHANGE_MS).await;
+    let held = ledger::open(&running.engine_root).unwrap();
+    let shown = notice(&held, 4);
+    let runtime = running.runtime();
+    let packet = running.packet();
+    let admission = runtime.authority.authenticate(&packet).unwrap();
+    let (mut server, mut client) = connection();
+    let body = dismissal_body(shown);
+    let barrier = runtime.engine.owner_egress.write().await;
+    let served = tokio::time::timeout(
+        Duration::from_millis(EXCHANGE_MS) + REPLY_WRITE_TIME + IN_FLIGHT,
+        serve(
+            &mut server,
+            &runtime.engine,
+            &runtime.authority,
+            &packet,
+            &admission,
+            &body,
+        ),
+    )
+    .await
+    .expect("the barrier wait is bounded by the engine timeout");
+    drop(barrier);
+    served.unwrap();
+    let frame = read_frame(&mut client).await.unwrap();
+    let reply: Reply = serde_json::from_slice(&frame[4..]).unwrap();
+    assert!(
+        matches!(&reply, Reply::Rejected { code } if code == "owner_busy"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        ledger::pending(&held, ActionKind::AgentSpawn)
+            .unwrap()
+            .iter()
+            .map(|action| action.id)
+            .collect::<Vec<_>>(),
+        vec![shown],
+        "a busy refusal dismisses nothing"
     );
     drop(held);
     running.stop().await;
