@@ -362,25 +362,31 @@ async fn handle(
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
 /// it finishes or undoes Accepts and worktree resets an engine stop interrupted and
-/// deletes discarded refs past their restore window. Input: the authority, held weakly so
-/// a server dropped without its stop path still releases it. Runs until the server aborts
-/// it or the authority is gone.
+/// deletes discarded refs past their restore window, each step run on its own so a failing
+/// one never skips the other. Input: the authority, held weakly so a server dropped
+/// without its stop path still releases it. Runs until the server aborts it or the
+/// authority is gone.
 pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
     loop {
         let Some(root) = authority.upgrade().map(|authority| engine_root(&authority)) else {
             return;
         };
-        let tended = match root {
-            Ok(root) => tokio::task::spawn_blocking(move || {
-                let db = landing::open(&root)?;
-                landing::reconcile(&db)?;
-                landing::prune(&db, now_ms()?)
+        let failures = match root {
+            Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
+                Ok(db) => [
+                    landing::reconcile(&db).err(),
+                    now_ms().and_then(|now| landing::prune(&db, now)).err(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+                Err(error) => vec![error],
             })
             .await
-            .unwrap_or_else(|_| Err(failure("changes_unavailable"))),
-            Err(error) => Err(error),
+            .unwrap_or_else(|_| vec![failure("changes_unavailable")]),
+            Err(error) => vec![error],
         };
-        if let Err(error) = tended {
+        for error in failures {
             eprintln!("landing_upkeep_failed cause={}", error.0);
         }
         tokio::time::sleep(UPKEEP_EVERY).await;

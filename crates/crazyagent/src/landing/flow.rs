@@ -747,7 +747,7 @@ pub(super) fn discard(
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
-    let mut record = store::load(db, id)?;
+    let mut record = super::owner::settled(db, id)?;
     if !record.is_open() || record.head != expected_head || record.intent.is_some() {
         return Err(failure("changes_stale"));
     }
@@ -779,7 +779,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
-    let mut record = store::load(db, id)?;
+    let mut record = super::owner::settled(db, id)?;
     if record.state != ChangeState::Discarded {
         return Err(failure("changes_stale"));
     }
@@ -813,25 +813,39 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     Ok(())
 }
 
-/// Deletes the discarded refs whose restore window ended by `now`, once each.
-/// Inputs: the store and the time now. Output: how many were deleted.
+/// Deletes the discarded refs whose restore window ended by `now`, once each. A change set
+/// whose ref cannot be deleted now is logged by its plain code and tried again at the next
+/// run, so it never stops the others. Inputs: the store and the time now. Output: how many
+/// were deleted.
 pub(super) fn prune(db: &Connection, now: u64) -> Result<usize, EngineError> {
     store::initialize(db)?;
     let mut pruned = 0;
-    for record in store::discarded_due(db, now)? {
-        let _held = hold(&record.repository);
-        let mut record = store::load(db, &record.id)?;
-        if record.state != ChangeState::Discarded || record.pruned {
-            continue;
+    for found in store::discarded_due(db, now)? {
+        let _held = hold(&found.repository);
+        match prune_one(db, &found.id) {
+            Ok(true) => pruned += 1,
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "landing_prune_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            ),
         }
-        if std::fs::symlink_metadata(record.repository.join(".git"))
-            .is_ok_and(|found| found.is_dir())
-        {
-            shared(&record.repository)?.run(&["update-ref", "-d", &discarded_ref(&record.id)])?;
-        }
-        record.pruned = true;
-        store::save(db, &record)?;
-        pruned += 1;
     }
     Ok(pruned)
+}
+
+/// Deletes one discarded change set's ref and marks it pruned. The caller holds [`hold`]
+/// on its repository. Inputs: the store and the change set. Output: whether it was pruned
+/// now, false when it is no longer discarded or already pruned.
+fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+    let mut record = store::load(db, id)?;
+    if record.state != ChangeState::Discarded || record.pruned {
+        return Ok(false);
+    }
+    if std::fs::symlink_metadata(record.repository.join(".git")).is_ok_and(|found| found.is_dir()) {
+        shared(&record.repository)?.run(&["update-ref", "-d", &discarded_ref(&record.id)])?;
+    }
+    record.pruned = true;
+    store::save(db, &record)?;
+    Ok(true)
 }
