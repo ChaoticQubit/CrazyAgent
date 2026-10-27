@@ -313,8 +313,9 @@ fn extract(archive: &Path, staging: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Tells whether a link target, read from a link `depth` folders below the root, stays
-/// inside the root. Inputs: the depth and the target. Output: the answer.
+/// Tells whether a link target as written, read from a link `depth` folders below the root,
+/// stays inside the root, so it still does once the root is renamed. Inputs: the depth and
+/// the target. Output: the answer.
 fn link_inside(depth: usize, target: &Path) -> bool {
     let mut depth = depth;
     for part in target.components() {
@@ -328,10 +329,12 @@ fn link_inside(depth: usize, target: &Path) -> bool {
     true
 }
 
-/// Walks the extracted tree without following links and refuses a link that leaves it,
-/// a hard link shared with a file outside it, or anything but files, folders and links.
+/// Walks the extracted tree without following links and refuses a link that leaves it as
+/// written or once followed on disk, a dangling or looping link, a hard link shared with a
+/// file outside it, or anything but files, folders and links.
 /// Input: the staging folder. Output: Ok, or `ide_build_archive_invalid`.
 fn check_tree(staging: &Path) -> Result<(), EngineError> {
+    let base = std::fs::canonicalize(staging).map_err(invalid)?;
     let mut folders = vec![(staging.to_path_buf(), 0_usize)];
     let mut shared: BTreeMap<(u64, u64), (u64, u64)> = BTreeMap::new();
     let mut count = 0_usize;
@@ -345,7 +348,9 @@ fn check_tree(staging: &Path) -> Result<(), EngineError> {
             let metadata = std::fs::symlink_metadata(&path).map_err(invalid)?;
             let kind = metadata.file_type();
             if kind.is_symlink() {
-                if !link_inside(depth, &std::fs::read_link(&path).map_err(invalid)?) {
+                if !link_inside(depth, &std::fs::read_link(&path).map_err(invalid)?)
+                    || !std::fs::canonicalize(&path).is_ok_and(|end| end.starts_with(&base))
+                {
                     return Err(failure("ide_build_archive_invalid"));
                 }
             } else if kind.is_dir() {
