@@ -1080,6 +1080,125 @@ fn a_waiting_sub_agent_a_paused_wake_and_a_new_notification_show_and_s_marks_it_
     );
 }
 
+#[test]
+fn a_opens_the_notifications_newest_first_with_their_age_and_s_marks_them_seen() {
+    use crate::team::events::{Notification, NotificationKind};
+    let mut status = team();
+    status.events.notifications = [
+        (9, None, 3 * MINUTE),
+        (6, None, 120 * MINUTE),
+        (4, Some(NOW), 3 * 24 * 60 * MINUTE),
+    ]
+    .into_iter()
+    .map(|(id, seen_ms, age)| Notification {
+        id,
+        project_id: project(),
+        kind: if id == 6 {
+            NotificationKind::WakePaused
+        } else {
+            NotificationKind::Escalation
+        },
+        text: format!("Pick the database {id}\nsecond line"),
+        created_ms: NOW - age,
+        seen_ms,
+    })
+    .collect();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    assert!(view.help().contains(&("a", "Notifications")));
+    let closed = frame(&view, 120, 36);
+    assert!(!closed.iter().any(|row| row.contains("Pick the database 4")));
+
+    assert_eq!(view.key(press(KeyCode::Char('a'))), TeamReply::Handled);
+    for (width, height) in [(120, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        assert!(find(&rows, "Notifications").contains("2 new"), "{rows:?}");
+        let at: Vec<usize> = [9, 6, 4]
+            .iter()
+            .map(|id| {
+                let needle = format!("Pick the database {id}");
+                assert_eq!(
+                    rows.iter().filter(|row| row.contains(&needle)).count(),
+                    1,
+                    "{needle} shows once"
+                );
+                rows.iter().position(|row| row.contains(&needle)).unwrap()
+            })
+            .collect();
+        assert!(at[0] < at[1] && at[1] < at[2], "newest first: {at:?}");
+        let newest = find(&rows, "Pick the database 9");
+        assert!(
+            newest.contains("New") && newest.contains("3 min ago"),
+            "{newest}"
+        );
+        assert!(find(&rows, "Pick the database 6").contains("2 h ago"));
+        let seen = find(&rows, "Pick the database 4");
+        assert!(
+            seen.contains("Seen") && seen.contains("3 days ago"),
+            "{seen}"
+        );
+        assert!(!rows.iter().any(|row| row.contains("second line")));
+    }
+    assert_eq!(view.help(), vec![("s", "Seen"), ("Esc", "Close")]);
+    assert_eq!(
+        view.key(press(KeyCode::Char('s'))),
+        TeamReply::Change(TeamAction::Seen {
+            project_id: project(),
+            upto: 9
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(
+        !frame(&view, 120, 36)
+            .iter()
+            .any(|row| row.contains("Pick the database 4"))
+    );
+    assert!(view.help().contains(&("e", "Wake rules")));
+
+    let mut quiet = loaded();
+    assert!(!quiet.help().contains(&("a", "Notifications")));
+    assert_eq!(quiet.key(press(KeyCode::Char('a'))), TeamReply::Handled);
+    assert!(find(&frame(&quiet, 80, 24), "No notifications yet.").contains("No notifications"));
+    assert_eq!(quiet.help(), vec![("Esc", "Close")]);
+}
+
+#[test]
+fn a_long_notification_list_stays_inside_a_short_window() {
+    use crate::team::events::{Notification, NotificationKind};
+    let mut status = team();
+    status.events.notifications = (1..=20)
+        .rev()
+        .map(|id| Notification {
+            id,
+            project_id: project(),
+            kind: NotificationKind::Escalation,
+            text: format!("Question number {id:02}"),
+            created_ms: NOW - id * MINUTE,
+            seen_ms: None,
+        })
+        .collect();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Char('a')));
+    let room = 24 - 4 - 2;
+    let look = Look::plain();
+    let (lines, _) = view.rows(76, room, &accounts(), &look);
+    assert!(lines.len() <= room, "{} rows for {room}", lines.len());
+    let text: Vec<String> = lines.iter().map(Row::text).collect();
+    assert!(text.iter().any(|row| row.contains("Question number 20")));
+    let more = text
+        .iter()
+        .find(|row| row.contains("older"))
+        .unwrap_or_else(|| panic!("{text:?}"));
+    let shown = text
+        .iter()
+        .filter(|row| row.contains("Question number"))
+        .count();
+    assert!(more.contains(&format!("{} older", 20 - shown)), "{more}");
+}
+
 async fn wake_change(
     view: &mut TeamView,
     controller: &mut OwnerController,

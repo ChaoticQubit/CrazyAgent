@@ -93,3 +93,13 @@ test("the wake rule, seen and attention commands send the argument names their R
     for (const param of params) assert.ok(signature.includes(param), `${command} takes ${param}`);
   }
 });
+
+test("each notification shows when it came and opens the project's conversation", () => {
+  const now = 1_800_000_000_000;
+  const items = [{ ...note(8, "p 2"), created_ms: now - 3 * 60_000 }, { ...note(6, "p 2", now), created_ms: now - 2 * 3_600_000 }];
+  const markup = renderToStaticMarkup(createElement(panel.NotificationList, { projectId: "p 2", notifications: items, reload: () => {}, now }));
+  assert.match(markup, /New<\/span>.*note 8.*3 min ago/s);
+  assert.match(markup, /Seen<\/span>.*note 6.*2 h ago/s);
+  assert.equal(markup.match(/href="#\/projects\/p%202\/conversation"/g)?.length, 2);
+  assert.match(markup, /Mark 1 as seen/);
+});
