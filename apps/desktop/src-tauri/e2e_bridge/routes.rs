@@ -1426,7 +1426,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_set_reset(account, window_kind, at_ms)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_set_reset(account, window_kind, at_ms)?; call.await }.await;
             routed(result)
         }
         "desktop_changes" => {
