@@ -527,6 +527,39 @@ fn committed(tx: &Transaction<'_>, provenance: &OwnerProvenance) -> Result<(), E
     Ok(())
 }
 
+/// Tells whether a session's owner provenance is the request that created it: the
+/// owner's Open, or a New session with or without cancelling a running turn, each rebuilt
+/// from the session's own project, source basis and selection. Every check of how a
+/// session was opened uses this one rule. Takes the session. Returns whether the stored
+/// request hash is one of them.
+pub(super) fn opened_by_owner(session: &MasterSessionView) -> Result<bool, EngineError> {
+    let opening = |action: MasterOwnerAction| -> Result<bool, EngineError> {
+        let original = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: session.owner.operation_id.clone(),
+            expected_revision: session.owner.revision_before.clone(),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster { action },
+            },
+        };
+        Ok(original.mutation_hash()? == session.owner.request_hash)
+    };
+    let renewal = |cancel_running: bool| MasterOwnerAction::NewSession {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+        cancel_running,
+    };
+    Ok(opening(MasterOwnerAction::Open {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+    })? || opening(renewal(false))?
+        || opening(renewal(true))?)
+}
+
 fn decode_session(
     tx: &Transaction<'_>,
     row: &Row<'_>,
@@ -558,36 +591,7 @@ fn decode_session(
         return Err(error("master_session_record"));
     }
     committed(tx, &session.owner)?;
-    let opened_by = |action: MasterOwnerAction| -> Result<bool, EngineError> {
-        let original = OwnerRequest {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: session.owner.operation_id.clone(),
-            expected_revision: session.owner.revision_before.clone(),
-            operation: OwnerOperation::Apply {
-                mutation: OwnerMutation::ProjectMaster { action },
-            },
-        };
-        Ok(original.mutation_hash()? == session.owner.request_hash)
-    };
-    let opened = opened_by(MasterOwnerAction::Open {
-        project_id: session.project_id.clone(),
-        expected_config_id: session.config_id.clone(),
-        expected_source_hash: session.source_hash.clone(),
-        selection: Box::new(session.selection.clone()),
-    })?;
-    let mut renewed = false;
-    for cancel_running in [false, true] {
-        renewed = renewed
-            || (!opened
-                && opened_by(MasterOwnerAction::NewSession {
-                    project_id: session.project_id.clone(),
-                    expected_config_id: session.config_id.clone(),
-                    expected_source_hash: session.source_hash.clone(),
-                    selection: Box::new(session.selection.clone()),
-                    cancel_running,
-                })?);
-    }
-    if !opened && !renewed {
+    if !opened_by_owner(&session)? {
         return Err(error("master_open_provenance"));
     }
     let mut statement = tx
@@ -5999,6 +6003,202 @@ fallback_allowed = false
             .unwrap();
         assert_eq!(projects, 0, "the project is removed in the same action");
         drop(tx);
+        case.close().await;
+    }
+
+    impl Fixture {
+        /// Starts a new session as the owner's New session does, parking the live one and
+        /// cancelling its turn, then submits `message` there. Inputs: the owner operation
+        /// name and the message. Output: the fixture bound to the new session and its turn.
+        async fn renewed(self, id: &str, message: &str) -> Self {
+            let basis = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 1,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+                panic!("actual model source basis missing");
+            };
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::NewSession {
+                        project_id: self.session.project_id.clone(),
+                        expected_config_id: basis.config_id,
+                        expected_source_hash: source_hash,
+                        selection: Box::new(self.session.selection.clone()),
+                        cancel_running: true,
+                    },
+                },
+            )
+            .await;
+            self.submitted(&format!("{id}-submit"), message).await
+        }
+
+        /// Makes a parked session live again as the owner's Resume does, parking the live
+        /// one and cancelling its turn, then submits `message` there. Inputs: the owner
+        /// operation name, the parked session and the message. Output: the fixture bound to
+        /// that session and its new turn.
+        async fn resumed(self, id: &str, session: &SessionId, message: &str) -> Self {
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Resume {
+                        project_id: self.session.project_id.clone(),
+                        session_id: session.clone(),
+                        cancel_running: true,
+                    },
+                },
+            )
+            .await;
+            self.submitted(&format!("{id}-submit"), message).await
+        }
+
+        /// Submits `message` to the project's live session and binds the fixture to that
+        /// session and the turn it queued. Inputs: the owner operation name and the message.
+        /// Output: the rebound fixture.
+        async fn submitted(mut self, id: &str, message: &str) -> Self {
+            let project_id = self.session.project_id.clone();
+            let live = |state: OwnerReadReply| match state.data {
+                OwnerData::ProjectMaster {
+                    session: Some(session),
+                } => *session,
+                _ => panic!("actual live master session missing"),
+            };
+            let session = live(
+                owner_read(
+                    &self.storage,
+                    &self.started,
+                    OwnerRead::ProjectMaster {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .await,
+            );
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Submit {
+                        project_id: project_id.clone(),
+                        session_id: session.session_id.clone(),
+                        text: message.into(),
+                    },
+                },
+            )
+            .await;
+            let session = live(
+                owner_read(
+                    &self.storage,
+                    &self.started,
+                    OwnerRead::ProjectMaster {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .await,
+            );
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMasterTurns {
+                    project_id,
+                    session_id: session.session_id.clone(),
+                    cursor: None,
+                    limit: 8,
+                },
+            )
+            .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turns missing");
+            };
+            let queued: Vec<MasterTurnView> = page
+                .turns
+                .into_iter()
+                .filter(|turn| turn.phase == MasterTurnPhase::Queued)
+                .collect();
+            assert_eq!(queued.len(), 1, "one queued turn in the live session");
+            self.session = session;
+            self.turn = queued.into_iter().next().unwrap();
+            assert_eq!(self.session.current_turn.as_ref(), Some(&self.turn.id));
+            self
+        }
+    }
+
+    const RENEWED: &str = "Name the main language of this project in one word.";
+
+    /// A session the owner started with New session prepares its turns as an opened one
+    /// does: its New session provenance is the request that created it, so the master
+    /// bootstrap admits it instead of refusing every turn with a scope conflict.
+    #[tokio::test]
+    async fn a_session_started_with_new_session_prepares_its_turns() {
+        let first = Fixture::new(true).await;
+        let opened = first.session.session_id.clone();
+        let case = first.renewed("renew-rcli-master", RENEWED).await;
+        assert_ne!(case.session.session_id, opened);
+        let proof = case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a renewed session must prepare its turn"),
+            Err(failure) => panic!("a renewed session must prepare its turn: {}", failure.0),
+        };
+        assert_eq!(prepared.text, RENEWED);
+        assert_eq!(prepared.session.session_id, case.session.session_id);
+        assert_eq!(
+            prepared.attempt.request.task_id,
+            turn_task_id(&case.session.session_id, &case.turn.id).unwrap()
+        );
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.owner_session, case.session.session_id);
+        assert_eq!(prepared.lease.task_id, case.session.bootstrap_task_id);
+        assert!(prepared.cwd.is_dir());
+        case.close().await;
+    }
+
+    /// A renewed session the owner parks and resumes keeps preparing turns: Resume keeps
+    /// the New session provenance the session was created with, and the bootstrap admits it.
+    #[tokio::test]
+    async fn a_resumed_renewed_session_prepares_its_turns() {
+        let case = Fixture::new(true)
+            .await
+            .renewed("renew-rcli-master", RENEWED)
+            .await;
+        let renewed = case.session.session_id.clone();
+        let case = case
+            .renewed("renew-rcli-master-again", PROMPT)
+            .await
+            .resumed("resume-renewed-master", &renewed, RENEWED)
+            .await;
+        assert_eq!(case.session.session_id, renewed);
+        assert_eq!(case.session.phase, MasterSessionPhase::Configured);
+        let proof = case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a resumed renewed session must prepare its turn"),
+            Err(failure) => panic!(
+                "a resumed renewed session must prepare its turn: {}",
+                failure.0
+            ),
+        };
+        assert_eq!(prepared.text, RENEWED);
+        assert_eq!(prepared.session.session_id, renewed);
+        assert_eq!(
+            prepared.attempt.request.task_id,
+            turn_task_id(&renewed, &case.turn.id).unwrap()
+        );
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.owner_session, renewed);
         case.close().await;
     }
 
