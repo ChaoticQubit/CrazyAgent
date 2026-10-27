@@ -1172,9 +1172,27 @@ export function cachedLoad<T>(key: string | null): Result<T> | undefined {
   return key === null ? undefined : loadCache.get(key) as Result<T> | undefined;
 }
 
+const loadReads = new Map<string, Promise<Result<unknown>>>();
+
+/** Starts a cached read, or joins the read of the same key already in flight, so screens that
+ * mount together ask the engine once. A fresh read (a reload) never joins: it starts its own and
+ * later joiners share that newer one. Inputs: the shared key (null reads alone), whether to read
+ * fresh and the read. Output: the reply. */
+export function sharedLoad<T>(key: string | null, fresh: boolean, read: () => Promise<Result<T>>): Promise<Result<T>> {
+  if (key === null) return read();
+  const running = loadReads.get(key);
+  if (running && !fresh) return running as Promise<Result<T>>;
+  const started = read();
+  loadReads.set(key, started);
+  const clear = () => { if (loadReads.get(key) === started) loadReads.delete(key); };
+  started.then(clear, clear);
+  return started;
+}
+
 /** Loads one engine read for a screen and reloads it when the session revision or the given
  * keys change. A read given a cache name first shows its last good reply from an earlier mount,
  * then refreshes in the background; a failed refresh shows its error as an uncached read does.
+ * Cached reads mounting together share one engine read; a reload always reads again.
  * Inputs: the read, its keys and an optional cache name. Output: the loaded value and a reload action. */
 export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [], cache?: string): [Loaded<T>, () => void] {
   const session = useContext(SessionContext);
@@ -1182,13 +1200,16 @@ export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [],
   const [value, setValue] = useState<Loaded<T>>(() => cachedLoad<T>(key) ?? { kind: "loading" });
   const [tick, setTick] = useState(0);
   const shownKey = useRef(key);
+  const fresh = useRef(false);
   useEffect(() => {
     let live = true;
     const cached = cachedLoad<T>(key);
     const same = shownKey.current === key;
     shownKey.current = key;
     setValue((old) => cached ?? (old.kind === "ok" && same ? old : { kind: "loading" }));
-    void read().then((result) => {
+    const reading = sharedLoad(key === null ? null : `${key}\n${session?.revision ?? 0}`, fresh.current, read);
+    fresh.current = false;
+    void reading.then((result) => {
       if (!live) return;
       const noted = session ? session.noteResult(result) : result;
       if (key !== null) cacheLoad(key, noted);
@@ -1196,5 +1217,5 @@ export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [],
     });
     return () => { live = false; };
   }, [session?.revision, tick, key, ...keys]);
-  return [value, () => setTick((old) => old + 1)];
+  return [value, () => { fresh.current = true; setTick((old) => old + 1); }];
 }
