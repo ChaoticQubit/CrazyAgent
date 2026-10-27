@@ -4954,6 +4954,10 @@ mod rcli_configured_tests {
     mod readiness_tests {
         include!("master_session/readiness_tests.rs");
     }
+
+    mod pruned_history_tests {
+        include!("master_session/pruned_history_tests.rs");
+    }
     use crate::engine::owner::{ModelAccessCollection, Started};
     use crate::master_session::{MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof};
     use crate::protocol::{CredentialRef, ProjectSpec};
