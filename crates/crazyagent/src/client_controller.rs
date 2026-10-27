@@ -21,6 +21,7 @@ mod plugins;
 mod project_setup;
 mod setup;
 mod team;
+mod usage;
 pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {
