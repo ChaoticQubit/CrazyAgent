@@ -2,8 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::project_setup::CONTEXT_DIRECTORY;
 use crate::protocol::ProjectId;
-use crate::questions::{Ask, Step};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use crate::questions::{Ask, EngineSource};
 use std::path::Path;
 
 pub mod prompt;
@@ -16,10 +15,7 @@ pub const RELEASE_PROCESS: &str = "context/release-process.md";
 pub const OPEN_POINTS_MAX: usize = 8;
 /// The largest open point raised as a question, the questions log's question bound.
 pub const OPEN_POINT_BYTES_MAX: usize = crate::questions::QUESTION_BYTES_MAX;
-/// The largest roadmap the owner answers are added to.
-pub const ROADMAP_BYTES_MAX: usize = 4 * 1024 * 1024;
-/// The heading the owner's answers to planning questions are listed under in the roadmap.
-pub const ANSWERS_HEADING: &str = "## Owner answers";
+const _: () = assert!(OPEN_POINTS_MAX as i64 <= crate::questions::PENDING_PER_ASKER_MAX);
 /// The largest agent reply a plan is read from.
 pub const REPLY_BYTES_MAX: usize = 512 * 1024;
 /// The job failure when the reply has no roadmap.
@@ -41,7 +37,9 @@ pub const REPLY_TOO_LARGE: &str = "Agent output exceeded the limit";
 /// any other job of its project still waits or runs; every other job passes.
 pub(crate) const AFTER_RESEARCH: &str = "(research_jobs.kind <> 'roadmap_planning' OR NOT EXISTS (SELECT 1 FROM research_jobs AS earlier WHERE earlier.project = research_jobs.project AND earlier.kind <> 'roadmap_planning' AND earlier.status IN ('queued','needs_pool','running')))";
 
-const QUESTION_CONTEXT: &str = "Raised by the roadmap planning job. The roadmap in context/roadmap.md lists it under Open questions, and your answer is added there.";
+const QUESTION_CONTEXT: &str = "Raised by the roadmap planning job. The roadmap in context/roadmap.md lists it under Open questions. Your answer goes to the project's master once; the roadmap itself does not change.";
+const FULL: [&str; 2] = ["questions_full", "questions_asker_full"];
+const REFUSED: [&str; 2] = ["questions_ask_invalid", "questions_text_invalid"];
 const ROADMAP_FILE: &str = "roadmap.md";
 const RELEASE_FILE: &str = "release-process.md";
 const ROADMAP_HEADING: &str = "# Roadmap";
@@ -308,176 +306,35 @@ pub fn publish(state: &Path, reply: &str, harness: &str) -> Result<Plan, &'stati
     Ok(plan)
 }
 
-/// Raises the plan's questions (`Plan::questions`) as `planning` owner questions of the project
-/// in one transaction, skipping one whose text a pending planning question already holds, and
-/// stopping when the project's questions are full; a refused question stays in the roadmap only.
-/// Inputs: the engine database path, the project and the plan. Output: how many were raised.
-pub fn raise(database: &Path, project: &str, plan: &Plan) -> Result<usize, EngineError> {
+/// Raises the plan's questions (`Plan::questions`) as `engine:planning` owner questions of the
+/// project; the log returns a pending planning question with the same text instead of asking
+/// it twice. A question the log refuses as invalid stays in the roadmap only, and raising stops
+/// once the project's or the planning step's questions are full. The owner's answer reaches
+/// the project's master once as an engine note; the roadmap is never changed by it.
+/// Inputs: the engine database path, the project and the plan. Output: each logged question's id.
+pub fn raise(database: &Path, project: &str, plan: &Plan) -> Result<Vec<u64>, EngineError> {
     let root = database
         .parent()
         .ok_or_else(|| failure("questions_unavailable"))?;
     let project = ProjectId::new(project).map_err(|_| failure("question_project_unknown"))?;
     let db = crate::questions::open(root)?;
-    let pending: Vec<String> = crate::questions::list(&db, &project, true, None)?
-        .into_iter()
-        .filter(|question| question.source == crate::questions::Source::Planning)
-        .map(|question| question.question)
-        .collect();
-    let now = now_ms();
-    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
-        .map_err(|_| failure("questions_unavailable"))?;
-    let mut raised = 0;
+    let mut logged = Vec::new();
     for question in plan.questions() {
-        if pending.contains(&question) {
-            continue;
-        }
         let ask = Ask {
             question,
             options: Vec::new(),
             recommended: None,
             context: Some(QUESTION_CONTEXT.to_owned()),
         };
-        match crate::questions::raise(&tx, &project, Step::Planning, &ask, now)? {
-            Ok(_) => raised += 1,
-            Err("questions_full") => break,
-            Err(_) => {}
+        match crate::questions::raise(&db, &project, &EngineSource::Planning, &ask) {
+            Ok(id) => logged.push(id),
+            Err(problem) if FULL.contains(&problem.0.as_str()) => break,
+            Err(problem) if REFUSED.contains(&problem.0.as_str()) => {}
+            Err(problem) => return Err(problem),
         }
     }
-    tx.commit().map_err(|_| failure("questions_unavailable"))?;
-    assert!(raised <= OPEN_POINTS_MAX);
-    Ok(raised)
-}
-
-/// Adds the owner's answers to planning questions to each project's roadmap under
-/// `ANSWERS_HEADING`, taking each settled question once, so every agent reading the context
-/// sees what the owner decided. The research service calls it every tick.
-/// Input: the engine database path. Output: how many answers were added, or the first failure
-/// after trying every project.
-pub fn record_answers(database: &Path) -> Result<usize, EngineError> {
-    let root = database
-        .parent()
-        .ok_or_else(|| failure("questions_unavailable"))?;
-    let db = crate::questions::open(root)?;
-    let mut recorded = 0;
-    let mut first = Ok(());
-    for project in crate::questions::untaken(&db, Step::Planning)? {
-        match record_project(&db, &project) {
-            Ok(count) => recorded += count,
-            Err(error) => first = first.and(Err(error)),
-        }
-    }
-    first.map(|()| recorded)
-}
-
-/// Takes one project's settled planning questions and adds them to its roadmap in the same
-/// transaction, which commits only once the roadmap is written; a project whose setup is gone
-/// has its answers taken and dropped. Inputs: the engine connection and the project.
-/// Output: how many answers were taken.
-fn record_project(db: &Connection, project: &ProjectId) -> Result<usize, EngineError> {
-    let asked = crate::questions::list(db, project, false, None)?;
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
-        .map_err(|_| failure("questions_unavailable"))?;
-    let taken = crate::questions::take(&tx, project, Step::Planning)?;
-    if taken.is_empty() {
-        return Ok(0);
-    }
-    if let Some(stored) = crate::project_setup::load_setup(&tx, project)? {
-        let lines: Vec<String> = taken
-            .iter()
-            .map(|item| {
-                let question = asked.iter().find(|question| question.id == item.id);
-                answer_line(item.id, question, item.answer.as_deref())
-            })
-            .collect();
-        let state = stored.state_folder();
-        let roadmap = read_beside_brief(&state, ROADMAP_FILE).map_err(failure)?;
-        let roadmap = with_answers(roadmap.as_deref(), &lines);
-        write_beside_brief(&state, &[(ROADMAP_FILE, roadmap.as_str())]).map_err(failure)?;
-    }
-    tx.commit().map_err(|_| failure("questions_unavailable"))?;
-    Ok(taken.len())
-}
-
-/// One answer as the roadmap lists it: the question id and text on one line, then the answer
-/// labelled by who gave it, or that the owner dismissed it, line breaks folded and hidden
-/// characters escaped. Inputs: the id, the question as listed before it was taken, and the
-/// answer, none when dismissed. Output: the entry.
-fn answer_line(
-    id: i64,
-    question: Option<&crate::questions::Question>,
-    answer: Option<&str>,
-) -> String {
-    use crate::questions::AnsweredBy;
-    let flat = |text: &str| crate::memory::visible_text(&words(text));
-    let asked = question.map_or_else(String::new, |asked| format!(" {}", flat(&asked.question)));
-    let outcome = match (answer, question.and_then(|asked| asked.answered_by)) {
-        (None, _) => "The owner dismissed it.".to_owned(),
-        (Some(answer), Some(AnsweredBy::Owner)) => format!("Owner: {}", flat(answer)),
-        (Some(answer), Some(AnsweredBy::Master)) => {
-            format!("Recorded by the master from chat: {}", flat(answer))
-        }
-        (Some(answer), Some(AnsweredBy::Terminal)) => {
-            format!("Answered in the master's terminal: {}", flat(answer))
-        }
-        (Some(answer), None) => format!("Answer: {}", flat(answer)),
-    };
-    format!("- Question {id}:{asked}\n  {outcome}\n")
-}
-
-/// Adds answer entries to the engine's answers section of a roadmap: the first
-/// `ANSWERS_HEADING` line after the engine's last `## Open questions` line, added at the end
-/// when there is none, so a heading the agent's text holds is never taken for it. An entry
-/// whose `Question <n>:` marker the section already lists is skipped, so a retried write
-/// never repeats one. Inputs: the roadmap, none when missing, and the entries. Output: the text.
-fn with_answers(roadmap: Option<&str>, entries: &[String]) -> String {
-    let mut text = roadmap.unwrap_or(ROADMAP_HEADING).to_owned();
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    let lines = lines_at(&text);
-    let open = lines
-        .iter()
-        .rfind(|(_, line)| *line == OPEN_QUESTIONS_HEADING)
-        .map_or(0, |(at, _)| *at);
-    let found = lines
-        .iter()
-        .find(|(at, line)| *at >= open && *line == ANSWERS_HEADING)
-        .map(|(at, _)| *at);
-    let answers = found.unwrap_or_else(|| {
-        text.push('\n');
-        let at = text.len();
-        text.push_str(&format!("{ANSWERS_HEADING}\n\n"));
-        at
-    });
-    for entry in entries {
-        let marker = entry.split_inclusive(':').next().unwrap_or(entry);
-        if !text[answers..].lines().any(|line| line.starts_with(marker)) {
-            text.push_str(entry);
-        }
-    }
-    assert!(answers >= open && text[answers..].starts_with(ANSWERS_HEADING));
-    text
-}
-
-/// Each line of a text with the byte offset it starts at, its line break left off.
-/// Takes the text. Returns the offsets and lines in order.
-fn lines_at(text: &str) -> Vec<(usize, &str)> {
-    let mut at = 0;
-    text.split_inclusive('\n')
-        .map(|line| {
-            let start = at;
-            at += line.len();
-            (start, line.trim_end_matches('\n'))
-        })
-        .collect()
-}
-
-fn now_ms() -> i64 {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    i64::try_from(elapsed).unwrap_or(i64::MAX)
+    assert!(logged.len() <= OPEN_POINTS_MAX);
+    Ok(logged)
 }
 
 /// Opens `<state>/context` as a directory handle, refusing a link at either name.
@@ -489,38 +346,6 @@ fn context_folder(state: &Path) -> Result<rustix::fd::OwnedFd, &'static str> {
     let folder = rustix::fs::open(state, directory, Mode::empty()).map_err(|_| UNWRITABLE)?;
     let context = crate::project_setup::CONTEXT_DIRECTORY;
     rustix::fs::openat(&folder, context, directory, Mode::empty()).map_err(|_| UNWRITABLE)
-}
-
-/// Reads one document beside the brief without following a link at its name, at most
-/// `ROADMAP_BYTES_MAX` bytes. Takes the state folder and file name. Returns the text, none
-/// when missing, or `UNWRITABLE` for a link, a non-regular file, an oversized or unreadable one.
-#[cfg(unix)]
-fn read_beside_brief(state: &Path, name: &str) -> Result<Option<String>, &'static str> {
-    use rustix::fs::{Mode, OFlags};
-    use std::io::Read;
-    let context = context_folder(state)?;
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let file = match rustix::fs::openat(&context, name, flags, Mode::empty()) {
-        Ok(file) => std::fs::File::from(file),
-        Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(_) => return Err(UNWRITABLE),
-    };
-    let metadata = file.metadata().map_err(|_| UNWRITABLE)?;
-    if !metadata.is_file() || metadata.len() > ROADMAP_BYTES_MAX as u64 {
-        return Err(UNWRITABLE);
-    }
-    let mut text = String::new();
-    file.take(ROADMAP_BYTES_MAX as u64)
-        .read_to_string(&mut text)
-        .map_err(|_| UNWRITABLE)?;
-    Ok(Some(text))
-}
-
-/// Refuses to read planning documents where no directory-relative no-follow open exists.
-/// Takes the state folder and name, both unused. Returns `UNWRITABLE`.
-#[cfg(not(unix))]
-fn read_beside_brief(_state: &Path, _name: &str) -> Result<Option<String>, &'static str> {
-    Err(UNWRITABLE)
 }
 
 /// Writes the named documents into `<state>/context/` as a pair: each target must be absent,

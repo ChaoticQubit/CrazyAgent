@@ -30,7 +30,8 @@ pub const ANSWER_TOOL: &str = "answer";
 pub const STATUS_TOOL: &str = "status";
 pub const CHANGES_TOOL: &str = "changes";
 pub const ESCALATE_TOOL: &str = "escalate";
-pub const ASK_TOOL: &str = "ask_owner";
+pub const ASK_TOOL: &str = "ask";
+pub const RECORD_TOOL: &str = "record_answer";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -49,15 +50,10 @@ const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60)
 const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
 const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
-const ASK_INVALID: &str = "Not asked: give one plain question of up to 2000 bytes, at most 4 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer of up to 500 bytes and context of up to 2000 bytes. To record an answer the owner gave you in chat, give only the question id and that answer, up to 2000 bytes.";
-const ASK_KEYS: [&str; 6] = [
-    "question",
-    "options",
-    "recommended",
-    "context",
-    "id",
-    "answer",
-];
+const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
+const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
+const ASK_KEYS: [&str; 4] = ["question", "options", "recommended", "context"];
+const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
 const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -81,7 +77,8 @@ const _: () = assert!(
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
 /// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
 /// `escalate` raises an app notification for a decision only the owner makes, and
-/// `ask_owner` logs a question for the owner or records the answer the owner gave in chat.
+/// `ask` logs a question for the owner, and `record_answer` records the owner's chat message
+/// that answered one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -103,15 +100,16 @@ pub enum Call {
     Escalate {
         text: String,
     },
-    AskOwner {
+    Ask {
         question: String,
         options: Vec<String>,
         recommended: Option<String>,
         context: Option<String>,
     },
     RecordAnswer {
-        id: i64,
-        answer: String,
+        question: u64,
+        version: u64,
+        owner_turn: i64,
     },
 }
 
@@ -289,23 +287,42 @@ fn live_tools() -> Value {
             "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
         },
+        ask_tool(),
         {
-            "name": ASK_TOOL,
-            "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. The owner is notified, and their answer or dismissal comes to you once as a message from the owner. When the owner answers you in chat instead, call this tool with only the question id and their answer to record it.",
+            "name": RECORD_TOOL,
+            "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "One plain question for the owner."},
-                    "options": {"type": "array", "items": {"type": "string"}, "maxItems": 4, "description": "Up to 4 short one-line answers the owner can pick from."},
-                    "recommended": {"type": "string", "description": "The answer you recommend, with the reason in a sentence."},
-                    "context": {"type": "string", "description": "What the owner needs to know to answer."},
-                    "id": {"type": "integer", "description": "Only to record a chat answer: the question number."},
-                    "answer": {"type": "string", "description": "Only to record a chat answer: what the owner said."},
+                    "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                    "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+                    "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
                 },
+                "required": ["question", "version", "owner_turn"],
                 "additionalProperties": false,
             },
         },
     ]})
+}
+
+/// The MCP entry of the `ask` tool, the same for every master and agent that is given it.
+/// Output: the tool's name, description and input schema.
+pub fn ask_tool() -> Value {
+    json!({
+        "name": ASK_TOOL,
+        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "One plain question for the owner."},
+                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "Up to 6 short one-line answers the owner can pick from."},
+                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer when there are none."},
+                "context": {"type": "string", "description": "What the owner needs to know to answer."},
+            },
+            "required": ["question"],
+            "additionalProperties": false,
+        },
+    })
 }
 
 fn answer_live(request: &Value, mailbox: &Path) -> Option<Value> {
@@ -386,13 +403,14 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             _ => Err(ESCALATE_INVALID),
         },
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
+        RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
         _ => return None,
     })
 }
 
-/// Reads one `ask_owner` call: a question with its options, recommendation and context, or
-/// only a question id with the answer the owner gave in chat. Takes the arguments.
-/// Returns the call, or none when a part is missing, unknown, mixed or outside its bounds.
+/// Reads one `ask` call: a question with its options, recommendation and context, each
+/// checked as the questions log checks it. Takes the arguments. Returns the call, or none
+/// when a part is missing, unknown or outside its bounds.
 fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     let arguments = arguments?.as_object()?;
     if arguments
@@ -401,26 +419,14 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     {
         return None;
     }
-    let given = |key: &str| arguments.get(key).is_some_and(|value| !value.is_null());
     let text = |key: &str| match arguments.get(key) {
         None | Some(Value::Null) => Some(None),
         Some(Value::String(text)) => Some(Some(text.clone())),
         Some(_) => None,
     };
-    if given("id") {
-        if ASK_KEYS[..4].iter().any(|key| given(key)) {
-            return None;
-        }
-        let id = arguments.get("id")?.as_i64().filter(|id| *id > 0)?;
-        let answer = crate::questions::answer_checked(&text("answer")??)?;
-        return Some(Call::RecordAnswer { id, answer });
-    }
-    if given("answer") {
-        return None;
-    }
     let options = match arguments.get("options") {
         None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(items)) => items
+        Some(Value::Array(items)) if items.len() <= crate::questions::OPTIONS_MAX => items
             .iter()
             .map(|item| item.as_str().map(str::to_owned))
             .collect::<Option<_>>()?,
@@ -432,12 +438,37 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
         recommended: text("recommended")?,
         context: text("context")?,
     }
-    .checked()?;
-    Some(Call::AskOwner {
+    .checked()
+    .ok()?;
+    Some(Call::Ask {
         question: ask.question,
         options: ask.options,
         recommended: ask.recommended,
         context: ask.context,
+    })
+}
+
+/// Reads one `record_answer` call: the question number, the version the master read and
+/// the owner's chat message number. Takes the arguments. Returns the call, or none when a
+/// part is missing, unknown or not a number in range.
+fn record_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !RECORD_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
+    let question = number("question").filter(|id| *id > 0)?;
+    let version = number("version")?;
+    let owner_turn = number("owner_turn")
+        .and_then(|turn| i64::try_from(turn).ok())
+        .filter(|turn| *turn > 0)?;
+    Some(Call::RecordAnswer {
+        question,
+        version,
+        owner_turn,
     })
 }
 
@@ -458,7 +489,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
-        Call::AskOwner {
+        Call::Ask {
             question,
             options,
             recommended,
@@ -467,7 +498,14 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             ASK_TOOL,
             json!({"question": question, "options": options, "recommended": recommended, "context": context}),
         ),
-        Call::RecordAnswer { id, answer } => (ASK_TOOL, json!({"id": id, "answer": answer})),
+        Call::RecordAnswer {
+            question,
+            version,
+            owner_turn,
+        } => (
+            RECORD_TOOL,
+            json!({"question": question, "version": version, "owner_turn": owner_turn}),
+        ),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {
