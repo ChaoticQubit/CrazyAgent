@@ -1654,8 +1654,8 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap();
     fixture.until(
         &mut team,
-        "the same sub-agent works on the resolve task",
-        |f| f.agent_status(member.id).0 == AgentStatus::Working,
+        "the same sub-agent works on the resolve task in its recorded pane",
+        |f| f.agent_status(member.id).0 == AgentStatus::Working && f.recorded(member.id),
     );
     ran(2);
     let (agent, status, sent): (Option<i64>, String, String) = fixture
@@ -1692,7 +1692,11 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap()
         .to_path_buf();
     assert_eq!(std::fs::read_dir(worktrees).unwrap().count(), 1);
-    assert!(team.shutdown().unwrap().is_empty());
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[member.id]),
+        "the working sub-agent's pane outlives the engine"
+    );
 }
 
 const LIVE_CODEX: &str = r#"#!/bin/sh
