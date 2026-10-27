@@ -37,7 +37,7 @@ const CALL_BYTES_MAX: u64 = 16 * 1024;
 const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
-const ROLE_BYTES_MAX: usize = 40;
+const ROLE_HANDLE_BYTES_MAX: usize = 40;
 const CALL_SUFFIX: &str = ".call";
 const REPLY_SUFFIX: &str = ".reply";
 const PART_SUFFIX: &str = ".part";
@@ -358,7 +358,7 @@ fn agent_name_valid(agent: &str) -> bool {
 /// lowercase letters, digits and single inner hyphens.
 pub fn role_handle(text: &str) -> Option<String> {
     let bare = text.trim().strip_prefix('@').unwrap_or(text.trim());
-    let fits = (2..=ROLE_BYTES_MAX).contains(&bare.len())
+    let fits = (2..=ROLE_HANDLE_BYTES_MAX).contains(&bare.len())
         && bare
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
