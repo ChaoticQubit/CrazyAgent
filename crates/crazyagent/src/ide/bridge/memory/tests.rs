@@ -401,3 +401,53 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     assert_eq!(check(&decide("fact", 0, Decision::Approve)), Err(INVALID));
     store.engine.close().await.unwrap();
 }
+
+/// A table an earlier build made without the decision column gains it at the next engine
+/// open: the old asks read as approvals, and a new ask records its own decision.
+#[tokio::test]
+async fn an_ask_table_from_an_earlier_build_gains_the_decision_column() {
+    let mut store = Store::open().await;
+    store.seed("ide-old", &["fact"]).await;
+    let old = project("ide-old");
+    let database = store.database();
+    let now = 1_000_000;
+    database
+        .execute_batch(
+            "DROP TABLE ide_asks;
+             CREATE TABLE ide_asks (
+                project TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0),
+                asked_ms INTEGER NOT NULL,
+                PRIMARY KEY (project, entry)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO ide_asks(project,entry,version,asked_ms) VALUES ('ide-old','fact',1,?1)",
+            [now],
+        )
+        .unwrap();
+
+    initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    let decided = |database: &rusqlite::Connection, at: i64| {
+        asks(database, &old, at)
+            .unwrap()
+            .iter()
+            .map(|ask| (ask.entry.id.as_str().to_owned(), ask.decision))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        decided(&database, now + 1),
+        [("fact".to_owned(), Decision::Approve)],
+        "an ask from the earlier build reads as the approval it was"
+    );
+    ask(&database, &old, &id("fact"), 1, Decision::Reject, now + 2).unwrap();
+    assert_eq!(
+        decided(&database, now + 3),
+        [("fact".to_owned(), Decision::Reject)]
+    );
+    store.engine.close().await.unwrap();
+}

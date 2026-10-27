@@ -208,9 +208,12 @@ pub(crate) async fn decide(
     }
 }
 
-/// Creates the table of decisions the IDE asked the owner to confirm in the desktop app.
-/// Takes the engine connection. Returns Ok.
+/// Creates the table of decisions the IDE asked the owner to confirm in the desktop app,
+/// and adds the decision column to a table an earlier build made without it; every ask of
+/// that shape was an approval, so its rows read as approvals. Takes the engine connection.
+/// Returns Ok, or `ide_asks_unavailable`.
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    let unavailable = |_| failure("ide_asks_unavailable");
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS ide_asks (
@@ -222,7 +225,23 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 PRIMARY KEY (project, entry)
             ) WITHOUT ROWID;",
         )
-        .map_err(|_| failure("ide_asks_unavailable"))
+        .map_err(unavailable)?;
+    let decided: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ide_asks') WHERE name='decision')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !decided {
+        connection
+            .execute_batch(
+                "ALTER TABLE ide_asks ADD COLUMN decision TEXT NOT NULL DEFAULT 'approve'
+                 CHECK (decision IN ('approve','reject'));",
+            )
+            .map_err(unavailable)?;
+    }
+    Ok(())
 }
 
 fn decision_name(decision: Decision) -> &'static str {
