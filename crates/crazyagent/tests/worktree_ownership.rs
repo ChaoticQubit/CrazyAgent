@@ -733,6 +733,108 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     engine.close().await.unwrap();
 }
 
+/// Makes a real FIFO at `path` with `mkfifo`. Input: the path.
+fn fifo(path: &Path) {
+    let output = crazyagent::spawn_gate::output(
+        Process::new("/usr/bin/mkfifo")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[tokio::test]
+async fn a_worktree_head_naming_a_ref_of_its_own_folder_is_refused_at_once_for_every_lease() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let repo = repository(&root, "repo");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "agent",
+            root.join("agent").to_str().unwrap(),
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            root.join("detached").to_str().unwrap(),
+        ],
+    );
+    let (engine, _) = setup(&root, &repo).await;
+    admit(&engine, &repo).await;
+    assert_eq!(
+        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
+            .await
+            .outcome,
+        Outcome::Applied
+    );
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Ready
+    );
+
+    let agent = admin_folder(&root.join("agent"));
+    std::fs::create_dir_all(agent.join("refs").join("worktree")).unwrap();
+    fifo(&agent.join("refs").join("worktree").join("stuck"));
+    let head = agent.join("HEAD");
+    let kept = std::fs::read_to_string(&head).unwrap();
+    assert_eq!(kept, "ref: refs/heads/agent\n");
+    std::fs::write(&head, "ref: refs/worktree/stuck\n").unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Uncertain
+    );
+    let readmission = apply(
+        &engine,
+        "readmit",
+        4,
+        Command::AdmitRepository {
+            project_id: ProjectId::new("project").unwrap(),
+            repository: repo.to_str().unwrap().into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        readmission.outcome,
+        rejected("untrusted_git_entry:worktrees/agent/HEAD")
+    );
+    for planted in [
+        "ref: refs/heads/../worktree/stuck\n",
+        "ref: refs/bisect/bad\n",
+        "ref: ORIG_HEAD\n",
+        "ref: refs/heads/agent\nref: refs/worktree/stuck\n",
+    ] {
+        std::fs::write(&head, planted).unwrap();
+        assert_eq!(
+            leases(&engine).await[0].state,
+            crazyagent::worktrees::LeaseState::Uncertain,
+            "{planted}"
+        );
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the refusals waited on git: {:?}",
+        started.elapsed()
+    );
+    std::fs::write(&head, &kept).unwrap();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Ready
+    );
+    engine.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn ordinary_remote_configuration_does_not_grant_network_authority() {
     let temporary = tempfile::tempdir().unwrap();

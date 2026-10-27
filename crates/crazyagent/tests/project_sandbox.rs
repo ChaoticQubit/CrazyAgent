@@ -680,6 +680,53 @@ fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
 }
 
 #[test]
+fn a_confined_agent_cannot_move_its_worktree_head_but_git_still_works_there() {
+    let (case, sandbox, profile, worktree) = git_case();
+    let moved = owner_git(
+        &case.project,
+        &case.home,
+        &["commit", "-q", "--allow-empty", "-m", "second"],
+    );
+    assert!(moved.status.success(), "{moved:?}");
+    let second = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    let second = String::from_utf8(second.stdout).unwrap().trim().to_owned();
+    let admin = case
+        .project
+        .join(".git")
+        .join("worktrees")
+        .join("engine-one");
+    let head = admin.join("HEAD");
+    let before = fs::read_to_string(&head).unwrap();
+    assert_ne!(before.trim(), second);
+    let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+    let place = quoted(&worktree);
+    let quiet = run(
+        &confined,
+        &profile,
+        &format!("cd {place} && git status --short && git reset -q --hard HEAD && echo ok"),
+    );
+    assert!(
+        quiet.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&quiet.stdout), "ok\n");
+    for script in [
+        format!("cd {place} && git update-ref --no-deref HEAD {second}"),
+        format!("cd {place} && git checkout -q --detach {second}"),
+        format!("printf 'ref: refs/heads/main\\n' > {}", quoted(&head)),
+        format!("mv {} {}", quoted(&head), quoted(&admin.join("HEAD.old"))),
+        format!("rm {}", quoted(&head)),
+    ] {
+        let output = run(&confined, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+        assert_eq!(fs::read_to_string(&head).unwrap(), before, "{script}");
+    }
+    assert!(!admin.join("HEAD.lock").exists());
+    assert!(!admin.join("HEAD.old").exists());
+}
+
+#[test]
 fn an_agent_cannot_plant_the_git_redirect_files_the_engine_rejects() {
     let plants: [(&str, &str, &str); 12] = [
         (
