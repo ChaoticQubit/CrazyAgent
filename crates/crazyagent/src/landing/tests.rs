@@ -1029,18 +1029,21 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     write(&sub.join("inner.txt"), "inner\n");
     git_in(&case.home, &sub, &["add", "inner.txt"]);
     git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub start"]);
-    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
-        .trim()
-        .to_owned();
 
-    let marker = case.home.join("submodule-fsmonitor-ran");
-    let fsmonitor = case.home.join("fsmonitor.sh");
-    marker_script(&fsmonitor, &marker);
+    let marker = case.home.join("submodule-clean-filter-ran");
+    let filter = case.home.join("clean-filter.sh");
+    marker_script(&filter, &marker);
     git_in(
         &case.home,
         &sub,
-        &["config", "core.fsmonitor", fsmonitor.to_str().unwrap()],
+        &["config", "filter.guard.clean", filter.to_str().unwrap()],
     );
+    write(&sub.join(".gitattributes"), "inner.txt filter=guard\n");
+    git_in(&case.home, &sub, &["add", ".gitattributes"]);
+    git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub filter"]);
+    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
 
     git_in(
         &case.home,
@@ -1074,7 +1077,78 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     );
     assert!(
         !marker.exists(),
-        "engine git ran the submodule's configured fsmonitor"
+        "engine git entered the submodule and ran its clean filter"
+    );
+}
+
+#[test]
+fn accept_lands_with_a_dirty_submodule_in_the_owner_checkout() {
+    let case = Case::new();
+    let sub = case.repo.join("vendor");
+    std::fs::create_dir(&sub).unwrap();
+    git_in(
+        &case.home,
+        &sub,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(&case.home, &sub, &["config", "user.name", "Vendor Owner"]);
+    git_in(
+        &case.home,
+        &sub,
+        &["config", "user.email", "vendor@example.invalid"],
+    );
+    write(&sub.join("inner.txt"), "inner\n");
+    git_in(&case.home, &sub, &["add", "inner.txt"]);
+    git_in(&case.home, &sub, &["commit", "-q", "-m", "Vendor start"]);
+    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    git_in(
+        &case.home,
+        &case.repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{sub_head},vendor"),
+        ],
+    );
+    write(
+        &case.repo.join(".gitmodules"),
+        "[submodule \"vendor\"]\n\tpath = vendor\n\turl = ./vendor\n",
+    );
+    git_in(&case.home, &case.repo, &["add", ".gitmodules"]);
+    git_in(
+        &case.home,
+        &case.repo,
+        &["commit", "-q", "-m", "Add submodule"],
+    );
+    let with_submodule = case.tip();
+    case.agent(&["reset", "-q", "--hard", &with_submodule]);
+
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    write(&sub.join("inner.txt"), "changed\n");
+    write(&sub.join("untracked.txt"), "new\n");
+
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&id).unwrap() else {
+        panic!("a dirty owner submodule blocked the accept");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["ls-tree", "--name-only", &commit])
+            .lines()
+            .filter(|name| *name == "vendor")
+            .count(),
+        1,
+        "the landed commit dropped the submodule gitlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sub.join("inner.txt")).unwrap(),
+        "changed\n",
+        "the accept reset the owner's dirty submodule work"
     );
 }
 

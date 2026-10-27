@@ -653,12 +653,12 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Confines the agent's writes to its own git worktree of the project: the worktree,
-    /// its admin folder in `.git/worktrees` except its HEAD, which only the engine moves,
-    /// and the shared object store, beside its home,
-    /// temp dir and extra worktrees. The project folder stays readable. Input: a canonical
-    /// worktree in the project's `worktrees/` folder whose `.git` link and admin folder
-    /// name each other. Output: the confined sandbox, or `Invalid`.
+    /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder
+    /// except its HEAD, which only the engine moves, and the object store, beside its home,
+    /// temp dir and extra worktrees; the project stays readable. Makes the admin folder's
+    /// `modules` store so every platform guards a real folder there. Input: a canonical
+    /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
+    /// Output: the confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
         if self.checkout.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
@@ -699,6 +699,12 @@ impl ProjectSandbox {
                 .iter()
                 .all(|root| root.starts_with(&self.project_root) && *root != self.project_root)
         );
+        ensure_store(&admin.join("modules")).map_err(|problem| match problem.kind() {
+            io::ErrorKind::InvalidData => {
+                invalid("the worktree's submodule store must be a plain folder")
+            }
+            _ => SandboxError::Io(problem),
+        })?;
         self.read_roots.push(self.project_root.clone());
         self.checkout = Some(Checkout {
             worktree: worktree.to_path_buf(),
@@ -850,21 +856,25 @@ impl ProjectSandbox {
         &self.network
     }
 
-    /// Paths inside the project folder no agent may write although the folder is writable:
-    /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
-    /// the git config with its lock file, and `.git/modules`, where git keeps submodule
-    /// repositories. Every platform boundary keeps these read-only, except that Windows
-    /// guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
-    pub fn protected_paths(&self) -> [PathBuf; 6] {
+    /// Paths no agent may write although they sit in a writable root: both `context/`
+    /// folders, the git hooks, config and its lock, `.git/modules` and, for an agent confined
+    /// to a worktree, its admin folder's `modules`, where git keeps submodule repositories.
+    /// Every platform boundary keeps these read-only, except that Windows guards the config
+    /// but not its lock (`windows::GIT_CONFIG_LOCK`).
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
         let git = self.project_root.join(".git");
-        [
+        let mut paths = vec![
             self.project_root.join("context"),
             self.project_root.join(".crazyagent").join("context"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
             git.join("modules"),
-        ]
+        ];
+        if let Some(checkout) = &self.checkout {
+            paths.push(checkout.admin.join("modules"));
+        }
+        paths
     }
 
     /// Every folder this sandbox lets the agent write: the project folder, or for a
@@ -1468,6 +1478,31 @@ fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a O
 
 fn invalid(reason: &str) -> SandboxError {
     SandboxError::Invalid(reason.into())
+}
+
+/// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
+/// it empty, mode 0700 on unix, or keeps an entry already there only when it is a real
+/// folder, never a file or a link. Disk state is input here, so a wrong entry is an error.
+/// Input: the store path. Output: Ok, or `InvalidData` for any other entry at the path.
+pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = fs::DirBuilder::new().create(path);
+    match created {
+        Err(problem) if problem.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::symlink_metadata(path)?.is_dir() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a submodule store must be a plain folder",
+                ))
+            }
+        }
+        made => made,
+    }
 }
 
 /// The owner's home folder from the user profile, canonical when it resolves, which

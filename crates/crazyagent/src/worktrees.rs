@@ -1543,6 +1543,7 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
         .map_err(error)?;
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
+    ensure_submodule_stores(repository, &metadata)?;
     let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
     let lease = |args: &[&str]| {
         let mut full = vec![
@@ -1574,6 +1575,25 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     verify_record(record)?;
     assert!(left_out.len() <= LINKS_LEFT_OUT_MAX);
     assert!(record.directory.is_some());
+    Ok(())
+}
+
+/// Makes the two submodule-store folders a sandbox profile denies writes to, the common
+/// `.git/modules` and this lease's admin `modules`, through `sandbox::ensure_store`, so every
+/// platform guards a real folder. A store already there is kept when it is a plain folder;
+/// a file or link there is refused, never trusted. Inputs: the repository and the lease
+/// admin git dir. Output: success, or `submodule_store_invalid` or the filesystem refusal.
+#[cfg(unix)]
+fn ensure_submodule_stores(repository: &Path, admin: &Path) -> Result<(), EngineError> {
+    for store in [
+        repository.join(".git").join("modules"),
+        admin.join("modules"),
+    ] {
+        crate::sandbox::ensure_store(&store).map_err(|problem| match problem.kind() {
+            std::io::ErrorKind::InvalidData => error("submodule_store_invalid"),
+            _ => error(problem),
+        })?;
+    }
     Ok(())
 }
 
@@ -2284,6 +2304,56 @@ mod tests {
             git(&repository, args).unwrap();
         }
         repository
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn submodule_stores_are_created_private_and_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let admin = temporary.path().join("admin");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir(&admin).unwrap();
+        ensure_submodule_stores(&repository, &admin).unwrap();
+        for store in [repository.join(".git/modules"), admin.join("modules")] {
+            let metadata = std::fs::metadata(&store).unwrap();
+            assert!(metadata.is_dir(), "{} is not a folder", store.display());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
+        ensure_submodule_stores(&repository, &admin).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_submodule_store_that_is_a_file_or_a_link_is_refused_not_trusted() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let admin = temporary.path().join("admin");
+        let elsewhere = temporary.path().join("elsewhere");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir(&admin).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        let common = repository.join(".git").join("modules");
+        std::fs::write(&common, b"planted").unwrap();
+        assert_eq!(
+            ensure_submodule_stores(&repository, &admin).unwrap_err().0,
+            "submodule_store_invalid"
+        );
+        assert_eq!(std::fs::read(&common).unwrap(), b"planted");
+        std::fs::remove_file(&common).unwrap();
+        let private = admin.join("modules");
+        std::os::unix::fs::symlink(&elsewhere, &private).unwrap();
+        assert_eq!(
+            ensure_submodule_stores(&repository, &admin).unwrap_err().0,
+            "submodule_store_invalid"
+        );
+        assert!(
+            std::fs::symlink_metadata(&private)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[test]
