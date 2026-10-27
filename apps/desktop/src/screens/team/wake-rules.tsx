@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { nextGeneration } from "../../api";
 import { markTeamSeen, setWakeRule } from "../../api-projects";
 import type { TeamNotification, TeamStatus, WakeRule, WakeRuleLevel, WakeRuleTarget } from "../../engine-client";
-import { Button, Notice, Select, StatusBadge, Switch, TextField } from "../../ui";
+import { Button, Notice, Select, StatusBadge, Switch, TextField, formatRoute } from "../../ui";
 import { displayText } from "../conversation";
+import { ago } from "../project/research";
 import { changeNote } from "./controls";
 import { WAKE_KINDS, capInput, eventLine, eventState, ruleSource, withKind } from "./wake";
 
@@ -59,12 +60,15 @@ export function WakeRuleEditor({ target, own, effective, fallback, reload }: {
   </div>;
 }
 
-/** The owner's notifications of one project with a Mark as seen action for the unseen ones.
- * Inputs: the project id, its notifications, newest first, and a reload. Output: the list. */
-export function NotificationList({ projectId, notifications, reload }: {
+/** The owner's notifications of one project with a Mark as seen action for the unseen ones;
+ * each shows when it came and opens the project's conversation, where the master waits.
+ * Inputs: the project id, its notifications, newest first, a reload and the time now.
+ * Output: the list. */
+export function NotificationList({ projectId, notifications, reload, now = Date.now() }: {
   projectId: string;
   notifications: TeamNotification[];
   reload: () => void;
+  now?: number;
 }) {
   const [note, setNote] = useState("");
   const unseen = notifications.filter((item) => item.seen_ms === null);
@@ -81,7 +85,9 @@ export function NotificationList({ projectId, notifications, reload }: {
     </div>
     <ul className="pj-rows">{notifications.map((item) => <li key={item.id} className="pj-row">
       <StatusBadge word={item.seen_ms === null ? "New" : "Seen"} tone={item.seen_ms === null ? "info" : "neutral"} />
-      <span>{displayText(item.text)}</span>
+      <span className="grow">{displayText(item.text)}</span>
+      <span className="pj-secondary">{ago(item.created_ms, now)}</span>
+      <a className="btn quiet small" href={formatRoute({ name: "project", id: projectId, tab: "conversation" })}>Open conversation</a>
     </li>)}</ul>
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </section>;

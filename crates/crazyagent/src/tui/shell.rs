@@ -1006,7 +1006,7 @@ mod tests {
         let mut team = card("Ledgerline", 0);
         team.activity = Activity {
             working: Some(2),
-            suggestions: 0,
+            ..Activity::default()
         };
         ctx.store.projects = Load::Ready(vec![team, card("Tidepool", 1)]);
         let mut shell = at(Place::Home, ctx);

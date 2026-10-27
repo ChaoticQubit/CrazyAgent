@@ -500,10 +500,12 @@ fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
     cards[0].activity = Activity {
         working: Some(1),
         suggestions: 3,
+        notifications: 0,
     };
     cards[1].activity = Activity {
         working: Some(0),
         suggestions: 1,
+        notifications: 0,
     };
     let mut ctx = ready(80, 24);
     ctx.store.projects = Load::Ready(cards);
@@ -526,6 +528,33 @@ fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
         shell.place(),
         Some(Place::Settings(SettingsSection::Memory))
     );
+}
+
+#[test]
+fn home_cards_put_new_team_notifications_before_suggested_memories() {
+    let mut cards = projects();
+    cards[0].activity = Activity {
+        working: Some(0),
+        suggestions: 3,
+        notifications: 2,
+    };
+    cards[1].activity = Activity {
+        working: Some(0),
+        suggestions: 0,
+        notifications: 1,
+    };
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut ctx = ready(width, height);
+        ctx.store.projects = Load::Ready(cards.clone());
+        ctx.store.pools = Load::Ready(pools());
+        let mut shell = shell_at(ctx, Place::Home);
+        shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+        let shown = render(&mut shell, width, height).join("\n");
+        assert!(shown.contains("2 new team notifications"), "{shown}");
+        assert_eq!(shown.matches("new team notification").count(), 2, "{shown}");
+        assert!(!shown.contains("1 new team notifications"), "{shown}");
+        assert!(!shown.contains("3 suggested memories"), "{shown}");
+    }
 }
 
 #[test]

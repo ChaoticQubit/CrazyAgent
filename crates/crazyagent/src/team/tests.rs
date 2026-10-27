@@ -2726,3 +2726,69 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     );
     service.stop();
 }
+
+#[test]
+fn the_owner_marks_one_project_s_notifications_seen_up_to_an_id_and_no_other_project_s() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-seen",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let other = ProjectId::new("team-other").unwrap();
+    let pool = access("team-seen", &["local-a"]);
+    let raise = |project: &ProjectId, text: &str| {
+        events::escalate(&connection, project, text, 5)
+            .unwrap()
+            .unwrap()
+    };
+    let first = raise(&project, "May Ada push to main?");
+    let second = raise(&project, "May Ada delete the old branch?");
+    let foreign = raise(&other, "May Grace spend on a new provider?");
+    let third = raise(&project, "May Ada rename the crate?");
+    let seen = |project: &ProjectId, upto: i64| TeamAction::Seen {
+        project_id: project.clone(),
+        upto,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &seen(&project, foreign)).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &seen(&other, third)).unwrap(),
+        rejected("project_setup_missing")
+    );
+    for upto in [0, -1] {
+        assert_eq!(
+            execute(&tx, &pool, &seen(&project, upto)).unwrap_err().0,
+            "team_notification_missing"
+        );
+    }
+    tx.commit().unwrap();
+    let state = |project: &ProjectId| -> Vec<(i64, bool)> {
+        events::notifications(&connection, Some(project), 10)
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.id, item.seen_ms.is_some()))
+            .collect()
+    };
+    assert_eq!(
+        state(&project),
+        [(third, false), (second, true), (first, true)]
+    );
+    assert_eq!(state(&other), [(foreign, false)]);
+}
