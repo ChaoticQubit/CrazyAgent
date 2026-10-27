@@ -732,6 +732,7 @@ impl TeamRuntime {
     /// scan. Every master is served before the first failure or log refusal is returned.
     fn watch_master_questions(&mut self) -> Result<(), EngineError> {
         use super::screen_questions::{Change, Pending};
+        use crate::questions::{Ask, Asker};
         let Some(host) = self.terminal.clone() else {
             return Ok(());
         };
@@ -752,15 +753,21 @@ impl TeamRuntime {
         let mut read = BTreeSet::new();
         let mut pending = Vec::new();
         for (project, agent) in self.master_watch.askers(&live) {
-            match crate::questions::terminal_pending(&self.connection, &project, agent) {
+            let asker = Asker::Terminal(agent).name();
+            match crate::questions::pending(&self.connection, &project) {
                 Ok(found) => {
                     read.insert(agent);
-                    pending.extend(found.into_iter().map(|(id, text)| Pending {
-                        id,
-                        project: project.clone(),
-                        agent,
-                        text,
-                    }));
+                    pending.extend(
+                        found
+                            .into_iter()
+                            .filter(|question| question.asker == asker)
+                            .map(|question| Pending {
+                                id: question.id,
+                                project: project.clone(),
+                                agent,
+                                text: question.question,
+                            }),
+                    );
                 }
                 Err(problem) => {
                     first.get_or_insert(problem);
@@ -771,27 +778,25 @@ impl TeamRuntime {
             .into_iter()
             .filter(|master| read.contains(&master.agent))
             .collect();
-        let now = now_ms();
         for change in self.master_watch.scan(host.as_ref(), &masters, &pending) {
             let applied = match change {
                 Change::Asked {
                     project,
                     agent,
                     text,
-                } => crate::questions::asked_in_terminal(
-                    &self.connection,
-                    &project,
-                    agent,
-                    &text,
-                    now,
-                )
-                .and_then(|logged| {
-                    logged
+                } => {
+                    let ask = Ask {
+                        question: text.clone(),
+                        options: Vec::new(),
+                        recommended: None,
+                        context: None,
+                    };
+                    let asker = Asker::Terminal(agent);
+                    crate::questions::ask(&self.connection, &project, &asker, &ask)
                         .map(|_| self.master_watch.logged(agent, &text))
-                        .map_err(|code| EngineError(code.into()))
-                }),
+                }
                 Change::Answered(id) => {
-                    crate::questions::answered_in_terminal(&self.connection, id, now).map(|_| ())
+                    crate::questions::terminal_settled(&self.connection, id).map(|_| ())
                 }
             };
             if let Err(problem) = applied {

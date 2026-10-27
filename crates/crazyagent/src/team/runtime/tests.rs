@@ -3114,11 +3114,17 @@ fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     let line =
         "Which database should the service use? | 1. Postgres | 2. SQLite | 3. None of the above";
-    let logged = |f: &Fixture| -> Vec<(i64, String)> {
+    let logged = |f: &Fixture| -> Vec<(u64, String)> {
         masters(&f.connection)
             .first()
             .map(|master| {
-                crate::questions::terminal_pending(&f.connection, &project, *master).unwrap()
+                let asker = crate::questions::Asker::Terminal(*master).name();
+                crate::questions::pending(&f.connection, &project)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|question| question.asker == asker)
+                    .map(|question| (question.id, question.question))
+                    .collect()
             })
             .unwrap_or_default()
     };
@@ -3129,15 +3135,15 @@ fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
     let pending = logged(&fixture);
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].1, line);
-    let id = pending[0].0;
+    let id = i64::try_from(pending[0].0).unwrap();
     for _ in 0..3 {
         idle_ticks(&mut team);
     }
     let rows =
-        |f: &Fixture| -> Vec<(i64, String, String, Option<String>, Option<i64>)> {
+        |f: &Fixture| -> Vec<(i64, String, String, Option<String>, String)> {
             f.connection
             .prepare(
-                "SELECT id,source,state,answered_by,agent FROM owner_questions WHERE project=?1",
+                "SELECT id,source,status,answered_by,asker FROM owner_questions WHERE project=?1",
             )
             .unwrap()
             .query_map([PROJECT], |row| {
@@ -3149,7 +3155,13 @@ fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
         };
     assert_eq!(
         rows(&fixture),
-        vec![(id, "terminal".into(), "pending".into(), None, Some(master))],
+        vec![(
+            id,
+            "terminal".into(),
+            "pending".into(),
+            None,
+            format!("terminal:{master}")
+        )],
         "a box still on screen is logged once"
     );
     let page = fixture
@@ -3171,7 +3183,7 @@ fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
         |f| {
             rows(f)
                 .first()
-                .is_some_and(|row| row.2 == "answered" && row.3.as_deref() == Some("terminal"))
+                .is_some_and(|row| row.2 == "answered_in_terminal" && row.3.is_none())
         },
     );
     assert!(logged(&fixture).is_empty());

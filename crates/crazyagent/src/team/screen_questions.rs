@@ -51,7 +51,7 @@ pub fn owner_question(screen: &[u8]) -> Option<String> {
 /// its id in the log, the master's project and team agent id, and its line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pending {
-    pub id: i64,
+    pub id: u64,
     pub project: ProjectId,
     pub agent: i64,
     pub text: String,
@@ -66,7 +66,7 @@ pub enum Change {
         agent: i64,
         text: String,
     },
-    Answered(i64),
+    Answered(u64),
 }
 
 /// Reads live masters' screens for questions their harness asks the owner. A question on a
@@ -80,7 +80,7 @@ pub struct MasterWatch {
     next: Option<Instant>,
     screens: BTreeMap<i64, u64>,
     held: BTreeMap<i64, String>,
-    misses: BTreeMap<i64, u8>,
+    misses: BTreeMap<u64, u8>,
     askers: BTreeMap<i64, ProjectId>,
 }
 
@@ -203,7 +203,7 @@ impl MasterWatch {
                 changes.push(Change::Answered(question.id));
             }
         }
-        let held: BTreeSet<i64> = pending.iter().map(|question| question.id).collect();
+        let held: BTreeSet<u64> = pending.iter().map(|question| question.id).collect();
         self.misses.retain(|id, _| held.contains(id));
         assert!(self.screens.keys().all(|agent| live.contains(agent)));
         assert!(self.held.keys().all(|agent| live.contains(agent)));

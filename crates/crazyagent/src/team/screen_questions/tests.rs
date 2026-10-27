@@ -98,7 +98,7 @@ fn master(agent: i64) -> Watched {
     }
 }
 
-fn pending(id: i64, agent: i64) -> Pending {
+fn pending(id: u64, agent: i64) -> Pending {
     Pending {
         id,
         project: project(),
