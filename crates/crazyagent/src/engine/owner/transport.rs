@@ -42,7 +42,9 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide;
 pub(crate) mod ide_extensions;
+pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
@@ -1237,6 +1239,7 @@ impl OwnerServer {
                     .ok_or_else(|| failure("owner_root_unavailable"))?,
                 crate::ide::server::IDLE_LIMIT,
             );
+            ide_servers.sweep_left().await;
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -2008,6 +2011,8 @@ enum Protocol {
     Recovery,
     NativeAuth,
     Process,
+    Ide,
+    IdeTab,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -2037,6 +2042,8 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("recovery", Protocol::Recovery),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
+        ("ide", Protocol::Ide),
+        ("ide_tab", Protocol::IdeTab),
     ];
     Ok(named
         .into_iter()
@@ -2121,6 +2128,13 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Ide if ide::deferred(body) => return Ok(Some(Deferred::Ide(a))),
+            Protocol::Ide => {
+                return ide::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2265,6 +2279,14 @@ async fn serve_admitted(
             let served = recovery::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
         }
+        Deferred::Ide(a) => {
+            let served = ide::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+        }
+        Deferred::IdeTab(a) => {
+            let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2310,10 +2332,10 @@ struct Tasks {
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
 /// agent's process group or its host to end it, Changes requests, which run git on the
-/// owner's checkout, IDE extension approvals, which download and check a VSIX, and
-/// Recovery requests, which wait for the action ledger under the owner barrier. Each
-/// carries the admission, and the projects home its validated request; the others read
-/// the request frame.
+/// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
+/// requests, which wait for the action ledger under the owner barrier, and IDE tab
+/// requests, which wait for an IDE server to start. Each carries the admission, and the
+/// projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2322,6 +2344,8 @@ enum Deferred {
     Changes(Admission),
     IdeExtensions(Admission),
     Recovery(Admission),
+    Ide(Admission),
+    IdeTab(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2364,6 +2388,8 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
+        Protocol::Ide => ide::refusal(code)?,
+        Protocol::IdeTab => ide_tab::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

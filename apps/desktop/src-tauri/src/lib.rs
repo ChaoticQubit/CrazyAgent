@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod ide;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
@@ -1980,6 +1981,25 @@ async fn desktop_usage_refresh(
 }
 
 #[tauri::command]
+async fn desktop_ide_focus(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
+    main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(None);
+    }
+    let call = lock(&state).await?.ide_focus()?;
+    let focus = call.await?;
+    if focus.is_some() {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    Ok(focus)
+}
+
+#[tauri::command]
 async fn desktop_usage_set_reset(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2156,6 +2176,82 @@ async fn desktop_save_process_text(
     let call = lock(&state)
         .await?
         .save_process_text(project_id, text, version, opened)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_state(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    retry: bool,
+) -> Result<bridge::ide::IdeView, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.ide_state(retry)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_open(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?;
+    let ticket = views.begin(&project);
+    let call = read(&state).await?.ide_open(project.clone())?;
+    let workbench = ide::workbench(&call.await?)?;
+    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
+}
+
+#[tauri::command]
+async fn desktop_ide_place(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::place(&app, &views, &project, bounds.checked()?)
+}
+
+#[tauri::command]
+async fn desktop_ide_hide(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
+}
+
+#[tauri::command]
+async fn desktop_ide_close(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    ide::close(&app, &views, &bridge::ide::ide_project(&project_id)?)
+}
+
+#[tauri::command]
+async fn desktop_ide_touch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let call = read(&state).await?.ide_touch(project)?;
     call.await
 }
 
@@ -2460,6 +2556,7 @@ pub fn run() {
         .manage(NativeState(BridgeQueue::new(NativeBridge::new(socket))))
         .manage(TerminalState(Arc::new(Terminals::default())))
         .manage(UpdateState::default())
+        .manage(ide::IdeViews::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
@@ -2624,6 +2721,12 @@ pub fn run() {
             desktop_recovery_banner,
             desktop_retry_recovery,
             desktop_dismiss_recovery,
+            desktop_ide_state,
+            desktop_ide_open,
+            desktop_ide_place,
+            desktop_ide_hide,
+            desktop_ide_close,
+            desktop_ide_touch,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,
@@ -2639,6 +2742,7 @@ pub fn run() {
             desktop_open_context_item,
             desktop_engine_versions,
             desktop_restart_engine,
+            desktop_ide_focus,
             desktop_update_settings,
             desktop_set_update_channel,
             desktop_check_update,

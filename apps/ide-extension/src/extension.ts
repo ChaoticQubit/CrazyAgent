@@ -5,6 +5,7 @@ import { Engine } from "./engine.js";
 import { extensions } from "./extensions.js";
 import { startLock } from "./lock.js";
 import { readonly } from "./readonly.js";
+import { reveal } from "./reveal.js";
 import { sidebarAgents } from "./sidebar/agents.js";
 import { sidebarChanges } from "./sidebar/changes.js";
 import { sidebarContext } from "./sidebar/context.js";
@@ -27,6 +28,7 @@ const features: Feature[] = [
   sidebarContext,
   readonly,
   extensions,
+  reveal,
 ];
 
 /**

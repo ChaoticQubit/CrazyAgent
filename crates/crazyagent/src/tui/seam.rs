@@ -114,6 +114,7 @@ pub enum Request {
     Process(Box<super::client::process::ProcessQuery>),
     Recovery(Box<super::client::recovery::RecoveryQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
+    Reveal(Box<super::client::ide::RevealQuery>),
     Reconnect,
 }
 
@@ -158,6 +159,7 @@ impl std::fmt::Debug for Request {
             Self::Process(_) => "Process",
             Self::Recovery(_) => "Recovery",
             Self::Cleanup(_) => "Cleanup",
+            Self::Reveal(_) => "Reveal",
             Self::Reconnect => "Reconnect",
         })
     }

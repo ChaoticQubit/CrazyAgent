@@ -456,16 +456,20 @@ async fn no_ide_server_process_survives_engine_stop() {
 #[tokio::test]
 async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_again() {
     let checkout = scratch();
+    let other_checkout = scratch();
     let data = scratch();
     let build = cached_build();
+    let forgotten = project("forgotten");
     let project = project("crashed");
-    let (left, path, name, opened) = (
+    let (left, path, name, other, opened, other_opened) = (
         data.path().to_path_buf(),
         build.clone(),
         project.clone(),
+        forgotten.clone(),
         checkout.path().to_path_buf(),
+        other_checkout.path().to_path_buf(),
     );
-    let (old, old_group, old_token) = std::thread::spawn(move || {
+    let (old, old_group, old_token, other_group) = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -474,15 +478,36 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
         let info = runtime
             .block_on(crashed.open(&name, &opened, &path))
             .unwrap();
+        runtime
+            .block_on(crashed.open(&other, &other_opened, &path))
+            .unwrap();
         let group = crashed.group(&name).unwrap();
+        let other_group = crashed.group(&other).unwrap();
         let token = fs::read_to_string(&info.token_path).unwrap();
         std::mem::forget(crashed);
-        (info, group, token)
+        (info, group, token, other_group)
     })
     .join()
     .unwrap();
     assert!(present(old_group));
+    assert!(present(other_group));
     let servers = Servers::new(data.path(), IDLE_LIMIT);
+    servers.sweep_left().await;
+    let other_leader = Pid::from_raw(other_group).unwrap();
+    assert!(
+        rustix::process::waitpid(Some(other_leader), rustix::process::WaitOptions::NOHANG)
+            .unwrap()
+            .is_some()
+    );
+    gone(other_group).await;
+    assert_eq!(servers.group(&forgotten), None);
+    assert!(
+        !servers
+            .project_folder(&forgotten)
+            .unwrap()
+            .join(GROUP)
+            .exists()
+    );
     let info = servers
         .open(&project, checkout.path(), &build)
         .await

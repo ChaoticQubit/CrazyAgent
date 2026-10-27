@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, type EngineVersions } from "./api";
+import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
@@ -227,13 +228,45 @@ function useTeamAlerts(running: boolean, showToast: (message: string) => void): 
   return counts;
 }
 
-/** The desktop app: one engine session, the hash route, the app-wide shortcuts and the team
- * notification watch. */
+export const IDE_FOCUS_POLL_MS = 1_000;
+
+/** The route a TUI "open in IDE" brings forward: the project's IDE tab.
+ * Input: the focus the engine handed over. Output: the route. */
+export function ideFocusRoute(focus: IdeFocus): Route {
+  return { name: "project", id: focus.project, tab: "ide" };
+}
+
+/** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
+ * second it takes the waiting focus, if any, and opens that project's IDE tab; the engine
+ * raises the window. The desktop asks the engine only while an IDE webview is loaded, since
+ * only a loaded IDE can take a reveal. Input: whether the engine runs. */
+function useIdeFocus(running: boolean) {
+  useEffect(() => {
+    if (!running) return;
+    let live = true;
+    let timer = 0;
+    const read = async () => {
+      const focus = await ideFocus().catch(() => null);
+      if (!live) return;
+      if (focus) navigate(ideFocusRoute(focus));
+      timer = window.setTimeout(read, IDE_FOCUS_POLL_MS);
+    };
+    void read();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [running]);
+}
+
+/** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
+ * notification watch and the TUI's "open in IDE" focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
   const alerts = useTeamAlerts(session.engine === "running", session.showToast);
+  useIdeFocus(session.engine === "running");
   return <AppView session={session} route={route} alerts={alerts} />;
 }

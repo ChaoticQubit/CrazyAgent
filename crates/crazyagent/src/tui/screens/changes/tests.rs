@@ -551,3 +551,64 @@ fn v_names_the_listed_text_file_whose_diff_is_at_the_top_for_the_editor() {
     assert!(!view.key(key(KeyCode::Char('v')), NOW));
     assert_eq!(view.take_edit(), None);
 }
+
+#[test]
+fn shift_o_names_the_chosen_worktree_or_the_shown_file_for_the_ide() {
+    let mut view = listed(vec![
+        set('1', ChangeState::Pending),
+        set('2', ChangeState::Pending),
+    ]);
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(help.contains(&("O", "Open in IDE")), "{help:?}");
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(view.key(key(KeyCode::Char('O')), NOW));
+    assert_eq!(
+        view.take_reveal(),
+        Some(RevealTarget::ChangeSet {
+            id: id('2'),
+            path: None
+        })
+    );
+    assert_eq!(view.take_reveal(), None, "one O opens one target once");
+
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let page = ChangeDiff {
+        files: vec![ChangedFile {
+            path: "src/app.rs".into(),
+            old_path: None,
+            status: FileStatus::Modified,
+            kind: FileKind::Text,
+            marks: Vec::new(),
+        }],
+        text: [
+            "diff --git a/src/app.rs b/src/app.rs",
+            "index 1111111..2222222 100644",
+            "--- a/src/app.rs",
+            "+++ b/src/app.rs",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ]
+        .join("\n"),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    assert!(view.key(key(KeyCode::Char('O')), NOW));
+    assert_eq!(
+        view.take_reveal(),
+        Some(RevealTarget::ChangeSet {
+            id: id('2'),
+            path: Some("src/app.rs".into())
+        })
+    );
+}
+
+#[test]
+fn shift_o_with_nothing_listed_opens_nothing() {
+    let mut view = listed(Vec::new());
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(!help.iter().any(|(key, _)| *key == "O"));
+    assert!(view.key(key(KeyCode::Char('O')), NOW));
+    assert_eq!(view.take_reveal(), None);
+}

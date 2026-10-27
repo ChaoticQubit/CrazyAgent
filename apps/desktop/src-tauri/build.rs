@@ -162,6 +162,12 @@ fn main() {
         "desktop_recovery_banner",
         "desktop_retry_recovery",
         "desktop_dismiss_recovery",
+        "desktop_ide_state",
+        "desktop_ide_open",
+        "desktop_ide_place",
+        "desktop_ide_hide",
+        "desktop_ide_close",
+        "desktop_ide_touch",
         "desktop_usage_report",
         "desktop_usage_refresh",
         "desktop_usage_set_reset",
@@ -183,6 +189,7 @@ fn main() {
         "desktop_link_cli",
         "desktop_engine_versions",
         "desktop_restart_engine",
+        "desktop_ide_focus",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

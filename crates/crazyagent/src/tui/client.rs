@@ -28,6 +28,7 @@ mod claude_code;
 pub(super) mod cleanup;
 pub(super) mod conflict;
 pub(super) mod editor;
+pub(super) mod ide;
 pub(super) mod intake;
 pub(super) mod process;
 mod project_setup;
@@ -64,6 +65,7 @@ enum Job {
     Process(Box<process::ProcessQuery>),
     Recovery(Box<recovery::RecoveryQuery>),
     Cleanup(Box<cleanup::CleanupQuery>),
+    Reveal(Box<ide::RevealQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -187,6 +189,7 @@ pub(super) enum OwnerEvent {
     Process(Box<process::ProcessEvent>),
     Recovery(Box<recovery::RecoveryEvent>),
     Cleanup(Box<cleanup::CleanupEvent>),
+    Reveal(Box<ide::RevealEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -775,6 +778,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Cleanup(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Reveal(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.reveal(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => ide::RevealEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Reveal(Box::new(event)),
                                 })
                                 .is_err()
                             {

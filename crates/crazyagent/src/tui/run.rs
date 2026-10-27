@@ -347,6 +347,7 @@ fn send(
         Request::Process(query) => connection.process(*query),
         Request::Recovery(query) => connection.recovery(*query),
         Request::Cleanup(query) => connection.cleanup(*query),
+        Request::Reveal(query) => connection.reveal(*query),
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)

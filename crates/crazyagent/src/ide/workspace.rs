@@ -108,6 +108,24 @@ pub fn follow(db: &Connection, root: &Path) -> Result<(), EngineError> {
     first
 }
 
+/// Lists the folders the project's workspace shows, with the owner's stored show-all
+/// switch, in workspace order with "Project" first. Inputs: the engine database and the
+/// project. Output: the sections, or `ide_project_unknown`.
+pub fn listed(db: &Connection, project: &ProjectId) -> Result<Vec<Section>, EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let show_all: bool = db
+        .query_row(
+            "SELECT show_all FROM ide_workspaces WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?
+        .unwrap_or(false);
+    let (sections, _) = sections(db, project, show_all)?;
+    Ok(sections)
+}
+
 /// Opens the engine database with the change set and workspace tables in place.
 /// Input: the engine root. Output: the connection.
 fn open(root: &Path) -> Result<Connection, EngineError> {

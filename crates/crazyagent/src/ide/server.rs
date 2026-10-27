@@ -6,7 +6,7 @@ use rustix::process::{Pid, Signal};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -110,6 +110,39 @@ impl Servers {
             launches: AtomicU64::new(0),
             closed: AtomicBool::new(false),
         }
+    }
+
+    /// Ends every server a previous engine recorded and left running, across the project
+    /// folders in `<data>/ide` (at most [`PROJECTS_MAX`]), so a crashed engine leaves no
+    /// server behind for a project that is never opened again. The owner server runs it
+    /// once at start, before any open. A folder others could write is reported and left
+    /// alone. Input: the register. Output: none.
+    pub async fn sweep_left(&self) {
+        let user = rustix::process::getuid().as_raw();
+        let private = |path: &Path| {
+            fs::symlink_metadata(path).is_ok_and(|found| {
+                found.file_type().is_dir() && found.uid() == user && found.mode() & 0o022 == 0
+            })
+        };
+        if !self.folder.exists() {
+            return;
+        }
+        if !private(&self.folder) {
+            eprintln!("ide_folder_unsafe");
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&self.folder) else {
+            return;
+        };
+        let mut swept = 0;
+        for entry in entries.flatten().take(PROJECTS_MAX) {
+            let folder = entry.path();
+            if private(&folder) {
+                sweep(&folder).await;
+                swept += 1;
+            }
+        }
+        assert!(swept <= PROJECTS_MAX);
     }
 
     /// The folder that holds one project's IDE state, `<data>/ide/<project>`. Input: the

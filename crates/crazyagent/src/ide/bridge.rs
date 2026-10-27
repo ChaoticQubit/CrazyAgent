@@ -18,6 +18,7 @@ use tokio::time::Instant;
 pub mod agents;
 pub mod memory;
 mod owner_edit;
+pub mod reveal;
 
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
@@ -36,7 +37,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 18] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 20] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -108,6 +109,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 18] = [
     (
         "out/extensions.js",
         include_bytes!("../../../../apps/ide-extension/out/extensions.js"),
+    ),
+    (
+        "out/reveal.js",
+        include_bytes!("../../../../apps/ide-extension/out/reveal.js"),
+    ),
+    (
+        "out/reveal-path.js",
+        include_bytes!("../../../../apps/ide-extension/out/reveal-path.js"),
     ),
 ];
 
@@ -337,10 +346,12 @@ pub(crate) struct IdeHost<'a> {
 
 /// The live IDE capabilities of one owner server, at most one per project and
 /// `GRANTS_MAX` in all. Each holds its token, its file and the sender of its project's
-/// events; dropping a grant kills its token and ends its subscriptions.
+/// events; dropping a grant kills its token and ends its subscriptions. The reveals the
+/// TUI sent wait here for their IDE to acknowledge them.
 #[derive(Default)]
 pub(crate) struct Grants {
     live: Mutex<Vec<Grant>>,
+    reveals: reveal::Reveals,
 }
 
 /// One project's capability for one IDE server launch.
@@ -688,7 +699,7 @@ async fn answer(
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
-        IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
+        IdeCall::RevealAck { request } => reveal::acked(runtime, project, &request)?,
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
     Ok(IdeReply::Ok { data })

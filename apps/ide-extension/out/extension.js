@@ -8,6 +8,7 @@ const engine_js_1 = require("./engine.js");
 const extensions_js_1 = require("./extensions.js");
 const lock_js_1 = require("./lock.js");
 const readonly_js_1 = require("./readonly.js");
+const reveal_js_1 = require("./reveal.js");
 const agents_js_1 = require("./sidebar/agents.js");
 const changes_js_1 = require("./sidebar/changes.js");
 const context_js_1 = require("./sidebar/context.js");
@@ -23,6 +24,7 @@ const features = [
     context_js_1.sidebarContext,
     readonly_js_1.readonly,
     extensions_js_1.extensions,
+    reveal_js_1.reveal,
 ];
 function activate(context) {
     (0, lock_js_1.startLock)(context, process.env);
