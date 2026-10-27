@@ -220,8 +220,8 @@ export function linkedSignIn(accounts: Loaded<AccountView[]>, id: string): { acc
  * link opens. */
 export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: string }) {
   const session = useAppSession();
-  const [accounts, reload] = useLoad(listAccounts);
-  const [pools, reloadPools] = useLoad(poolSummaries);
+  const [accounts, reload] = useLoad(listAccounts, [], "accounts");
+  const [pools, reloadPools] = useLoad(poolSummaries, [], "pool-summaries");
   const [opened, setOpened] = useState<{ account: AccountView; signIn: boolean }>();
   const [add, setAdd] = useState(adding);
   const [deleting, setDeleting] = useState<AccountView[]>();

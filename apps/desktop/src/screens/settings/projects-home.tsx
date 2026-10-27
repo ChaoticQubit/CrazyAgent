@@ -79,7 +79,7 @@ export function ProjectsHomeSettingsView({ home, picked, busy, problem, onChoose
  * switches to it without moving anything or, after showing the size, moves every project there. */
 export function ProjectsHomeSettings() {
   const session = useAppSession();
-  const [home, reload] = useLoad(loadProjectsHome);
+  const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
   const [picked, setPicked] = useState<string | null>(null);
   const [ask, setAsk] = useState<HomeAsk | null>(null);
   const [busy, setBusy] = useState(false);
