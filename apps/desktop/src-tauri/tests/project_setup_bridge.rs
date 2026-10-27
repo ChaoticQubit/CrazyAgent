@@ -144,10 +144,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         Path::new(&context.folder),
         Path::new(&stored.folder).join(".crazyagent")
     );
-    let (paths, shown) = tokio::join!(
-        bridge.project_read_paths(&id),
-        bridge.project_context(&id)
-    );
+    let (paths, shown) = tokio::join!(bridge.project_read_paths(&id), bridge.project_context(&id));
     assert_eq!(
         paths?,
         Vec::<String>::new(),
