@@ -356,7 +356,7 @@ fn catalog_skill_names_are_tagged_and_ctrl_o_opens_the_skill_at_the_cursor() {
     assert!(
         settings_jobs(&mut shell)
             .iter()
-            .any(|job| matches!(job, SettingsJob::SkillDetail { id } if id == "skill-a")),
+            .any(|job| matches!(job, SettingsJob::SkillDetail { id, .. } if id == "skill-a")),
         "Ctrl-O opens that skill's detail page"
     );
     let rows = render(&mut shell, 80, 24);

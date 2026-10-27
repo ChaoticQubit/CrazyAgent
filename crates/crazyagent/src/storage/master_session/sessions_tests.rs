@@ -777,17 +777,18 @@ fn root_backups(case: &Case) -> Vec<String> {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=Session Test",
-            "-c",
-            "user.email=session@test.invalid",
-        ])
-        .args(args)
-        .current_dir(folder)
-        .output()
-        .unwrap();
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Session Test",
+                "-c",
+                "user.email=session@test.invalid",
+            ])
+            .args(args)
+            .current_dir(folder),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
