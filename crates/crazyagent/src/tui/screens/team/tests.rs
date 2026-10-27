@@ -811,6 +811,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
     let status = TeamStatus {
         project_id: project(),
         keep_warm: false,
+        show_finished: false,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -837,6 +838,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 stopped_ms: Some(2),
                 persona: None,
                 handle: None,
+                register: None,
+                finished: false,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -1162,6 +1165,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
     let status = crate::team::TeamStatus {
         project_id: project(),
         keep_warm: false,
+        show_finished: false,
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),

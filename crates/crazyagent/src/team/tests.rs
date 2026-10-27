@@ -168,6 +168,115 @@ fn delegation_lines_are_read_from_a_master_reply() {
 }
 
 #[test]
+fn team_agents_name_their_newest_register_entry_and_finished_agents_hide_until_shown() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let setup = stored("team-finished", vec![]);
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let agent = |status: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('team-finished','sub','codex',0,?1,1,1)",
+                [status],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let stopped = agent("stopped");
+    let idle = agent("idle");
+    let unhosted = agent("failed");
+    let busy = agent("working");
+    let before = status(&connection, &setup).unwrap();
+    assert!(!before.show_finished, "Hide is the default");
+    assert!(
+        before.agents.iter().all(|a| a.register.is_none()),
+        "no register yet: {before:#?}"
+    );
+
+    let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
+    let host = |project: &ProjectId, reference: i64| {
+        agents
+            .host(
+                crate::agents::HostedAgent {
+                    project: project.clone(),
+                    role: crate::agents::AgentRole::SubAgent,
+                    label: format!("Team sub-agent {reference}"),
+                    harness: "codex".into(),
+                    host: runtime::TEAM_HOST,
+                    reference: reference.to_string(),
+                    account: None,
+                },
+                None,
+            )
+            .unwrap()
+    };
+    let other = ProjectId::new("team-elsewhere").unwrap();
+    let older = host(&setup.project_id, stopped);
+    let newer = host(&setup.project_id, stopped);
+    let waiting = host(&setup.project_id, idle);
+    let foreign = host(&other, unhosted);
+    assert_ne!(older.id(), newer.id());
+    let read = status(&connection, &setup).unwrap();
+    let register = |id: i64| {
+        read.agents
+            .iter()
+            .find(|a| a.id == id)
+            .and_then(|a| a.register.clone())
+    };
+    assert_eq!(register(stopped).as_deref(), Some(newer.id()), "{read:#?}");
+    assert_eq!(register(idle).as_deref(), Some(waiting.id()));
+    assert_eq!(
+        register(unhosted),
+        None,
+        "another project's entry {} is not this agent's",
+        foreign.id()
+    );
+    let finished: Vec<i64> = read
+        .agents
+        .iter()
+        .filter(|a| a.finished)
+        .map(|a| a.id)
+        .collect();
+    assert_eq!(finished, [stopped, idle, unhosted], "{read:#?}");
+    assert!(read.agents.iter().any(|a| a.id == busy && !a.finished));
+
+    let show = |connection: &mut Connection, on: bool| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(
+            &tx,
+            &access("team-finished", &["local-a"]),
+            &TeamAction::FinishedAgents {
+                project_id: setup.project_id.clone(),
+                show: on,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(outcome, Outcome::Applied);
+        status(connection, &setup).unwrap().show_finished
+    };
+    assert!(show(&mut connection, true));
+    assert!(!show(&mut connection, false));
+    let other_setup = stored("team-elsewhere", vec![]);
+    assert!(
+        !show_finished(&connection, &other_setup.project_id).unwrap(),
+        "the choice is per project"
+    );
+}
+
+#[test]
 fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
     let project = ProjectId::new("team-accounts").unwrap();
     let all = access(
