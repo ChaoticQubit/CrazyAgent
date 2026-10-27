@@ -416,11 +416,15 @@ export function loadProjectMemories(id: string, after: string | null): Promise<R
   return call<MemoryItem[]>("desktop_project_memories", { id, after });
 }
 
-/** Reads the memories this project's IDE asked the owner to approve, still waiting at the
- * asked version. The desktop draws the confirm, which the IDE cannot click.
- * Input: the project id. Output: at most one engine batch of memories. */
-export function loadIdeAsks(id: string): Promise<Result<MemoryItem[]>> {
-  return call<MemoryItem[]>("desktop_ide_asks", { id });
+/** One decision the project's IDE asked the owner to confirm: the memory at the asked
+ * version and whether to approve or reject it. */
+export type IdeAsk = MemoryItem & { decision: "approve" | "reject" };
+
+/** Reads the decisions this project's IDE asked the owner to confirm on memories still
+ * waiting at the asked version. The desktop draws the confirm, which the IDE cannot click.
+ * Input: the project id. Output: at most one engine batch of asks. */
+export function loadIdeAsks(id: string): Promise<Result<IdeAsk[]>> {
+  return call<IdeAsk[]>("desktop_ide_asks", { id });
 }
 
 /** Saves, dismisses or deletes one memory; Keep is the owner's one-click approval.

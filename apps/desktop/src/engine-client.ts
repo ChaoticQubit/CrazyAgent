@@ -581,8 +581,12 @@ export function projectMemories(id: string, after: string | null = null): Promis
   return invoke<MemoryItem[]>("desktop_project_memories", { id, after });
 }
 
-export function ideAsks(id: string): Promise<MemoryItem[]> {
-  return invoke<MemoryItem[]>("desktop_ide_asks", { id });
+/** One decision the project's IDE asked the owner to confirm: the memory at the asked
+ * version and whether to approve or reject it. */
+export type IdeAsk = MemoryItem & { decision: "approve" | "reject" };
+
+export function ideAsks(id: string): Promise<IdeAsk[]> {
+  return invoke<IdeAsk[]>("desktop_ide_asks", { id });
 }
 
 export function reviewMemory(

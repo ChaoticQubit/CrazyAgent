@@ -7,7 +7,7 @@ mod native_refresh_observation;
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryList, MemoryNote};
 use bridge::picker::{FolderPurpose, Pick};
-use bridge::project_setup::{MemoryItem, ResearchLog};
+use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
 use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
@@ -461,7 +461,7 @@ async fn desktop_ide_asks(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<Vec<MemoryItem>, BridgeError> {
+) -> Result<Vec<IdeAskItem>, BridgeError> {
     main_window(&window)?;
     read(&state).await?.ide_asks(&id).await
 }
