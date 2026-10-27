@@ -438,6 +438,47 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
 }
 
 #[test]
+fn the_engine_never_takes_a_call_its_server_is_still_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let askers: Vec<_> = (0..8)
+        .map(|_| {
+            let mailbox = mailbox.clone();
+            std::thread::spawn(move || {
+                (0..16)
+                    .map(|_| ask(&mailbox, &Call::Status, REPLY_WAIT))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut unread = 0;
+    while askers.iter().any(|asker| !asker.is_finished()) {
+        for (id, call) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
+            unread += usize::from(call.is_none());
+            answer_call(&mailbox, &id, "Taken.", call.is_none()).unwrap();
+        }
+    }
+    let answers: Vec<(String, bool)> = askers
+        .into_iter()
+        .flat_map(|asker| asker.join().unwrap())
+        .collect();
+    assert_eq!(unread, 0, "calls were taken before they were written whole");
+    assert_eq!(answers.len(), 8 * 16);
+    assert!(
+        answers
+            .iter()
+            .all(|answer| *answer == ("Taken.".to_owned(), false)),
+        "{answers:?}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
+
+#[test]
 fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();

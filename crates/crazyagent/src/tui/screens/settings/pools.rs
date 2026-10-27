@@ -243,7 +243,7 @@ impl Screen for Pools {
             _ => vec![
                 hint("a", "New pool"),
                 hint("Enter", "Edit"),
-                hint("o", "Account choice"),
+                hint("o", "Order"),
                 hint("d", "Delete"),
                 sections_hint(ctx.glyphs),
                 hint("Esc", "Home"),

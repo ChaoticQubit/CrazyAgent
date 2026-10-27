@@ -136,15 +136,23 @@ export interface NeedRow {
   href: string;
 }
 
-/** Lists what needs the owner across projects, for the Needs you strip: accounts that are not
+/** Lists what needs the owner across projects, for the Needs you strip: projects whose team
+ * left unseen notifications (one row each, opening its conversation), accounts that are not
  * signed in (one row each, with Sign in again opening that account's sign-in; accounts sharing
  * a name and provider fold into one row that opens Accounts), research waiting for a pool, then
  * suggested memories grouped by project. Inputs: the accounts read, the projects, each
- * project's card activity and the suggestions read. Output: the first three rows, every row
- * and the total. */
+ * project's card activity, the suggestions read and each project's unseen notification count.
+ * Output: the first three rows, every row and the total. */
 export function needsYou(accounts: Loaded<AccountView[]>, projects: ProjectRow[] = [], activity: Map<string, CardActivity> = new Map(),
-  suggestions: Loaded<Suggestion[]> = { kind: "loading" }): { rows: NeedRow[]; all: NeedRow[]; total: number } {
+  suggestions: Loaded<Suggestion[]> = { kind: "loading" }, alerts: Map<string, number> = new Map()): { rows: NeedRow[]; all: NeedRow[]; total: number } {
   const all: NeedRow[] = [];
+  for (const project of projects) {
+    const unseen = alerts.get(project.id) ?? 0;
+    if (unseen <= 0) continue;
+    all.push({ key: `alerts-${project.id}`, icon: "inbox", project: project.name,
+      text: `${unseen} new team notification${unseen === 1 ? "" : "s"}.`,
+      action: "Open conversation", href: formatRoute({ name: "project", id: project.id, tab: "conversation" }) });
+  }
   const unsigned = new Map<string, AccountView[]>();
   for (const account of accounts.kind === "ok" ? accounts.value : []) {
     if (account.status !== "not_signed_in") continue;
@@ -217,7 +225,7 @@ function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow
  * cards with their live work or the empty state, and the Get set up panel while setup is
  * incomplete. Inputs: the five reads, each card's activity and the suggested memories when read,
  * the projects folder section and a retry for the project list. */
-export function HomeView({ projects, accounts, pools, harnesses, tools, activity, suggestions, found, onRetryProjects }: {
+export function HomeView({ projects, accounts, pools, harnesses, tools, activity, suggestions, alerts, found, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
   onRetryProjects: () => void;
   accounts: Loaded<AccountView[]>;
@@ -226,10 +234,11 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
   tools: Loaded<SetupStatus>;
   activity?: Map<string, CardActivity>;
   suggestions?: Loaded<Suggestion[]>;
+  alerts?: Map<string, number>;
   found?: ReactNode;
 }) {
   const setup = setupSteps(accounts, pools, harnesses, tools);
-  const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions);
+  const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions, alerts);
   const [expanded, setExpanded] = useState(false);
   return <>
     <PageHeader title="Projects" actions={<>
@@ -267,8 +276,9 @@ export function useToolsStatus(): Loaded<SetupStatus> {
 }
 
 /** Home: loads accounts, pools, harnesses and tool setup for the setup panel, each project's live
- * work and the suggested memories for Needs you, and renders HomeView with the session's projects. */
-export function Home() {
+ * work and the suggested memories for Needs you, and renders HomeView with the session's projects.
+ * Input: each project's unseen team notification count, when the app watches them. */
+export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   const session = useAppSession();
   const [accounts] = useLoad(listAccounts, [], "accounts");
   const [pools] = useLoad(poolSummaries, [], "pool-summaries");
@@ -284,5 +294,5 @@ export function Home() {
     return () => { live = false; };
   }, [named]);
   return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} activity={activity} suggestions={suggestions}
-    found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
+    alerts={alerts} found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
 }

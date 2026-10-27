@@ -1654,8 +1654,8 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap();
     fixture.until(
         &mut team,
-        "the same sub-agent works on the resolve task",
-        |f| f.agent_status(member.id).0 == AgentStatus::Working,
+        "the same sub-agent works on the resolve task in its recorded pane",
+        |f| f.agent_status(member.id).0 == AgentStatus::Working && f.recorded(member.id),
     );
     ran(2);
     let (agent, status, sent): (Option<i64>, String, String) = fixture
@@ -1692,7 +1692,11 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap()
         .to_path_buf();
     assert_eq!(std::fs::read_dir(worktrees).unwrap().count(), 1);
-    assert!(team.shutdown().unwrap().is_empty());
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[member.id]),
+        "the working sub-agent's pane outlives the engine"
+    );
 }
 
 const LIVE_CODEX: &str = r#"#!/bin/sh
@@ -1949,10 +1953,16 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert_eq!(sets[0].files, 1);
 
     let input = Connection::open(fixture.base.join("engine.db")).unwrap();
-    super::super::master::master_input(&input, host.as_ref(), &project, "[owner] status please")
-        .unwrap();
+    super::super::master::master_input(
+        &input,
+        host.as_ref(),
+        None,
+        &project,
+        "[owner] status please",
+    )
+    .unwrap();
     assert_eq!(
-        super::super::master::master_input(&input, host.as_ref(), &project, "[owner] again"),
+        super::super::master::master_input(&input, host.as_ref(), None, &project, "[owner] again"),
         Err(super::super::master::InputRefused::Busy),
         "engine input waits while its last input settles"
     );
