@@ -83,7 +83,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let read = |project: Option<ProjectId>| ProcessQuery::Read { project };
     let event = native.process(read(None)).await;
     assert_eq!(event.query, read(None));
-    assert_eq!(event.result, Ok(String::new()));
+    assert_eq!(event.result, Ok(ProcessReply::Text(String::new())));
     for (scope, text) in [
         (None, "APP-RULE-51\n"),
         (Some(project.clone()), "PROJECT-RULE-52\n"),
@@ -92,8 +92,14 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
             project: scope.clone(),
             text: text.into(),
         };
-        assert_eq!(native.process(save).await.result, Ok(String::new()));
-        assert_eq!(native.process(read(scope)).await.result, Ok(text.into()));
+        assert_eq!(
+            native.process(save).await.result,
+            Ok(ProcessReply::Text(String::new()))
+        );
+        assert_eq!(
+            native.process(read(scope)).await.result,
+            Ok(ProcessReply::Text(text.into()))
+        );
     }
     assert_eq!(
         std::fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
@@ -111,9 +117,62 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         .find("PROJECT-RULE-52")
         .expect("a launch reads the saved project text");
     assert!(app < own);
+    drop(tx);
+
+    crate::team::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
+             VALUES (?1, 'sub', 'codex', 0, 'stopped', 1, 1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    let asked = ProcessQuery::Agent {
+        project: project.clone(),
+        agent: Some(agent),
+    };
+    let Ok(ProcessReply::Agent(view)) = native.process(asked.clone()).await.result else {
+        panic!("an agent before its first launch is still shown");
+    };
+    assert!(!view.launched);
+    let home = crate::team::runtime::agent_home(&root.path().join("team"), agent);
+    std::fs::create_dir_all(&home).unwrap();
+    for folder in [home.parent().unwrap(), home.as_path()] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    crate::agent_home::prepare(&home, crate::agent_home::Harness::Codex, &launch, &given).unwrap();
+    crate::agent_home::record_skills(&home, &[]).unwrap();
+    let Ok(ProcessReply::Agent(view)) = native.process(asked.clone()).await.result else {
+        panic!("the launched agent's view is read through the engine");
+    };
+    assert_eq!(view.agent, agent);
+    assert_eq!(view.harness, "codex");
+    assert!(view.launched);
+    assert_eq!(
+        view.text, given,
+        "the view shows exactly what the launch wrote"
+    );
+    assert!(view.skills.is_empty(), "a launch that installed no skill records none");
+    std::fs::remove_file(home.join("AGENTS.md")).unwrap();
+    std::os::unix::fs::symlink(
+        folder.join(".crazyagent/instructions.md"),
+        home.join("AGENTS.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        native.process(asked).await.result,
+        Err("agent_instructions_unsafe".into()),
+        "a linked file in the agent home is refused"
+    );
 
     let event = native.process(ProcessQuery::Default).await;
-    assert_eq!(event.result, Ok(crate::agent_home::DEFAULT_PROCESS.into()));
+    assert_eq!(
+        event.result,
+        Ok(ProcessReply::Text(
+            crate::agent_home::DEFAULT_PROCESS.into()
+        ))
+    );
     let unknown = ProjectId::new("not-set-up").unwrap();
     assert_eq!(
         native.process(read(Some(unknown))).await.result,
@@ -129,7 +188,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     );
     assert_eq!(
         native.process(read(None)).await.result,
-        Ok("APP-RULE-51\n".into()),
+        Ok(ProcessReply::Text("APP-RULE-51\n".into())),
         "a refused save keeps the saved text"
     );
     service.shutdown().await.unwrap();
