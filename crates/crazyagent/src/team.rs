@@ -562,20 +562,34 @@ pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &st
     Accounts::Usable(usable)
 }
 
-/// Picks the least loaded usable account that is not paused for a rate limit.
-/// Takes the usable accounts in pool order, live agents per connection and paused connections.
-/// Returns the chosen account, or none when every account is paused.
+/// Picks the usable account the owner's schedule puts first among those not paused for a
+/// rate limit; with no limits or ranks that is the least loaded, then pool order.
+/// Takes the usable accounts in pool order, live agents per connection, paused connections
+/// and the scheduling choice. Returns the chosen account, or none when every account is
+/// paused or left out by the schedule.
 pub fn pick_account<'a>(
     accounts: &'a [TeamAccount],
     load: &dyn Fn(&CredentialRef) -> usize,
     paused: &BTreeSet<CredentialRef>,
+    choice: &crate::scheduling::Choice,
 ) -> Option<&'a TeamAccount> {
-    accounts
+    let open: Vec<&TeamAccount> = accounts
         .iter()
         .filter(|account| !paused.contains(&account.connection))
-        .enumerate()
-        .min_by_key(|(order, account)| (load(&account.connection), *order))
-        .map(|(_, account)| account)
+        .collect();
+    let candidates: Vec<crate::scheduling::Candidate> = open
+        .iter()
+        .map(|account| crate::scheduling::Candidate {
+            connection: account.connection.clone(),
+            load: load(&account.connection),
+            current: false,
+        })
+        .collect();
+    choice
+        .order(&candidates)
+        .ready
+        .first()
+        .map(|index| open[*index])
 }
 
 /// One task the master asked for in its reply, with the role handle it gave the job, if any.

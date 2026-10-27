@@ -402,6 +402,53 @@ fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_nex
     session.stop().unwrap();
 }
 
+const USAGE_RESULT_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"step-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE","usage":{"input_tokens":12,"output_tokens":30,"cache_read_input_tokens":900,"cache_creation_input_tokens":40}}'
+IFS= read -r turn
+printf '%s\n' '{"type":"assistant","uuid":"step-2","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"QUIET"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-2","session_id":"native-session","is_error":false,"result":"QUIET"}'
+/bin/cat > /dev/null
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_piped_claude_turn_reports_the_usage_its_result_carries_before_it_finishes() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut launch = team_launch("claude-code");
+    let harness = launch.work.parent().unwrap().join("usage-harness");
+    std::fs::write(&harness, USAGE_RESULT_HARNESS).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    let mut session = super::Session::start(launch.request).unwrap();
+    let first = turn(&mut session, "Finish the check.");
+    let reported = crate::usage::capture::Tokens {
+        input: 12,
+        output: 30,
+        cache_read: 900,
+        cache_write: 40,
+    };
+    assert_eq!(
+        first[first.len() - 2..],
+        [
+            LaunchEvent::Usage { tokens: reported },
+            LaunchEvent::TurnFinished { success: true }
+        ],
+        "{first:?}"
+    );
+    let second = turn(&mut session, "Say nothing about usage.");
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::Usage { .. })),
+        "a result without usage reports none: {second:?}"
+    );
+    session.stop().unwrap();
+}
+
 fn codex_driver_in_a_turn() -> Driver {
     let working_dir = std::env::temp_dir();
     let cwd = working_dir.to_str().unwrap().to_owned();
@@ -510,13 +557,14 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         "[user]\n\tname = Repo Owner\n\temail = owner@example.invalid\n",
     )
     .unwrap();
-    let initialized = Command::new("/usr/bin/git")
-        .env_clear()
-        .env("HOME", &owner)
-        .args(["init", "-q", "--template="])
-        .arg(&repo)
-        .status()
-        .unwrap();
+    let initialized = crate::spawn_gate::status(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("HOME", &owner)
+            .args(["init", "-q", "--template="])
+            .arg(&repo),
+    )
+    .unwrap();
     assert!(initialized.success());
     let profile = base.join("project.sb");
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();

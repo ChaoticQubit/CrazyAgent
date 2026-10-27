@@ -236,6 +236,9 @@ export function errorMessage(error: unknown): string {
     skill_not_found: "This skill was removed.",
     skill_text_too_large: "This SKILL.md is too large to show here.",
     skill_page_invalid: "This skill changed while it was read. Open it again.",
+    skill_import_too_large: "A skill brought in from your skills folders can be up to 2 MB.",
+    skill_import_name_changed: "This folder now holds a different skill. Look for your skills again.",
+    skill_import_home_unknown: "Your home folder is unknown, so your skills can't be found.",
     server_name_invalid: "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
     server_name_taken: "An MCP server with this name already exists here.",
     server_limit: "You can add up to 50 MCP servers here.",
@@ -369,7 +372,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -1342,6 +1345,33 @@ export interface SkillDetail {
   files_more: number;
 }
 
+export type ImportFrom = "claude" | "codex";
+
+export type ImportState =
+  | { kind: "new" }
+  | { kind: "added"; id: string }
+  | { kind: "differs"; id: string }
+  | { kind: "unusable"; code: string };
+
+export interface ImportCandidate {
+  from: ImportFrom;
+  folder: string;
+  name: string;
+  line: string;
+  state: ImportState;
+}
+
+export interface ImportList {
+  found: ImportCandidate[];
+  more: number;
+}
+
+export interface ImportedSkill {
+  skill: SkillView;
+  skipped: string[];
+  skipped_total: number;
+}
+
 export interface McpServerView {
   id: string;
   name: string;
@@ -1392,6 +1422,16 @@ export function removeSkill(id: string): Promise<void> {
 /** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
 export function skillDetail(id: string, projectId?: string): Promise<SkillDetail> {
   return invoke<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
+}
+
+/** Looks for skills in the owner's Claude Code and Codex skills folders, only when asked. */
+export function skillImportScan(): Promise<ImportList> {
+  return invoke<ImportList>("desktop_skill_import_scan", {});
+}
+
+/** Imports one found skill, turned on for every project; `replace` is the id of an added skill whose files differ. */
+export function importSkill(folder: string, replace: string | null): Promise<ImportedSkill> {
+  return invoke<ImportedSkill>("desktop_import_skill", { folder, replace });
 }
 
 /** Adds an MCP server that waits for approval. Secret values go to the engine and are never returned. */

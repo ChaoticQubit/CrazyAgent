@@ -20,9 +20,9 @@ impl OwnerRuntimeHandle {
         root: PathBuf,
         id: &ChangeSetId,
     ) -> Result<(), EngineError> {
-        let set = id.clone();
+        let (set, store) = (id.clone(), root.clone());
         let master = tokio::task::spawn_blocking(move || {
-            crate::landing_turns::master_of(&crate::landing::open(&root)?, &set)
+            crate::landing_turns::master_of(&crate::landing::open(&store)?, &set)
         })
         .await
         .map_err(|_| failure("changes_unavailable"))??;
@@ -38,6 +38,12 @@ impl OwnerRuntimeHandle {
                     failure("changes_outcome_unknown")
                 }
             })?;
+        let set = id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::landing::resolve_handed_over(&crate::landing::open(&root)?, &set)
+        })
+        .await
+        .map_err(|_| failure("changes_unavailable"))??;
         when_storage_frees(|| self.start_waiting_now(&project_id, &session_id))
             .await
             .map_err(|error| {

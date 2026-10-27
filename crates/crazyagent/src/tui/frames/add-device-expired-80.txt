@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  …  /  ChatGPT / Codex  /  Sign in with ChatGPT           
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+──━━━━━━━━──────────────────────────────────────────────────────────────────────
   Sign in with ChatGPT                                                          
                                                                                 
   1. Open this page on any device                                               

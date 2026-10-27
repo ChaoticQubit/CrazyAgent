@@ -7,9 +7,9 @@ const NOW: i64 = 1_793_000_000_000;
 fn attribution(kind: RunKind, pool: Option<&str>) -> Attribution {
     Attribution {
         kind,
-        project: ProjectId::new("alpha").unwrap(),
+        project: Some(ProjectId::new("alpha").unwrap()),
         pool: pool.map(|pool| CredentialRef::new(pool).unwrap()),
-        account: CredentialRef::new("claude-main").unwrap(),
+        account: Some(CredentialRef::new("claude-main").unwrap()),
         agent: "team-7".into(),
         harness: "claude-code".into(),
     }
@@ -265,7 +265,7 @@ fn codex_totals_count_their_growth_with_cached_input_apart_and_limits_are_kept()
     });
     append(&record, &format!("{limits}\n"));
     let mut who = attribution(RunKind::Research, None);
-    who.account = CredentialRef::new("codex-a").unwrap();
+    who.account = Some(CredentialRef::new("codex-a").unwrap());
     who.harness = "codex".into();
     let added = scan_home(&db, home.path(), Format::Codex, &who, NOW).unwrap();
     assert_eq!(
@@ -277,7 +277,9 @@ fn codex_totals_count_their_growth_with_cached_input_apart_and_limits_are_kept()
             cache_write: 0
         }
     );
-    let stored = super::super::limits(&db, &who.account).unwrap().unwrap();
+    let stored = super::super::limits(&db, who.account.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.plan.as_deref(), Some("pro"));
     assert_eq!(
         stored.five_hour,
@@ -359,4 +361,217 @@ fn a_replaced_or_shortened_record_starts_over_and_an_overlong_line_is_skipped() 
     assert_eq!(Format::of("claude-code"), Some(Format::Claude));
     assert_eq!(Format::of("codex"), Some(Format::Codex));
     assert_eq!(Format::of("aider"), None);
+}
+
+fn unattributed(harness: &str) -> Attribution {
+    Attribution {
+        kind: RunKind::Research,
+        project: None,
+        pool: None,
+        account: None,
+        agent: "onboarding".into(),
+        harness: harness.into(),
+    }
+}
+
+fn groups(db: &Connection) -> Vec<(String, String, String, String, i64)> {
+    let mut statement = db
+        .prepare(
+            "SELECT project,pool,account,agent,SUM(input) FROM usage_tokens
+             GROUP BY project,pool,account,agent ORDER BY agent,project",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_run_tied_to_no_project_or_account_counts_unattributed_and_keeps_no_limits() {
+    let (_root, db) = store();
+    let homes = tempfile::tempdir().unwrap();
+    let endpoint = homes.path().join("endpoint");
+    let record = endpoint.join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-e.jsonl");
+    append(&record, &codex_count(400, 100, 20));
+    let limits = serde_json::json!({
+        "type": "event_msg",
+        "payload": {"type": "token_count", "info": null, "rate_limits": {
+            "primary": {"used_percent": 40.0, "window_minutes": 300, "resets_in_seconds": 60}
+        }}
+    });
+    append(&record, &format!("{limits}\n"));
+    register_run(&db, &endpoint, &unattributed("codex"), NOW).unwrap();
+    let renamed = homes.path().join("renamed");
+    append(
+        &renamed.join("projects/f/r.jsonl"),
+        &claude_assistant("m1", 7, 1, 0, 0, "end_turn"),
+    );
+    db.execute(
+        "INSERT INTO usage_runs (home,kind,project,account,agent,harness,started_ms)
+         VALUES (?1,'research','not a project id','not an account!','research-r','claude-code',?2)",
+        params![renamed.to_string_lossy(), NOW],
+    )
+    .unwrap();
+    let added = scan_runs(
+        &db,
+        |project, account| {
+            panic!(
+                "no pool lookup without both: {project} {}",
+                account.as_str()
+            )
+        },
+        NOW + 1,
+    )
+    .unwrap();
+    assert_eq!(added.input, 307);
+    assert_eq!(
+        groups(&db),
+        vec![
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                "onboarding".into(),
+                300
+            ),
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                "research-r".into(),
+                7
+            ),
+        ]
+    );
+    assert!(super::super::all_limits(&db).unwrap().is_empty());
+}
+
+#[test]
+fn a_finished_turn_counts_its_reported_usage_or_its_records_once_and_forgets_its_home() {
+    let (_root, db) = store();
+    let homes = tempfile::tempdir().unwrap();
+    let mut master = attribution(RunKind::Master, Some("pool-a"));
+    master.agent = "master-alpha".into();
+    let claude = homes.path().join("claude-turn");
+    std::fs::create_dir_all(&claude).unwrap();
+    let reported = Tokens {
+        input: 12,
+        output: 30,
+        cache_read: 900,
+        cache_write: 40,
+    };
+    assert_eq!(
+        count_turn(
+            &db,
+            &claude,
+            Format::Claude,
+            &master,
+            reported,
+            "turn-1",
+            NOW
+        )
+        .unwrap(),
+        reported
+    );
+    let codex = homes.path().join("codex-turn");
+    let record = codex.join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-m.jsonl");
+    append(&record, &codex_count(1000, 600, 50));
+    master.harness = "codex".into();
+    let counted = count_turn(
+        &db,
+        &codex,
+        Format::Codex,
+        &master,
+        Tokens::default(),
+        "turn-2",
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(counted.input, 400);
+    assert_eq!(counted.cache_read, 600);
+    let sessions: Vec<(String, i64, i64)> = db
+        .prepare("SELECT session,input,cache_read FROM usage_tokens WHERE agent='master-alpha' ORDER BY session")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        sessions,
+        vec![
+            ("rollout-2026-10-27T03-00-00-m".into(), 400, 600),
+            ("turn-1".into(), 12, 900),
+        ]
+    );
+    let progress: i64 = db
+        .query_row("SELECT COUNT(*) FROM usage_files", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(progress, 0);
+    assert_eq!(
+        count_turn(
+            &db,
+            &claude,
+            Format::Claude,
+            &master,
+            Tokens::default(),
+            "turn-3",
+            NOW
+        )
+        .unwrap(),
+        Tokens::default()
+    );
+}
+
+#[test]
+fn reported_turn_usage_adds_up_under_its_agent_and_a_bad_session_name_is_refused() {
+    let (_root, db) = store();
+    let mut piped = attribution(RunKind::Agent, Some("pool-a"));
+    piped.agent = "team-4".into();
+    let turn = Tokens {
+        input: 5,
+        output: 7,
+        cache_read: 100,
+        cache_write: 3,
+    };
+    count_reported(&db, &piped, turn, "headless", NOW).unwrap();
+    count_reported(&db, &piped, turn, "headless", NOW + 1000).unwrap();
+    count_reported(&db, &piped, Tokens::default(), "headless", NOW).unwrap();
+    let rows: Vec<(String, String, i64, i64, i64, i64)> = db
+        .prepare("SELECT agent,session,input,output,cache_read,cache_write FROM usage_tokens")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("team-4".into(), "headless".into(), 10, 14, 200, 6)]
+    );
+    for session in ["", &"s".repeat(129)] {
+        assert_eq!(
+            count_reported(&db, &piped, turn, session, NOW)
+                .unwrap_err()
+                .0,
+            "usage_attribution_invalid"
+        );
+    }
 }

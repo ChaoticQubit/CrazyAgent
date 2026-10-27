@@ -194,8 +194,8 @@ fn proposed(repo: &Repo, record: &Record, roots: &[&Path]) -> Result<String, Eng
         .as_chunks::<2>()
         .0
         .iter()
-        .filter(|[author, _]| *author != ENGINE.1)
-        .map(|[_, line]| subject(line, roots))
+        .filter(|commit| commit[0] != ENGINE.1)
+        .map(|commit| subject(commit[1], roots))
         .filter(|line| !line.is_empty());
     let Some(mut message) = subjects.next() else {
         return Ok(String::new());
@@ -490,6 +490,7 @@ pub(super) fn record(
             turn: turn_id.clone(),
             prompt_line: line,
             message: String::new(),
+            waiting: false,
             files: 0,
             added: 0,
             removed: 0,
@@ -509,6 +510,7 @@ pub(super) fn record(
         return Ok(Some(record.id));
     }
     record.state = ChangeState::Pending;
+    record.waiting = false;
     record.conflicts.clear();
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
@@ -537,6 +539,21 @@ pub(super) fn record(
         }
     }
     Ok(Some(record.id))
+}
+
+/// Notes that the agent of an updating change set was handed the work that resolves it,
+/// so the set no longer shows as waiting for its agent. Inputs: the store and the change
+/// set. Output: Ok, also when the set is no longer updating.
+pub(super) fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let _held = hold(&repository);
+    let mut record = store::load(db, id)?;
+    if record.state == ChangeState::Updating && record.waiting {
+        record.waiting = false;
+        store::save(db, &record)?;
+    }
+    Ok(())
 }
 
 /// The task prompt for resolving the conflict markers an update left in a worktree.

@@ -107,13 +107,23 @@ export function readLine(limits: AccountLimits, nowMs: number): string {
   return `${from} ${agoText(limits.observed_ms, nowMs)}`;
 }
 
-/** An agent's name in the tables. Input: the engine's agent key. Output: "Agent 3",
- * "Research harbor" or the key itself. */
-export function agentLabel(key: string): string {
+/** An agent's name in the tables. Inputs: the engine's agent key and the project namer.
+ * Output: "Agent 3", "Research harbor", "Master, Harbor Notes", "Onboarding" or the key. */
+export function agentLabel(key: string, project: (key: string) => string = (key) => key): string {
   const team = /^team-(\d+)$/.exec(key);
   if (team) return `Agent ${team[1]}`;
   const research = /^research-(.+)$/.exec(key);
-  return research ? `Research ${research[1]}` : key;
+  if (research) return `Research ${research[1]}`;
+  const master = /^master-(.+)$/.exec(key);
+  if (master) return `Master, ${project(master[1])}`;
+  if (key === "master") return "Master";
+  return key === "onboarding" ? "Onboarding" : key;
+}
+
+/** Names a project or account row, the empty key being runs tied to none. Inputs: the
+ * names by key and the key. Output: the name, "Unattributed" or the key itself. */
+function rowName(names: Map<string, string>, key: string): string {
+  return key === "" ? "Unattributed" : names.get(key) ?? key;
 }
 
 /** Reads a manual reset typed as local date and time. Inputs: the field's value and now.
@@ -278,8 +288,8 @@ export function UsageView({ report, range, names, nowMs, failure, busy, onRange,
   onRetry: () => void;
 }) {
   if (report.kind === "not_ready" || (report.kind === "error" && usageNotReady(report))) return <NotReady what="Usage" />;
-  const project = (key: string) => names.projects.get(key) ?? key;
-  const account = (key: string) => names.accounts.get(key) ?? key;
+  const project = (key: string) => rowName(names.projects, key);
+  const account = (key: string) => rowName(names.accounts, key);
   const pool = (key: string) => names.pools.get(key) ?? key;
   const head = <div className="row usage-head">
     <Segmented label="Range" value={range} options={RANGES} onValue={onRange} />
@@ -304,7 +314,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, onRange,
       <UsageTable title="By project" rows={value.projects} name={project} nowMs={nowMs} />
       <UsageTable title="By pool" rows={value.pools} name={pool} nowMs={nowMs} />
       <UsageTable title="By account" rows={value.accounts} name={account} nowMs={nowMs} />
-      <UsageTable title="By agent" rows={value.agents} name={agentLabel} nowMs={nowMs} />
+      <UsageTable title="By agent" rows={value.agents} name={(key) => agentLabel(key, project)} nowMs={nowMs} />
       <DaysTable days={value.days} />
       <LinesTable rows={value.lines} name={project} />
     </>}
@@ -324,8 +334,8 @@ export function UsageSettings() {
     const now = new Date();
     return loadUsage(rangeStart(range, now), offsetMinutes(now));
   }, [range, tick]);
-  const [accounts] = useLoad(listAccounts);
-  const [pools] = useLoad(poolSummaries);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [pools] = useLoad(poolSummaries, [], "pool-summaries");
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTick((old) => old + 1); }, TICK_MS);
     return () => clearInterval(timer);

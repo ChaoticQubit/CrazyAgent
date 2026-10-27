@@ -199,6 +199,10 @@ pub enum Command {
     Team {
         action: crate::team::TeamAction,
     },
+    #[serde(skip_deserializing)]
+    AccountSchedule {
+        change: crate::scheduling::ScheduleChange,
+    },
     ProposePlan {
         plan: crate::coordination::WorkPlan,
     },
