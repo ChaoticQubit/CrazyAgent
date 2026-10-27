@@ -371,6 +371,18 @@ const PROBLEMS: &[(&str, &str)] = &[
         "This skill changed while it was read. Open it again.",
     ),
     (
+        "skill_import_too_large",
+        "A skill brought in from your skills folders can be up to 2 MB.",
+    ),
+    (
+        "skill_import_name_changed",
+        "This folder now holds a different skill. Look for your skills again.",
+    ),
+    (
+        "skill_import_home_unknown",
+        "Your home folder is unknown, so your skills can't be found.",
+    ),
+    (
         "server_name_invalid",
         "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
     ),

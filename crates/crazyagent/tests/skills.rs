@@ -295,3 +295,205 @@ async fn a_skill_detail_reads_the_whole_skill_md_its_files_and_the_project_switc
     assert_eq!(bad.0, "plugin_not_found");
     case.close().await;
 }
+
+fn private_folder(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn found_skill(folder: &Path, name: &str, guide: &str) {
+    fs::create_dir_all(folder.join("references")).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: The {name} skill. More here.\n---\n\nSteps.\n"),
+    )
+    .unwrap();
+    fs::write(folder.join("references/guide.md"), guide).unwrap();
+}
+
+#[tokio::test]
+async fn only_ticked_skills_are_imported_on_without_private_files_and_a_differing_one_is_replaced()
+{
+    let case = Case::new().await;
+    let mut controller = case.controller().await;
+    let project = create_project(&mut controller, "app").await;
+    let root = case.root.path().to_path_buf();
+    let home = root.join("home");
+    let scratch = root.join("scratch");
+    private_folder(&scratch);
+    let claude = home.join(".claude/skills");
+    let notes = claude.join("notes");
+    found_skill(&notes, "notes", "Guide.\n");
+    fs::write(notes.join(".env"), "TOKEN=dummy-value").unwrap();
+    fs::write(notes.join("api_key.txt"), "dummy-key").unwrap();
+    found_skill(&claude.join("style"), "style", "Style.\n");
+    let graph = home.join(".codex/skills/graph");
+    found_skill(&graph, "graph", "Graph.\n");
+
+    let list = skills::import::scan(
+        &home,
+        &skills::catalog(&controller, None).await.unwrap(),
+        &scratch,
+    )
+    .unwrap();
+    let names: Vec<&str> = list.found.iter().map(|found| found.name.as_str()).collect();
+    assert_eq!(names, vec!["notes", "style", "graph"]);
+    assert!(
+        list.found
+            .iter()
+            .all(|found| found.state == skills::import::ImportState::New)
+    );
+    let ticked: Vec<(String, Option<String>)> = list
+        .found
+        .iter()
+        .filter(|found| found.name != "style")
+        .map(|found| (found.folder.clone(), None))
+        .collect();
+    let done = controller.import_skills(ticked).await.unwrap();
+    assert_eq!(done.len(), 2);
+    let first = done[0].1.as_ref().unwrap();
+    assert_eq!(first.skill.name, "notes");
+    assert_eq!(first.skipped, vec![".env", "api_key.txt"]);
+    assert_eq!(first.skipped_total, 2);
+    assert!(done[1].1.as_ref().unwrap().skipped.is_empty());
+
+    let app = skills::catalog(&controller, None).await.unwrap();
+    let rows: Vec<(&str, bool, &str)> = app
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.enabled, skill.source.as_str()))
+        .collect();
+    let notes_source = notes.display().to_string();
+    let graph_source = graph.display().to_string();
+    assert_eq!(
+        rows,
+        vec![
+            ("graph", true, graph_source.as_str()),
+            ("notes", true, notes_source.as_str())
+        ]
+    );
+    let stored = Path::new(&app[1].folder);
+    assert!(stored.join("references/guide.md").is_file());
+    assert!(!stored.join(".env").exists());
+    assert!(!stored.join("api_key.txt").exists());
+    assert_eq!(
+        fs::read_to_string(notes.join(".env")).unwrap(),
+        "TOKEN=dummy-value",
+        "the source folder is never changed"
+    );
+    let given = controller.project_plugins(project.clone()).await.unwrap();
+    let given: Vec<&str> = given
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(
+        given,
+        vec!["graph", "notes"],
+        "imported skills reach agents"
+    );
+
+    let notes_id = app[1].id.clone();
+    let graph_id = app[0].id.clone();
+    fs::write(notes.join("references/guide.md"), "Newer guide.\n").unwrap();
+    let again = skills::import::scan(&home, &app, &scratch).unwrap();
+    let states: Vec<(&str, &skills::import::ImportState)> = again
+        .found
+        .iter()
+        .map(|found| (found.name.as_str(), &found.state))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (
+                "notes",
+                &skills::import::ImportState::Differs {
+                    id: notes_id.clone()
+                }
+            ),
+            ("style", &skills::import::ImportState::New),
+            (
+                "graph",
+                &skills::import::ImportState::Added {
+                    id: graph_id.clone()
+                }
+            ),
+        ]
+    );
+
+    controller
+        .switch_plugin(project.clone(), notes_id.clone(), false)
+        .await
+        .unwrap();
+    controller
+        .set_skill_enabled(notes_id.clone(), false)
+        .await
+        .unwrap();
+    let taken = controller
+        .import_skills(vec![(notes_source.clone(), None)])
+        .await
+        .unwrap();
+    assert_eq!(taken[0].1.as_ref().unwrap_err(), "skill_name_taken");
+    let wrong = controller
+        .import_skills(vec![(notes_source.clone(), Some(graph_id.clone()))])
+        .await
+        .unwrap();
+    assert_eq!(
+        wrong[0].1.as_ref().unwrap_err(),
+        "skill_import_name_changed"
+    );
+    let replaced = controller
+        .import_skills(vec![(notes_source.clone(), Some(notes_id.clone()))])
+        .await
+        .unwrap();
+    let replaced = replaced[0].1.as_ref().unwrap();
+    assert_eq!(replaced.skill.id, notes_id);
+    assert!(replaced.skill.enabled);
+    let here = skills::catalog(&controller, Some(project.clone()))
+        .await
+        .unwrap();
+    let notes_here = here.iter().find(|skill| skill.id == notes_id).unwrap();
+    assert_eq!(notes_here.on_here, Some(false), "project switches are kept");
+    assert_eq!(
+        fs::read_to_string(Path::new(&notes_here.folder).join("references/guide.md")).unwrap(),
+        "Newer guide.\n"
+    );
+    assert!(!Path::new(&notes_here.folder).join(".env").exists());
+    let graph_here = here.iter().find(|skill| skill.id == graph_id).unwrap();
+    assert_eq!(
+        fs::read_to_string(Path::new(&graph_here.folder).join("references/guide.md")).unwrap(),
+        "Graph.\n"
+    );
+
+    let leaky = claude.join("leaky");
+    found_skill(&leaky, "leaky", "Leaky.\n");
+    fs::write(root.join("outside.md"), "secret").unwrap();
+    std::os::unix::fs::symlink(root.join("outside.md"), leaky.join("leak.md")).unwrap();
+    let heavy = claude.join("heavy");
+    found_skill(&heavy, "heavy", "Heavy.\n");
+    fs::write(
+        heavy.join("big.bin"),
+        vec![0u8; crazyagent::plugins::skill_folder::IMPORT_BYTES_MAX as usize + 1],
+    )
+    .unwrap();
+    let refused = controller
+        .import_skills(vec![
+            (leaky.display().to_string(), None),
+            (heavy.display().to_string(), None),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(refused[0].1.as_ref().unwrap_err(), "skill_link_outside");
+    assert_eq!(refused[1].1.as_ref().unwrap_err(), "skill_import_too_large");
+    assert_eq!(
+        plain_problem("skill_import_too_large"),
+        Some("A skill brought in from your skills folders can be up to 2 MB.")
+    );
+    let names: Vec<String> = skills::catalog(&controller, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    assert_eq!(names, vec!["graph", "notes"]);
+    case.close().await;
+}

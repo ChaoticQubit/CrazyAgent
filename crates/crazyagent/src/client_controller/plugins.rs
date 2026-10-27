@@ -103,6 +103,33 @@ impl OwnerController {
         self.plugins_client()?.add_skill(scope, folder).await
     }
 
+    /// Looks for skills in the owner's Claude Code and Codex skills folders, only when asked.
+    /// Output: each skill found with its state against the app's skills.
+    pub async fn skill_import_scan(
+        &self,
+    ) -> Result<crate::skills::import::ImportList, EngineError> {
+        self.plugins_client()?.skill_import_scan().await
+    }
+
+    /// Imports the skills the owner ticked, one at a time, so one failure leaves the rest.
+    /// Input: each ticked folder with the id to replace for a skill whose files differ.
+    /// Output: each folder with its imported skill or the plain problem code, in order.
+    pub async fn import_skills(
+        &self,
+        picks: Vec<(String, Option<String>)>,
+    ) -> Result<Vec<(String, Result<crate::skills::import::Imported, String>)>, EngineError> {
+        let client = self.plugins_client()?;
+        let mut done = Vec::with_capacity(picks.len());
+        for (folder, replace) in picks {
+            let result = client
+                .import_skill(folder.clone(), replace)
+                .await
+                .map_err(|problem| problem.0);
+            done.push((folder, result));
+        }
+        Ok(done)
+    }
+
     /// Turns a skill on or off where it was added. Inputs: skill id and the new state.
     pub async fn set_skill_enabled(
         &self,
