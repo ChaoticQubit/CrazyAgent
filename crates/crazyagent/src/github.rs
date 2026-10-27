@@ -184,11 +184,17 @@ pub fn problem(code: &str) -> String {
 
 fn replace_pending(root: &Path, next: Option<Pending>) {
     let mut pending = pending();
-    if let Some(old) = pending.remove(root) {
-        old.cancel.store(true, Ordering::Release);
-    }
+    cancel_waiting(&mut pending, root);
     if let Some(next) = next {
         pending.insert(root.to_path_buf(), next);
+    }
+}
+
+/// Ends the device sign-in waiting for one engine root, if any: forgets it and sets its
+/// cancel flag, so its thread saves nothing. Inputs: the held pending map and the root.
+fn cancel_waiting(pending: &mut BTreeMap<PathBuf, Pending>, root: &Path) {
+    if let Some(old) = pending.remove(root) {
+        old.cancel.store(true, Ordering::Release);
     }
 }
 
@@ -307,7 +313,9 @@ impl GitHub {
             .name("github-sign-in".into())
             .spawn(move || {
                 let outcome = api::finish_device(&account.endpoints, &client_id, start, &flag)
-                    .and_then(|token| account.keep(&token, GitHubMethod::Device));
+                    .and_then(|token| {
+                        account.keep(&token, GitHubMethod::Device, Some(flag.as_ref()))
+                    });
                 settle(&account.root, &flag, outcome.err());
             });
         if spawned.is_err() {
@@ -354,8 +362,7 @@ impl GitHub {
         token: &SecretString,
         method: GitHubMethod,
     ) -> Result<GitHubStatus, EngineError> {
-        let login = self.keep(token, method)?;
-        replace_pending(&self.root, None);
+        let login = self.keep(token, method, None)?;
         Ok(GitHubStatus {
             signed_in: true,
             login: Some(login),
@@ -365,8 +372,22 @@ impl GitHub {
         })
     }
 
-    fn keep(&self, token: &SecretString, method: GitHubMethod) -> Result<String, EngineError> {
+    /// Saves a token GitHub accepted. A device sign-in passes its cancel flag and saves
+    /// nothing once a sign-out or newer sign-in set it; any other sign-in that saved its
+    /// token cancels the one waiting. All of it runs under the pending lock sign-out holds
+    /// throughout, so no token lands during or after a sign-out.
+    /// Inputs: the token, the method and the device flag. Output: the login, or the refusal.
+    fn keep(
+        &self,
+        token: &SecretString,
+        method: GitHubMethod,
+        device: Option<&AtomicBool>,
+    ) -> Result<String, EngineError> {
         let login = api::login(&self.endpoints, token)?;
+        let mut pending = pending();
+        if device.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            return Err(failure("github_sign_in_cancelled"));
+        }
         let credential = self.store.put(&self.service(), TOKEN_ACCOUNT, token)?;
         state::save(
             &self.root,
@@ -376,17 +397,23 @@ impl GitHub {
                 credential,
             },
         )?;
+        if device.is_none() {
+            cancel_waiting(&mut pending, &self.root);
+        }
         Ok(login)
     }
 
     /// Signs out: cancels a waiting device sign-in, deletes the stored token and forgets
-    /// the saved sign-in. Output: the signed-out status.
+    /// the saved sign-in, all under the pending lock every save takes, so no pasted, CLI or
+    /// device token is saved between the read and the forget. Output: the signed-out status.
     pub fn sign_out(&self) -> Result<GitHubStatus, EngineError> {
-        replace_pending(&self.root, None);
+        let mut pending = pending();
+        cancel_waiting(&mut pending, &self.root);
         if let Some(saved) = state::load(&self.root)? {
             self.store.delete(&saved.credential)?;
         }
         state::forget(&self.root)?;
+        drop(pending);
         Ok(self.signed_out(false, None))
     }
 

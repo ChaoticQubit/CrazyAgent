@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
-const CHECK_FOLDER: &str = "mcp-checks";
+pub(super) const CHECK_FOLDER: &str = "mcp-checks";
+pub(super) const CHECK_PROFILES: &str = "profiles";
 pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
@@ -638,6 +639,30 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("plugin_store_unavailable"))
 }
 
+/// Names the sandbox profile file the checks of one server run under.
+/// Inputs: the engine's check folder and the server id. Output: the profile path.
+fn check_profile(checks: &Path, id: &str) -> PathBuf {
+    checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
+}
+
+/// Deletes a removed server's check folder, with whatever its checks wrote there while
+/// they held the server's secrets, and its check profile, on a blocking thread of its own,
+/// so a storage answer that comes after the owner's wait still clears them. Inputs: the
+/// engine's check folder and the server id. A failure other than a missing entry is logged.
+fn remove_check_folder(checks: PathBuf, id: String) {
+    drop(tokio::task::spawn_blocking(move || {
+        let removed = [
+            std::fs::remove_dir_all(checks.join(&id)),
+            std::fs::remove_file(check_profile(&checks, &id)),
+        ];
+        for problem in removed.into_iter().filter_map(Result::err) {
+            if problem.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("plugin_check_folder_not_removed cause={problem}");
+            }
+        }
+    }));
+}
+
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -795,24 +820,26 @@ async fn handle(
             server(actor(engine, Command::SetServer { id, enabled }).await?)?
         }
         Action::RemoveServer { id } => {
-            let ResultValue::Removed(references) =
-                actor(engine, Command::RemoveServer { id: id.clone() }).await?
-            else {
+            let root = engine_root(authority)?;
+            let checks = root.join(CHECK_FOLDER);
+            let server = id.clone();
+            let removed = engine
+                .settled_job(
+                    move |reply| Job::Plugins(Command::RemoveServer { id }, reply),
+                    move |result| match result {
+                        Ok(ResultValue::Removed(references)) => {
+                            let secrets =
+                                crate::storage::plugins::remove_secrets(&root, references);
+                            remove_check_folder(checks, server);
+                            secrets
+                        }
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
-            let root = engine_root(authority)?;
-            for reference in references {
-                crate::storage::plugins::remove_secret(&root, &reference)?;
-            }
-            let checked = root.join(CHECK_FOLDER).join(&id);
-            let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checked))
-                .await
-                .map_err(|_| unknown())?;
-            if let Err(problem) = removed
-                && problem.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
             Reply::Done
         }
         Action::Switch { project, id, on } => {
@@ -855,14 +882,21 @@ async fn handle(
             Reply::Server { server: *view }
         }
         Action::RemoveSecret { id, name } => {
-            let ResultValue::Secret(view, removed) =
-                actor(engine, Command::DetachSecret { id, name }).await?
-            else {
+            let root = engine_root(authority)?;
+            let detached = engine
+                .settled_job(
+                    |reply| Job::Plugins(Command::DetachSecret { id, name }, reply),
+                    move |result| match result {
+                        Ok(ResultValue::Secret(_, Some(reference))) => {
+                            crate::storage::plugins::remove_secret(&root, reference)
+                        }
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Secret(view, _) = detached else {
                 return Err(unknown());
             };
-            if let Some(reference) = removed {
-                crate::storage::plugins::remove_secret(&engine_root(authority)?, &reference)?;
-            }
             Reply::Server { server: *view }
         }
         Action::Check { id } => start_check(engine, authority, id).await?,
@@ -1012,7 +1046,7 @@ fn boundary_check(
         }
         folders.push(plain);
     }
-    let profiles = checks.join("profiles");
+    let profiles = checks.join(CHECK_PROFILES);
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -1022,7 +1056,7 @@ fn boundary_check(
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profiles.join(format!("{id}.sb"))))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
         .map_err(|error| refused(&error))?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);

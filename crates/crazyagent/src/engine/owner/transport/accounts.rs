@@ -386,14 +386,24 @@ async fn handle(
             }
         }
         Action::Remove { id } => {
-            let ResultValue::Removed(connection) =
-                actor(engine, admission, Command::Remove(id)).await?
-            else {
+            let keys = authority.clone();
+            let removed = engine
+                .settled_job(
+                    |reply| Job::Accounts(admission.clone(), Command::Remove(id), reply),
+                    move |result| match result {
+                        Ok(ResultValue::Removed(connection)) => match &connection.auth {
+                            ModelAuthentication::ApiKey { credential_ref } => {
+                                remove_key(&keys.root, credential_ref)
+                            }
+                            _ => Ok(()),
+                        },
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
-            if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
-                remove_key(root, credential_ref)?;
-            }
             Reply::Removed
         }
         Action::ReplaceKey { id } => {
@@ -410,12 +420,18 @@ async fn handle(
                 return Err(failure("account_key_not_allowed"));
             };
             replace_key(root, credential_ref, key)?;
-            let listed = match actor(engine, admission, Command::KeyReplaced(id)).await {
+            let listed = match key_replaced(
+                engine,
+                admission,
+                authority,
+                id,
+                credential_ref.clone(),
+            )
+            .await
+            {
                 Ok(ResultValue::Account(current)) => current,
-                Err(gone) if gone.0 == "account_not_found" => {
-                    remove_key(root, credential_ref)?;
-                    return Err(gone);
-                }
+                Err(gone) if gone.0 == "account_not_found" => return Err(gone),
+                Err(problem) if problem.0.starts_with("account_key") => return Err(problem),
                 _ => return Err(unknown()),
             };
             Reply::Account {
@@ -448,6 +464,30 @@ async fn actor(
 ) -> Result<ResultValue, EngineError> {
     engine
         .native_auth_job(|reply| Job::Accounts(admission.clone(), command, reply))
+        .await
+}
+
+/// Tells storage that a new key replaced an account's key, and deletes that key file once
+/// storage answers that the account is gone, even after the owner's wait ended, so a key
+/// replace racing a Remove leaves no key behind. Inputs: the engine, the admission, the
+/// authority, the account and its key reference. Output: storage's answer, or the error
+/// of a key file that could not be deleted.
+pub(super) async fn key_replaced(
+    engine: &Engine,
+    admission: &Admission,
+    authority: &Arc<Authority>,
+    id: CredentialRef,
+    credential: CredentialRef,
+) -> Result<ResultValue, EngineError> {
+    let keys = authority.clone();
+    engine
+        .settled_job(
+            |reply| Job::Accounts(admission.clone(), Command::KeyReplaced(id), reply),
+            move |result| match result {
+                Err(gone) if gone.0 == "account_not_found" => remove_key(&keys.root, &credential),
+                _ => Ok(()),
+            },
+        )
         .await
 }
 
@@ -587,7 +627,7 @@ fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), Eng
 /// never holds a partial key. Inputs: owner root, credential reference and the new key.
 /// Output: the key directory synced; on failure the old key stays and nothing is staged.
 #[cfg(unix)]
-fn replace_key(
+pub(super) fn replace_key(
     root: &Root,
     credential: &CredentialRef,
     key: AccountSecret,
@@ -654,7 +694,7 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
 /// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
 /// Returns `account_key_store_unavailable`.
 #[cfg(not(unix))]
-fn replace_key(
+pub(super) fn replace_key(
     _root: &Root,
     _credential: &CredentialRef,
     key: AccountSecret,

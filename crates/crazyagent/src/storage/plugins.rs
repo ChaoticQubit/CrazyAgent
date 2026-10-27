@@ -394,6 +394,16 @@ pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineEr
     }
 }
 
+/// Deletes every listed MCP server secret file, going on past one that fails so an
+/// earlier failure leaves none of the others behind. Inputs: the engine root and the
+/// references. Output: Ok when every file is gone, else the first failure.
+pub(crate) fn remove_secrets(root: &Path, references: &[String]) -> Result<(), EngineError> {
+    references
+        .iter()
+        .map(|reference| remove_secret(root, reference))
+        .fold(Ok(()), Result::and)
+}
+
 fn project_exists(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, EngineError> {
     tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
