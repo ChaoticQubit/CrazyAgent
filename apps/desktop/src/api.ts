@@ -286,7 +286,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   research_memory: "saving research to memory",
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
-  project_read_paths: "saving read-only folders",
+  project_read_paths: "saving extra folders agents can read",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
