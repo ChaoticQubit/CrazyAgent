@@ -3,6 +3,20 @@ use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+#[cfg(unix)]
+mod diff;
+#[cfg(unix)]
+mod flow;
+#[cfg(unix)]
+mod git;
+#[cfg(unix)]
+mod owner;
+#[cfg(unix)]
+mod store;
+#[cfg(all(test, unix))]
+mod tests;
 
 /// How long a discarded change set stays restorable before its ref is deleted.
 pub const RESTORE_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -200,39 +214,93 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
-/// Opens the change set store in the engine database. Input: the engine root holding
-/// `engine.db`. Output: the connection, or `changes_unavailable` until implemented.
-pub fn open(_runtime: &Path) -> Result<Connection, EngineError> {
-    Err(unavailable())
+/// Opens the change set store in the engine database, adding its table when missing.
+/// Input: the engine root holding `engine.db`. Output: the connection.
+pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
+    if !runtime.is_absolute() {
+        return Err(unavailable());
+    }
+    let db = Connection::open(runtime.join("engine.db")).map_err(|_| unavailable())?;
+    db.busy_timeout(Duration::from_secs(5))
+        .map_err(|_| unavailable())?;
+    #[cfg(unix)]
+    store::initialize(&db)?;
+    Ok(db)
 }
 
-/// Commits every change in an agent worktree as the engine and adds it to that
-/// worktree's open change set. Inputs: the store, the workspace and the turn end.
-/// Output: the change set the work now belongs to, None when nothing is pending.
+/// Commits every change in an agent worktree as the engine, with hooks, filters and
+/// fsmonitor off, and adds it to that worktree's open change set or opens one above the
+/// worktree's HEAD. A failed or cancelled turn commits too. Inputs: the store, the
+/// workspace and the turn end. Output: the change set the work now belongs to, None
+/// when nothing is pending.
 pub fn record_turn_end(
-    _db: &Connection,
-    _workspace: &Workspace,
-    _turn: &TurnEnd,
+    db: &Connection,
+    workspace: &Workspace,
+    turn: &TurnEnd,
 ) -> Result<Option<ChangeSetId>, EngineError> {
-    Err(unavailable())
+    #[cfg(unix)]
+    return flow::record(
+        db,
+        workspace,
+        turn,
+        &crate::worktrees::TREE_BOUNDS,
+        flow::now_ms()?,
+    );
+    #[cfg(not(unix))]
+    {
+        let _ = (db, workspace, turn);
+        Err(unavailable())
+    }
 }
 
 /// The plain prompt for the task that resolves the conflict markers an update left.
-/// Inputs: the store and the change set. Output: the prompt.
-pub fn resolve_task_prompt(_db: &Connection, _id: &ChangeSetId) -> Result<String, EngineError> {
-    Err(unavailable())
+/// Inputs: the store and the change set. Output: the prompt, or `changes_stale` when
+/// the change set is not waiting for its resolve task.
+pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, EngineError> {
+    #[cfg(unix)]
+    return flow::resolve_prompt(db, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
+        Err(unavailable())
+    }
 }
 
-/// Lists one project's change sets, newest first, at most `LIST_MAX`.
-/// Inputs: the store and the project. Output: the change sets.
-pub fn list(_db: &Connection, _project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
-    Err(unavailable())
+/// Lists one project's change sets, open ones first, then newest first, at most
+/// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
+pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
+    #[cfg(unix)]
+    return Ok(store::of_project(db, project, LIST_MAX)?
+        .iter()
+        .map(store::Record::view)
+        .collect());
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(unavailable())
+    }
 }
 
-/// Reads one page of a change set's diff. Inputs: the store, the change set and the
-/// page. Output: the page.
-pub fn diff(_db: &Connection, _id: &ChangeSetId, _page: u16) -> Result<ChangeDiff, EngineError> {
-    Err(unavailable())
+/// Reads one page of a change set's diff between its base and head, produced by the
+/// engine with no external diff or text conversion. Inputs: the store, the change set
+/// and the page. Output: the page.
+pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
+    #[cfg(unix)]
+    {
+        store::initialize(db)?;
+        let record = store::load(db, id)?;
+        diff::page(
+            &flow::shared(&record.repository)?,
+            &record.base,
+            &record.head,
+            page,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id, page);
+        Err(unavailable())
+    }
 }
 
 /// Lands a change set as one squash commit on the owner's checked-out branch, authored
@@ -240,45 +308,84 @@ pub fn diff(_db: &Connection, _id: &ChangeSetId, _page: u16) -> Result<ChangeDif
 /// finds the owner's own user.name and user.email), the change set and the head the
 /// owner reviewed. Output: the landed commit and branch, or the conflicting files.
 pub fn accept(
-    _db: &Connection,
-    _owner_home: &Path,
-    _id: &ChangeSetId,
-    _expected_head: &str,
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
 ) -> Result<AcceptOutcome, EngineError> {
-    Err(unavailable())
+    #[cfg(unix)]
+    return owner::accept(db, owner_home, id, expected_head, &|_| false);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id, expected_head);
+        Err(unavailable())
+    }
 }
 
-/// Discards a change set, keeping its commits restorable. Inputs: the store, the change
-/// set, the head the owner reviewed and the time now. Output: the restorable-until time.
+/// Discards a change set, keeping its commits restorable for `RESTORE_WINDOW_MS`, and
+/// points the agent's worktree at the owner's current commit. Inputs: the store, the
+/// change set, the head the owner reviewed and the time now. Output: the
+/// restorable-until time.
 pub fn discard(
-    _db: &Connection,
-    _id: &ChangeSetId,
-    _expected_head: &str,
-    _now_ms: u64,
+    db: &Connection,
+    id: &ChangeSetId,
+    expected_head: &str,
+    now_ms: u64,
 ) -> Result<u64, EngineError> {
-    Err(unavailable())
+    #[cfg(unix)]
+    return flow::discard(db, id, expected_head, now_ms);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id, expected_head, now_ms);
+        Err(unavailable())
+    }
 }
 
-/// Brings a discarded change set back as pending. Inputs: the store, the change set and
-/// the time now. Output: Ok once pending.
-pub fn restore(_db: &Connection, _id: &ChangeSetId, _now_ms: u64) -> Result<(), EngineError> {
-    Err(unavailable())
+/// Brings a discarded change set back as pending, with its work back in the agent's
+/// worktree. Inputs: the store, the change set and the time now. Output: Ok once
+/// pending.
+pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return flow::restore(db, id, now_ms);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id, now_ms);
+        Err(unavailable())
+    }
 }
 
 /// Merges the owner's branch tip into the agent's worktree with conflict markers, ready
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
-pub fn update(_db: &Connection, _id: &ChangeSetId) -> Result<(), EngineError> {
-    Err(unavailable())
+pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return owner::update(db, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
+        Err(unavailable())
+    }
 }
 
-/// Finishes or undoes an Accept an engine stop interrupted. Input: the store.
-/// Output: Ok once no Accept is left in flight.
-pub fn reconcile(_db: &Connection) -> Result<(), EngineError> {
-    Err(unavailable())
+/// Finishes or undoes an Accept or worktree reset an engine stop interrupted.
+/// Input: the store. Output: Ok once nothing is left in flight.
+pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return owner::reconcile(db);
+    #[cfg(not(unix))]
+    {
+        let _ = db;
+        Err(unavailable())
+    }
 }
 
-/// Deletes the refs of discarded change sets past their restore window.
+/// Deletes the refs of discarded change sets whose restore window ended.
 /// Inputs: the store and the time now. Output: how many were deleted.
-pub fn prune(_db: &Connection, _now_ms: u64) -> Result<usize, EngineError> {
-    Err(unavailable())
+pub fn prune(db: &Connection, now_ms: u64) -> Result<usize, EngineError> {
+    #[cfg(unix)]
+    return flow::prune(db, now_ms);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, now_ms);
+        Err(unavailable())
+    }
 }
