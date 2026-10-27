@@ -2628,7 +2628,14 @@ impl TeamRuntime {
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
+        let kept = if tools {
+            (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+        } else {
+            Vec::new()
+        };
+        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
+            .and_then(|sandbox| sandbox.keep_ports(&kept))
+            .map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }

@@ -32,6 +32,36 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// it cannot keep an agent's listener on loopback; it can keep these ports free.
 pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
 
+/// The most ports of the owner's configured local model endpoints one tools-on sandbox keeps
+/// free beside [`OWNER_PORTS`], which bounds the profile's deny rules.
+pub const KEPT_PORTS_MAX: usize = 64;
+
+/// The loopback ports the owner's configured model endpoints listen on, which a tools-on
+/// agent must not bind before the owner's model server does. An endpoint URL that does not
+/// parse names no port. Input: the model access settings. Output: the ports, sorted, once
+/// each.
+pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
+    let mut ports: Vec<u16> = access
+        .connections
+        .iter()
+        .filter_map(|connection| match &connection.endpoint {
+            crate::config::ModelEndpoint::Http { url } => url::Url::parse(url).ok(),
+            crate::config::ModelEndpoint::Native {} => None,
+        })
+        .filter(|url| match url.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => false,
+        })
+        .filter_map(|url| url.port_or_known_default())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    assert!(ports.len() <= access.connections.len());
+    ports
+}
+
 /// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
@@ -411,8 +441,8 @@ pub fn agent_command<'a>(
 }
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
-/// it never binds or listens on an [`OWNER_PORTS`] port, otherwise only the listed model
-/// endpoints.
+/// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
+/// keeps, otherwise only the listed model endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -497,6 +527,7 @@ pub struct ProjectSandbox {
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
+    kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
@@ -546,10 +577,33 @@ impl ProjectSandbox {
             scratch: None,
             hidden: Vec::new(),
             network,
+            kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
             checkout: None,
         })
+    }
+
+    /// Keeps the ports of the owner's configured local model endpoints free of this agent's
+    /// listeners, beside [`OWNER_PORTS`], when its network is open. Input: the ports, as
+    /// [`owner_ports`] lists them. Output: the sandbox, or a refusal for port 0 or more than
+    /// `KEPT_PORTS_MAX` ports.
+    pub fn keep_ports(mut self, ports: &[u16]) -> Result<Self, SandboxError> {
+        if ports.contains(&0) {
+            return Err(invalid("kept ports must be nonzero"));
+        }
+        self.kept_ports.extend(
+            ports
+                .iter()
+                .copied()
+                .filter(|port| !OWNER_PORTS.contains(port)),
+        );
+        self.kept_ports.sort_unstable();
+        self.kept_ports.dedup();
+        if self.kept_ports.len() > KEPT_PORTS_MAX {
+            return Err(invalid("at most 64 kept ports"));
+        }
+        Ok(self)
     }
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
@@ -936,6 +990,7 @@ impl ProjectSandbox {
                 );
                 let owner = OWNER_PORTS
                     .iter()
+                    .chain(&self.kept_ports)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
                     .collect::<String>();
                 text.push_str(&format!(
