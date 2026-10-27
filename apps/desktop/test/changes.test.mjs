@@ -114,6 +114,10 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   for (const code of own.filter((code) => !["changes_request_bounds", "changes_reply_bounds", "changes_request_invalid"].includes(code))) {
     assert.ok(client.CHANGES_REFUSALS.includes(code), `${code} has its own sentence`);
   }
+  const team = [...codes.matchAll(/"(team_[a-z_]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(team, ["team_agent_not_found", "team_conversation_full", "team_task_invalid"], "an Update's team refusals reach the window as themselves");
+  for (const code of team) assert.doesNotMatch(client.changesRefusal({ code }), /Something went wrong|_/, `${code} reads as its own sentence`);
+  assert.equal(client.changesRefusal({ code: "team_agent_not_found" }), "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.");
   for (const code of client.CHANGES_REFUSALS) {
     const line = client.changesRefusal({ code, files: ["x"] });
     assert.match(line, /^[A-Z].*\.$/, code);

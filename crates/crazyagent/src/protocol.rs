@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const FRAME_BYTES_MAX: usize = 65536;
+/// The most owner and runner requests the engine serves at once in its exchange, and the
+/// most connections it reads a handshake from at once. Clients that run requests side by
+/// side, such as the desktop's plain reads, size themselves under it. Each holds at most
+/// one `FRAME_BYTES_MAX` frame.
+pub const OWNER_CLIENTS_MAX: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolError(pub String);
