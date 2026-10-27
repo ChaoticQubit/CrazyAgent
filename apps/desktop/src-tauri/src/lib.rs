@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod ide;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
@@ -2082,6 +2083,81 @@ async fn desktop_save_process_text(
 }
 
 #[tauri::command]
+async fn desktop_ide_state(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    retry: bool,
+) -> Result<bridge::ide::IdeView, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.ide_state(retry)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_open(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?;
+    let call = read(&state).await?.ide_open(project.clone())?;
+    let workbench = ide::workbench(&call.await?)?;
+    ide::show(&app, &window, &views, &project, workbench, bounds)
+}
+
+#[tauri::command]
+async fn desktop_ide_place(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::place(&app, &views, &project, bounds.checked()?)
+}
+
+#[tauri::command]
+async fn desktop_ide_hide(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
+}
+
+#[tauri::command]
+async fn desktop_ide_close(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    ide::close(&app, &views, &bridge::ide::ide_project(&project_id)?)
+}
+
+#[tauri::command]
+async fn desktop_ide_touch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let call = read(&state).await?.ide_touch(project)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_import_global_instructions(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2348,6 +2424,7 @@ pub fn run() {
         .manage(NativeState(BridgeQueue::new(NativeBridge::new(socket))))
         .manage(TerminalState(Arc::new(Terminals::default())))
         .manage(UpdateState::default())
+        .manage(ide::IdeViews::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
@@ -2508,6 +2585,12 @@ pub fn run() {
             desktop_import_global_instructions,
             desktop_default_process,
             desktop_agent_instructions,
+            desktop_ide_state,
+            desktop_ide_open,
+            desktop_ide_place,
+            desktop_ide_hide,
+            desktop_ide_close,
+            desktop_ide_touch,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

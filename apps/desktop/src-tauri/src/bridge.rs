@@ -23,6 +23,7 @@ mod agents;
 mod changes;
 mod cleanup;
 mod harnesses;
+pub mod ide;
 pub mod intake;
 pub mod master;
 pub mod memory;
