@@ -579,6 +579,31 @@ async fn desktop_remember_research(
 }
 
 #[tauri::command]
+async fn desktop_project_read_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_read_paths(&id).await
+}
+
+#[tauri::command]
+async fn desktop_set_project_read_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paths: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_read_paths(&id, paths, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_delete_project_context(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2025,6 +2050,8 @@ pub fn run() {
             desktop_save_research_to_memory,
             desktop_add_project_documents,
             desktop_delete_project_context,
+            desktop_project_read_paths,
+            desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,
