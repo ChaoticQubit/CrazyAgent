@@ -3107,6 +3107,9 @@ impl TeamRuntime {
             worktree: PathBuf::from(worktree),
             git_dir: PathBuf::from(git_dir),
         };
+        let task = turn
+            .strip_prefix("task-")
+            .and_then(|task| task.parse::<i64>().ok());
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -3127,10 +3130,6 @@ impl TeamRuntime {
             Ok(crate::landing_turns::Landed::Added(_)) => {
                 let note = format!("The edits from {what} are waiting for you in Changes.");
                 if AgentRole::parse(&role) == Some(AgentRole::Sub) {
-                    let task = match busy {
-                        Busy::Task(task) => Some(task),
-                        Busy::Message(_) => None,
-                    };
                     super::events::record(
                         &self.connection,
                         project,
