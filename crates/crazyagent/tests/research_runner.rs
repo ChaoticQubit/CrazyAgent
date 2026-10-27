@@ -8,7 +8,9 @@ use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
-use research_support::{EngineRuntime, claude, codex, hanging_endpoint, processes_with};
+use research_support::{
+    EngineRuntime, claude, codex, hanging_endpoint, processes_with, recording_hanging_endpoint,
+};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -444,6 +446,51 @@ fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
     )
     .unwrap();
     assert!(report.starts_with("# Design research\n"), "{report}");
+}
+
+#[test]
+fn codex_research_offers_its_model_web_search_only_with_tools_on() {
+    for tools in [true, false] {
+        let case = case("A mobile app that stores family recipes.");
+        let jobs = ResearchJobs::open(&case.database).unwrap();
+        jobs.enqueue("project-a", "design_research", "codex", tools)
+            .unwrap();
+        let (port, _server, requests) = recording_hanging_endpoint();
+        let run = runner(&case, limits(Duration::from_secs(20)))
+            .run_once(&project(&case, Some(endpoint(port))))
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, ResearchStatus::Failed);
+        let requests = requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let turn = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(request).into_owned())
+            .find(|request| request.starts_with("POST /v1/responses "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "codex asked its model nothing in 20 s; {} connections",
+                    requests.len()
+                )
+            });
+        let (head, body) = turn.split_once("\r\n\r\n").unwrap();
+        let length = head
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|value| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or_else(|| panic!("no content length: {head}"));
+        assert_eq!(body.len(), length, "{head}");
+        assert!(body.contains("\"tools\":["), "{body}");
+        assert_eq!(
+            body.contains("\"type\":\"web_search\""),
+            tools,
+            "tools {tools}: {body}"
+        );
+    }
 }
 
 #[test]
