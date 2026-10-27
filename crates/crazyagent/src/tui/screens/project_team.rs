@@ -365,6 +365,9 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('w') => self.keep_warm(),
+            KeyCode::Char('t') => self.time_limit(Limit::Task),
+            KeyCode::Char('l') => self.time_limit(Limit::Session),
+            KeyCode::Char('i') => self.time_limit(Limit::Idle),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -829,6 +832,67 @@ impl TeamView {
         })
     }
 
+    /// Moves one time limit to its next choice. The task and session limits go Off, then
+    /// 30 min up to 8 h, then Off again, and the other follows so a session is never shorter
+    /// than a task; the idle stop goes Off, 2 min, 10 min, 1 h. Takes which limit. Returns the
+    /// change, or Handled while the team loads or saves.
+    fn time_limit(&mut self, which: Limit) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let below = |a: Option<u32>, b: Option<u32>| a.is_some_and(|a| b.is_none_or(|b| a < b));
+        let limits = &crate::team::LIMIT_CHOICES_SECS;
+        let (turn, kept, idle) = (
+            status.turn_limit_secs,
+            status.session_limit_secs,
+            status.idle_stop_secs,
+        );
+        let (turn, kept, idle) = match which {
+            Limit::Task => {
+                let next = next_limit(limits, turn);
+                (next, if below(kept, next) { next } else { kept }, idle)
+            }
+            Limit::Session => {
+                let next = next_limit(limits, kept);
+                (if below(next, turn) { next } else { turn }, next, idle)
+            }
+            Limit::Idle => (
+                turn,
+                kept,
+                next_limit(&crate::team::IDLE_CHOICES_SECS, idle),
+            ),
+        };
+        self.changing = Some(match which {
+            Limit::Idle => idle.map_or_else(
+                || "Idle sub-agents now keep running until the team stops.".to_owned(),
+                |secs| {
+                    format!(
+                        "An idle sub-agent now stops after {}.",
+                        crate::team::span_words(secs.into())
+                    )
+                },
+            ),
+            Limit::Task | Limit::Session => format!(
+                "Each task may now run {}, each agent session {}.",
+                limit_words(turn),
+                limit_words(kept)
+            ),
+        });
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: self.project.clone(),
+            turn_secs: turn,
+            session_secs: kept,
+            idle_secs: idle,
+        })
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -1033,7 +1097,13 @@ impl TeamView {
                 .push("auto-wake paused", look.warning);
         }
         let right = Row::of("Keep warm  ", look.muted)
-            .push(if status.keep_warm { "On" } else { "Off" }, look.fg);
+            .push(if status.keep_warm { "On" } else { "Off" }, look.fg)
+            .push("  Task  ", look.muted)
+            .push(limit_label(status.turn_limit_secs), look.fg)
+            .push("  Session  ", look.muted)
+            .push(limit_label(status.session_limit_secs), look.fg)
+            .push("  Idle stop  ", look.muted)
+            .push(limit_label(status.idle_stop_secs), look.fg);
         spread(content, left, right)
     }
 
@@ -1219,6 +1289,9 @@ impl TeamView {
             ("n", "New task"),
             ("x", "Cancel task"),
             ("w", "Keep warm"),
+            ("t", "Task limit"),
+            ("l", "Session limit"),
+            ("i", "Idle stop"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1234,6 +1307,43 @@ impl TeamView {
         help.extend([TABS, ("Esc", "Home")]);
         help
     }
+}
+
+/// Which team time limit a key moves.
+#[derive(Clone, Copy)]
+enum Limit {
+    Task,
+    Session,
+    Idle,
+}
+
+/// The time limit choice after `current`: Off, then each of `choices`, then Off again; a
+/// stored value outside the choices goes to Off. Inputs: the choices in seconds, ascending,
+/// and the limit now. Output: the next.
+fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
+    match current {
+        None => Some(choices[0]),
+        Some(secs) => choices
+            .iter()
+            .position(|choice| *choice == secs)
+            .and_then(|at| choices.get(at + 1).copied()),
+    }
+}
+
+/// A time limit as Team settings shows it, "Off" for none. Input: the limit in seconds.
+fn limit_label(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "Off".to_owned(),
+        |secs| crate::team::span_words(secs.into()),
+    )
+}
+
+/// A time limit in a sentence: "as long as it needs" for none, else "up to 1 h".
+fn limit_words(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "as long as it needs".to_owned(),
+        |secs| format!("up to {}", crate::team::span_words(secs.into())),
+    )
 }
 
 /// Turns a team refusal code into the sentence shown to the owner.
@@ -1257,6 +1367,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_task_limit" => "This project has reached its task limit.".into(),
         "team_wake_cap_invalid" => "Set the hourly limit between 0 and 500 wakes.".into(),
+        "team_time_limits_invalid" => {
+            "Pick a listed time limit; an agent session may not be shorter than a task.".into()
+        }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
         other => plain_problem(other),

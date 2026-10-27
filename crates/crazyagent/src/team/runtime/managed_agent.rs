@@ -354,13 +354,14 @@ impl ManagedAgent {
             .send(Order::Turn(
                 prompt.to_owned(),
                 Some(Box::new(Grant { profile, context })),
+                Some(turn_time),
             ))
             .unwrap();
         drop(orders);
         let cancel = AtomicBool::new(false);
         let interrupt = AtomicBool::new(false);
         let problem = per_turn(
-            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt, turn_time,
+            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt,
         );
         drop(reports);
         let finished = reported.iter().find_map(|report| match report {

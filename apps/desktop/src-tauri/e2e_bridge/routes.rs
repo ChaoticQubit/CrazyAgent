@@ -537,6 +537,23 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_keep_warm(&id, on, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_time_limits" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                turn_secs: Option<u32>,
+                session_secs: Option<u32>,
+                idle_secs: Option<u32>,
+                generation: u64,
+            }
+            let Args { id, turn_secs, session_secs, idle_secs, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_time_limits(&id, turn_secs, session_secs, idle_secs, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_live_master" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

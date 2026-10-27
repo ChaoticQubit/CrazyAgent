@@ -2850,3 +2850,106 @@ fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
     let graph = owner_graph(&connection, &setup).unwrap();
     assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
 }
+
+/// The owner sets a team's task and session time limits from the listed choices; both are
+/// Off until set, a session limit below the task limit or an unlisted value is refused, and
+/// the team status shows what was stored.
+#[test]
+fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-limits",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    assert_eq!(
+        time_limits(&connection, &project).unwrap(),
+        TimeLimits::default()
+    );
+    assert_eq!(
+        time_limits(&connection, &project).unwrap().idle,
+        Some(IDLE_STOP_DEFAULT_SECS),
+        "an idle sub-agent stops after 10 minutes until the owner changes it"
+    );
+    let limits = |turn_secs, session_secs, idle_secs| TeamAction::TimeLimits {
+        project_id: project.clone(),
+        turn_secs,
+        session_secs,
+        idle_secs,
+    };
+    for refused in [
+        limits(Some(60), None, None),
+        limits(Some(3600), Some(1800), None),
+        limits(None, Some(3600), None),
+        limits(Some(3600), Some(86_400), None),
+        limits(None, None, Some(300)),
+    ] {
+        assert_eq!(
+            refused.validate().unwrap_err().0,
+            "team_time_limits_invalid",
+            "{refused:?}"
+        );
+    }
+    let pool = access("team-limits", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(Some(3600), Some(28_800), Some(120))).unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        time_limits(&connection, &project).unwrap(),
+        TimeLimits {
+            turn: Some(3600),
+            session: Some(28_800),
+            idle: Some(120)
+        }
+    );
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (
+            shown.turn_limit_secs,
+            shown.session_limit_secs,
+            shown.idle_stop_secs
+        ),
+        (Some(3600), Some(28_800), Some(120))
+    );
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(None, None, None)).unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        time_limits(&connection, &project).unwrap(),
+        TimeLimits {
+            turn: None,
+            session: None,
+            idle: None
+        },
+        "every limit Off, the idle stop included"
+    );
+    connection
+        .execute(
+            "UPDATE team_time_limits SET turn_secs=0 WHERE project=?1",
+            [project.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        time_limits(&connection, &project).unwrap_err().0,
+        "team_time_limits_invalid"
+    );
+}

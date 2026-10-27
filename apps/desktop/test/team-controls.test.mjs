@@ -8,7 +8,7 @@ const controls = await import("../src/screens/team/controls.tsx");
 
 const harness = (name, role, extra = {}) => ({ harness: name, role, agents_max: 2, tools: true, live: 0, delegation: null, delegation_label: null, runnable: true, ...extra });
 const status = (extra = {}) => ({
-  project_id: "chores", keep_warm: false, paused: false, min_agents: 1, max_agents: 3,
+  project_id: "chores", keep_warm: false, idle_stop_secs: 600, paused: false, min_agents: 1, max_agents: 3,
   harnesses: [harness("codex", "master"), harness("codex", "sub"), harness("claude", "sub"), harness("codex", "sub", { tools: false })],
   agents: [], tasks: [], messages: [], plan: [], ...extra,
 });
@@ -55,4 +55,38 @@ test("the controls show the keep-ready switch and the hand-off form for a team w
   assert.match(lone, /This team has no sub-agents/);
   assert.match(lone, /Keep 0 sub-agents ready/);
   assert.match(lone, /aria-disabled="true"/);
+});
+
+test("each time limit offers Off and 30 min to 8 h, with Off the default", () => {
+  assert.deepEqual(controls.limitOptions(null).map((option) => [option.value, option.label]), [
+    ["off", "Off"], ["1800", "30 min"], ["3600", "1 h"], ["7200", "2 h"], ["14400", "4 h"], ["28800", "8 h"],
+  ]);
+  assert.deepEqual(controls.limitOptions(90).at(-1), { value: "90", label: "90 s" }, "a stored value outside the choices still shows");
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.match(html, /<label for="tg-turn-limit-chores">Each task may run<\/label>/);
+  assert.match(html, /<label for="tg-session-limit-chores">Each agent session may run<\/label>/);
+  assert.equal(html.match(/<option value="off" selected="">Off<\/option>/g)?.length, 2, "both limits are Off until the owner sets one");
+  const set = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ turn_limit_secs: 3600, session_limit_secs: 14_400 }), reload() {} }));
+  assert.match(set, /<option value="3600" selected="">1 h<\/option>/);
+  assert.match(set, /<option value="14400" selected="">4 h<\/option>/);
+});
+
+test("the idle stop offers Off, 2 min, 10 min and 1 h, and shows the engine's 10 min default", () => {
+  assert.deepEqual(controls.limitOptions(null, controls.IDLE_CHOICES_SECS).map((option) => [option.value, option.label]), [
+    ["off", "Off"], ["120", "2 min"], ["600", "10 min"], ["3600", "1 h"],
+  ]);
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ idle_stop_secs: 600 }), reload() {} }));
+  assert.match(html, /<label for="tg-idle-stop-chores">Stop an idle sub-agent after<\/label>/);
+  assert.match(html, /<option value="600" selected="">10 min<\/option>/);
+  const off = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ idle_stop_secs: null }), reload() {} }));
+  assert.equal(off.match(/<option value="off" selected="">Off<\/option>/g)?.length, 3, "the idle stop Off with both time limits Off");
+});
+
+test("a changed limit keeps the session limit not below the task limit", () => {
+  assert.deepEqual(controls.limitPair(null, null, "turn", 3600), { turn: 3600, session: null });
+  assert.deepEqual(controls.limitPair(3600, 7200, "turn", 14_400), { turn: 14_400, session: 14_400 });
+  assert.deepEqual(controls.limitPair(3600, 7200, "session", 1800), { turn: 1800, session: 1800 });
+  assert.deepEqual(controls.limitPair(null, null, "session", 7200), { turn: 7200, session: 7200 });
+  assert.deepEqual(controls.limitPair(3600, 7200, "turn", null), { turn: null, session: null });
+  assert.deepEqual(controls.limitPair(3600, 7200, "session", null), { turn: 3600, session: null });
 });

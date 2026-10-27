@@ -716,6 +716,25 @@ async fn desktop_team_keep_warm(
         .await
 }
 
+/// Sets a project team's task and session time limits and sub-agent idle stop from Team
+/// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
+#[tauri::command]
+async fn desktop_team_time_limits(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    turn_secs: Option<u32>,
+    session_secs: Option<u32>,
+    idle_secs: Option<u32>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_time_limits(&id, turn_secs, session_secs, idle_secs, generation)
+        .await
+}
+
 #[tauri::command]
 async fn desktop_team_live_master(
     window: WebviewWindow,
@@ -2374,6 +2393,7 @@ pub fn run() {
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_time_limits,
             desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,

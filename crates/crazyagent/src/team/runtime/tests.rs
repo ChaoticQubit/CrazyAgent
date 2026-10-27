@@ -2700,3 +2700,319 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
 }
+
+const WORKING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  case "$line" in *"short summary"*|*"for a long time"*) exec /bin/sleep 300 ;; esac
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// Opens a runtime whose agents run `script` as their harness in the fixture's terminal,
+/// under `limits`. Inputs: the fixture, its terminal host, the script and the limits.
+/// Output: the runtime.
+fn limited_runtime(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    script: &str,
+    limits: TeamLimits,
+) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, script).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let access = fixture.access.clone();
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        limits,
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap()
+}
+
+/// Applies owner team actions in one transaction, as the owner socket does.
+fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    for action in actions {
+        assert_eq!(
+            crate::team::execute(&tx, &fixture.access, action).unwrap(),
+            crate::protocol::Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.commit().unwrap();
+}
+
+fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
+    crate::team::TeamAction::Delegate {
+        project_id: fixture.setup.project_id.clone(),
+        harness: Some("codex".into()),
+        prompt: prompt.into(),
+    }
+}
+
+fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
+    fixture
+        .connection
+        .query_row(
+            "SELECT status, error FROM team_tasks WHERE prompt=?1",
+            [prompt],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// With the owner's task limit stored at 1 s, a sub-agent turn that keeps running is stopped
+/// and its task names the limit and where to change it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_turn_past_the_task_limit_is_stopped_and_names_the_limit() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs) VALUES (?1,1,NULL)",
+            [PROJECT],
+        )
+        .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the limited task ends", |f| {
+        task_of(f, "Write page.md").0 == "failed"
+    });
+    assert_eq!(
+        task_of(&fixture, "Write page.md").1.as_deref(),
+        Some("The sub-agent was stopped by the 1 s task limit; change it in Team settings")
+    );
+    team.shutdown().unwrap();
+}
+
+/// With the task limit Off, the owner's setting, a sub-agent turn runs on well past the
+/// point where a limit stops one, and the team status reports both limits as Off.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_the_task_limit_off_a_turn_runs_past_where_a_limit_would_stop_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[
+            crate::team::TeamAction::TimeLimits {
+                project_id: fixture.setup.project_id.clone(),
+                turn_secs: None,
+                session_secs: None,
+                idle_secs: Some(crate::team::IDLE_STOP_DEFAULT_SECS),
+            },
+            hand_off(&fixture, "Write page.md"),
+        ],
+    );
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(task_of(&fixture, "Write page.md"), ("running".into(), None));
+    let status = fixture.status();
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (None, None)
+    );
+    team.shutdown().unwrap();
+}
+
+/// A master whose idle bound is tiny is not stopped while a sub-agent works on a task;
+/// once that task ends and its result reached the master, its idle time runs out and it stops.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_is_not_stopped_as_idle_while_a_sub_agent_works() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let limits = TeamLimits {
+        master_idle_stop: Duration::from_millis(200),
+        ..TeamLimits::default()
+    };
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, limits);
+    owner(
+        &fixture,
+        &[
+            hand_off(&fixture, "Write page.md"),
+            crate::team::TeamAction::Message {
+                project_id: fixture.setup.project_id.clone(),
+                text: "Plan the page".into(),
+            },
+        ],
+    );
+    let master = |f: &Fixture| {
+        f.status()
+            .agents
+            .into_iter()
+            .find(|agent| agent.role == AgentRole::Master)
+    };
+    fixture.until(
+        &mut team,
+        "the master answered and the sub-agent works",
+        |f| {
+            master(f).is_some_and(|agent| agent.status == AgentStatus::Idle)
+                && task_of(f, "Write page.md").0 == "running"
+        },
+    );
+    let id = master(&fixture).unwrap().id;
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "ten idle bounds passed while the sub-agent worked"
+    );
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Cancel {
+            project_id: fixture.setup.project_id.clone(),
+            task: Some(task),
+        }],
+    );
+    fixture.until(
+        &mut team,
+        "the idle master stops once the work ended",
+        |f| f.agent_status(id).0 == AgentStatus::Stopped,
+    );
+    assert_eq!(task_of(&fixture, "Write page.md").0, "cancelled");
+    team.shutdown().unwrap();
+}
+
+/// A master turn cut by the owner's 1 h task limit, stored here as 1 s, leaves the note
+/// naming that limit and the setting; the session limit and the launch ceiling have their
+/// own words.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_turn_cut_by_the_task_limit_names_the_limit_and_the_setting() {
+    assert_eq!(
+        limit_note(Some(TURN_LIMIT), Some(Duration::from_secs(3600)), None),
+        "stopped by the 1 h task limit; change it in Team settings"
+    );
+    assert_eq!(
+        limit_note(Some("launch_deadline"), None, Some(1800)),
+        "stopped by the 30 min session limit; change it in Team settings"
+    );
+    assert_eq!(
+        limit_note(Some("launch_deadline"), None, None),
+        "stopped after 24 h, the longest one agent process may run"
+    );
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs) VALUES (?1,1,NULL)",
+            [PROJECT],
+        )
+        .unwrap();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Message {
+            project_id: fixture.setup.project_id.clone(),
+            text: "Think about it for a long time".into(),
+        }],
+    );
+    let said = "The master stopped before it replied: stopped by the 1 s task limit; change it in Team settings.";
+    fixture.until(&mut team, "the cut master turn leaves its note", |f| {
+        f.note(said)
+    });
+    team.shutdown().unwrap();
+}
+
+/// The idle stop is the owner's setting: with it Off a sub-agent that finished its task stays
+/// up past where a 1 s stop would end it, and once the stored idle stop is 1 s it is stopped.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_idle_sub_agent_is_stopped_by_the_idle_setting_and_never_while_it_is_off() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[
+            crate::team::TeamAction::TimeLimits {
+                project_id: fixture.setup.project_id.clone(),
+                turn_secs: None,
+                session_secs: None,
+                idle_secs: None,
+            },
+            hand_off(&fixture, "Write page.md"),
+        ],
+    );
+    assert_eq!(fixture.status().idle_stop_secs, None);
+    let sub = |f: &Fixture| {
+        f.status()
+            .agents
+            .into_iter()
+            .find(|agent| agent.role == AgentRole::Sub)
+    };
+    fixture.until(&mut team, "the sub-agent finished and is idle", |f| {
+        task_of(f, "Write page.md").0 == "done"
+            && sub(f).is_some_and(|agent| agent.status == AgentStatus::Idle)
+    });
+    let id = sub(&fixture).unwrap().id;
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "with the idle stop Off an idle sub-agent keeps running"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET idle_secs=1 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    fixture.until(&mut team, "the 1 s idle stop ends the sub-agent", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    team.shutdown().unwrap();
+}
