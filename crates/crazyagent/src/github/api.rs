@@ -76,6 +76,7 @@ impl Endpoints {
             accept,
             token,
             form,
+            headers: Vec::new(),
             allow_http: self.allow_http,
         }
     }

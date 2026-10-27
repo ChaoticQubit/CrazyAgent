@@ -65,6 +65,23 @@ impl OwnerController {
         }
     }
 
+    /// Reads the extra read-only folders the owner saved for a project's agents.
+    /// Takes the project id.
+    /// Returns the folders in saved order, none when nothing was saved.
+    pub async fn project_read_paths(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<String>, EngineError> {
+        match self
+            .read(OwnerRead::ProjectReadPaths { project_id })
+            .await?
+            .data
+        {
+            OwnerData::ProjectReadPaths { paths, .. } => Ok(paths),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Lists a project's research jobs with plain status labels.
     /// Takes the project id.
     /// Returns the jobs in creation order.
@@ -213,6 +230,23 @@ impl OwnerController {
     ) -> Result<OwnerResponse, EngineError> {
         self.project_setup(project_id.clone()).await?;
         self.begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Replaces a project's extra read-only folders for its agents' sandboxes.
+    /// Takes the project id, the typed folders and the client generation.
+    /// Returns the actual owner response; a refused folder is a plain rejection.
+    pub async fn set_project_read_paths(
+        &mut self,
+        project_id: ProjectId,
+        paths: Vec<String>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_read_paths(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::SetProjectReadPaths { project_id, paths },
+            generation,
+        )?;
         self.send_pending().await
     }
 

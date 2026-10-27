@@ -65,9 +65,9 @@ fn project(id: &str) -> Result<ProjectId, BridgeError> {
 }
 
 impl NativeBridge {
-    pub(super) fn ready_for_intent(&self, generation: u64) -> Result<(), BridgeError> {
+    pub(super) fn ready_for_intent(&mut self, generation: u64) -> Result<(), BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -313,6 +313,39 @@ impl NativeBridge {
         self.controller()?
             .begin_mutation(
                 OwnerMutation::DeleteProjectContext { project_id, path },
+                generation,
+            )
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Reads the extra read-only folders a project's agents get beside its toolchains.
+    /// Takes the project id.
+    /// Returns the folders in saved order.
+    pub async fn project_read_paths(&mut self, id: &str) -> Result<Vec<String>, BridgeError> {
+        let paths = self
+            .controller()?
+            .project_read_paths(project(id)?)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(paths)
+    }
+
+    /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
+    /// path, the home folder, a credential location and the CrazyAgent data folder.
+    /// Takes the project id, the folders and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn set_project_read_paths(
+        &mut self,
+        id: &str,
+        paths: Vec<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::SetProjectReadPaths { project_id, paths },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

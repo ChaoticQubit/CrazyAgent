@@ -11,6 +11,7 @@ use crate::harnesses::launch::{
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host};
@@ -667,6 +668,43 @@ impl ResearchRunner {
         })
     }
 
+    /// Registers a job agent's home with the usage store, so its tokens count against the
+    /// project and account; a run on an endpoint account, or a store that cannot be
+    /// written, goes uncounted and the run still starts. Inputs: the home, the project,
+    /// the account and the run name.
+    fn register_usage(
+        &self,
+        home: &Path,
+        project: &ProjectId,
+        account: &ResearchAccount,
+        name: &str,
+    ) {
+        let (ResearchAccount::ManagedCodex { connection, .. }
+        | ResearchAccount::ManagedClaude { connection, .. }) = account
+        else {
+            return;
+        };
+        let attribution = crate::usage::capture::Attribution {
+            kind: crate::usage::capture::RunKind::Research,
+            project: project.clone(),
+            pool: None,
+            account: connection.id.clone(),
+            agent: format!("research-{name}"),
+            harness: connection.harness.as_str().to_owned(),
+        };
+        let registered = self
+            .database
+            .parent()
+            .ok_or_else(|| crate::engine::EngineError("usage_unavailable".into()))
+            .and_then(crate::usage::open)
+            .and_then(|db| {
+                crate::usage::capture::register_run(&db, home, &attribution, crate::team::now_ms())
+            });
+        if let Err(problem) = registered {
+            eprintln!("research usage not counted: {}", problem.0);
+        }
+    }
+
     /// Runs a claimed job's agent once its account is taken: the managed credential copy
     /// in the agent's home, the project context, the sandboxed worktree and the harness.
     /// Inputs: the job store, the job, its account, where it runs and the held lease, none
@@ -681,15 +719,16 @@ impl ResearchRunner {
     ) -> Result<(Ending, u32, PathBuf), RunError> {
         let JobPlace {
             root,
+            project,
             context,
             name,
             worktree,
             agent,
-            ..
         } = place;
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
+        self.register_usage(&home, &project, account, &name);
         let harness = account.harness();
         let executable = match harness {
             ResearchHarness::Codex => self
@@ -726,10 +765,20 @@ impl ResearchRunner {
         } else {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
+        let homes = ToolHomes::owner()?;
+        let scratch = toolchains::ScopedTmp::make(&home)?;
+        toolchains::prepare_cargo_home(&home, &homes)?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
         }
+        let extra = jobs
+            .read_paths(&project)
+            .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;
+        (sandbox, _) = sandbox
+            .allow_tools(&Toolchains::detect(&root, &homes))?
+            .allow_scratch(scratch.path())?
+            .allow_extra_reads(&extra)?;
         for folder in read_folders(executable, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
@@ -758,6 +807,7 @@ impl ResearchRunner {
                 model,
                 tools: job.tools,
                 sandbox_profile: Some(profile.clone()),
+                git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
                     output_bytes: usize::try_from(self.limits.output_bytes_max)
@@ -1445,6 +1495,9 @@ fn codex_arguments(
         })
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
+    if !tools {
+        command.args(["-c", "web_search=\"disabled\""]);
+    }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
             let url = endpoint_url(base_url)?;

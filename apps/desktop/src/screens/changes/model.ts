@@ -34,6 +34,7 @@ const MARKS: Record<string, string> = {
   modules: ".gitmodules: changes the project's submodules",
 };
 
+const MESSAGE_BYTES_MAX = 4096;
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** Names the agent whose work a change set holds. Input: the change set. Output: the name. */
@@ -100,6 +101,14 @@ export function updatingNote(set: ChangeSet): string | null {
  * the note, or null in any other state. */
 export function conflictNote(set: ChangeSet): string | null {
   return set.state === "conflict" ? changesRefusal({ code: "changes_conflict", files: set.conflicts.map(displayText) }) : null;
+}
+
+/** The owner's edited commit message as Accept sends it: line ends made \n, trimmed.
+ * Input: the editor text. Output: the message, or null when it is empty or longer than
+ * the engine takes. */
+export function commitMessage(text: string): string | null {
+  const message = text.replace(/\r\n/g, "\n").trim();
+  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX ? message : null;
 }
 
 /** What a landed Accept did, in one sentence; a conflict is told by the change set's own

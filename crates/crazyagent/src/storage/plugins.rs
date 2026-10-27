@@ -89,6 +89,10 @@ pub(crate) enum Command {
         project: Option<ProjectId>,
         offset: u16,
     },
+    Skill {
+        id: String,
+        project: Option<ProjectId>,
+    },
     Servers {
         project: Option<ProjectId>,
         offset: u16,
@@ -516,6 +520,7 @@ fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> Skill
         id: record.id.clone(),
         name: record.name.clone(),
         description: record.description.clone(),
+        line: crate::skills::one_line(&record.description),
         scope: record.scope.clone(),
         scope_label: record.scope.label().into(),
         enabled: record.enabled,
@@ -1048,6 +1053,21 @@ pub(super) fn run(
                 .collect();
             let (views, next) = page(views, offset)?;
             ResultValue::Skills(views, next)
+        }
+        Command::Skill { id, project } => {
+            let record: SkillRecord = load(tx, "skill", &id)?;
+            if !visible(&record.scope, project.as_ref()) {
+                return Err(error("skill_not_found"));
+            }
+            let off = match &project {
+                Some(project) => switched_off(tx, project)?,
+                None => Vec::new(),
+            };
+            let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
+            ResultValue::Skill(Box::new(SkillChange {
+                view: skill_view(&record, root, here),
+                added: false,
+            }))
         }
         Command::Servers { project, offset } => {
             let off = match &project {

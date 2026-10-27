@@ -13,7 +13,7 @@ use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
 use crate::launch_context::AgentContext;
@@ -22,6 +22,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -122,6 +123,7 @@ struct Plan {
     model: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
+    git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
 }
@@ -136,6 +138,7 @@ impl Plan {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: Some(self.sandbox_profile.clone()),
+            git_identity: self.git_identity.clone(),
             limits: self.limits,
         }
     }
@@ -1913,6 +1916,25 @@ impl TeamRuntime {
                 params![id, stored.project_id.as_str(), landing[0], landing[1], landing[2]],
             )
             .map_err(error)?;
+        if kept.is_none() {
+            let paths = landing.each_ref().map(Path::new);
+            let started = crate::landing::open(&self.root).and_then(|db| {
+                crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2])
+            });
+            if let Err(problem) = started {
+                let problem = with_code(
+                    "the agent worktree's starting commit could not be recorded",
+                    Some(&problem.0),
+                );
+                self.connection
+                    .execute(
+                        "UPDATE team_agents SET status='failed', error=?2, stopped_ms=?3 WHERE id=?1",
+                        params![id, bound_text(&problem, 400), now_ms()],
+                    )
+                    .map_err(error)?;
+                return Ok(Err(problem));
+            }
+        }
         let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
             Ok(hosted) => hosted,
             Err(problem) => {
@@ -2057,10 +2079,22 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
+        let homes = ToolHomes::owner().map_err(sandboxed)?;
+        let scratch = toolchains::make_tmp(&home)
+            .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
+        toolchains::prepare_cargo_home(&home, &homes)
+            .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
+        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
+            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        (sandbox, _) = sandbox
+            .allow_tools(&Toolchains::detect(&root, &homes))
+            .and_then(|sandbox| sandbox.allow_scratch(&scratch))
+            .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
+            .map_err(sandboxed)?;
         let install = executable
             .canonicalize()
             .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
@@ -2122,6 +2156,7 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
+            git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
         };
@@ -2344,6 +2379,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -3140,6 +3176,16 @@ fn full_stop(line: String) -> String {
     } else {
         line + "."
     }
+}
+
+/// The owner's git identity for an agent's own commits in a project: the project
+/// repository's `user.name` and `user.email` as the owner's git reads them, with the
+/// owner's home from the engine's `HOME`. Input: the project root. Output: the
+/// identity, or None when the owner set none, so git keeps its own default.
+fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let (name, email) = crate::landing::owner_git_identity(root, &home).ok()?;
+    GitIdentity::new(name, email).ok()
 }
 
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,

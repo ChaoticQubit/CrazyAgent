@@ -208,6 +208,7 @@ enum Picked {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
+    Read,
     Approve,
     NotNow,
     Toggle,
@@ -307,7 +308,9 @@ impl Plugins {
 
     fn actions(&self) -> Vec<Action> {
         match self.picked() {
-            Some(Picked::Skill(_)) => vec![Action::Toggle, Action::Remove, Action::Close],
+            Some(Picked::Skill(_)) => {
+                vec![Action::Read, Action::Toggle, Action::Remove, Action::Close]
+            }
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let mut actions = Vec::new();
@@ -332,6 +335,7 @@ impl Plugins {
             None => false,
         };
         match action {
+            Action::Read => "Read SKILL.md",
             Action::Approve => "Approve",
             Action::NotNow => "Not now",
             Action::Toggle if on => "Turn off",
@@ -789,6 +793,14 @@ impl Plugins {
                 }
                 Key::Enter => {
                     let action = self.actions().get(focus).copied().unwrap_or(Action::Close);
+                    if let (Action::Read, Some(Picked::Skill(index))) = (action, self.picked()) {
+                        self.open = Open::None;
+                        let skill = &self.skills[index];
+                        return Flow::Replace(Box::new(SkillDetailPage::new(
+                            skill.id.clone(),
+                            skill.name.clone(),
+                        )));
+                    }
                     if let (Action::Edit, Some(Picked::Server(index))) = (action, self.picked()) {
                         self.open = Open::None;
                         let server = self.servers[index].clone();
@@ -1882,6 +1894,9 @@ impl Screen for EditServer {
         Some(place_of(self.project.as_ref()))
     }
 }
+
+mod skill_detail;
+pub use skill_detail::SkillDetailPage;
 
 #[cfg(test)]
 mod tests;

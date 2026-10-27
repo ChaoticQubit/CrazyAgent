@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadProjectCatalog, loadProjects, receiptState, removeProject, setProjectPool, updateProjectSetup } from "../../api-projects";
+import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
 import type { ProjectCatalog, StoredSetup } from "../../api-projects";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
@@ -24,6 +24,7 @@ const SECTIONS = [
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "sandbox", label: "Sandbox" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -214,6 +215,76 @@ function GeneralSection({ data, setup }: { data: ProjectData; setup: StoredSetup
   </form>;
 }
 
+/** The most extra read-only folders a project can share with its agents, as the engine allows. */
+export const READ_PATHS_MAX = 8;
+
+/** Adds one typed folder to the extra read-only list, as the engine will check it again.
+ * Inputs: the current list and the typed text. Output: the new list, or a plain error. */
+export function addReadPath(paths: string[], typed: string): { paths: string[] } | { error: string } {
+  const path = typed.trim();
+  if (!path.startsWith("/")) return { error: "Type the full path of a folder, starting with /." };
+  if (path.length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return { error: "Each folder must be one plain path of up to 1024 characters." };
+  if (paths.includes(path)) return { error: "That folder is already in the list." };
+  if (paths.length >= READ_PATHS_MAX) return { error: `A project can share at most ${READ_PATHS_MAX} extra folders.` };
+  return { paths: [...paths, path] };
+}
+
+function SandboxSection({ data }: { data: ProjectData }) {
+  const [saved, setSaved] = useState<string[] | null>(null);
+  const [paths, setPaths] = useState<string[]>([]);
+  const [typed, setTyped] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void loadReadPaths(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
+      else setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result));
+    });
+    return () => { live = false; };
+  }, [data.id]);
+
+  function add() {
+    const next = addReadPath(paths, typed);
+    if ("error" in next) return setNote(next.error);
+    setPaths(next.paths);
+    setTyped("");
+    setNote("");
+  }
+
+  async function save() {
+    setBusy(true);
+    const result = await saveReadPaths(data.id, paths, nextGeneration());
+    setBusy(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
+    setSaved(paths);
+    setNote("");
+    data.notify("Read-only folders saved. Agents started from now on get them.");
+  }
+
+  const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
+  return <div className="pj-stack">
+    <h2>Sandbox</h2>
+    <p className="pj-secondary">Agents find the toolchains this project uses (Rust, Node, Python and Homebrew) on their own and can read them, never change them. Add other folders they may read here. They can never read credential files, such as .npmrc, .netrc or .ssh, even inside these folders.</p>
+    {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
+    {saved !== null && <ul className="pj-paths" aria-label="Extra read-only folders">
+      {paths.length === 0 && <li className="pj-muted">No extra folders.</li>}
+      {paths.map((path) => <li key={path}><span className="pj-mono">{displayText(path)}</span>{" "}
+        <button type="button" className="btn" aria-label={`Remove ${path}`} onClick={() => setPaths(paths.filter((item) => item !== path))}>Remove</button></li>)}
+    </ul>}
+    {saved !== null && <form className="pj-field" onSubmit={(event) => { event.preventDefault(); add(); }}>
+      <label className="pj-label" htmlFor="ps-read-path">Folder path</label>
+      <input id="ps-read-path" className="pj-input" value={typed} placeholder="/Users/you/shared-config" onChange={(event) => setTyped(event.target.value)} />
+      <div><button type="submit" className="btn" disabled={!typed.trim()}>Add folder</button></div>
+    </form>}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy} onClick={() => void save()}>Save folders</Button></div>
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -221,7 +292,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, and Remove project. A setup
+/** Project Settings tab: General, Pool, Team, Plugins and skills, Sandbox and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -245,6 +316,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
       </div>}
+      {active === "sandbox" && <SandboxSection data={data} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

@@ -1,13 +1,17 @@
 import { createRef, useRef, useState, type RefObject } from "react";
 import {
   addMcpServer, addSkill, approveMcpServer, checkMcpServer, listMcpServers, listSkills, pickFolder, removeMcpSecret, removeMcpServer, removeSkill,
-  setMcpSecret, setMcpServerEnabled, setSkillEnabled, switchPlugin, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillView,
+  setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, switchPlugin, type McpServerSpec, type McpServerView, type PluginScope, type Result,
+  type SkillDetail, type SkillView,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, ConfirmDialog, Dialog, EmptyState, LoadError, Menu, NotReady, Notice, Panel, SecretField, Segmented, Skeleton, StatusBadge, Switch, TextArea, TextField,
   type MenuItem,
 } from "../../ui";
+import { navigate } from "../../ui/router";
+import { MarkdownView } from "../project/markdown";
+import { useLinkOpener } from "../project/links";
 import { homePath } from "./harnesses";
 
 const ARGS_MAX = 32;
@@ -123,11 +127,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
 
 /** The skills list as a pure view of the engine read. Inputs: the read, the project id when
  * shown in a project, the last failure and the actions. */
-export function SkillsView({ skills, projectId, failure, onAdd, onToggle, onRemove, onRetry }: {
+export function SkillsView({ skills, projectId, failure, onAdd, onOpen, onToggle, onRemove, onRetry }: {
   skills: Loaded<SkillView[]>;
   projectId?: string;
   failure: string;
   onAdd: () => void;
+  onOpen: (skill: SkillView) => void;
   onToggle: (skill: SkillView, on: boolean) => void;
   onRemove: (skill: SkillView) => void;
   onRetry: () => void;
@@ -149,6 +154,7 @@ export function SkillsView({ skills, projectId, failure, onAdd, onToggle, onRemo
           <div className="stack-small"><span className="title">{skill.name}</span><span className="secondary">{skill.description}</span>
             <span className="mono muted small">{homePath(skill.source)}</span></div>
           <span className="row">
+            <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
             <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
               disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
             {!on.project && <Menu label={`More for ${skill.name}`} items={[{ label: "Remove", icon: "trash", danger: true, onSelect: () => onRemove(skill) }]} />}
@@ -157,6 +163,81 @@ export function SkillsView({ skills, projectId, failure, onAdd, onToggle, onRemo
       })}
     </div></Panel>}
   </div>;
+}
+
+/** Drops the frontmatter block at the top of a SKILL.md, which the detail view shows as the
+ * skill's name and description instead. Input: the file text. Output: the Markdown body. */
+export function skillBody(text: string): string {
+  const source = text.replace(/^\uFEFF/, "");
+  const lines = source.split("\n");
+  if (lines[0]?.trimEnd() !== "---") return source;
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  return end < 0 ? source : lines.slice(end + 1).join("\n").replace(/^(\s*\n)+/, "");
+}
+
+/** A file size as the detail view lists it. Input: bytes. Output: such as "812 B" or "4.2 KB". */
+export function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** One skill's detail as a pure view of the engine read: description, where it applies and
+ * comes from, its switch, the rendered SKILL.md and its files. Inputs: the read, the project id
+ * when shown in a project, the last failure and the actions. */
+export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLink, onRetry }: {
+  detail: Loaded<SkillDetail>;
+  projectId?: string;
+  failure: string;
+  onToggle: (skill: SkillView, on: boolean) => void;
+  onOpenLink: (href: string) => void;
+  onRetry: () => void;
+}) {
+  if (detail.kind === "loading") return <Skeleton shape="row" count={6} />;
+  if (detail.kind === "not_ready") return <NotReady what="Skill details" compact />;
+  if (detail.kind === "error") return <LoadError message={detail.message} onRetry={onRetry} />;
+  const { skill, text, files, files_more } = detail.value;
+  const on = pluginSwitch(skill, projectId);
+  return <div className="stack">
+    <p className="secondary">{skill.description}</p>
+    <div className="row between">
+      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
+      <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
+        disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
+    </div>
+    {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    <Panel title="SKILL.md"><MarkdownView source={skillBody(text)} onOpenLink={onOpenLink} /></Panel>
+    <Panel title={`Files (${files.length + files_more})`} padded={false}><div className="rows">
+      {files.map((file) => <div className="item-row" key={file.path}><span className="mono small">{file.path}</span><span className="muted small">{fileSize(file.bytes)}</span></div>)}
+      {files_more > 0 && <div className="item-row"><span className="secondary">And {files_more} more</span></div>}
+    </div></Panel>
+  </div>;
+}
+
+/** The skill detail pop-up: reads the skill from the engine and switches it the same way the
+ * list does. Inputs: the skill id, the project id when opened in a project, close and changed. */
+export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
+  id: string;
+  projectId?: string;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const session = useAppSession();
+  const openLink = useLinkOpener(session.showToast);
+  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId]);
+  const [failure, setFailure] = useState("");
+  const toggle = async (skill: SkillView, on: boolean) => {
+    setFailure("");
+    const target = pluginSwitch(skill, projectId);
+    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on) : await setSkillEnabled(skill.id, on));
+    if (result.kind === "ok") { session.showToast(on ? "Skill turned on." : "Skill turned off."); reload(); onChanged(); }
+    else setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+  };
+  const title = detail.kind === "ok" ? detail.value.skill.name : "Skill";
+  return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
+    <SkillDetailView detail={detail} projectId={projectId} failure={failure} onRetry={reload} onOpenLink={openLink}
+      onToggle={(skill, on) => void toggle(skill, on)} />
+  </Dialog>;
 }
 
 /** The MCP server list as a pure view of the engine read, with the approval review for
@@ -418,9 +499,10 @@ export function SecretsDialog({ server, onClose, onChanged }: {
 type Removing = { kind: "skill"; skill: SkillView } | { kind: "server"; server: McpServerView };
 
 /** Settings, Plugins and skills: skills and MCP servers read from the engine, with add,
- * switch, remove, approve, check and secrets. Global by default; with a project id it shows
- * that project's view and adds items to that project only. Input: optional project id. */
-export function PluginsAndSkills({ projectId }: { projectId?: string } = {}) {
+ * switch, remove, approve, check, secrets and each skill's detail. Global by default; with a
+ * project id it shows that project's view and adds items to that project only. Inputs: optional
+ * project id and, in global settings, the skill id from the route whose detail is open. */
+export function PluginsAndSkills({ projectId, skill }: { projectId?: string; skill?: string } = {}) {
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
   const [section, setSection] = useState<"skills" | "servers">("skills");
@@ -431,6 +513,10 @@ export function PluginsAndSkills({ projectId }: { projectId?: string } = {}) {
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();
   const [secrets, setSecrets] = useState<McpServerView>();
   const [removing, setRemoving] = useState<Removing>();
+  const [opened, setOpened] = useState<string>();
+  const shown = projectId ? opened : skill;
+  const open = (id: string) => projectId ? setOpened(id) : navigate({ name: "settings", tab: "plugins", skill: id });
+  const closeDetail = () => projectId ? setOpened(undefined) : navigate({ name: "settings", tab: "plugins" }, true);
 
   async function act<T>(id: string, action: () => Promise<Result<T>>, done: (value: T) => string, reload: () => void): Promise<void> {
     setFailure("");
@@ -473,7 +559,7 @@ export function PluginsAndSkills({ projectId }: { projectId?: string } = {}) {
       options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }]} />
     {section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
-        onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
+        onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}
         onToggle={toggleServer} onSecrets={setSecrets} onRemove={(server) => setRemoving({ kind: "server", server })}
         onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec), () => "Server approved.", reloadServers)}
@@ -484,6 +570,7 @@ export function PluginsAndSkills({ projectId }: { projectId?: string } = {}) {
       onAdded={(skill) => { setAdding(undefined); session.showToast(`Added ${skill.name}.`); reloadSkills(); }} />
     <AddServerDialog open={adding?.kind === "server"} scope={scope} onClose={() => setAdding(undefined)}
       onAdded={(server) => { setAdding(undefined); session.showToast(`Added ${server.name}. Review it, then approve it.`); reloadServers(); }} />
+    {shown && <SkillDetailDialog id={shown} projectId={projectId} onClose={closeDetail} onChanged={reloadSkills} />}
     {secrets && <SecretsDialog server={secrets} onClose={() => setSecrets(undefined)} onChanged={(server) => { setSecrets(server); reloadServers(); }} />}
     <ConfirmDialog open={Boolean(removing)} title={removing?.kind === "server" ? "Remove this MCP server?" : "Remove this skill?"} confirmLabel="Remove"
       onCancel={() => setRemoving(undefined)} onConfirm={confirmRemove}>

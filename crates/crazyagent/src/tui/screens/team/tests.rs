@@ -1,11 +1,11 @@
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
-use crate::tui::ctx::{Ctx, Link};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::screens::{Place, open};
-use crate::tui::seam::{Arrival, NOT_READY, Request};
+use crate::tui::seam::{AccountRow, Arrival, NOT_READY, Request};
 use crate::tui::shell::Shell;
 use crate::tui::terminal_pane::LEADER;
 use crate::tui::theme::{Appearance, Colors, Depth};
@@ -59,7 +59,7 @@ fn graph() -> Box<TeamGraph> {
             None,
             "Master",
             AgentStatus::Working,
-            Some("ChatGPT Pro - main"),
+            Some("acct-pro"),
             Some("team-1"),
         )
     };
@@ -91,7 +91,7 @@ fn graph() -> Box<TeamGraph> {
                 Some("group-claude"),
                 "claude-1",
                 AgentStatus::Working,
-                Some("Claude Max - work"),
+                Some("acct-max"),
                 Some("team-2"),
             ),
             agent(
@@ -108,7 +108,7 @@ fn graph() -> Box<TeamGraph> {
                 Some("group-codex"),
                 "codex-1",
                 AgentStatus::Starting,
-                Some("ChatGPT Plus"),
+                Some("acct-plus"),
                 Some("team-5"),
             ),
         ],
@@ -146,6 +146,21 @@ fn fresh(width: u16, height: u16) -> Shell {
     ctx.width = width;
     ctx.height = height;
     ctx.link = Link::Ready;
+    ctx.store.accounts = Load::Ready(
+        [
+            ("acct-pro", "ChatGPT Pro - main"),
+            ("acct-max", "Claude Max - work"),
+            ("acct-plus", "ChatGPT Plus"),
+        ]
+        .into_iter()
+        .map(|(id, name)| AccountRow {
+            id: CredentialRef::new(id).unwrap(),
+            name: name.into(),
+            provider: String::new(),
+            status: String::new(),
+        })
+        .collect(),
+    );
     let place = Place::Team {
         id: project(),
         name: "Tidepool".into(),
@@ -199,19 +214,19 @@ fn the_tree_draws_the_master_groups_agents_and_tasks_from_a_team_graph() {
     let rows = render(&mut shell);
     let mut expected = vec![format!("┌─ Team {}┐", "─".repeat(21))];
     for line in [
-        "> Master  ▸ Working",
+        "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
         "  ├─ Claude Code (2)",
-        "  │  ├─ claude-1  ▸ Working",
+        "  │  ├─ ▸ claude-1  Working",
         "  │  │  Claude Max - work",
-        "  │  └─ claude-2  ◌ Waiting…",
+        "  │  └─ ◌ claude-2  Waiting…",
         "  └─ Codex (1)",
-        "     └─ codex-1  ▸ Starting",
+        "     └─ ▸ codex-1  Starting",
         "        ChatGPT Plus",
         "",
         "  Tasks",
-        "  ▸ Master → claude-1  Fix …",
-        "  ✓ Master → codex-1  Write…",
+        "  ▸ claude-1  Fix the login…",
+        "  ✓ codex-1  Write tests",
         "",
         "",
         "",
@@ -224,6 +239,36 @@ fn the_tree_draws_the_master_groups_agents_and_tasks_from_a_team_graph() {
     let drawn: Vec<String> = rows[2..22].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(drawn, expected);
     assert!(rows[0].contains("Tidepool  /  Team"), "{}", rows[0]);
+}
+
+#[test]
+fn long_names_and_task_text_are_cut_with_an_ellipsis_behind_the_status_glyph() {
+    let mut team = graph();
+    team.nodes[2].label = "Ada Lovelace (@onboarding-fix-for-reused-ids)".into();
+    team.nodes[2].status = Some(AgentStatus::Failed);
+    team.edges[0].text = "\n  Fix\tthe   login\u{7} bug\u{1b}[31m now\nsecond line".into();
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows[3..21].iter().map(|row| chars(row, 3, 31)).collect();
+    assert!(tree[3].starts_with("  │  ├─ ✗ Ada Lovelace"), "{}", tree[3]);
+    assert!(tree[3].ends_with('…'), "{}", tree[3]);
+    assert!(tree[11].starts_with("  ▸ Ada Lovelace"), "{}", tree[11]);
+    assert!(tree[11].ends_with('…'), "{}", tree[11]);
+    assert!(
+        rows.iter()
+            .all(|row| row.chars().all(|character| !character.is_control())),
+        "no control character reaches the screen"
+    );
+    assert_eq!(
+        super::title("\n  Fix\tthe   login\u{7} bug\u{1b}[31m now\nsecond line"),
+        "Fix the login bug[31m now"
+    );
+    assert_eq!(super::title(" \t\n\u{7}\n"), "Untitled task");
+    assert_eq!(super::plain("a\tb\u{1b}c\nd"), "a bc\nd");
 }
 
 #[test]
@@ -398,7 +443,7 @@ fn enter_on_a_task_shows_its_route_status_source_text_and_reply() {
     }
     assert_eq!(
         chars(&rows[14], 2, 32),
-        format!("│{:<28}│", "> ▸ Master → claude-1  Fix …")
+        format!("│{:<28}│", "> ▸ claude-1  Fix the login…")
     );
 
     shell.key(Key::Down);
@@ -444,7 +489,7 @@ fn a_failed_refresh_keeps_the_team_on_screen() {
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[3], 2, 32),
-        format!("│{:<28}│", "> Master  ▸ Working")
+        format!("│{:<28}│", "> ▸ Master  Working")
     );
 }
 
@@ -744,4 +789,94 @@ fn an_ended_terminal_is_not_opened_again_when_the_engine_comes_back() {
     let sent = requests(&mut shell);
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(matches!(&sent[0], Request::TeamGraph { .. }));
+}
+
+#[test]
+fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_tasks() {
+    use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamHarness, TeamStatus, TeamTask};
+    let harness = |role: AgentRole, agents_max: u8| TeamHarness {
+        harness: "codex".into(),
+        role,
+        agents_max,
+        tools: true,
+        live: 0,
+        delegation: None,
+        delegation_label: None,
+        runnable: true,
+    };
+    let status = TeamStatus {
+        project_id: project(),
+        keep_warm: false,
+        paused: false,
+        min_agents: 1,
+        max_agents: 5,
+        harnesses: vec![harness(AgentRole::Master, 1), harness(AgentRole::Sub, 4)],
+        agents: (1..=4)
+            .map(|id| TeamAgent {
+                id,
+                role: AgentRole::Sub,
+                label: AgentRole::Sub.agent_label(id),
+                harness: "codex".into(),
+                tools: true,
+                account: Some("acct-plus".into()),
+                worktree: Some(format!(".crazyagent/worktrees/agent-{id}")),
+                status: AgentStatus::Stopped,
+                status_label: AgentStatus::Stopped.label().into(),
+                task: None,
+                turns: 1,
+                problem: None,
+                process_group: None,
+                created_ms: 1,
+                heartbeat_ms: 1,
+                stopped_ms: Some(2),
+            })
+            .collect(),
+        tasks: [1, 2, 3, 4, 3]
+            .into_iter()
+            .zip(1..)
+            .map(|(agent, id)| TeamTask {
+                id,
+                source: TaskSource::Master,
+                harness: "codex".into(),
+                tools: true,
+                prompt: format!("Browsky task {id}"),
+                status: TaskStatus::Done,
+                status_label: TaskStatus::Done.label().into(),
+                agent: Some(agent),
+                attempts: 1,
+                result: Some(format!("Result {id}")),
+                problem: None,
+                delivered: true,
+                output_bytes: 0,
+                created_ms: 1,
+                started_ms: Some(1),
+                finished_ms: Some(2),
+            })
+            .collect(),
+        messages: Vec::new(),
+        plan: Vec::new(),
+    };
+    let mut shell = fresh(160, 40);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(Box::new(crate::team::graph(&status))),
+    });
+    let rows = render(&mut shell);
+    let text = rows.join("\n");
+    for id in 1..=4 {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(&format!("Sub-agent {id} ")))
+            .unwrap_or_else(|| panic!("Sub-agent {id} is listed:\n{text}"));
+        assert!(row.contains("Stopped"), "{row}");
+    }
+    assert_eq!(text.matches("ChatGPT Plus").count(), 4, "{text}");
+    assert!(!text.contains("acct-plus"), "{text}");
+    for (id, agent) in [(1, 1), (2, 2), (3, 3), (4, 4), (5, 3)] {
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!(" Sub-agent {agent}  Browsky task {id}"))),
+            "task {id} points at Sub-agent {agent}:\n{text}"
+        );
+    }
 }

@@ -406,6 +406,7 @@ impl ProjectPage {
             }
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
+            MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
         };
         let problem = master_problem(code);
         if self.waiting.is_some() {
@@ -845,6 +846,7 @@ impl Screen for ProjectPage {
             || self.screen.adding.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
+            || (self.changes_have_keys() && self.screen.changes.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {

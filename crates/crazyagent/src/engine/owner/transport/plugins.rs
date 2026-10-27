@@ -19,6 +19,11 @@ enum Action {
         project: Option<ProjectId>,
         offset: u16,
     },
+    SkillDetail {
+        id: String,
+        project: Option<ProjectId>,
+        offset: u32,
+    },
     Servers {
         project: Option<ProjectId>,
         offset: u16,
@@ -103,6 +108,7 @@ pub struct ServerPage {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
     Skills { page: SkillPage },
+    SkillDetail { page: crate::skills::SkillPage },
     Servers { page: ServerPage },
     Skill { skill: SkillView },
     Server { server: ServerView },
@@ -133,6 +139,7 @@ impl Action {
     fn validate(&self) -> Result<(), EngineError> {
         let id = match self {
             Self::Server { id }
+            | Self::SkillDetail { id, .. }
             | Self::SetSkill { id, .. }
             | Self::RemoveSkill { id }
             | Self::UpdateServer { id, .. }
@@ -179,6 +186,34 @@ impl OwnerClient {
             .await?
         {
             Reply::Skills { page } => Ok(page),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads one page of a skill's detail view. Inputs: the skill id, a project to include
+    /// that project's switch (or none for global settings) and the SKILL.md byte offset, 0
+    /// first and then each page's `next`. Output: the skill, that part of its SKILL.md, the
+    /// next offset and on the first page its files; `skill_not_found` for a skill the project
+    /// does not see.
+    pub async fn skill_page(
+        &self,
+        id: String,
+        project: Option<ProjectId>,
+        offset: u32,
+    ) -> Result<crate::skills::SkillPage, EngineError> {
+        match self
+            .plugins_exchange(
+                Action::SkillDetail {
+                    id,
+                    project,
+                    offset,
+                },
+                None,
+                self.timeout,
+            )
+            .await?
+        {
+            Reply::SkillDetail { page } => Ok(page),
             _ => Err(unknown()),
         }
     }
@@ -549,6 +584,29 @@ async fn handle(
             Reply::Skills {
                 page: SkillPage { skills, next },
             }
+        }
+        Action::SkillDetail {
+            id,
+            project,
+            offset,
+        } => {
+            let ResultValue::Skill(skill) = actor(engine, Command::Skill { id, project }).await?
+            else {
+                return Err(unknown());
+            };
+            let store = engine_root(authority)?.join(crate::storage::plugins::STORE);
+            let folder = PathBuf::from(&skill.view.folder);
+            let inside = folder.starts_with(&store)
+                && !folder
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir));
+            if !inside {
+                return Err(failure("plugin_store_unsafe"));
+            }
+            let page = tokio::task::spawn_blocking(move || crate::skills::page(skill.view, offset))
+                .await
+                .map_err(|_| unknown())??;
+            Reply::SkillDetail { page }
         }
         Action::Servers { project, offset } => {
             let ResultValue::Servers(servers, next) =

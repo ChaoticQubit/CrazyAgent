@@ -554,6 +554,8 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
     Ok(line)
 }
 
+/// The most pane history rows an attach sends ahead of the screen: all that tmux keeps.
+const HISTORY_ROWS_MAX: usize = SCROLLBACK_LINES as usize;
 const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 const CURSOR_KEYS_ON: &[u8] = b"\x1b[?1h";
 
@@ -586,6 +588,27 @@ fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16), modes: M
     bytes
 }
 
+/// Puts the pane's history rows into a fresh view's scrollback before its screen is drawn:
+/// each row is written from the top, then `rows - 1` more line feeds scroll every one of
+/// them off a view of `rows` rows. Inputs: the history rows, oldest first, and the view
+/// height. Output: the bytes, or none for no history.
+fn scrollback(history: &[Vec<u8>], rows: u16) -> Vec<u8> {
+    if history.is_empty() {
+        return Vec::new();
+    }
+    let mut bytes = b"\x1b[0m\x1b[H\x1b[2J".to_vec();
+    for line in history {
+        bytes.extend_from_slice(line);
+        bytes.extend_from_slice(b"\r\n");
+    }
+    bytes.extend_from_slice(b"\x1b[0m");
+    bytes.extend(std::iter::repeat_n(
+        b'\n',
+        usize::from(rows.saturating_sub(1)),
+    ));
+    bytes
+}
+
 struct Located {
     pane: Vec<u8>,
     window: Vec<u8>,
@@ -593,12 +616,13 @@ struct Located {
     rows: u16,
     cursor: (u16, u16),
     modes: Modes,
+    history: usize,
 }
 
 fn located(lines: &[Vec<u8>]) -> Option<Located> {
     let text = std::str::from_utf8(lines.first()?).ok()?;
     let fields: Vec<&str> = text.split(' ').collect();
-    let [pane, window, x, y, cols, rows, paste, keys] = fields.as_slice() else {
+    let [pane, window, x, y, cols, rows, paste, keys, history] = fields.as_slice() else {
         return None;
     };
     if !pane.starts_with('%') || !window.starts_with('@') {
@@ -620,6 +644,7 @@ fn located(lines: &[Vec<u8>]) -> Option<Located> {
             bracketed_paste: flag(paste)?,
             cursor_keys: flag(keys)?,
         },
+        history: history.parse::<usize>().ok()?.min(HISTORY_ROWS_MAX),
     })
 }
 
@@ -627,7 +652,7 @@ fn viewer(
     state: &mut State,
     agent: AgentId,
     located_lines: &[Vec<u8>],
-    screen: &[Vec<u8>],
+    capture: &[Vec<u8>],
 ) -> Result<TerminalStream, HostError> {
     let Located {
         pane,
@@ -636,7 +661,9 @@ fn viewer(
         rows,
         cursor,
         modes,
+        history,
     } = located(located_lines).ok_or_else(|| failure("terminal_command_failed"))?;
+    let (earlier, screen) = capture.split_at(history.min(capture.len()));
     state.viewers.retain(|viewer| viewer.feed.open());
     if state.viewers.len() >= VIEWERS_MAX {
         return Err(failure("terminal_viewers_full"));
@@ -648,6 +675,7 @@ fn viewer(
         agent,
         cols,
         rows,
+        history: scrollback(earlier, rows),
         screen: render(screen, cols, rows, cursor, modes),
         chunks: receiver,
     })
@@ -711,17 +739,18 @@ fn guard<'a>(line: &'a [u8], word: &[u8]) -> Option<&'a [u8]> {
     line.strip_prefix(word)?.strip_prefix(b" ")
 }
 
-/// How many screen rows the reply block opening now holds, when it is an attach's capture.
+/// How many rows the reply block opening now holds, when it is an attach's capture: the
+/// history rows the attach read just before, then the screen rows.
 /// capture-pane prints one line per pane row and the pane's own text can look like any
 /// control line, including the block's closing guard, so those rows are counted as data
-/// rather than searched for a guard. Takes the state. Returns the pane height the attach
-/// read just before, or none for every other reply.
+/// rather than searched for a guard. Takes the state. Returns the history and pane height
+/// the attach read just before, or none for every other reply.
 fn capture_rows(state: &State) -> Option<usize> {
     match state.pending.front()? {
         Pending::Attach {
             located: Some(lines),
             ..
-        } => located(lines).map(|found| usize::from(found.rows)),
+        } => located(lines).map(|found| found.history + usize::from(found.rows)),
         _ => None,
     }
 }
@@ -841,7 +870,7 @@ impl Host for Tmux {
         let control = self.live_control()?;
         let target = target(agent);
         let line = format!(
-            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}}' ; capture-pane {} -t {target}",
+            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}}' ; capture-pane {} -S -{HISTORY_ROWS_MAX} -t {target}",
             control.capture
         );
         let (reply, answer) = sync_channel(1);

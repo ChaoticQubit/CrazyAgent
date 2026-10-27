@@ -8,10 +8,10 @@
   Folder    ~/projects/fieldnotes-mobile   x Remove project
   Pool      No pool yet   Enter Pick a pool
   Team      Codex leads. Codex x3. Tools on.
+  Folders   Loading...   f Edit read-only folders
 
   Skills  0                                                                           From Settings, plus this project
     Loading...
-
 
 
 
