@@ -304,12 +304,18 @@ pub fn plain_reason(code: &str) -> &'static str {
 #[cfg(unix)]
 pub fn platform(engine_root: &Path) -> (bool, Arc<dyn Host>) {
     let found = tmux::installed(engine_root);
-    let ready = found.is_some();
-    let host: Arc<dyn Host> = Arc::new(kept::LastScreenHost::new(tmux::Tmux::open(
-        found,
+    (found.is_some(), tmux_host(engine_root, found))
+}
+
+/// Opens the engine's terminal host on one tmux program, keeping the last screen of each
+/// terminal it ends. Takes the engine root and the program, none when tmux is missing.
+/// Returns the host; nothing starts until its first call.
+#[cfg(unix)]
+pub fn tmux_host(engine_root: &Path, program: Option<std::path::PathBuf>) -> Arc<dyn Host> {
+    Arc::new(kept::LastScreenHost::new(tmux::Tmux::open(
+        program,
         &engine_root.join(FOLDER),
-    )));
-    (ready, host)
+    )))
 }
 
 /// Opens this platform's terminal host for an engine: the ConPTY host on Windows, keeping the

@@ -460,7 +460,12 @@ pub struct Engine {
     owner_egress: tokio::sync::RwLock<()>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
-    terminal: Mutex<Option<(bool, std::sync::Arc<dyn crate::terminal::Host>)>>,
+    terminal: Mutex<
+        Option<(
+            Option<std::path::PathBuf>,
+            std::sync::Arc<dyn crate::terminal::Host>,
+        )>,
+    >,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
 }
 

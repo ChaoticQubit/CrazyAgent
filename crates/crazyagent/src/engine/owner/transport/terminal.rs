@@ -161,7 +161,8 @@ impl OwnerClient {
 }
 
 impl OwnerRuntimeHandle {
-    /// Returns the engine's terminal host on its private tmux server, opening it on first use.
+    /// Returns the engine's terminal host on its private tmux server, opening it on first use
+    /// and again whenever the tmux program found changes; see [`Engine::terminal`].
     /// Engine launchers start every interactive agent through it; viewers attach over the
     /// owner socket. While tmux is missing every call fails with `terminal_unavailable`.
     pub fn terminal(&self) -> Result<Arc<dyn Host>, EngineError> {
@@ -170,16 +171,23 @@ impl OwnerRuntimeHandle {
 }
 
 impl Engine {
+    /// Gives the terminal host on the tmux program found now. The host is kept while that
+    /// program stays the one found and opened anew when it changes, such as when setup
+    /// installs its own copy over an unsupported one or an upgrade removes the old one.
+    /// Takes the engine root. Returns the host, or `terminal_unavailable`.
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        if let Some((true, host)) = slot.as_ref() {
+        let found = crate::terminal::tmux::installed(root);
+        if let Some((program, host)) = slot.as_ref()
+            && *program == found
+        {
             return Ok(host.clone());
         }
-        let (ready, host) = crate::terminal::platform(root);
-        *slot = Some((ready, host.clone()));
+        let host = crate::terminal::tmux_host(root, found.clone());
+        *slot = Some((found, host.clone()));
         Ok(host)
     }
 }
