@@ -629,7 +629,7 @@ pub(crate) fn hidden_text(text: &str) -> bool {
 /// Shows every character hidden_text finds as a visible escape, `\uXXXX` or `\u{XXXXX}`,
 /// the same form the desktop shows. Input: the text. Output: the text with those characters
 /// escaped; line breaks, tabs and an emoji selector or joiner inside an emoji stay as they are.
-pub(crate) fn visible_text(text: &str) -> String {
+pub fn visible_text(text: &str) -> String {
     if !hidden_text(text) {
         return text.to_owned();
     }

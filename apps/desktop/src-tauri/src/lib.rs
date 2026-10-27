@@ -2157,7 +2157,7 @@ async fn desktop_notify_question(
     let setup = read(&state).await?.project_setup(&project_id).await;
     let name = setup.ok().flatten().map(|setup| setup.name);
     let notice = bridge::notify::notice(name.as_deref(), &question);
-    let Some(id) = notices.claim(question.id, question.project.as_str()) else {
+    let Some(id) = notices.claim(question.id, question.project.as_str())? else {
         return Ok(());
     };
     bridge::notify::show(tauri::Manager::app_handle(&window), id, &notice)

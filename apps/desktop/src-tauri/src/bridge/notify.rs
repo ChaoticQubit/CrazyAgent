@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tauri::Manager;
 use tauri_plugin_notification::{ActionPerformed, NotificationExt};
 
-/// The most question notifications the app remembers; the oldest is forgotten first.
+/// The most question notifications the app shows in one run. On macOS each one holds a
+/// plugin thread until the owner clicks or closes it, so this also bounds those threads.
 pub const SHOWN_MAX: usize = 256;
 const TITLE_CHARS_MAX: usize = 80;
 const BODY_CHARS_MAX: usize = 160;
 const ELLIPSIS: &str = "...";
-const PAGES_MAX: usize = 4;
+const PAGES_MAX: usize = crazyagent::questions::PENDING_PER_PROJECT_MAX as usize;
 
 /// What a macOS notification for one question says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,10 +42,10 @@ pub fn available() -> Result<(), BridgeError> {
     }
 }
 
-/// One plain line of engine or agent text: the first line that is not blank, trimmed,
-/// control, direction and invisible format characters shown as a replacement mark, and at
-/// most `max` characters with an ellipsis past it. Inputs: the text and the bound. Output:
-/// the line.
+/// One plain line of engine or agent text: the first line that is not blank, trimmed, with
+/// every character the engine's memory check finds hidden shown as a visible escape, line and
+/// paragraph separators included, and at most `max` characters with an ellipsis past it.
+/// Inputs: the text and the bound. Output: the line.
 pub fn plain_line(text: &str, max: usize) -> String {
     assert!(max > ELLIPSIS.len());
     let line = text
@@ -52,16 +53,8 @@ pub fn plain_line(text: &str, max: usize) -> String {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("");
-    let shown: String = line
-        .chars()
-        .map(|character| {
-            if hidden(character) {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect();
+    let shown = crazyagent::memory::visible_text(line);
+    assert!(!shown.contains(['\u{2028}', '\u{2029}', '\n', '\r']));
     if shown.chars().count() <= max {
         return shown;
     }
@@ -69,15 +62,6 @@ pub fn plain_line(text: &str, max: usize) -> String {
     cut.push_str(ELLIPSIS);
     assert!(cut.chars().count() <= max);
     cut
-}
-
-/// Whether a character would hide or reorder text in a notification: a control
-/// character, a bidirectional mark or isolate, a zero-width or byte-order mark, or a tag.
-fn hidden(character: char) -> bool {
-    character.is_control()
-        || matches!(character,
-            '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}'
-            | '\u{feff}' | '\u{e0000}'..='\u{e007f}')
 }
 
 /// Who asked, in plain words, from the engine's asker name. Input: the asker. Output: the
@@ -216,13 +200,17 @@ impl Notices {
     }
 
     /// Claims the notification of one question, once: the first claim gets a new
-    /// notification id, later claims of the same question get none. The oldest of more
-    /// than `SHOWN_MAX` is forgotten. Inputs: the question id and its project id. Output:
-    /// the notification id, or None when the question was already notified.
-    pub fn claim(&self, question: u64, project: &str) -> Option<i32> {
+    /// notification id, later claims of the same question get none. At most `SHOWN_MAX`
+    /// are claimed in one run and none is forgotten. Inputs: the question id and its project
+    /// id. Output: the notification id, None when the question was already notified, or
+    /// `notifications_full`.
+    pub fn claim(&self, question: u64, project: &str) -> Result<Option<i32>, BridgeError> {
         let mut shown = self.shown();
         if shown.order.iter().any(|(known, _)| *known == question) {
-            return None;
+            return Ok(None);
+        }
+        if shown.order.len() >= SHOWN_MAX {
+            return Err(failure("notifications_full"));
         }
         shown.last = if shown.last == i32::MAX {
             1
@@ -233,13 +221,8 @@ impl Notices {
         assert!(id > 0);
         shown.order.push_back((question, id));
         shown.projects.insert(id, project.to_owned());
-        while shown.order.len() > SHOWN_MAX {
-            if let Some((_, old)) = shown.order.pop_front() {
-                shown.projects.remove(&old);
-            }
-        }
-        assert!(shown.order.len() <= SHOWN_MAX && shown.projects.len() <= SHOWN_MAX);
-        Some(id)
+        assert!(shown.order.len() <= SHOWN_MAX && shown.projects.len() == shown.order.len());
+        Ok(Some(id))
     }
 
     /// Gives a claim back after the notification could not be shown, so a later read may
@@ -269,9 +252,10 @@ impl Notices {
     }
 }
 
-/// Shows a notice as a system notification with the given id. Inputs: the app, the
-/// notification id and the notice. Output: Ok once handed to the system, or
-/// `notifications_failed`.
+/// Hands a notice to the notification plugin with the given id. On macOS the plugin sends it
+/// on a thread of its own and drops a send error there, so Ok means accepted by the plugin,
+/// not shown: macOS may still refuse it unreported. Inputs: the app, the notification id and
+/// the notice. Output: Ok, or `notifications_failed` when the plugin refused it.
 pub fn show<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     id: i32,
@@ -371,18 +355,57 @@ mod tests {
             Some("Re\u{202e}cipe"),
             &question("agent:x\u{7}", "Run\u{200b} it\u{e0041}?"),
         );
-        assert_eq!(hidden.title, "Re\u{fffd}cipe needs your answer");
-        assert_eq!(hidden.body, "Agent x\u{fffd}: Run\u{fffd} it\u{fffd}?");
+        assert_eq!(hidden.title, "Re\\u202ecipe needs your answer");
+        assert_eq!(hidden.body, "Agent x\\u0007: Run\\u200b it\\u{e0041}?");
     }
 
-    /// A question is notified once; its click opens its project once; the oldest past the
-    /// bound is forgotten; a released claim may be claimed again.
+    /// Line and paragraph separators and the invisible characters the engine's memory check
+    /// knows never reach a notification, so agent text cannot draw a second line.
+    #[test]
+    fn separators_and_invisible_characters_never_reach_a_notification() {
+        assert_eq!(plain_line("a\u{2028}b", 80), "a\\u2028b");
+        let forged = notice(
+            Some("Recipe box"),
+            &question("agent:team-3", "Ship it?\u{2029}Approve to continue"),
+        );
+        assert_eq!(
+            forged.body,
+            "Agent team-3: Ship it?\\u2029Approve to continue"
+        );
+        for hidden in [
+            '\u{00ad}',
+            '\u{034f}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{180b}',
+            '\u{3164}',
+            '\u{fe00}',
+            '\u{ffa0}',
+            '\u{1d173}',
+            '\u{2028}',
+            '\u{2029}',
+        ] {
+            let shown = plain_line(&format!("x{hidden}y"), 80);
+            assert!(!shown.contains(hidden), "{shown:?}");
+            assert!(
+                shown.starts_with("x\\u") && shown.ends_with('y'),
+                "{shown:?}"
+            );
+        }
+        assert_eq!(
+            plain_line("ok \u{1f44d}\u{fe0f}", 80),
+            "ok \u{1f44d}\u{fe0f}"
+        );
+    }
+
+    /// A question is notified once; its click opens its project once; a released claim may
+    /// be claimed again; past `SHOWN_MAX` in one run nothing more is claimed or forgotten.
     #[test]
     fn each_question_is_notified_once_and_a_click_opens_its_project_once() {
         let notices = Notices::default();
-        let first = notices.claim(7, "p-1").unwrap();
-        assert_eq!(notices.claim(7, "p-1"), None);
-        let second = notices.claim(8, "p-2").unwrap();
+        let first = notices.claim(7, "p-1").unwrap().unwrap();
+        assert_eq!(notices.claim(7, "p-1").unwrap(), None);
+        let second = notices.claim(8, "p-2").unwrap().unwrap();
         assert_ne!(first, second);
         assert!(!notices.clicked(9999));
         assert_eq!(notices.take(), None);
@@ -391,12 +414,27 @@ mod tests {
         assert_eq!(notices.take(), None);
         notices.release(8, second);
         assert!(!notices.clicked(second));
-        assert!(notices.claim(8, "p-2").is_some());
-        for question in 100..100 + SHOWN_MAX as u64 {
-            assert!(notices.claim(question, "p-3").is_some());
+        let again = notices.claim(8, "p-2").unwrap().unwrap();
+        for question in 100..100 + SHOWN_MAX as u64 - 2 {
+            assert!(notices.claim(question, "p-3").unwrap().is_some());
         }
-        assert!(!notices.clicked(first), "the oldest is forgotten");
-        assert!(notices.claim(7, "p-1").is_some());
+        assert_eq!(
+            notices.claim(9, "p-4").unwrap_err().code,
+            "notifications_full",
+            "each shown notification holds a plugin thread, so a run shows at most SHOWN_MAX"
+        );
+        assert_eq!(
+            notices.claim(7, "p-1").unwrap(),
+            None,
+            "nothing is forgotten"
+        );
+        assert!(notices.clicked(first));
+        assert_eq!(notices.take().as_deref(), Some("p-1"));
+        notices.release(8, again);
+        assert!(
+            notices.claim(9, "p-4").unwrap().is_some(),
+            "a failed show frees its place"
+        );
     }
 
     /// Only macOS shows question notifications until the others are qualified.

@@ -13,7 +13,8 @@ export interface PendingQuestion {
 }
 
 export const QUESTION_READ_MS = 10_000;
-export const PAGES_MAX = 2;
+export const PAGES_MAX = 64;
+export const NOTIFY_PER_READ_MAX = 3;
 
 export const UNAVAILABLE_LINE = "System notifications are unavailable on this system.";
 export const AVAILABLE_LINE = "When a question waits for you while CrazyAgent is in the background, macOS shows a notification. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications.";
@@ -28,14 +29,23 @@ export function systemNotificationsLine(state: Result<SystemNotifications> | und
   return state.value === "available" ? AVAILABLE_LINE : UNAVAILABLE_LINE;
 }
 
-/** Finds the pending questions that appeared since the watch last looked. The first look only
- * remembers what is pending, so an app start never notifies for old questions. A settled
- * question never returns to pending, so the ids known now are exactly the ones pending now.
- * Inputs: the ids known before, or null before the first look, and every pending question
- * read now. Output: the ids known now and the fresh questions, oldest first. */
-export function freshQuestions(known: ReadonlySet<number> | null, pending: readonly PendingQuestion[]): { known: Set<number>; fresh: PendingQuestion[] } {
+/** Picks the new pending questions to notify now, oldest first, at most `NOTIFY_PER_READ_MAX`
+ * while notifying; the rest stay unknown for the next read, so a burst arrives spread out. The
+ * first look only remembers, so an app start notifies nothing old. Inputs: the ids known
+ * before or null, every pending question read now, whether this read notifies. Output: the
+ * ids known now and the questions to send. */
+export function freshQuestions(known: ReadonlySet<number> | null, pending: readonly PendingQuestion[], notifying: boolean): { known: Set<number>; send: PendingQuestion[] } {
   const fresh = known === null ? [] : pending.filter((item) => !known.has(item.id)).sort((a, b) => a.id - b.id);
-  return { known: new Set(pending.map((item) => item.id)), fresh };
+  const send = notifying ? fresh.slice(0, NOTIFY_PER_READ_MAX) : [];
+  const later = new Set(notifying ? fresh.slice(NOTIFY_PER_READ_MAX).map((item) => item.id) : []);
+  return { known: new Set(pending.map((item) => item.id).filter((id) => !later.has(id))), send };
+}
+
+/** The toast a notification that went wrong earns: only the plugin's refusal points at the
+ * system setting; a question settled meanwhile or a full run says nothing. Input: what the
+ * app answered. Output: the line, or null. */
+export function failureLine(result: Result<void>): string | null {
+  return result.kind === "error" && result.code === "notifications_failed" ? FAILED_LINE : null;
 }
 
 /** Whether a fresh question also goes to the system: only while the window is in the
@@ -56,9 +66,10 @@ export function systemNotifications(): Promise<Result<SystemNotifications>> {
   return call<SystemNotifications>("desktop_system_notifications", {});
 }
 
-/** Shows one macOS notification for a pending question. The app reads the question from the
- * engine and writes the text itself; the window only names it. Inputs: the project id and the
- * question id. Output: ok once handed to macOS, or the refusal. */
+/** Asks the app for one macOS notification for a pending question. The app reads the question
+ * from the engine and writes the text itself; the window only names it. Inputs: the project id
+ * and the question id. Output: ok once the notification plugin took it, which macOS may still
+ * drop unreported, or the refusal. */
 export function notifyQuestion(projectId: string, questionId: number): Promise<Result<void>> {
   return call<void>("desktop_notify_question", { projectId, questionId });
 }
@@ -69,8 +80,9 @@ export function takeNotificationTarget(): Promise<Result<string | null>> {
   return call<string | null>("desktop_notification_target", {});
 }
 
-/** Reads every pending question of one project, at most `PAGES_MAX` pages; pending ones come
- * first, oldest first. Input: the project id. Output: the pending questions, or null when a
+/** Reads every pending question of one project; pending ones come first, oldest first, every
+ * page holds at least one while any remain, and a project holds at most 64, so `PAGES_MAX`
+ * pages reach them all. Input: the project id. Output: the pending questions, or null when a
  * read failed so the watch skips this look. */
 async function pendingOf(projectId: string): Promise<PendingQuestion[] | null> {
   const found: PendingQuestion[] = [];
@@ -87,9 +99,9 @@ async function pendingOf(projectId: string): Promise<PendingQuestion[] | null> {
 }
 
 /** Watches pending questions while the engine runs: every 10 s it reads them and, while the
- * window is in the background, sends one macOS notification per new question. When the window
- * comes to the front after a click it opens that project's Questions tab. Inputs: whether the
- * engine runs and the toast action, used once when macOS refuses a notification. */
+ * window is in the background, sends one macOS notification per new question, a few per read.
+ * When the window comes to the front after a click it opens that project's Questions tab.
+ * Inputs: whether the engine runs and the toast action, used once when the plugin refuses. */
 export function useQuestionNotifications(running: boolean, showToast: (message: string) => void) {
   const toast = useRef(showToast);
   toast.current = showToast;
@@ -106,15 +118,14 @@ export function useQuestionNotifications(running: boolean, showToast: (message: 
       if (counts.kind === "ok") {
         const pages = await Promise.all([...pendingByProject(counts.value).keys()].map(pendingOf));
         if (live && pages.every((page) => page !== null)) {
-          const watched = freshQuestions(known, pages.flatMap((page) => page ?? []));
+          const notifying = shouldNotify(inBackground(), await system);
+          const watched = freshQuestions(known, pages.flatMap((page) => page ?? []), notifying);
           known = watched.known;
-          if (shouldNotify(inBackground(), await system)) {
-            for (const question of watched.fresh) {
-              const sent = await notifyQuestion(question.project_id, question.id);
-              if (sent.kind === "error" && !failed) {
-                failed = true;
-                toast.current(FAILED_LINE);
-              }
+          for (const question of watched.send) {
+            const line = failureLine(await notifyQuestion(question.project_id, question.id));
+            if (line && !failed) {
+              failed = true;
+              toast.current(line);
             }
           }
         }
