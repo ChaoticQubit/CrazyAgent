@@ -1,6 +1,9 @@
 use super::new_project_view::{Look, Row, columns, list_row, spread};
 use super::project_team::{Help, window};
 use super::project_time::{clock, duration};
+use crate::master_session::{MasterOwnerAction, MasterSessionPhase};
+use crate::master_sessions::MasterSessionSummary;
+use crate::tui::master_session::State as MasterState;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const DAY_MS: i64 = 86_400_000;
@@ -39,25 +42,23 @@ pub(in crate::tui) enum SessionsAction {
 }
 
 /// What the sessions part asks its host to do after a key: nothing (the host's own keys
-/// run), nothing more (the key was used), read the list again, or send an owner action.
+/// run), nothing more (the key was used), or send an owner action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum SessionsReply {
     Ignored,
     Handled,
-    Read,
     Act(SessionsAction),
 }
 
 /// The master view's sessions part: the engine's list, whether the list is open, the
-/// cursor, the action waiting for the owner's confirmation and the last read problem.
-/// Takes engine reads through `set` and `failed` and keys through `key`; never invents rows.
+/// cursor and the action waiting for the owner's confirmation.
+/// Takes engine reads through `set` and keys through `key`; never invents rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(in crate::tui) struct Sessions {
     rows: Option<Vec<SessionRow>>,
     open: bool,
     cursor: usize,
     confirm: Option<SessionsAction>,
-    problem: Option<String>,
 }
 
 impl Sessions {
@@ -70,12 +71,22 @@ impl Sessions {
             .and_then(|id| rows.iter().position(|row| row.id == id))
             .unwrap_or(0);
         self.rows = Some(rows);
-        self.problem = None;
     }
 
-    /// Keeps the plain reason the list could not be read. Input: the text. Output: none.
-    pub fn failed(&mut self, problem: String) {
-        self.problem = Some(problem);
+    /// Asks the owner again when the engine refused a switch because a turn started
+    /// running meanwhile. Input: the refused action. Output: true when it was a switch.
+    pub fn turn_was_running(&mut self, action: &MasterOwnerAction) -> bool {
+        self.confirm = match action {
+            MasterOwnerAction::NewSession { .. } => Some(SessionsAction::New {
+                cancel_running: false,
+            }),
+            MasterOwnerAction::Resume { session_id, .. } => Some(SessionsAction::Resume {
+                session: session_id.as_str().to_owned(),
+                cancel_running: false,
+            }),
+            _ => return false,
+        };
+        true
     }
 
     /// Says whether the sessions part draws in place of the conversation: the list is open
@@ -143,7 +154,7 @@ impl Sessions {
             ),
             KeyCode::Char('l') if !self.open => {
                 self.open = true;
-                SessionsReply::Read
+                SessionsReply::Handled
             }
             KeyCode::Esc if self.open => {
                 self.open = false;
@@ -157,7 +168,6 @@ impl Sessions {
                 self.cursor = (self.cursor + 1).min(count.saturating_sub(1));
                 SessionsReply::Handled
             }
-            KeyCode::Char('r') if self.open && self.problem.is_some() => SessionsReply::Read,
             KeyCode::Enter if self.open => match self.picked() {
                 Some(row) if row.live => {
                     self.open = false;
@@ -175,6 +185,7 @@ impl Sessions {
                 }
                 None => SessionsReply::Handled,
             },
+            _ if self.open => SessionsReply::Handled,
             _ => SessionsReply::Ignored,
         }
     }
@@ -268,18 +279,12 @@ impl Sessions {
 
     fn list(&self, width: usize, room: usize, now_ms: i64, offset: i64, look: &Look) -> Vec<Row> {
         let Some(rows) = &self.rows else {
-            return vec![match &self.problem {
-                Some(problem) => Row::of(problem.clone(), look.error),
-                None => Row::of("Reading sessions...", look.muted),
-            }];
+            return vec![Row::of("Reading sessions...", look.muted)];
         };
         let mut lines = vec![
             Row::of("Sessions", look.heading).push(format!("  {}", rows.len()), look.muted),
             Row::default(),
         ];
-        if let Some(problem) = &self.problem {
-            lines[1] = Row::of(format!("{problem} Press r to try again."), look.error);
-        }
         if rows.is_empty() {
             lines.push(Row::of("No sessions yet.", look.muted));
             return lines;
@@ -325,6 +330,50 @@ impl Sessions {
             ));
         }
         lines
+    }
+}
+
+/// The list rows from the engine's session summaries, in the engine's order.
+/// Input: the summaries. Output: one row per session; the line is the latest owner line,
+/// else the first.
+pub(in crate::tui) fn rows_of(listed: &[MasterSessionSummary]) -> Vec<SessionRow> {
+    listed
+        .iter()
+        .map(|session| SessionRow {
+            id: session.session_id.as_str().to_owned(),
+            live: session.phase == MasterSessionPhase::Configured,
+            started_ms: session.started_ms.and_then(|at| i64::try_from(at).ok()),
+            line: session
+                .last_line
+                .clone()
+                .or_else(|| session.first_line.clone())
+                .unwrap_or_default(),
+            agents: session.agents.clone(),
+            waiting: u32::try_from(session.results_waiting).unwrap_or(u32::MAX),
+        })
+        .collect()
+}
+
+/// Sends the owner's choice through the master client. Inputs: the client and the action.
+/// Output: the client's plain refusal when it cannot send it.
+pub(in crate::tui) fn act(master: &mut MasterState, action: &SessionsAction) -> Result<(), String> {
+    match action {
+        SessionsAction::New { cancel_running } => master.new_session(*cancel_running),
+        SessionsAction::Resume {
+            session,
+            cancel_running,
+        } => {
+            let id = master
+                .sessions()
+                .and_then(|listed| {
+                    listed
+                        .iter()
+                        .find(|item| item.session_id.as_str() == session)
+                })
+                .map(|item| item.session_id.clone())
+                .ok_or("That session is not in the Sessions list")?;
+            master.resume(&id, *cancel_running)
+        }
     }
 }
 

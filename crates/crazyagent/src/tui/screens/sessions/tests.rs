@@ -50,7 +50,7 @@ fn opened() -> Sessions {
     let mut sessions = Sessions::default();
     assert_eq!(
         sessions.key(press(KeyCode::Char('l')), true, false),
-        SessionsReply::Read
+        SessionsReply::Handled
     );
     sessions.set(listed());
     sessions
@@ -248,7 +248,7 @@ fn enter_resumes_the_chosen_session_and_asks_first_while_a_turn_runs() {
 }
 
 #[test]
-fn the_list_reads_follows_its_cursor_and_says_why_a_read_failed() {
+fn the_list_waits_for_its_read_follows_its_cursor_and_keeps_every_key() {
     let look = Look::plain();
     let mut sessions = Sessions::default();
     sessions.key(press(KeyCode::Char('l')), true, false);
@@ -261,14 +261,10 @@ fn the_list_reads_follows_its_cursor_and_says_why_a_read_failed() {
         SessionsReply::Handled,
         "nothing to resume yet"
     );
-    sessions.failed("Could not read the sessions.".into());
     assert_eq!(
-        texts(&sessions.view(76, 12, NOW, 0, &look).unwrap().0),
-        ["Could not read the sessions."]
-    );
-    assert_eq!(
-        sessions.key(press(KeyCode::Char('r')), true, false),
-        SessionsReply::Read
+        sessions.key(press(KeyCode::Char('e')), true, false),
+        SessionsReply::Handled,
+        "the open list keeps the conversation's keys"
     );
 
     sessions.set(listed());
@@ -283,13 +279,7 @@ fn the_list_reads_follows_its_cursor_and_says_why_a_read_failed() {
         drawn[3].starts_with("> Parked  earlier"),
         "the cursor stays on its session: {drawn:?}"
     );
-    sessions.failed("Could not refresh the sessions.".into());
-    let drawn = texts(&sessions.view(76, 12, NOW, 0, &look).unwrap().0);
-    assert_eq!(
-        drawn[1],
-        "Could not refresh the sessions. Press r to try again."
-    );
-    assert_eq!(drawn.len(), 5, "the rows already read stay");
+    assert_eq!(drawn.len(), 5);
 
     let many: Vec<SessionRow> = (0..50)
         .map(|index| {
@@ -317,5 +307,28 @@ fn the_list_reads_follows_its_cursor_and_says_why_a_read_failed() {
     assert_eq!(
         texts(&sessions.view(76, 8, NOW, 0, &look).unwrap().0)[2],
         "No sessions yet."
+    );
+}
+
+#[test]
+fn a_switch_the_engine_refused_for_a_running_turn_asks_the_owner_again() {
+    let mut sessions = opened();
+    let refused = MasterOwnerAction::Resume {
+        project_id: crate::protocol::ProjectId::new("notes-cli").unwrap(),
+        session_id: crate::protocol::SessionId::new("s2").unwrap(),
+        cancel_running: false,
+    };
+    assert!(sessions.turn_was_running(&refused));
+    let (body, _) = sessions.view(76, 12, NOW, 0, &Look::plain()).unwrap();
+    assert_eq!(
+        texts(&body).last().unwrap(),
+        "A turn is running. Stop it and resume the session from 26 h ago?"
+    );
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('y')), true, true),
+        SessionsReply::Act(SessionsAction::Resume {
+            session: "s2".into(),
+            cancel_running: true
+        })
     );
 }
