@@ -43,6 +43,8 @@ pub struct TerminalSession {
     events: usize,
     ready: bool,
     turn: bool,
+    live: bool,
+    facts: VecDeque<TranscriptEvent>,
     exited: bool,
     stopped: bool,
     record: Option<PaneRecord>,
@@ -176,6 +178,8 @@ impl TerminalSession {
             events: 0,
             ready: false,
             turn: false,
+            live: false,
+            facts: VecDeque::new(),
             exited: false,
             stopped: false,
             record: PaneRecord::new(
@@ -273,6 +277,47 @@ impl TerminalSession {
         }
     }
 
+    /// Follows every turn in the pane from now on, the ones the owner types included, as a
+    /// live master needs: turn facts then come from [`Self::next_fact`] and `next_event`
+    /// reports nothing more. Takes the session. Returns nothing.
+    pub fn follow_every_turn(&mut self) {
+        self.live = true;
+        self.queue
+            .retain(|event| matches!(event, LaunchEvent::Ready { .. }));
+    }
+
+    /// Waits up to `wait` for the next turn fact of a session that follows every turn: a
+    /// turn started, said text, ended, hit an error, was interrupted or waits for an
+    /// answer. Tool use is not kept. Output: Some(fact), None on timeout, or an error once the
+    /// pane ended or past a limit, as for `next_event`.
+    pub fn next_fact(&mut self, wait: Duration) -> Result<Option<TranscriptEvent>, LaunchError> {
+        assert!(self.live);
+        let until = Instant::now() + wait;
+        loop {
+            if let Some(fact) = self.facts.pop_front() {
+                return Ok(Some(fact));
+            }
+            if self.exited {
+                return Err(failure("launch_closed"));
+            }
+            if Instant::now() >= self.deadline {
+                self.halt();
+                return Err(failure("launch_deadline"));
+            }
+            self.poll()?;
+            if !self.facts.is_empty() {
+                continue;
+            }
+            let left = until
+                .min(self.deadline)
+                .saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            std::thread::sleep(left.min(POLL));
+        }
+    }
+
     /// Ends the pane and every process in it, then removes the key file and the
     /// generated context. Output: none, since a pane reports no exit code.
     pub fn stop(mut self) -> Option<i32> {
@@ -339,6 +384,21 @@ impl TerminalSession {
             return Err(failure("launch_output_limit"));
         }
         for fact in facts {
+            if self.live {
+                match fact {
+                    TranscriptEvent::ToolUse { .. } => {}
+                    TranscriptEvent::TurnStarted => {
+                        self.turn = true;
+                        self.facts.push_back(fact);
+                    }
+                    TranscriptEvent::TurnFinished { .. } => {
+                        self.turn = false;
+                        self.facts.push_back(fact);
+                    }
+                    other => self.facts.push_back(other),
+                }
+                continue;
+            }
             if !self.turn {
                 continue;
             }

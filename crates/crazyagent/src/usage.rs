@@ -179,8 +179,9 @@ fn checked_text(text: Option<&str>, max: usize) -> Result<Option<&str>, EngineEr
 }
 
 /// Stores what a read of an account's limits found, keeping any window it did not report
-/// and the plan when it reported none. A reported window replaces the owner's manual reset
-/// for it; a poll clears the last failure.
+/// and the plan when it reported none. A polled window replaces the owner's manual reset
+/// for it and a poll clears the last failure. A transcript reading is advisory: it keeps
+/// every manual reset and is ignored while a poll succeeded within `POLL_EVERY_MS`.
 /// Inputs: the store, the account, the observation, its source and the time.
 /// Output: done, `usage_limits_invalid` for a share outside 0..=100 or a bad time, or
 /// `usage_unavailable`.
@@ -194,7 +195,8 @@ pub fn record_observation(
     let five_hour = checked_window(observation.five_hour)?;
     let weekly = checked_window(observation.weekly)?;
     let plan = checked_text(observation.plan.as_deref(), PLAN_BYTES_MAX)?;
-    let checked = matches!(source, LimitSource::Poll).then_some(now_ms);
+    let polled = matches!(source, LimitSource::Poll);
+    let checked = polled.then_some(now_ms);
     db.execute(
         "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,\
             weekly_percent,weekly_resets_ms,source,observed_ms,checked_ms,failure)
@@ -203,14 +205,15 @@ pub fn record_observation(
             plan=COALESCE(excluded.plan,plan),
             five_hour_percent=CASE WHEN ?10 THEN excluded.five_hour_percent ELSE five_hour_percent END,
             five_hour_resets_ms=CASE WHEN ?10 THEN excluded.five_hour_resets_ms ELSE five_hour_resets_ms END,
-            five_hour_reset_override_ms=CASE WHEN ?10 THEN NULL ELSE five_hour_reset_override_ms END,
+            five_hour_reset_override_ms=CASE WHEN ?10 AND ?12 THEN NULL ELSE five_hour_reset_override_ms END,
             weekly_percent=CASE WHEN ?11 THEN excluded.weekly_percent ELSE weekly_percent END,
             weekly_resets_ms=CASE WHEN ?11 THEN excluded.weekly_resets_ms ELSE weekly_resets_ms END,
-            weekly_reset_override_ms=CASE WHEN ?11 THEN NULL ELSE weekly_reset_override_ms END,
+            weekly_reset_override_ms=CASE WHEN ?11 AND ?12 THEN NULL ELSE weekly_reset_override_ms END,
             source=excluded.source,
             observed_ms=excluded.observed_ms,
             checked_ms=COALESCE(excluded.checked_ms,checked_ms),
-            failure=CASE WHEN excluded.checked_ms IS NULL THEN failure ELSE NULL END",
+            failure=CASE WHEN excluded.checked_ms IS NULL THEN failure ELSE NULL END
+         WHERE ?12 OR source IS NOT 'poll' OR observed_ms<=?8-?13",
         params![
             account.as_str(),
             plan,
@@ -223,6 +226,8 @@ pub fn record_observation(
             checked,
             five_hour.is_some(),
             weekly.is_some(),
+            polled,
+            service::POLL_EVERY_MS,
         ],
     )
     .map_err(storage)?;

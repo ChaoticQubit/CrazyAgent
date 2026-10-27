@@ -330,3 +330,29 @@ fn a_project_report_keeps_only_its_runs_and_names_lines_by_the_agent_that_made_t
     assert_eq!(all.agent_lines[0].agent, "team-9");
     assert_eq!(all.agent_lines.len(), 3);
 }
+
+#[test]
+fn token_sums_past_the_integer_range_still_report_saturated() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    for (hour_ms, input) in [
+        (MIDNIGHT, "9223372036854775807"),
+        (MIDNIGHT + HOUR, "9223372036854775807"),
+        (MIDNIGHT + 2 * HOUR, "1.8446744073709552e19"),
+    ] {
+        db.execute(
+            &format!(
+                "INSERT INTO usage_tokens VALUES
+                 (?1,'agent','alpha','pool-a','claude-a','team-1','claude-code','s1',{input},1,0,0)"
+            ),
+            params![hour_ms],
+        )
+        .unwrap();
+    }
+    let report = report(&db, None, None, 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(report.total.input, u64::MAX);
+    assert_eq!(report.total.output, 3);
+    assert_eq!(report.projects[0].tokens.input, u64::MAX);
+    assert_eq!(report.agents[0].tokens.output, 3);
+    assert_eq!(report.days[0].tokens.input, u64::MAX);
+}
