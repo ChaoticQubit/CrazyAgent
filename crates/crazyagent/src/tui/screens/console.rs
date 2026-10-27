@@ -6,6 +6,7 @@ pub(in crate::tui) const MENU_SHOWN_MAX: usize = 6;
 const HISTORY_MAX: usize = 50;
 const TAG_CANDIDATES_MAX: usize = 256;
 const MASTER_TAG: &str = "@master";
+const FILES_QUERY_BYTES_MAX: usize = 256;
 
 /// What one `/` command of the master console does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,12 +145,13 @@ fn label_tag(label: &str) -> Option<&str> {
 }
 
 /// Every tag the prompt can complete: `@master`, then each sub-agent's role handle from the
-/// team graph, then each project context file, without repeats and at most
-/// `TAG_CANDIDATES_MAX`.
-/// Takes the team graph and the project context, when read.
+/// team graph, then the project files the engine listed, then each project context file,
+/// without repeats or paths with spaces and at most `TAG_CANDIDATES_MAX`.
+/// Takes the team graph, the listed files and the project context, when read.
 /// Returns the tags in that order.
 pub(in crate::tui) fn tags(
     graph: Option<&TeamGraph>,
+    files: Option<&[String]>,
     context: Option<&ProjectContext>,
 ) -> Vec<String> {
     let handles = graph
@@ -158,11 +160,15 @@ pub(in crate::tui) fn tags(
         .filter(|node| node.kind == NodeKind::Agent)
         .filter_map(|node| label_tag(&node.label))
         .map(str::to_owned);
-    let files = context
+    let listed = files.into_iter().flatten().map(String::as_str);
+    let documents = context
         .into_iter()
         .flat_map(|context| &context.items)
-        .filter(|item| !item.path.chars().any(char::is_whitespace))
-        .map(|item| format!("@{}", item.path));
+        .map(|item| item.path.as_str());
+    let files = listed
+        .chain(documents)
+        .filter(|path| !path.is_empty() && !path.chars().any(char::is_whitespace))
+        .map(|path| format!("@{path}"));
     let mut tags: Vec<String> = Vec::new();
     for tag in std::iter::once(MASTER_TAG.to_owned())
         .chain(handles)
@@ -179,17 +185,37 @@ pub(in crate::tui) fn tags(
     tags
 }
 
-/// The tags that complete the typed `@` word, case-insensitively by prefix, at most
-/// `MENU_SHOWN_MAX`.
+/// The tags that complete the typed `@` word, case-insensitively, as the desktop console:
+/// tags starting with it first, then tags containing it, at most `MENU_SHOWN_MAX`.
 /// Takes the candidates and the word after the `@`.
-/// Returns the matching tags in candidate order.
+/// Returns the matching tags in that order.
 pub(in crate::tui) fn completions<'a>(tags: &'a [String], query: &str) -> Vec<&'a str> {
     let query = query.to_lowercase();
-    tags.iter()
-        .filter(|tag| tag[1..].to_lowercase().starts_with(&query))
+    let lower: Vec<String> = tags.iter().map(|tag| tag[1..].to_lowercase()).collect();
+    let starts = (0..tags.len()).filter(|&at| lower[at].starts_with(&query));
+    let contains =
+        (0..tags.len()).filter(|&at| !lower[at].starts_with(&query) && lower[at].contains(&query));
+    starts
+        .chain(contains)
         .take(MENU_SHOWN_MAX)
-        .map(String::as_str)
+        .map(|at| tags[at].as_str())
         .collect()
+}
+
+/// The query one project file read sends for the typed `@` word: the word cut at a character
+/// edge to the engine's `FILES_QUERY_BYTES_MAX`.
+/// Takes the word after the `@`.
+/// Returns the query.
+pub(in crate::tui) fn files_query(word: &str) -> String {
+    let end = word
+        .char_indices()
+        .map(|(at, c)| at + c.len_utf8())
+        .take_while(|end| *end <= FILES_QUERY_BYTES_MAX)
+        .last()
+        .unwrap_or(0);
+    let query = word[..end].to_owned();
+    assert!(query.len() <= FILES_QUERY_BYTES_MAX);
+    query
 }
 
 /// Splits one line into plain text and `@` tags, a tag being an `@` word at line start or

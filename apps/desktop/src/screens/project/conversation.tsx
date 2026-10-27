@@ -10,6 +10,7 @@ import { poolName } from "../new-project/wizard";
 import { useTeamGraph } from "../team";
 import { Console, type ConsoleLine } from "./console";
 import { agentMentions } from "./console-model";
+import { useProjectFiles } from "./project-files";
 import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -90,6 +91,8 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const current = useRef(data.id);
   current.current = data.id;
   const [graph] = useTeamGraph(data.id);
+  const [tag, setTag] = useState<string | null>(null);
+  const files = useProjectFiles(data.id, readOnly ? null : tag);
   const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
   const session = master?.ticket === ticket ? master.session : null;
@@ -246,7 +249,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       {again !== null && <div className="pj-row"><button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button></div>}
     </>}
-    <Console projectId={data.id} lines={lines} agents={agents} files={null}
+    <Console projectId={data.id} lines={lines} agents={agents} files={files} onTagQuery={setTag}
       canSend={!readOnly && !blocked} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
       onSend={offer} onStop={() => void stopReply()} onNavigate={(route) => data.navigate(formatRoute(route).slice(1))} />
   </div>;

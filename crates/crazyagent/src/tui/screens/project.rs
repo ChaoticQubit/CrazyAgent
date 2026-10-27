@@ -532,6 +532,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub menu_cursor: usize,
     pub console_note: Vec<String>,
     pub cleared: Option<(usize, Message)>,
+    pub files: Option<(String, Vec<String>)>,
     pub transcript_scroll: usize,
     pub overview_cursor: usize,
     pub agents_cursor: usize,
@@ -594,6 +595,7 @@ impl ProjectScreen {
             menu_cursor: 0,
             console_note: Vec::new(),
             cleared: None,
+            files: None,
             transcript_scroll: 0,
             overview_cursor: 0,
             agents_cursor: 0,
@@ -1297,7 +1299,8 @@ impl ProjectScreen {
             return Picks::None;
         };
         let graph = self.team.ready().map(|graph| graph.as_ref());
-        let candidates = console::tags(graph, self.context.as_ref());
+        let files = self.files.as_ref().map(|(_, paths)| paths.as_slice());
+        let candidates = console::tags(graph, files, self.context.as_ref());
         let tags: Vec<String> = console::completions(&candidates, query)
             .into_iter()
             .map(str::to_owned)
@@ -1309,6 +1312,15 @@ impl ProjectScreen {
             typed: query.chars().count() + 1,
             tags,
         }
+    }
+
+    /// The project file query for the `@` word the owner is typing to the master.
+    /// Takes the screen. Returns the query, or None while no tag is typed.
+    pub fn files_query(&self) -> Option<String> {
+        if self.tab != Tab::Conversation || !self.typing {
+            return None;
+        }
+        console::tag_query(self.input.head()).map(console::files_query)
     }
 
     fn pick(&mut self, picks: Picks) -> ProjectReply {

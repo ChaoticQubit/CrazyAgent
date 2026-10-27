@@ -148,6 +148,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("team graph");
                     connection.team_graph(project).unwrap();
                 }
+                Request::ProjectFiles { project, query } => {
+                    sent.push("project files");
+                    connection.project_files(project, query).unwrap();
+                }
                 other => panic!("project pages never send {other:?}"),
             }
         }
@@ -1538,6 +1542,68 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
         "{shown}"
     );
     assert!(!engine.home.path().join("tidepool").exists(), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let setup = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let folder = std::path::PathBuf::from(&setup.folder);
+    let status = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q", "--template="])
+            .current_dir(&folder)
+            .env_clear()
+            .env("HOME", engine.root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1"),
+    )
+    .unwrap()
+    .status;
+    assert!(status.success());
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(folder.join("src/planner.rs"), "fn plan() {}\n").unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"project files"), "{sent:?}");
+    for typed in "ask @pl".chars() {
+        shell.key(Key::Char(typed));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter().filter(|name| **name == "project files").count(),
+        2,
+        "one read for the bare @, then one for the word typed while it was out: {sent:?}"
+    );
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("@src/planner.rs"), "{shown}");
+    shell.key(Key::Tab);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("> ask @src/planner.rs"), "{shown}");
+    for typed in "now".chars() {
+        shell.key(Key::Char(typed));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        !sent.contains(&"project files"),
+        "no read while no @ word is typed: {sent:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

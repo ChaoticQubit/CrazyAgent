@@ -2338,9 +2338,23 @@ fn at_completes_agent_handles_and_project_files_and_inserts_the_tag() {
     );
     assert_eq!(screen.input.value(), "ask @page to read @docs/brief.md ");
     assert_eq!(screen.picks(), Picks::None);
+    assert_eq!(screen.files_query(), None);
+    type_text(&mut screen, "@pla");
+    assert_eq!(screen.files_query().as_deref(), Some("pla"));
+    assert_eq!(screen.picks(), Picks::None);
+    screen.files = Some(("pla".into(), vec!["src/planner.rs".into()]));
+    assert_eq!(
+        screen.picks(),
+        Picks::Tags {
+            typed: 4,
+            tags: vec!["@src/planner.rs".into()]
+        },
+        "the engine's file list completes the word"
+    );
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Send("ask @page to read @docs/brief.md".into())
+        ProjectReply::Send("ask @page to read @docs/brief.md @src/planner.rs".into())
     );
 }
 

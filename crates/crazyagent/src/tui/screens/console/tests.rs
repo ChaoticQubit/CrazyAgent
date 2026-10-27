@@ -1,5 +1,6 @@
 use super::{
-    Action, History, MENU_SHOWN_MAX, command, completions, menu, tag_parts, tag_query, tags,
+    Action, History, MENU_SHOWN_MAX, command, completions, files_query, menu, tag_parts, tag_query,
+    tags,
 };
 use crate::project_setup::{ContextItem, ContextKind, ProjectContext};
 use crate::protocol::ProjectId;
@@ -123,8 +124,12 @@ fn an_at_word_at_the_cursor_is_completed_from_master_handles_and_project_files()
     );
 
     let graph = team();
+    let listed: Vec<String> = ["src/main.rs", "docs/brief.md", "my file.rs"]
+        .map(String::from)
+        .into();
     let all = tags(
         Some(&graph),
+        Some(&listed),
         Some(&context(&["docs/brief.md", "my notes.md", "README.md"])),
     );
     assert_eq!(
@@ -133,19 +138,29 @@ fn an_at_word_at_the_cursor_is_completed_from_master_handles_and_project_files()
             "@master",
             "@page",
             "@onboarding-fix",
+            "@src/main.rs",
             "@docs/brief.md",
             "@README.md"
         ],
-        "only sub-agents with a handle, never the group; paths with spaces are left out"
+        "only sub-agents with a handle, never the group; listed files, then documents; paths with spaces are left out"
     );
-    assert_eq!(tags(None, None), ["@master"]);
+    assert_eq!(tags(None, None, None), ["@master"]);
     assert_eq!(
         completions(&all, ""),
-        all[..5].iter().map(String::as_str).collect::<Vec<_>>()
+        all[..MENU_SHOWN_MAX]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
     );
     assert_eq!(completions(&all, "ON"), ["@onboarding-fix"]);
-    assert_eq!(completions(&all, "re"), ["@README.md"]);
-    assert_eq!(completions(&all, "x"), Vec::<&str>::new());
+    assert_eq!(
+        completions(&all, "ma"),
+        ["@master", "@src/main.rs"],
+        "names starting with it first, then names containing it"
+    );
+    assert_eq!(completions(&all, "zz"), Vec::<&str>::new());
+    assert_eq!(files_query("brief"), "brief");
+    assert_eq!(files_query(&"é".repeat(200)).len(), 256);
 
     let many: Vec<String> = (0..20).map(|n| format!("@file-{n}")).collect();
     assert_eq!(completions(&many, "file").len(), MENU_SHOWN_MAX);
