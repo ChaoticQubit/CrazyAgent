@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { ConfirmDialog } from "../../ui/overlay";
 import { displayText } from "../conversation";
 
 export type Inline =
@@ -23,6 +24,7 @@ const INLINE_DEPTH_MAX = 4;
 const TABLE_COLUMNS_MAX = 32;
 const URL_CHARS_MAX = 2048;
 const PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+const URL_LIKE = /^(?:https?:\/\/)?(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]{2,}(?::\d+)?(?:[/?#]\S*)?$/iu;
 
 /** Accepts only absolute http and https links without spaces or control characters.
  * Input: a link target from untrusted Markdown. Output: the same target, or null. */
@@ -32,6 +34,22 @@ export function safeHref(url: string): string | null {
   try {
     const parsed = new URL(url);
     return parsed.protocol === "http:" || parsed.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Names the target host when a link's visible text looks like a URL on a different host, as
+ * in [https://docs.example](https://other.example). A leading www. is ignored on both sides.
+ * Inputs: the visible text and the target. Output: the target host, or null. */
+export function linkTargetHost(text: string, href: string): string | null {
+  const shown = text.trim();
+  if (shown.length > URL_CHARS_MAX || !URL_LIKE.test(shown)) return null;
+  const bare = (host: string) => host.replace(/^www\./u, "");
+  try {
+    const seen = new URL(/^https?:\/\//iu.test(shown) ? shown : `https://${shown}`).hostname;
+    const target = new URL(href).hostname;
+    return bare(seen) === bare(target) ? null : target;
   } catch {
     return null;
   }
@@ -85,6 +103,18 @@ function tickRuns(text: string): Int32Array {
     longest[index] = Math.max(run, longest[index + 1]);
   }
   return longest;
+}
+
+/** Keeps the text of links inside a link label, since a link can't hold another link.
+ * Inputs: the label nodes and the list to fill. Output: the nodes without links. */
+function unlink(nodes: Inline[], out: Inline[] = []): Inline[] {
+  for (const node of nodes) {
+    if (node.kind === "link") unlink(node.children, out);
+    else if (node.kind === "text") pushText(out, node.text);
+    else if (node.kind === "strong" || node.kind === "em") out.push({ kind: node.kind, children: unlink(node.children) });
+    else out.push(node);
+  }
+  return out;
 }
 
 /** Parses inline Markdown: code, strong, emphasis, links and bare http(s) links. Every close
@@ -172,7 +202,7 @@ export function parseInline(text: string, depth = 0): Inline[] {
         if (end > close) {
           const target = text.slice(close + 2, end).trim().split(/\s+/u)[0].replace(/^<(.*)>$/u, "$1");
           const href = safeHref(target);
-          const label = parseInline(text.slice(index + 1, close), depth + 1);
+          const label = unlink(parseInline(text.slice(index + 1, close), depth + 1));
           if (href) out.push({ kind: "link", href, children: label });
           else for (const node of label) node.kind === "text" ? pushText(out, node.text) : out.push(node);
           index = end + 1;
@@ -389,20 +419,21 @@ export function headings(blocks: Block[]): string[] {
   return blocks.flatMap((block) => block.kind === "heading" && block.text ? [block.text] : []);
 }
 
-function renderInline(nodes: Inline[], open: (href: string) => void): ReactNode[] {
+function renderInline(nodes: Inline[], open: (href: string, text: string) => void): ReactNode[] {
   return nodes.map((node, key) => {
     switch (node.kind) {
       case "text": return displayText(node.text);
       case "code": return <code key={key}>{displayText(node.text)}</code>;
       case "strong": return <strong key={key}>{renderInline(node.children, open)}</strong>;
       case "em": return <em key={key}>{renderInline(node.children, open)}</em>;
-      case "link": return <a key={key} href={node.href} target="_blank" rel="noopener noreferrer"
-        onClick={(event) => { event.preventDefault(); open(node.href); }}>{renderInline(node.children, open)}</a>;
+      case "link": return <a key={key} href={node.href} title={node.href} target="_blank" rel="noopener noreferrer"
+        onClick={(event) => { event.preventDefault(); open(node.href, inlineText(node.children)); }}>{renderInline(node.children, open)}</a>;
     }
   });
 }
 
-/** Renders untrusted Markdown as React elements; raw HTML stays visible text.
+/** Renders untrusted Markdown as React elements; raw HTML stays visible text. Every link shows
+ * its target on hover, and one whose URL text names another host asks before it opens.
  * Inputs: the source, a link handler and an optional per-heading action.
  * Output: the rendered report. */
 export function MarkdownView({ source, onOpenLink, headingAction }: {
@@ -411,24 +442,33 @@ export function MarkdownView({ source, onOpenLink, headingAction }: {
   headingAction?: (heading: string) => ReactNode;
 }) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
-  return <div className="markdown">{blocks.map((block, key) => {
+  const [asking, setAsking] = useState<{ href: string; text: string; host: string } | null>(null);
+  const follow = (href: string, text: string) => {
+    const host = linkTargetHost(text, href);
+    if (host) setAsking({ href, text, host });
+    else onOpenLink(href);
+  };
+  return <>{asking && <ConfirmDialog open title={`Open ${asking.host}?`} confirmLabel="Open"
+    onConfirm={() => { setAsking(null); onOpenLink(asking.href); }} onCancel={() => setAsking(null)}>
+    The link text shows {displayText(asking.text.trim())}, but it opens {displayText(asking.href)}.
+  </ConfirmDialog>}<div className="markdown">{blocks.map((block, key) => {
     switch (block.kind) {
       case "heading": {
         const Tag = `h${Math.min(6, block.level + 1)}` as "h2";
-        return <div className="markdown-heading" key={key}><Tag>{renderInline(block.children, onOpenLink)}</Tag>{headingAction?.(block.text)}</div>;
+        return <div className="markdown-heading" key={key}><Tag>{renderInline(block.children, follow)}</Tag>{headingAction?.(block.text)}</div>;
       }
-      case "paragraph": return <p key={key}>{renderInline(block.children, onOpenLink)}</p>;
-      case "quote": return <blockquote key={key}>{renderInline(block.children, onOpenLink)}</blockquote>;
+      case "paragraph": return <p key={key}>{renderInline(block.children, follow)}</p>;
+      case "quote": return <blockquote key={key}>{renderInline(block.children, follow)}</blockquote>;
       case "rule": return <hr key={key} />;
       case "code": return <pre key={key}><code>{displayText(block.text)}</code></pre>;
       case "list": {
-        const items = block.items.map((item, index) => <li key={index}>{renderInline(item, onOpenLink)}</li>);
+        const items = block.items.map((item, index) => <li key={index}>{renderInline(item, follow)}</li>);
         return block.ordered ? <ol key={key}>{items}</ol> : <ul key={key}>{items}</ul>;
       }
       case "table": return <div className="markdown-table" key={key}><table>
-        <thead><tr>{block.header.map((cell, index) => <th key={index}>{renderInline(cell, onOpenLink)}</th>)}</tr></thead>
-        <tbody>{block.rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column}>{renderInline(cell, onOpenLink)}</td>)}</tr>)}</tbody>
+        <thead><tr>{block.header.map((cell, index) => <th key={index}>{renderInline(cell, follow)}</th>)}</tr></thead>
+        <tbody>{block.rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column}>{renderInline(cell, follow)}</td>)}</tr>)}</tbody>
       </table></div>;
     }
-  })}</div>;
+  })}</div></>;
 }

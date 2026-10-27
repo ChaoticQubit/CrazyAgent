@@ -495,9 +495,10 @@ pub struct Order {
     pub excluded: Vec<(usize, Excluded)>,
 }
 
-/// How one ready candidate sorts: `use_last` pin, the strategy's own order (unknown
-/// last), rank, not the current account, live agents and the caller's order.
-type SortKey = (bool, (bool, i64, i64), u16, bool, usize, usize);
+/// How one ready candidate sorts: `use_last` pin, a newer reading that reaches a limit
+/// the last poll did not, the strategy's own order (unknown last), rank, not the current
+/// account, live agents and the caller's order.
+type SortKey = (bool, bool, (bool, i64, i64), u16, bool, usize, usize);
 
 /// The schedule, strategy, account limits and clock one choice of account is made with.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -544,10 +545,13 @@ impl Choice {
     }
 
     /// Orders candidates by this choice. `use_last` accounts go after the rest; a
-    /// `never_use` pin, a full 5-hour window or weekly use at or above 100 minus the
-    /// reserve leaves an account out. Each window is read as it stands now, with the
-    /// owner's manual reset applied and a passed reset counted as reset. Ties fall to rank, then the current account, then fewer live agents, then
-    /// the caller's order. Takes the candidates in pool order. Returns the order.
+    /// `never_use` pin, or a full 5-hour window or weekly use at or above 100 minus the
+    /// reserve as the last poll read them, leaves an account out. A newer reading from a
+    /// run's own record that reaches such a limit only sorts the account after the others
+    /// with the same pin. Each window is read as it stands now, with the owner's manual
+    /// reset applied and a passed reset counted as reset. Ties fall to rank, then the
+    /// current account, then fewer live agents, then the caller's order. Takes the
+    /// candidates in pool order. Returns the order.
     pub fn order(&self, candidates: &[Candidate]) -> Order {
         let mut ready = Vec::new();
         let mut excluded = Vec::new();
@@ -578,28 +582,26 @@ impl Choice {
         )
     }
 
+    fn polled(&self, candidate: &Candidate) -> (Option<LimitWindow>, Option<LimitWindow>) {
+        let limits = self.limits.get(&candidate.connection);
+        (
+            limits.and_then(|limits| limits.polled_five_hour_at(self.now_ms)),
+            limits.and_then(|limits| limits.polled_weekly_at(self.now_ms)),
+        )
+    }
+
     fn exclusion(&self, candidate: &Candidate) -> Option<Excluded> {
         let plan = self.schedule.plan(&candidate.connection);
         if plan.pin == Some(Pin::NeverUse) {
             return Some(Excluded::NeverUse);
         }
-        let (five_hour, weekly) = self.windows(candidate);
-        if let Some(window) = five_hour.filter(|window| window.used_percent >= 100.0) {
-            return Some(Excluded::FiveHourCap {
-                resets_ms: window.resets_at_ms,
-            });
-        }
-        let ceiling = f64::from(100 - plan.reserve_percent);
-        weekly
-            .filter(|window| window.used_percent >= ceiling)
-            .map(|window| Excluded::WeeklyReserve {
-                resets_ms: window.resets_at_ms,
-            })
+        limit_reached(plan, self.polled(candidate))
     }
 
     fn key(&self, candidate: &Candidate, index: usize) -> SortKey {
         let plan = self.schedule.plan(&candidate.connection);
         let (five_hour, weekly) = self.windows(candidate);
+        let doubtful = limit_reached(plan, (five_hour, weekly)).is_some();
         let permille = |window: Option<LimitWindow>| {
             window.map_or(0, |window| (window.used_percent * 10.0).round() as i64)
         };
@@ -616,6 +618,7 @@ impl Choice {
         };
         (
             plan.pin == Some(Pin::UseLast),
+            doubtful,
             primary,
             plan.rank.unwrap_or(u16::MAX),
             !candidate.current,
@@ -623,6 +626,26 @@ impl Choice {
             index,
         )
     }
+}
+
+/// The limit 5-hour and weekly windows reach under an account's plan: a full 5-hour
+/// window, else weekly use at or above 100 minus the reserve. Takes the plan and the
+/// windows as they stand now. Returns why they would leave the account out, if they would.
+fn limit_reached(
+    plan: AccountPlan,
+    (five_hour, weekly): (Option<LimitWindow>, Option<LimitWindow>),
+) -> Option<Excluded> {
+    if let Some(window) = five_hour.filter(|window| window.used_percent >= 100.0) {
+        return Some(Excluded::FiveHourCap {
+            resets_ms: window.resets_at_ms,
+        });
+    }
+    let ceiling = f64::from(100 - plan.reserve_percent);
+    weekly
+        .filter(|window| window.used_percent >= ceiling)
+        .map(|window| Excluded::WeeklyReserve {
+            resets_ms: window.resets_at_ms,
+        })
 }
 
 /// Where one account stands in its pool's ranking now: next in line, with its weekly

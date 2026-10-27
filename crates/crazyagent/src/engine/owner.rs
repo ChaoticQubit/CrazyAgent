@@ -591,6 +591,7 @@ pub enum OwnerRead {
         query: String,
         limit: u16,
     },
+    TeamEvents,
     ProjectContext {
         project_id: ProjectId,
     },
@@ -689,6 +690,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -1047,6 +1049,9 @@ pub enum OwnerData {
     ProjectFiles {
         project_id: ProjectId,
         paths: Vec<String>,
+    },
+    TeamEvents {
+        events: Box<crate::team::events::AppEvents>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,

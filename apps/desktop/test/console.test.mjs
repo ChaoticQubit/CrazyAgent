@@ -68,7 +68,7 @@ test("a master reply's Markdown is formatted terminal-style, and HTML or images 
   assert.match(html, /<ul><li><strong>Add<\/strong> the <code>cart<\/code> route<\/li><li>Test it <em>twice<\/em><\/li><\/ul>/);
   assert.match(html, /<ol><li>Build<\/li><li>Ship<\/li><\/ol>/);
   assert.match(html, /<pre><code>const tag = &#x27;&lt;b&gt;x&lt;\/b&gt;&#x27;;<\/code><\/pre>/, "a fenced block keeps its text in a monospace box");
-  assert.match(html, /<a href="https:\/\/example\.com\/docs" target="_blank" rel="noopener noreferrer">the docs<\/a>/);
+  assert.match(html, /<a href="https:\/\/example\.com\/docs" title="https:\/\/example\.com\/docs" target="_blank" rel="noopener noreferrer">the docs<\/a>/);
   assert.doesNotMatch(html, /href="javascript/i, "only http and https links become links");
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &lt;img src=x onerror=alert\(1\)&gt;/, "raw HTML shows as text");
   assert.doesNotMatch(html, /<script|<img/i, "no element comes from the reply's HTML or image syntax");
