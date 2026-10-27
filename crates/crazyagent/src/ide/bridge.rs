@@ -36,7 +36,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 15] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 17] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -96,6 +96,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 15] = [
     (
         "out/worktree.js",
         include_bytes!("../../../../apps/ide-extension/out/worktree.js"),
+    ),
+    (
+        "out/lock.js",
+        include_bytes!("../../../../apps/ide-extension/out/lock.js"),
+    ),
+    (
+        "out/lock-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/lock-model.js"),
     ),
 ];
 

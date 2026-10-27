@@ -299,7 +299,17 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
         .collect();
     assert_eq!(
         body["settings"],
-        serde_json::json!({ "files.readonlyInclude": running, "files.readonlyExclude": {} })
+        serde_json::json!({
+            "chat.disableAIFeatures": true,
+            "chat.mcp.access": "none",
+            "chat.extensionTools.enabled": false,
+            "workbench.settings.showAISearchToggle": false,
+            "extensions.ignoreRecommendations": true,
+            "workbench.startupEditor": "none",
+            "files.readonlyInclude": running,
+            "files.readonlyExclude": {},
+        }),
+        "the workspace file carries the lock's workspace keys and the running agents' globs"
     );
 }
 

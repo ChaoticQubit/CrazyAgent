@@ -173,7 +173,8 @@ const ENGINE_SECRET_FILES: &[&str] = &[
     "github.toml",
 ];
 
-const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys", crate::terminal::FOLDER];
+const ENGINE_SECRET_FOLDERS: &[&str] =
+    &["account-keys", crate::terminal::FOLDER, crate::ide::FOLDER];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
 
@@ -1268,7 +1269,7 @@ fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
 /// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.
 /// Input: a path that passes `clean_absolute`, so it holds no quote or backslash.
 /// Output: the pattern text, without anchors.
-fn seatbelt_pattern(path: &Path) -> String {
+pub(crate) fn seatbelt_pattern(path: &Path) -> String {
     let text = path.display().to_string();
     assert!(text.starts_with('/'));
     regex_escape(&text)

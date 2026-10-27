@@ -2,6 +2,7 @@ import type * as vscode from "vscode";
 import { registerBaseContent } from "./base-content.js";
 import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
+import { startLock } from "./lock.js";
 import { readonly } from "./readonly.js";
 import { sidebarAgents } from "./sidebar/agents.js";
 import { sidebarChanges } from "./sidebar/changes.js";
@@ -27,11 +28,12 @@ const features: Feature[] = [
 ];
 
 /**
- * Starts every feature when the CrazyAgent engine launched this IDE server, which it
- * shows by setting the capability and socket variables; otherwise does nothing.
+ * Starts the settings lock, then every feature when the CrazyAgent engine launched this IDE
+ * server, which it shows by setting the capability and socket variables.
  * Input: the extension context. Output: none; the bridge closes with the context.
  */
 export function activate(context: vscode.ExtensionContext): void {
+  startLock(context, process.env);
   const engine = Engine.fromEnv(process.env);
   if (engine === undefined) return;
   context.subscriptions.push(engine);
