@@ -1069,15 +1069,19 @@ fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
 }
 
 #[test]
-fn a_store_from_before_proposed_messages_gains_the_column_and_falls_back_to_the_prompt() {
+fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt() {
     let case = Case::new();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     case.db
-        .execute_batch("ALTER TABLE landing_change_sets DROP COLUMN message")
+        .execute_batch(
+            "ALTER TABLE landing_change_sets DROP COLUMN message;
+             ALTER TABLE landing_change_sets DROP COLUMN waiting;",
+        )
         .unwrap();
     store::initialize(&case.db).unwrap();
     assert_eq!(case.view(&id).message, "Add the fourth line");
+    assert!(!case.view(&id).waiting);
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
         panic!("the accept conflicted");
     };
