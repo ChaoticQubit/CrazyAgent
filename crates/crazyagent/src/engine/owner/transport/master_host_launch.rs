@@ -722,11 +722,12 @@ fn delegate_servers(
     Ok(setting)
 }
 
-/// Builds and installs the Seatbelt boundary for one master turn. The master writes only
-/// in the project repository, its leased worktree, the account's managed home and the
-/// turn's own temp folder; it reads the harness install folder and the turn directory,
-/// and reaches only its model endpoint (HTTPS for a native account) because its tools
-/// are off. Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+/// Builds and installs the Seatbelt boundary for one master turn with its tools off. The
+/// master writes only in its leased worktree, the account's managed home and the turn's own
+/// temp folder; it reads the project repository, never writing its refs, reflogs or other
+/// worktrees' admin folders, since the engine makes every ref move, and it reads the harness
+/// install folder and the turn directory, and reaches only its model endpoint (HTTPS for a
+/// native account). Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
 #[cfg(unix)]
 pub(super) fn master_sandbox(
     root: &Root,
@@ -812,8 +813,8 @@ fn turn_sandbox(
     let network = SandboxNetwork::Only(vec![remote]);
     let tools = Toolchains::detect(repository, &ToolHomes::owner().map_err(refused)?);
     let sandbox = match engine {
-        None => ProjectSandbox::new(repository, &home, &tmp, network)
-            .and_then(|sandbox| sandbox.allow_worktree(worktree)),
+        None => ProjectSandbox::new(worktree, &home, &tmp, network)
+            .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
             let folder = std::fs::canonicalize(engine)
                 .map_err(io_error)?
@@ -841,11 +842,10 @@ fn turn_sandbox(
             .any(|writable| installed.profile().starts_with(writable))
     );
     assert!(
-        engine.is_none()
-            || installed
-                .sandbox()
-                .writable_roots()
-                .all(|writable| writable != repository)
+        installed
+            .sandbox()
+            .writable_roots()
+            .all(|writable| writable != repository)
     );
     Ok(installed)
 }
@@ -1339,13 +1339,9 @@ mod tests {
                 .writable_roots()
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>(),
-            [
-                repository.as_path(),
-                home.as_path(),
-                tmp.as_path(),
-                worktree.as_path()
-            ]
+            [worktree.as_path(), home.as_path(), tmp.as_path()]
         );
+        assert!(sandbox.sandbox().read_roots().contains(&repository));
         assert!(
             sandbox
                 .sandbox()
@@ -1456,7 +1452,6 @@ mod tests {
         };
         for allowed in [
             worktree.join("work.txt"),
-            repository.join("shared.txt"),
             home.join("account.txt"),
             tmp.join("scratch.txt"),
         ] {
@@ -1465,6 +1460,7 @@ mod tests {
         }
         let profile_text = std::fs::read(sandbox.profile()).unwrap();
         for refused in [
+            repository.join("shared.txt"),
             base.join("escape.txt"),
             turn.join("escape.txt"),
             turn.join(format!("capture-{}.jsonl", capture_ref.as_str())),
@@ -1473,6 +1469,7 @@ mod tests {
         ] {
             assert!(!run(&refused), "{}", refused.display());
         }
+        assert!(!repository.join("shared.txt").exists());
         assert!(!base.join("escape.txt").exists());
         assert!(!turn.join("escape.txt").exists());
         assert_eq!(capture.metadata().unwrap().len(), 0);
@@ -1545,6 +1542,181 @@ mod tests {
         assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
         assert!(!text.contains("*:443"));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    /// A tools-off master in a real git worktree lease reads the repository's refs but
+    /// cannot move them: real git and plain writes from inside its boundary are refused for
+    /// the owner's branch, `HEAD`, a new engine ref, the reflog, `packed-refs` and both its
+    /// own and another worktree's admin `HEAD`, and every ref stays where the owner left it.
+    #[test]
+    fn a_tools_off_master_reads_the_repository_but_cannot_move_its_refs() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let leases = base.join("worktrees");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &leases, &home, &install] {
+            private_directory(directory);
+        }
+        let git = crate::research::runner::setup_git();
+        let owner = |args: &[&str]| -> String {
+            let output = crate::spawn_gate::output(
+                Command::new(git)
+                    .args([
+                        "-c",
+                        "user.name=Owner",
+                        "-c",
+                        "user.email=owner@example.invalid",
+                        "-c",
+                        "commit.gpgsign=false",
+                    ])
+                    .args(args)
+                    .current_dir(&repository)
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        owner(&["init", "-q", "-b", "main"]);
+        std::fs::write(repository.join("main.txt"), "first\n").unwrap();
+        owner(&["add", "main.txt"]);
+        owner(&["commit", "-q", "-m", "first"]);
+        let first = owner(&["rev-parse", "HEAD"]);
+        std::fs::write(repository.join("main.txt"), "owner\n").unwrap();
+        owner(&["commit", "-q", "-am", "owner"]);
+        let tip = owner(&["rev-parse", "HEAD"]);
+        let worktree = leases.join("lease");
+        let other = leases.join("other");
+        for (path, branch) in [(&worktree, "lease"), (&other, "other")] {
+            owner(&[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ]);
+        }
+        let refs = owner(&["for-each-ref", "--format=%(refname) %(objectname)"]);
+        let git_dir = repository.join(".git");
+        let head = std::fs::read(git_dir.join("HEAD")).unwrap();
+        let reflog = std::fs::read(git_dir.join("logs/HEAD")).unwrap();
+        let lease_head = std::fs::read(git_dir.join("worktrees/lease/HEAD")).unwrap();
+        let other_head = std::fs::read(git_dir.join("worktrees/other/HEAD")).unwrap();
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+        )
+        .unwrap();
+        let run = |program: &Path, args: &[&str]| {
+            let mut command = Command::new(program);
+            command
+                .args(args)
+                .current_dir(&worktree)
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            let mut child = sandbox.wrap(&command).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::spawn_gate::status(&mut child).unwrap().success()
+        };
+        let repository_text = repository.to_str().unwrap();
+        let other_admin = git_dir.join("worktrees/other");
+        let other_admin = other_admin.to_str().unwrap();
+        let first = first.as_str();
+        assert!(run(git, &["rev-parse", "--verify", "refs/heads/main"]));
+        assert!(run(
+            git,
+            &["-C", repository_text, "log", "-1", "--format=%H"]
+        ));
+        let refused: [&[&str]; 6] = [
+            &["update-ref", "refs/heads/main", first],
+            &["update-ref", "refs/crazyagent/pending/1", first],
+            &["update-ref", "--no-deref", "HEAD", first],
+            &[
+                "-C",
+                repository_text,
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/other",
+            ],
+            &[
+                "--git-dir",
+                other_admin,
+                "update-ref",
+                "--no-deref",
+                "HEAD",
+                first,
+            ],
+            &["-C", repository_text, "pack-refs", "--all"],
+        ];
+        for args in refused {
+            assert!(!run(git, args), "git {args:?}");
+        }
+        for file in [
+            "HEAD",
+            "packed-refs",
+            "logs/HEAD",
+            "refs/heads/planted",
+            "worktrees/lease/HEAD",
+            "worktrees/other/HEAD",
+        ] {
+            let target = git_dir.join(file);
+            assert!(
+                !run(
+                    Path::new("/bin/sh"),
+                    &["-c", "echo planted >> \"$0\"", target.to_str().unwrap()]
+                ),
+                "{file}"
+            );
+        }
+        assert_eq!(
+            owner(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+            refs
+        );
+        assert_eq!(owner(&["rev-parse", "refs/heads/main"]), tip);
+        assert_eq!(std::fs::read(git_dir.join("HEAD")).unwrap(), head);
+        assert_eq!(std::fs::read(git_dir.join("logs/HEAD")).unwrap(), reflog);
+        assert_eq!(
+            std::fs::read(git_dir.join("worktrees/lease/HEAD")).unwrap(),
+            lease_head
+        );
+        assert_eq!(
+            std::fs::read(git_dir.join("worktrees/other/HEAD")).unwrap(),
+            other_head
+        );
+        assert!(!git_dir.join("packed-refs").exists());
+        assert!(!git_dir.join("refs/heads/planted").exists());
+        assert!(run(Path::new("/bin/sh"), &["-c", "echo agent >> work.txt"]));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("work.txt")).unwrap(),
+            "agent\n"
+        );
     }
 
     #[test]

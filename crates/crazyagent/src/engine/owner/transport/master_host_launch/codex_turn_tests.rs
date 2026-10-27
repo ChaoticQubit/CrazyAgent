@@ -195,12 +195,11 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         drop: &engine,
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
-    assert!(
-        sandbox
-            .sandbox()
-            .writable_roots()
-            .any(|writable| *writable == repository)
+    assert_eq!(
+        sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
+        [&worktree, &home, &off_turn.join("tmp")]
     );
+    assert!(sandbox.sandbox().read_roots().contains(&repository));
     drop(credential);
     drop(off_folder);
 
