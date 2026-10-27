@@ -25,13 +25,17 @@ struct Case {
 
 impl Case {
     async fn new() -> Self {
+        Self::with_settings(SETTINGS).await
+    }
+
+    async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-plugins-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        fs::write(&global, SETTINGS).unwrap();
+        fs::write(&global, settings).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = watch::channel(false);
         let mut case = Self {
@@ -120,6 +124,15 @@ fn fixture(root: &Path) -> String {
     fs::write(&path, FIXTURE).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path.display().to_string()
+}
+
+/// Settings with one local model connection the owner configured at
+/// `http://127.0.0.1:<port>/v1`, as for LM Studio or vLLM. Input: the port. Output: the
+/// global settings text.
+fn local_model_settings(port: u16) -> String {
+    format!(
+        "{SETTINGS}\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{{ id = \"local-connection\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"local-account\", endpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}, model = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}, auth = {{ method = \"none\" }} }}]\npools = [{{ id = \"local-pool\", members = [\"local-connection\"], projects = [], roles = [], fallback_allowed = false }}]\n"
+    )
 }
 
 fn secret(value: &str) -> AccountSecret {
@@ -664,6 +677,49 @@ async fn a_server_check_cannot_write_outside_or_read_another_servers_secret() {
         !folder.exists(),
         "a removed server leaves no check folder behind"
     );
+    case.close().await;
+}
+
+/// A checked server gets the open network agents get, but while the owner's local model
+/// server is down it cannot listen on that configured endpoint's port and answer the
+/// prompts sent there; another loopback port stays free for it to bind.
+#[tokio::test]
+async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
+    let (kept, other) = {
+        let first = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let second = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        (
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port(),
+        )
+    };
+    let case = Case::with_settings(&local_model_settings(kept)).await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    for (name, port, first) in [("kept", kept, "refused"), ("other", other, "listened")] {
+        let spec = ServerSpec::Stdio {
+            command: fixture(&root),
+            args: vec!["listen".into(), port.to_string()],
+        };
+        let server = controller
+            .add_mcp_server(Scope::Global, name.into(), spec.clone(), vec![])
+            .await
+            .unwrap();
+        controller
+            .approve_mcp_server(server.id.clone(), spec)
+            .await
+            .unwrap();
+        let checked = controller
+            .check_mcp_server(server.id.clone())
+            .await
+            .unwrap();
+        assert_eq!(checked.problem, None, "{name}");
+        assert_eq!(
+            checked.tools,
+            vec![first, "anonymous"],
+            "{name} port {port}: a check listens only where the owner's model server does not"
+        );
+    }
     case.close().await;
 }
 

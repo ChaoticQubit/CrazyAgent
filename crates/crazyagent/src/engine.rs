@@ -462,6 +462,7 @@ pub struct Engine {
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
     terminal: Mutex<Option<(bool, std::sync::Arc<dyn crate::terminal::Host>)>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
+    settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 const HARNESS_PROBE_FRESH: Duration = Duration::from_secs(10);
@@ -511,6 +512,18 @@ impl Engine {
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
+    /// The loopback ports of the owner's configured local model endpoints, read from the
+    /// engine's settings files at each call, for a sandbox the engine starts to keep free
+    /// of the listeners of what it runs. Output: the ports; none when the engine has no
+    /// settings files or they do not read, as for team and research launches.
+    pub(crate) fn owner_ports(&self) -> Vec<u16> {
+        self.settings_files
+            .as_ref()
+            .and_then(|(global, project)| crate::config::resolve_config(global, project).ok())
+            .and_then(|config| config.settings.model_access)
+            .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+    }
+
     pub async fn open_with_settings_sources(
         path: &Path,
         global: &Path,
@@ -536,6 +549,7 @@ impl Engine {
                 agents: Mutex::default(),
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+                settings_files: Some((global.to_path_buf(), project.to_path_buf())),
             },
             config,
         ))
@@ -553,6 +567,7 @@ impl Engine {
             agents: Mutex::default(),
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            settings_files: None,
         })
     }
 
@@ -568,6 +583,7 @@ impl Engine {
             agents: Mutex::default(),
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            settings_files: None,
         })
     }
 

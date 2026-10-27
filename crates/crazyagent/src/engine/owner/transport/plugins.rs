@@ -917,8 +917,10 @@ async fn start_check(
     tokio::spawn(async move {
         let _slot = slot;
         let folder = id.clone();
+        let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let outcome = boundary_check(&root, &folder, &command, &args, &values);
+            let kept = settings.owner_ports();
+            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept);
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -948,9 +950,10 @@ async fn start_check(
 
 /// Checks an approved command server inside the boundary agents run it in: its own
 /// project, home and temp folders under `mcp-checks/<id>` in the engine folder, reads of
-/// system paths and the command's folder only, open network, and only its own secrets.
-/// Inputs: the engine folder, server id, command, arguments and secret values. Output:
-/// the tool names, or a plain rejection code.
+/// system paths and the command's folder only, open network without binding the owner's
+/// ports, and only its own secrets. Inputs: the engine folder, server id, command,
+/// arguments, secret values and the configured local model ports to keep. Output: the
+/// tool names, or a plain rejection code.
 #[cfg(unix)]
 fn boundary_check(
     root: &Path,
@@ -958,6 +961,7 @@ fn boundary_check(
     command: &str,
     args: &[String],
     secrets: &[(String, Vec<u8>)],
+    kept: &[u16],
 ) -> Result<Vec<String>, &'static str> {
     use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
     use std::os::unix::ffi::OsStrExt;
@@ -1004,6 +1008,7 @@ fn boundary_check(
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
+        .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
         .and_then(|sandbox| InstalledSandbox::install(sandbox, &profiles.join(format!("{id}.sb"))))
@@ -1019,7 +1024,7 @@ fn boundary_check(
 }
 
 /// Refuses to check a command server where no process group can be stopped. Takes the
-/// engine folder, server id, command, arguments and secrets, all unused. Returns
+/// engine folder, server id, command, arguments, secrets and kept ports, all unused. Returns
 /// `server_check_unavailable`, like [`check::check_stdio`] on this system.
 #[cfg(not(unix))]
 fn boundary_check(
@@ -1028,6 +1033,7 @@ fn boundary_check(
     _command: &str,
     _args: &[String],
     _secrets: &[(String, Vec<u8>)],
+    _kept: &[u16],
 ) -> Result<Vec<String>, &'static str> {
     Err("server_check_unavailable")
 }
