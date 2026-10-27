@@ -96,6 +96,38 @@ impl Case {
         id
     }
 
+    /// Sends one owner chat message of the project through the owner's team Message path,
+    /// which records it as an owner turn. Output: the message id.
+    fn said(&self, project: &str, text: &str) -> i64 {
+        self.send(project, text, true)
+    }
+
+    /// Sends one owner message of the project through the team Message path: one the owner
+    /// typed, or one an engine surface framed, as an IDE comment is. Output: the message id.
+    fn send(&self, project: &str, text: &str, typed: bool) -> i64 {
+        let tx = self.db.unchecked_transaction().unwrap();
+        let action = crate::team::TeamAction::Message {
+            project_id: ProjectId::new(project).unwrap(),
+            text: text.into(),
+        };
+        let access = crate::config::ModelAccess::default();
+        let outcome = if typed {
+            crate::team::execute(&tx, &access, &action)
+        } else {
+            crate::team::execute_framed(&tx, &access, &action)
+        };
+        assert_eq!(outcome.unwrap(), crate::protocol::Outcome::Applied);
+        let id = tx
+            .query_row(
+                "SELECT MAX(id) FROM team_messages WHERE project=?1",
+                [project],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tx.commit().unwrap();
+        id
+    }
+
     /// Fills the master's conversation with waiting engine messages until it refuses more.
     fn fill(&self) {
         let tx = self.db.unchecked_transaction().unwrap();
@@ -582,16 +614,22 @@ fn record_from_chat_takes_only_a_newer_owner_message_for_the_masters_own_questio
     std::fs::create_dir_all(beta.join(CRAZYAGENT_DIRECTORY)).unwrap();
     crate::ide::workspace::tests::add_project(&case.db, "beta", &beta);
 
-    let early = case.chat(PROJECT, MessageAuthor::Owner, "Yes, ship it.");
+    let early = case.said(PROJECT, "Yes, ship it.");
     let id = case.ask(&MASTER, "Ship on Friday?");
     let other = case.ask(&Asker::Master(42), "Rename the app?");
     let agents = case.ask(&Asker::Agent(7), "Which database?");
     let own = case.chat(PROJECT, MessageAuthor::Master, "The owner said yes.");
-    let elsewhere = case.chat("beta", MessageAuthor::Owner, "Yes, Friday.");
-    let owner = case.chat(PROJECT, MessageAuthor::Owner, "  Yes, Friday.  ");
+    let elsewhere = case.said("beta", "Yes, Friday.");
+    let unrecorded = case.chat(PROJECT, MessageAuthor::Owner, "Yes, Friday.");
+    let framed = case.send(
+        PROJECT,
+        "On Ada's changes \"Yes, Friday.\", README line 1",
+        false,
+    );
+    let owner = case.said(PROJECT, "  Yes, Friday.  ");
     let before = case.messages().len();
 
-    for turn in [early, own, elsewhere, owner + 100] {
+    for turn in [early, own, elsewhere, unrecorded, framed, owner + 100] {
         assert_eq!(
             code(record_from_chat(&case.db, &case.project, 41, id, 0, turn)),
             "questions_owner_turn_invalid"
@@ -639,6 +677,86 @@ fn record_from_chat_takes_only_a_newer_owner_message_for_the_masters_own_questio
     assert!(
         case.page()
             .contains("Answered by the owner in the master chat:")
+    );
+}
+
+#[test]
+fn a_settle_notice_quoting_a_masters_own_question_is_never_an_owner_turn() {
+    let case = Case::new();
+    let waiting = case.ask(&MASTER, "Ship on Friday?");
+    let planted = case.ask(&MASTER, "Yes, ship on Friday.");
+    let answered = case.ask(&MASTER, "Rename the app?");
+    assert_eq!(dismiss(&case.db, planted, 0).unwrap(), Settlement::Settled);
+    assert_eq!(
+        answer(&case.db, answered, 0, &Answer::Text("Yes, Friday.".into())).unwrap(),
+        Settlement::Settled
+    );
+    let notices: Vec<i64> = case
+        .db
+        .prepare("SELECT id FROM team_messages WHERE project=?1 AND author='owner' ORDER BY id")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(notices.len(), 2);
+
+    for notice in notices {
+        assert_eq!(
+            code(record_from_chat(
+                &case.db,
+                &case.project,
+                41,
+                waiting,
+                0,
+                notice
+            )),
+            "questions_owner_turn_invalid"
+        );
+    }
+    assert_eq!(case.get(waiting).status, QuestionStatus::Pending);
+    assert_eq!(case.get(waiting).answer, None);
+
+    let typed = case.said(PROJECT, "Yes, Friday.");
+    assert_eq!(
+        record_from_chat(&case.db, &case.project, 41, waiting, 0, typed).unwrap(),
+        Settlement::Settled
+    );
+}
+
+#[test]
+fn owner_turns_are_forgotten_with_the_messages_the_chat_drops() {
+    let case = Case::new();
+    let first = case.said(PROJECT, "Yes, Friday.");
+    let tx = case.db.unchecked_transaction().unwrap();
+    tx.execute(
+        "UPDATE team_messages SET state='answered' WHERE id=?1",
+        [first],
+    )
+    .unwrap();
+    for n in 0..crate::team::MESSAGES_PER_PROJECT_MAX {
+        tx.execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms)
+             VALUES (?1,'master',?2,'reply',1)",
+            params![PROJECT, format!("reply {n}")],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let last = case.said(PROJECT, "No, Monday.");
+
+    let turns: Vec<i64> = case
+        .db
+        .prepare("SELECT message FROM team_owner_turns WHERE project=?1 ORDER BY message")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(turns, [last]);
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM team_messages WHERE project='alpha'"),
+        crate::team::MESSAGES_PER_PROJECT_MAX
     );
 }
 
