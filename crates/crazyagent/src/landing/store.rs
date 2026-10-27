@@ -31,7 +31,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     pruned INTEGER NOT NULL DEFAULT 0 CHECK(pruned IN (0,1)),
     landed TEXT,
     intent TEXT,
-    message TEXT NOT NULL DEFAULT ''
+    message TEXT NOT NULL DEFAULT '',
+    waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -44,7 +45,14 @@ CREATE TABLE IF NOT EXISTS landing_bases (
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
-    restorable_until_ms,pruned,landed,intent,message";
+    restorable_until_ms,pruned,landed,intent,message,waiting";
+const ADDED_COLUMNS: [(&str, &str); 2] = [
+    ("message", "message TEXT NOT NULL DEFAULT ''"),
+    (
+        "waiting",
+        "waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1))",
+    ),
+];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
@@ -88,6 +96,7 @@ pub(super) struct Record {
     pub(super) landed: Option<String>,
     pub(super) intent: Option<Intent>,
     pub(super) message: String,
+    pub(super) waiting: bool,
 }
 
 impl Record {
@@ -108,6 +117,7 @@ impl Record {
             restorable_until_ms: self.restorable_until_ms,
             conflicts: self.conflicts.clone(),
             message: self.message(),
+            waiting: self.waiting && self.state == ChangeState::Updating,
         }
     }
 
@@ -138,27 +148,29 @@ fn storage(_: impl std::fmt::Display) -> EngineError {
     failure("changes_unavailable")
 }
 
-/// Creates the store's tables, and adds the message column to a store made before it.
-/// Input: the store. Output: Ok once the store has every column.
+/// Creates the store's tables, and adds the columns in `ADDED_COLUMNS` to a store made
+/// before them. Input: the store. Output: Ok once the store has every column.
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(storage)?;
-    let has_message = || {
-        db.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('landing_change_sets') WHERE name='message'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(storage)
-    };
-    if has_message()? == 0
-        && db
-            .execute_batch(
-                "ALTER TABLE landing_change_sets ADD COLUMN message TEXT NOT NULL DEFAULT ''",
+    for (name, definition) in ADDED_COLUMNS {
+        let has = || {
+            db.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('landing_change_sets') WHERE name=?1",
+                [name],
+                |row| row.get::<_, i64>(0),
             )
-            .is_err()
-        && has_message()? == 0
-    {
-        return Err(failure("changes_unavailable"));
+            .map_err(storage)
+        };
+        if has()? == 0
+            && db
+                .execute_batch(&format!(
+                    "ALTER TABLE landing_change_sets ADD COLUMN {definition}"
+                ))
+                .is_err()
+            && has()? == 0
+        {
+            return Err(failure("changes_unavailable"));
+        }
     }
     Ok(())
 }
@@ -260,6 +272,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         landed: row.get(22)?,
         intent,
         message: text(24)?,
+        waiting: row.get::<_, bool>(25)?,
     })
 }
 
@@ -285,7 +298,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
     db.execute(
         &format!(
             "INSERT OR REPLACE INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)"
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)"
         ),
         params![
             record.id.as_str(),
@@ -313,6 +326,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
             record.landed,
             intent,
             record.message,
+            record.waiting,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {

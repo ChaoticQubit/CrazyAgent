@@ -36,7 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
-use crazyagent::scheduling::{Schedule, ScheduleChange};
+use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
@@ -1450,6 +1450,15 @@ async fn desktop_account_schedule(
 }
 
 #[tauri::command]
+async fn desktop_account_ranking(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<PoolRanking>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.account_ranking().await
+}
+
+#[tauri::command]
 async fn desktop_set_account_schedule(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1810,11 +1819,14 @@ async fn desktop_restart_agent(
 async fn desktop_usage_report(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    project_id: Option<String>,
     since_ms: Option<i64>,
     offset_minutes: i32,
 ) -> Result<UsageReport, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.usage_report(since_ms, offset_minutes)?;
+    let call = lock(&state)
+        .await?
+        .usage_report(project_id, since_ms, offset_minutes)?;
     call.await
 }
 
@@ -2301,6 +2313,7 @@ pub fn run() {
             desktop_save_owner_profile,
             desktop_pool_summaries,
             desktop_account_schedule,
+            desktop_account_ranking,
             desktop_set_account_schedule,
             desktop_account_catalog,
             desktop_list_accounts,

@@ -7,6 +7,7 @@ use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::toolchains::{self, ToolHomes};
+use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
@@ -40,7 +41,10 @@ pub const DURABLE_OUTPUT: &str = "output.log";
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
-const CODEX_TOOLS_OFF: [&str; 13] = [
+/// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
+/// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
+/// web search tool and no MCP server.
+pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "sandbox_mode=\"read-only\"",
     "approval_policy=\"never\"",
     "features.shell_tool=false",
@@ -262,6 +266,7 @@ pub enum LaunchEvent {
     ApprovalDenied,
     Interrupted,
     TurnFinished { success: bool },
+    Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
@@ -989,8 +994,12 @@ impl Driver {
                                     status: RateLimitStatus::Rejected,
                                     ..
                                 } => events.push(LaunchEvent::TurnError { rate_limited: true }),
-                                EventKind::TurnFinished { outcome, .. } => {
+                                EventKind::TurnFinished { outcome, usage, .. } => {
                                     *interrupt = None;
+                                    let tokens = Tokens::reported(&usage);
+                                    if !tokens.is_empty() {
+                                        events.push(LaunchEvent::Usage { tokens });
+                                    }
                                     events.push(LaunchEvent::TurnFinished {
                                         success: outcome == TurnOutcome::Success,
                                     });

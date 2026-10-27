@@ -1741,6 +1741,16 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             Row::of(folder(screen), look.fg).push("   x Remove project", look.muted),
         ),
         entry("Pool", pool),
+        entry(
+            "Accounts",
+            Row::of(
+                screen
+                    .account_order()
+                    .unwrap_or_else(|| "Loading...".to_owned()),
+                look.fg,
+            )
+            .push("   u Change order", look.muted),
+        ),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
         entry(

@@ -784,8 +784,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
-    names::initialize(connection)?;
     master::initialize(connection)?;
+    names::initialize(connection)?;
     events::initialize(connection)?;
     direct::erase_typed_input(connection)
 }

@@ -45,7 +45,7 @@ test("the skills list shows each skill from the engine with its folder, switch a
   assert.match(markup, /Add skill/);
   assert.match(markup, /aria-label="Open frontend-design"/);
   assert.match(markup, /aria-label="Open pdf"/);
-  assert.doesNotMatch(markup, /skill-1|skill-2/);
+  assert.doesNotMatch(markup.replace(/ href="[^"]*"/g, ""), /skill-1|skill-2/);
 });
 
 test("a skill's detail renders its SKILL.md without the frontmatter, its files and its switch", () => {

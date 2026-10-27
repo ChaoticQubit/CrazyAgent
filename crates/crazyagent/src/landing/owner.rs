@@ -380,6 +380,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let message = "Merge the owner's branch into this agent's work\n";
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], message, ENGINE)?;
     record.state = ChangeState::Updating;
+    record.waiting = true;
     record.base = tip;
     record.head = merged.clone();
     record.conflicts = conflicts;

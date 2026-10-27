@@ -531,3 +531,253 @@ fn a_finished_turn_counts_its_reported_usage_or_its_records_once_and_forgets_its
         Tokens::default()
     );
 }
+
+#[test]
+fn reported_turn_usage_adds_up_under_its_agent_and_a_bad_session_name_is_refused() {
+    let (_root, db) = store();
+    let mut piped = attribution(RunKind::Agent, Some("pool-a"));
+    piped.agent = "team-4".into();
+    let turn = Tokens {
+        input: 5,
+        output: 7,
+        cache_read: 100,
+        cache_write: 3,
+    };
+    count_reported(&db, &piped, turn, "headless", NOW).unwrap();
+    count_reported(&db, &piped, turn, "headless", NOW + 1000).unwrap();
+    count_reported(&db, &piped, Tokens::default(), "headless", NOW).unwrap();
+    let rows: Vec<(String, String, i64, i64, i64, i64)> = db
+        .prepare("SELECT agent,session,input,output,cache_read,cache_write FROM usage_tokens")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("team-4".into(), "headless".into(), 10, 14, 200, 6)]
+    );
+    for session in ["", &"s".repeat(129)] {
+        assert_eq!(
+            count_reported(&db, &piped, turn, session, NOW)
+                .unwrap_err()
+                .0,
+            "usage_attribution_invalid"
+        );
+    }
+}
+
+fn mkfifo(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let made =
+        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
+    assert!(made.success());
+}
+
+#[test]
+fn a_record_that_is_a_fifo_is_skipped_without_waiting_for_a_writer() {
+    let home = tempfile::tempdir().unwrap();
+    let fifo = home.path().join("projects/-work-alpha/pipe.jsonl");
+    mkfifo(&fifo);
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut progress = Progress::default();
+        let found = read_record(&fifo, Format::Claude, &mut progress, NOW);
+        let _ = sent.send((found, progress));
+    });
+    assert_eq!(
+        read.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(((Tokens::default(), None), Progress::default())),
+        "a FIFO record is skipped without waiting for a writer"
+    );
+}
+
+#[test]
+fn a_record_swapped_for_a_fifo_never_stalls_the_scan_or_locks_the_store() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects/-work-alpha");
+    let fresh = folder.join("a.jsonl");
+    let record = folder.join("b.jsonl");
+    let plain = home.path().join("plain");
+    let fifo = home.path().join("fifo");
+    append(&plain, &claude_assistant("b1", 1, 1, 0, 0, "end_turn"));
+    mkfifo(&fifo);
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let swapping = stop.clone();
+    let swapper = std::thread::spawn(move || {
+        while !swapping.load(Ordering::SeqCst) {
+            for staged in [&plain, &fifo] {
+                let _ = std::fs::rename(staged, &record);
+                let _ = std::fs::rename(&record, staged);
+            }
+        }
+    });
+    let writing = stop.clone();
+    let path = root.path().join("engine.db");
+    let writer = std::thread::spawn(move || {
+        let other = Connection::open(path).unwrap();
+        other
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let mut writes = 0_i64;
+        while !writing.load(Ordering::SeqCst) {
+            other
+                .execute(
+                    "INSERT INTO usage_refresh (singleton,requested_ms) VALUES (1,?1)
+                     ON CONFLICT(singleton) DO UPDATE SET requested_ms=excluded.requested_ms",
+                    params![writes],
+                )
+                .map_err(|error| error.to_string())?;
+            writes += 1;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok::<i64, String>(writes)
+    });
+    let (sent, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let who = attribution(RunKind::Agent, None);
+        for scan in 0..300 {
+            append(
+                &fresh,
+                &claude_assistant(&format!("a{scan}"), 1, 1, 0, 0, "end_turn"),
+            );
+            scan_home(&db, home.path(), Format::Claude, &who, NOW + scan).unwrap();
+        }
+        let _ = sent.send(());
+    });
+    let finished = done.recv_timeout(std::time::Duration::from_secs(30));
+    stop.store(true, Ordering::SeqCst);
+    swapper.join().unwrap();
+    assert_eq!(finished, Ok(()), "every scan returns while records swap");
+    assert!(writer.join().unwrap().unwrap() > 0);
+}
+
+#[test]
+fn an_implausible_token_count_is_bounded_and_later_growth_never_overflows_its_row() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s9.jsonl");
+    append(
+        &record,
+        &claude_assistant("huge", i64::MAX as u64, u64::MAX, 0, 0, "end_turn"),
+    );
+    let who = attribution(RunKind::Agent, None);
+    let first = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        (first.input, first.output),
+        (LINE_TOKENS_MAX, LINE_TOKENS_MAX)
+    );
+    append(&record, &claude_assistant("next", 7, 1, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 1)
+            .unwrap()
+            .input,
+        7
+    );
+    let flood = Tokens {
+        input: u64::MAX,
+        output: u64::MAX,
+        cache_read: u64::MAX,
+        cache_write: u64::MAX,
+    };
+    count_reported(&db, &who, flood, "s9", NOW + 2).unwrap();
+    count_reported(&db, &who, flood, "s9", NOW + 3).unwrap();
+    let stored: (i64, String, i64) = db
+        .query_row(
+            "SELECT input,typeof(input),cache_write FROM usage_tokens WHERE session='s9'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (ROW_TOKENS_MAX, "integer".into(), ROW_TOKENS_MAX));
+    let report = super::super::report::report(&db, None, None, 0, NOW + 4).unwrap();
+    assert_eq!(report.total.input, ROW_TOKENS_MAX as u64);
+}
+
+fn codex_limits(used: f64, minutes: u64, resets_at_ms: i64) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": null, "rate_limits": {
+                "primary": {
+                    "used_percent": used,
+                    "window_minutes": minutes,
+                    "resets_at": resets_at_ms / 1000
+                }
+            }}
+        })
+    )
+}
+
+#[test]
+fn transcript_limits_stay_within_their_window_below_the_owner_and_a_fresh_poll() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home
+        .path()
+        .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-f.jsonl");
+    let mut who = attribution(RunKind::Agent, None);
+    who.account = Some(CredentialRef::new("codex-a").unwrap());
+    who.harness = "codex".into();
+    let account = who.account.clone().unwrap();
+    let stored = || super::super::limits(&db, &account).unwrap();
+    let full_at = |at: i64| {
+        stored()
+            .and_then(|limits| limits.five_hour_at(at))
+            .is_some_and(|window| window.used_percent >= 100.0)
+    };
+    let scan = |at: i64| scan_home(&db, home.path(), Format::Codex, &who, at).unwrap();
+    append(&record, &codex_limits(100.0, 300, 32_503_679_999_000));
+    scan(NOW);
+    assert!(!full_at(NOW + 5 * HOUR), "a year-3000 reset is refused");
+    append(&record, &codex_limits(100.0, 300, NOW + HOUR));
+    scan(NOW + 1);
+    assert!(full_at(NOW + 2));
+    assert!(!full_at(NOW + HOUR));
+    super::super::set_reset_override(
+        &db,
+        &account,
+        super::super::WindowKind::FiveHour,
+        Some(NOW + 60_000),
+    )
+    .unwrap();
+    append(&record, &codex_limits(100.0, 300, NOW + 2 * HOUR));
+    scan(NOW + 2);
+    assert_eq!(
+        stored().unwrap().five_hour_reset_override_ms,
+        Some(NOW + 60_000)
+    );
+    assert!(!full_at(NOW + 60_000));
+    let polled = Observation {
+        plan: None,
+        five_hour: Some(LimitWindow {
+            used_percent: 20.0,
+            resets_at_ms: Some(NOW + 4 * HOUR),
+        }),
+        weekly: None,
+    };
+    record_observation(&db, &account, &polled, LimitSource::Poll, NOW + 3).unwrap();
+    append(&record, &codex_limits(100.0, 300, NOW + HOUR));
+    scan(NOW + 4);
+    let kept = stored().unwrap();
+    assert_eq!(kept.five_hour, polled.five_hour);
+    assert_eq!(kept.source, Some(LimitSource::Poll));
+    let stale = NOW + 3 + super::super::service::POLL_EVERY_MS;
+    append(&record, &codex_limits(90.0, 300, stale + HOUR));
+    scan(stale);
+    let advisory = stored().unwrap();
+    assert_eq!(advisory.five_hour.unwrap().used_percent, 90.0);
+    assert_eq!(advisory.source, Some(LimitSource::Transcript));
+}

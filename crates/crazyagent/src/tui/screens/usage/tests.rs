@@ -80,6 +80,7 @@ fn report() -> UsageReport {
             committed_added: 80,
             committed_removed: 55,
         }],
+        agent_lines: Vec::new(),
         limits: vec![limits(Some("usage_rate_limited"))],
     }
 }

@@ -5,7 +5,8 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::protocol::CredentialRef;
 use crazyagent::scheduling::{
-    AccountEntry, AccountPlan, Pin, Schedule, ScheduleChange, ScopedStrategy, Strategy,
+    AccountEntry, AccountPlan, Pin, PoolRanking, RankedAccount, Schedule, ScheduleChange,
+    ScopedStrategy, Standing, Strategy,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -180,6 +181,22 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
         }],
     };
     assert_eq!(controller.account_schedule().await.unwrap(), expected);
+    let next = |connection: &str, use_last: bool| RankedAccount {
+        connection: reference(connection),
+        standing: Standing::Next {
+            weekly_resets_ms: None,
+            weekly_left_percent: None,
+            use_last,
+        },
+    };
+    assert_eq!(
+        controller.account_ranking().await.unwrap(),
+        [PoolRanking {
+            pool: reference("pool-claude"),
+            strategy: Strategy::Balanced,
+            accounts: vec![next("claude-a", false), next("claude-b", true)],
+        }]
+    );
     drop(controller);
     case.restart().await;
     let mut controller = case.controller().await;
