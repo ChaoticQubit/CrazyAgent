@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -42,10 +43,37 @@ function git(folder, ...args) {
   return result.stdout.trim();
 }
 
+/** Whether something accepts connections on a loopback port. Input: the port. Output: the answer. */
+function listening(port) {
+  return new Promise((done) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      done(true);
+    });
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Starts a real git daemon on 127.0.0.1 serving the bare repositories in a folder, pushes
+ * included. The IDE sandbox has no network, so the IDE reaches it only through the engine.
+ * Input: the folder. Output: the daemon process and the URL of one served repository. */
+async function gitDaemon(served) {
+  const port = await closedPort();
+  const daemon = spawn(GIT, ["daemon", "--reuseaddr", "--listen=127.0.0.1", `--port=${port}`, `--base-path=${served}`, "--export-all", "--enable=receive-pack", "--informative-errors", served], {
+    env: { PATH: "/usr/bin:/bin", HOME: served, GIT_CONFIG_NOSYSTEM: "1" },
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  for (const deadline = Date.now() + SETUP_MS; !(await listening(port)); await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline && daemon.exitCode === null, "the git daemon never listened on 127.0.0.1");
+  }
+  return { daemon, url: (name) => `git://127.0.0.1:${port}/${name}` };
+}
+
 /** Makes the owner's project: a repository on main with the owner's identity in its own
- * config, one commit, and a local bare remote in the temp folder that main tracks.
- * Inputs: the project folder and the remote's folder. Output: the commit. */
-function ownerRepo(folder, remote) {
+ * config, one commit, and a bare remote the git daemon serves that main tracks.
+ * Inputs: the project folder, the remote's folder and its daemon URL. Output: the commit. */
+function ownerRepo(folder, remote, url) {
   writeFileSync(join(folder, "README.md"), "# Seed shop\n\nSells seeds.\n");
   writeFileSync(join(folder, "notes.md"), "Planting notes.\n");
   git(folder, "init", "-q", "-b", "main");
@@ -54,7 +82,7 @@ function ownerRepo(folder, remote) {
   git(folder, "add", ".");
   git(folder, "commit", "-q", "-m", "Start the seed shop");
   git(remote, "init", "-q", "--bare", "-b", "main");
-  git(folder, "remote", "add", "origin", remote);
+  git(folder, "remote", "add", "origin", url);
   git(folder, "push", "-q", "-u", "origin", "main");
   return git(folder, "rev-parse", "HEAD");
 }
@@ -292,10 +320,10 @@ test("the owner edits, reviews an agent change in Source Control, accepts, commi
   const home = join(root, "home");
   const projects = join(root, "projects");
   const repo = join(root, "repos", REPO);
-  const remote = join(root, "remote.git");
+  const served = join(root, "served");
+  const remote = join(served, "remote.git");
   const worktree = join(root, "agents", AGENT);
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo, remote, join(root, "agents")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
-  const start = ownerRepo(repo, remote);
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
@@ -314,7 +342,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   const next = () => (generation += 1);
   let running;
   let site;
+  let daemon;
   try {
+    daemon = await gitDaemon(served);
+    const start = ownerRepo(repo, remote, daemon.url("remote.git"));
     running = await stack(engineBinary, bridgeBinary, runtime, env, evidence);
     const { bridge } = running;
     const project = await onboard(bridge, projects, repo, "local-pool", next);
@@ -490,14 +521,15 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("accepted");
       });
 
-      await t.test("the IDE pushes the branch to the local bare remote", async () => {
+      await t.test("the IDE pushes the branch through the engine to the git daemon on 127.0.0.1", async () => {
         await ide.run("Git: Push");
         const pushed = () => git(remote, "rev-parse", "main");
         for (const deadline = Date.now() + STEP_MS; pushed() !== head(); await pause(POLL_MS * 5)) {
           const picker = await page.evaluate(ide.rows);
           if (picker && picker.some((label) => label.includes(REPO))) await ide.pick(REPO);
-          assert.ok(Date.now() < deadline, "the push never reached the bare remote");
+          assert.ok(Date.now() < deadline, "the push never reached the git daemon");
         }
+        assert.equal(git(repo, "rev-parse", "refs/remotes/origin/main"), head(), "the engine's push moved the project's origin/main, which the IDE sandbox cannot reach");
         assert.equal(git(remote, "log", "-1", "--format=%s", "main^"), ARROWED, "the remote holds the owner's IDE commit");
         assert.ok(git(remote, "show", "main:README.md").includes(AGENT_LINE), "the remote holds the accepted agent change");
         assert.notEqual(pushed(), start, "the remote moved past the first commit");
@@ -538,6 +570,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     site?.server.close();
     await stop(running?.bridgeProcess);
     await stop(running?.engine);
+    await stop(daemon?.daemon);
     if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });

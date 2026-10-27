@@ -37,7 +37,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 24] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -126,6 +126,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
         "out/terminal.js",
         include_bytes!("../../../../apps/ide-extension/out/terminal.js"),
     ),
+    (
+        "out/git.js",
+        include_bytes!("../../../../apps/ide-extension/out/git.js"),
+    ),
+    (
+        "out/git-forward.js",
+        include_bytes!("../../../../apps/ide-extension/out/git-forward.js"),
+    ),
 ];
 
 const GRANTS_MAX: usize = 64;
@@ -143,6 +151,15 @@ const TEXT_BYTES_MAX: usize = 16384;
 pub(super) const COMMENT_BYTES_MAX: usize = 2048;
 const NAME_BYTES_MAX: usize = 128;
 const VERSION_BYTES_MAX: usize = 64;
+/// The most arguments one `ide.git` call carries after `git`, and the most bytes each holds.
+pub(super) const GIT_ARGS_MAX: usize = 16;
+pub(super) const GIT_ARG_BYTES_MAX: usize = 1024;
+/// How long one IDE git network command may run in the engine before its process group is
+/// killed: a push of a long history over a slow link still lands.
+pub(super) const GIT_TIME: Duration = Duration::from_secs(600);
+/// How long past `GIT_TIME` an `ide.git` call may take to answer: its checks before git
+/// runs and the reply. The bound stays under the extension's git request timer.
+const GIT_ANSWER_MARGIN: Duration = Duration::from_secs(60);
 const CAPABILITY: &str = "capability";
 
 /// The path of a capability file: `<engine root>/ide/<project>/capability`.
@@ -227,6 +244,8 @@ pub enum IdeCall {
     Session {},
     #[serde(rename = "ide.terminal")]
     Terminal { cols: u16, rows: u16 },
+    #[serde(rename = "ide.git")]
+    Git { args: Vec<String>, folder: String },
 }
 
 /// The owner's decision on a memory nomination.
@@ -276,7 +295,8 @@ impl IdeRequest {
     /// Checks every argument's bounds before any handler runs: paths are relative, at most
     /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX`, a comment
     /// fits `COMMENT_BYTES_MAX` and is not blank on a line from 1; extension ids are
-    /// `publisher.name`.
+    /// `publisher.name`; a git call has 1 to `GIT_ARGS_MAX` arguments of 1 to
+    /// `GIT_ARG_BYTES_MAX` bytes without NUL and an absolute folder path.
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
@@ -297,6 +317,15 @@ impl IdeRequest {
             IdeCall::ExtensionRequest { id, version }
             | IdeCall::ExtensionDecide { id, version, .. } => {
                 extension_id(id) && extension_version(version)
+            }
+            IdeCall::Git { args, folder } => {
+                (1..=GIT_ARGS_MAX).contains(&args.len())
+                    && args.iter().all(|arg| {
+                        !arg.is_empty() && arg.len() <= GIT_ARG_BYTES_MAX && !arg.contains('\0')
+                    })
+                    && folder.starts_with('/')
+                    && folder.len() <= PATH_BYTES_MAX
+                    && !folder.contains('\0')
             }
             IdeCall::Workspace {}
             | IdeCall::ShowAllAgents { .. }
@@ -693,12 +722,12 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 /// request for the capability's own project and answers it, swaps the capability file for
 /// the extension's session, or turns the connection into the project's event subscription
 /// or a Sandboxed terminal. An answer is sent only while the capability still admits the
-/// handshake, except what an Accept, Discard or Restore did, which is reported even when
-/// its capability was revoked while it ran; a refusal is sent as it is. The handshake
-/// deadline bounds the request and every call but the subscription, the terminal and the
-/// Changes calls, which run git under `bound`; Accept, Discard or Restore past it is
-/// `changes_outcome_unknown`. Inputs: the stream, handshake packet, owner runtime and
-/// deadline.
+/// handshake, except what an Accept, Discard, Restore or git command did, which is reported
+/// even when its capability was revoked while it ran; a refusal is sent as it is. The
+/// handshake deadline bounds the request and every call but the subscription, the terminal,
+/// the Changes calls and `ide.git`, which run git under `bound`; Accept, Discard or Restore
+/// past it is `changes_outcome_unknown` and a git command `ide_git_outcome_unknown`.
+/// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
     mut stream: UnixStream,
     packet: [u8; 37],
@@ -734,19 +763,22 @@ pub(crate) async fn serve(
             (Some(refusal(&failure("ide_terminal_unavailable"))), false)
         }
         Ok(Ok((project, call))) => {
-            let writes = matches!(
-                call,
-                IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. }
-            );
+            let unknown = match call {
+                IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
+                    Some("changes_outcome_unknown")
+                }
+                IdeCall::Git { .. } => Some("ide_git_outcome_unknown"),
+                _ => None,
+            };
             let bound = bound(&call, deadline);
             let answered = tokio::time::timeout_at(bound, answer(&runtime, &project, call)).await;
-            let reply = match answered {
-                Ok(Ok(reply)) => reply,
-                Ok(Err(error)) => refusal(&error),
-                Err(_) if writes => refusal(&failure("changes_outcome_unknown")),
-                Err(_) => refusal(&failure("ide_request_timeout")),
+            let reply = match (answered, unknown) {
+                (Ok(Ok(reply)), _) => reply,
+                (Ok(Err(error)), _) => refusal(&error),
+                (Err(_), Some(code)) => refusal(&failure(code)),
+                (Err(_), None) => refusal(&failure("ide_request_timeout")),
             };
-            (Some(reply), writes)
+            (Some(reply), unknown.is_some())
         }
     };
     if let Some(reply) = reply {
@@ -764,15 +796,17 @@ pub(crate) async fn serve(
 
 /// When one IDE call must be answered by. Accept, Discard and Restore run under the
 /// desktop's Changes bound, so a slow commit still lands and reports what it did; the
-/// three Changes reads run under READ_TIME, since the extension polls them again; every
-/// other call keeps the handshake deadline. Inputs: the call and the handshake deadline.
-/// Output: the instant, never before the deadline.
+/// three Changes reads run under READ_TIME, since the extension polls them again; a git
+/// command runs under `GIT_TIME` and `GIT_ANSWER_MARGIN`; every other call keeps the
+/// handshake deadline. Inputs: the call and the handshake deadline. Output: the instant,
+/// never before the deadline.
 fn bound(call: &IdeCall, deadline: Instant) -> Instant {
     let time = match call {
         IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
             CHANGES_TIMEOUT
         }
         IdeCall::ChangeSets {} | IdeCall::ChangeDiff { .. } | IdeCall::BaseBlob { .. } => READ_TIME,
+        IdeCall::Git { .. } => GIT_TIME + GIT_ANSWER_MARGIN,
         _ => return deadline,
     };
     deadline.max(Instant::now() + time)
@@ -855,6 +889,7 @@ async fn answer(
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
         IdeCall::RevealAck { request } => reveal::acked(runtime, project, &request)?,
+        IdeCall::Git { args, folder } => git_call(runtime, project, args, folder).await?,
         IdeCall::Events {} | IdeCall::Session {} | IdeCall::Terminal { .. } => {
             return Err(failure("ide_request_invalid"));
         }
@@ -883,6 +918,27 @@ async fn change_call(
     #[cfg(not(unix))]
     {
         let _ = (runtime, project, call);
+        Err(failure("ide_request_unavailable"))
+    }
+}
+
+/// Runs one git network command of the IDE in the project folder outside the IDE sandbox
+/// ([`remote_git::answer`]); where the engine has no IDE sandbox it is unavailable.
+/// Inputs: the owner runtime, the project, git's arguments and the folder git ran in.
+/// Output: the reply data.
+async fn git_call(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    args: Vec<String>,
+    folder: String,
+) -> Result<serde_json::Value, EngineError> {
+    #[cfg(unix)]
+    {
+        remote_git::answer(runtime.ide()?.root, project.clone(), args, folder).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (runtime, project, args, folder);
         Err(failure("ide_request_unavailable"))
     }
 }
@@ -1071,6 +1127,8 @@ mod changes;
 #[cfg(unix)]
 mod comments;
 mod extensions;
+#[cfg(unix)]
+mod remote_git;
 #[cfg(unix)]
 mod terminal;
 #[cfg(all(test, unix))]

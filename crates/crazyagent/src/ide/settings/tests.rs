@@ -42,6 +42,10 @@ impl Case {
             .join("Machine")
             .join("settings.json")
     }
+
+    fn shim(&self) -> PathBuf {
+        self.machine().with_file_name(super::super::git::SHIM)
+    }
 }
 
 fn read(path: &Path) -> Value {
@@ -55,14 +59,16 @@ fn built_in() -> &'static str {
         .unwrap()
 }
 
-/// The Remote settings a fresh write holds: every locked key, the built-in extension's pin
-/// and this machine's IDE terminal profiles, which only that write-denied file carries.
-fn expected_machine() -> Value {
+/// The Remote settings a fresh write holds: every locked key, the built-in extension's pin,
+/// this machine's IDE terminal profiles and `git.path` naming the case's git shim, which only
+/// that write-denied file carries.
+fn expected_machine(case: &Case) -> Value {
     let mut machine = expected_locks();
     machine["extensions.allowed"] = json!({ super::super::extensions::BUILT_IN: [built_in()] });
     for (key, value) in super::super::terminal::machine_profiles().unwrap() {
         machine[key.as_str()] = value;
     }
+    machine["git.path"] = json!(case.shim());
     machine
 }
 
@@ -103,8 +109,8 @@ fn written_remote_settings_hold_every_locked_key() {
     let machine = read(&written.machine);
     assert_eq!(
         machine,
-        expected_machine(),
-        "a fresh Remote settings file holds the locks, the pin list and the terminal profiles, nothing else"
+        expected_machine(&case),
+        "a fresh Remote settings file holds the locks, the pin list, the terminal profiles and the git shim, nothing else"
     );
     assert_eq!(machine["chat.disableAIFeatures"], json!(true));
     let os = if cfg!(target_os = "macos") {
@@ -155,7 +161,7 @@ fn written_remote_settings_hold_every_locked_key() {
 
     let before = std::fs::symlink_metadata(&written.machine).unwrap().ino();
     let again = write(&case.folder, &case.server_data, &case.data()).unwrap();
-    assert_eq!(read(&again.machine), expected_machine());
+    assert_eq!(read(&again.machine), expected_machine(&case));
     assert_ne!(
         std::fs::symlink_metadata(&again.machine).unwrap().ino(),
         before,
@@ -185,10 +191,10 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
     assert_eq!(machine["update.mode"], json!("none"));
     assert_eq!(
         machine["extensions.allowed"],
-        expected_machine()["extensions.allowed"],
+        expected_machine(&case)["extensions.allowed"],
         "the engine's pin list replaces the owner's own"
     );
-    let mut expected = expected_machine();
+    let mut expected = expected_machine(&case);
     expected["editor.fontSize"] = json!(15);
     expected["workbench.preferredDarkColorTheme"] = json!("Solarized Dark");
     assert_eq!(machine, expected);
@@ -201,7 +207,7 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
     let unreadable = "// my notes\n{\"editor.fontSize\": 16,}\n";
     std::fs::write(case.machine(), unreadable).unwrap();
     let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
-    assert_eq!(read(&written.machine), expected_machine());
+    assert_eq!(read(&written.machine), expected_machine(&case));
     assert_eq!(
         std::fs::read_to_string(case.machine().with_file_name(UNREADABLE)).unwrap(),
         unreadable,
@@ -220,7 +226,7 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
     );
     assert_eq!(
         read(&written.machine),
-        expected_machine(),
+        expected_machine(&case),
         "a link is replaced, never followed"
     );
     assert_eq!(
@@ -468,6 +474,10 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         format!("printf '%s' '{off}' > '{data}/MACHINE/Settings.json'"),
         format!("mv '{data}' '{project}/data-aside'"),
         format!("mv '{home}' '{project}/server-aside'"),
+        format!("printf 'exec /bin/sh' > '{machine}/git'"),
+        format!("chmod 755 '{machine}/git'"),
+        format!("rm '{machine}/git'"),
+        format!("printf '#!/bin/sh' > '{home}/shim' && mv '{home}/shim' '{machine}/git'"),
     ] {
         assert!(
             !sandboxed(&case, &attempt),
@@ -475,7 +485,12 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         );
         assert_eq!(
             read(&written.machine),
-            expected_machine(),
+            expected_machine(&case),
+            "after: {attempt}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(case.shim()).unwrap(),
+            super::super::git::SHIM_TEXT,
             "after: {attempt}"
         );
     }
@@ -489,13 +504,88 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         ),
         "the server still writes the rest of its data folder"
     );
-    assert_eq!(read(&written.machine), expected_machine());
+    assert_eq!(read(&written.machine), expected_machine(&case));
     assert!(case.server_data.join("data").join("Machine").is_dir());
     assert_eq!(
         std::fs::read_dir(case.server_data.join("data").join("Machine"))
             .unwrap()
             .count(),
-        1,
-        "nothing was added next to the engine's settings"
+        2,
+        "nothing was added next to the engine's settings and git shim"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.shim()).unwrap(),
+        super::super::git::SHIM_TEXT
+    );
+}
+
+/// Runs the written git shim as VS Code's git would, with a cleared environment holding
+/// `env` and git's own PATH. Inputs: the shim, the variables and the arguments. Output:
+/// what it printed and its status.
+fn shim_run(shim: &Path, env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
+    crate::spawn_gate::output(
+        std::process::Command::new(shim)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/nonexistent")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(env.iter().copied())
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap()
+}
+
+/// Every start writes `git.path` and its shim next to the Remote settings: an owner-only
+/// executable holding exactly [`super::super::git::SHIM_TEXT`]. It hands push, pull, fetch
+/// and ls-remote to the forwarder the extension names, refuses them plainly before the
+/// extension has named one, and runs the PATH's git for everything else.
+#[test]
+fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
+    let case = Case::new();
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
+    assert_eq!(read(&written.machine)["git.path"], json!(case.shim()));
+    let metadata = std::fs::symlink_metadata(case.shim()).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.mode() & 0o7777, 0o700);
+    assert_eq!(
+        std::fs::read_to_string(case.shim()).unwrap(),
+        super::super::git::SHIM_TEXT
+    );
+
+    let version = shim_run(&case.shim(), &[], &["--version"]);
+    assert!(version.status.success(), "{version:?}");
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("git version "));
+
+    let forwarder = [
+        ("CRAZYAGENT_IDE_GIT_NODE", "/bin/echo"),
+        ("CRAZYAGENT_IDE_GIT_FORWARD", "forwarded"),
+    ];
+    for args in [
+        ["push", "origin", "main:main"].as_slice(),
+        &["pull", "--tags", "origin", "main"],
+        &["fetch", "--all"],
+        &["ls-remote", "--heads", "origin"],
+    ] {
+        let handed = shim_run(&case.shim(), &forwarder, args);
+        assert!(handed.status.success(), "{args:?}: {handed:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&handed.stdout),
+            format!("forwarded {}\n", args.join(" ")),
+            "{args:?}"
+        );
+        let early = shim_run(&case.shim(), &[], args);
+        assert_eq!(early.status.code(), Some(128), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&early.stderr).contains("has not connected"),
+            "{args:?}: {early:?}"
+        );
+    }
+    let status = shim_run(&case.shim(), &forwarder, &["-C", "/", "push"]);
+    assert!(
+        !String::from_utf8_lossy(&status.stdout).contains("forwarded"),
+        "only the command word is forwarded: {status:?}"
     );
 }

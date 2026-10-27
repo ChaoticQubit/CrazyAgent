@@ -26,6 +26,8 @@ const MACHINE_TEMPORARY: &str = "machine-settings.json.tmp";
 #[cfg(unix)]
 const LOCKED_TEMPORARY: &str = "locked-settings.json.tmp";
 #[cfg(unix)]
+const SHIM_TEMPORARY: &str = "git-shim.tmp";
+#[cfg(unix)]
 const SETTINGS_BYTES_MAX: u64 = 256 * 1024;
 
 /// The lock files written for one server start: its Remote settings file and the locked-keys
@@ -39,9 +41,11 @@ pub struct Written {
 /// Writes the lock before each server start: the Remote settings file
 /// `<server data>/data/Machine/settings.json`, which VSCodium reh-web reads above the owner's
 /// User settings, holding every [`locked`] key, the `extensions.allowed` pin list of the
-/// owner's approved extensions ([`super::extensions::allowed_setting`]) and the IDE terminal
-/// profiles ([`super::terminal::machine_profiles`]) over the owner's own keys there, which
-/// are kept; and `<folder>/locked-settings.json` for the extension. Each file is written whole in
+/// owner's approved extensions ([`super::extensions::allowed_setting`]), the IDE terminal
+/// profiles ([`super::terminal::machine_profiles`]) and `git.path` naming the git shim
+/// [`super::git::SHIM`] written next to it first ([`super::git::machine_settings`]) over the
+/// owner's own keys there, which are kept; and `<folder>/locked-settings.json` for the
+/// extension. Each file is written whole in
 /// the engine's private IDE folder and renamed into place, so the server never reads a
 /// partial file and a link to the old file changes nothing. A Remote settings file that is
 /// not a JSON object is kept aside as `settings.json.unreadable`; a link there is replaced,
@@ -67,6 +71,14 @@ pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, 
     for path in [folder, server_data, user_data.as_path(), machine.as_path()] {
         super::bridge::private_folder(path)?;
     }
+    let shim = machine.join(super::git::SHIM);
+    replace(
+        folder,
+        SHIM_TEMPORARY,
+        &shim,
+        super::git::SHIM_TEXT.as_bytes(),
+        0o700,
+    )?;
     let target = machine.join(SETTINGS);
     let mut settings = match owner_settings(&target)? {
         Owner::Kept(settings) => settings,
@@ -80,18 +92,26 @@ pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, 
     settings.extend(locked.clone());
     settings.extend(super::terminal::machine_profiles()?);
     settings.extend(super::extensions::allowed_setting(data));
+    settings.extend(super::git::machine_settings(&shim)?);
     assert!(
         locked
             .iter()
             .all(|(key, value)| settings.get(key) == Some(value))
     );
-    replace(folder, MACHINE_TEMPORARY, &target, &Value::Object(settings))?;
+    replace(
+        folder,
+        MACHINE_TEMPORARY,
+        &target,
+        &pretty(&Value::Object(settings))?,
+        0o600,
+    )?;
     let locked_path = folder.join(LOCKED_FILE);
     replace(
         folder,
         LOCKED_TEMPORARY,
         &locked_path,
-        &Value::Object(locked),
+        &pretty(&Value::Object(locked))?,
+        0o600,
     )?;
     Ok(Written {
         machine: target,
@@ -248,14 +268,27 @@ fn owner_settings(path: &Path) -> Result<Owner, EngineError> {
     })
 }
 
-/// Replaces a file whole: writes a new 0600 file in the engine's private IDE folder, syncs it
-/// and renames it over the target. Inputs: the folder, the temporary name, the target and
-/// the JSON. Output: Ok once renamed, or `ide_settings_unwritable`.
+/// A settings file's text: the JSON, pretty-printed. Input: the value. Output: its bytes, or
+/// `ide_settings_unwritable`.
 #[cfg(unix)]
-fn replace(folder: &Path, temporary: &str, target: &Path, body: &Value) -> Result<(), EngineError> {
+fn pretty(body: &Value) -> Result<Vec<u8>, EngineError> {
+    serde_json::to_vec_pretty(body).map_err(unwritable)
+}
+
+/// Replaces a file whole: writes a new file with `mode` in the engine's private IDE folder,
+/// syncs it and renames it over the target. Inputs: the folder, the temporary name, the
+/// target, the bytes and the mode. Output: Ok once renamed, or `ide_settings_unwritable`.
+#[cfg(unix)]
+fn replace(
+    folder: &Path,
+    temporary: &str,
+    target: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), EngineError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let text = serde_json::to_string_pretty(body).map_err(unwritable)?;
+    assert!(mode & 0o077 == 0);
     let temporary = folder.join(temporary);
     match std::fs::remove_file(&temporary) {
         Ok(()) => {}
@@ -265,10 +298,10 @@ fn replace(folder: &Path, temporary: &str, target: &Path, body: &Value) -> Resul
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(mode)
         .open(&temporary)
         .map_err(unwritable)?;
-    file.write_all(text.as_bytes()).map_err(unwritable)?;
+    file.write_all(bytes).map_err(unwritable)?;
     file.sync_all().map_err(unwritable)?;
     std::fs::rename(&temporary, target).map_err(unwritable)
 }

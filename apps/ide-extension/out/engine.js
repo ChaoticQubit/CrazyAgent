@@ -91,8 +91,8 @@ class Engine {
         const socket = env[exports.SOCKET_ENV];
         return capability && socket ? new Engine(socket, capability, store) : undefined;
     }
-    request(name, args = {}) {
-        return this.#token().then((token) => this.#exchange(token, name, args));
+    request(name, args = {}, timeMs = REQUEST_TIME_MS) {
+        return this.#token().then((token) => this.#exchange(token, name, args, timeMs));
     }
     stream(name, args) {
         return this.#token().then((token) => this.#dial(token, name, args));
@@ -128,11 +128,11 @@ class Engine {
         await this.#store?.store(key, token);
         return Buffer.from(token, "hex");
     }
-    #exchange(token, name, args) {
+    #exchange(token, name, args, timeMs = REQUEST_TIME_MS) {
         return new Promise((resolve, reject) => {
             const socket = this.#dial(token, name, args);
             const reader = new FrameReader();
-            const timer = setTimeout(() => socket.destroy(new Error("ide_request_timeout")), REQUEST_TIME_MS);
+            const timer = setTimeout(() => socket.destroy(new Error("ide_request_timeout")), timeMs);
             socket.on("data", (chunk) => {
                 try {
                     const [reply] = reader.push(chunk);
