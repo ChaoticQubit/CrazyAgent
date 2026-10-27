@@ -1109,11 +1109,39 @@ impl TeamRuntime {
                 "Sign in to an account in this project's pool to run {harness}"
             ));
         }
-        pick_account(&accounts, &|c: &CredentialRef| self.load(c), paused)
-            .cloned()
-            .ok_or_else(|| {
-                "Every account in this project's pool is resting after a rate limit".into()
+        let pools: Vec<&CredentialRef> = access
+            .pools
+            .iter()
+            .filter(|pool| {
+                pool.projects
+                    .iter()
+                    .any(|id| id.as_str() == project.as_str())
             })
+            .map(|pool| &pool.id)
+            .collect();
+        let choice = crate::scheduling::Choice::read(
+            &self.connection,
+            access,
+            Some(project.as_str()),
+            &pools,
+            super::now_ms(),
+        )
+        .map_err(|_| "Could not read the account scheduling settings".to_owned())?;
+        if let Some(account) = pick_account(
+            &accounts,
+            &|c: &CredentialRef| self.load(c),
+            paused,
+            &choice,
+        ) {
+            return Ok(account.clone());
+        }
+        if accounts
+            .iter()
+            .any(|account| !paused.contains(&account.connection))
+        {
+            return Err("Every account in this project's pool is at its usage limit, held in reserve or set to Never use".into());
+        }
+        Err("Every account in this project's pool is resting after a rate limit".into())
     }
 
     /// Tells why an account cannot take agent work now: endpoints always can, managed

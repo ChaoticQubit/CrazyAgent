@@ -34,6 +34,7 @@ pub mod rcli_host;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod scheduling;
 pub mod service;
 pub mod setup;
 /// The short address a Unix socket is bound and reached at when its own path is too long

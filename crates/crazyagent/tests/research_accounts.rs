@@ -4,8 +4,9 @@ mod research_support;
 
 use crazyagent::config::{ModelAccess, ModelAuthentication, ModelConnection};
 use crazyagent::protocol::CredentialRef;
-use crazyagent::research::accounts::{AccountPick, pick_account, pick_unpaused};
+use crazyagent::research::accounts::{AccountPick, pick_account, pick_scheduled, pick_unpaused};
 use crazyagent::research::runner::ResearchAccount;
+use crazyagent::scheduling::{AccountPlan, Choice, Pin, ScheduleChange};
 use sha2::Digest;
 use std::os::unix::fs::PermissionsExt;
 
@@ -442,5 +443,96 @@ fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_p
     assert_eq!(
         resolver.pool_pick(&CredentialRef::new("absent-pool").unwrap(), &both),
         AccountPick::NeedsPool
+    );
+}
+
+#[test]
+fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
+    let access = access();
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = rusqlite::Connection::open(directory.path().join("engine.db")).unwrap();
+    crazyagent::scheduling::initialize(&db).unwrap();
+    db.execute_batch(
+        "CREATE TABLE account_limits (account_ref TEXT PRIMARY KEY, five_hour_percent REAL,
+         five_hour_resets_ms INTEGER, weekly_percent REAL, weekly_resets_ms INTEGER);
+         INSERT INTO account_limits VALUES ('codex-account', 5.0, NULL, 95.0, 9000);
+         INSERT INTO account_limits VALUES ('local-account', 5.0, NULL, 10.0, 5000);",
+    )
+    .unwrap();
+    let pool = CredentialRef::new("mixed-pool").unwrap();
+    let choice = |db: &rusqlite::Connection| {
+        Choice::read(db, &access, Some("project-a"), &[&pool], 1_000).unwrap()
+    };
+    let plan = |db: &mut rusqlite::Connection, id: &str, plan: AccountPlan| {
+        let tx = db.transaction().unwrap();
+        let change = ScheduleChange::Account {
+            connection: CredentialRef::new(id).unwrap(),
+            plan,
+        };
+        crazyagent::scheduling::apply(&tx, &access, &change).unwrap();
+        tx.commit().unwrap();
+    };
+    let picked = |choice: &Choice| match pick_scheduled(
+        &access,
+        "project-a",
+        "codex",
+        signed_in,
+        |_| None,
+        choice,
+    ) {
+        AccountPick::Account { connection, .. } => connection.as_str().to_owned(),
+        other => panic!("expected an account, got {other:?}"),
+    };
+    assert_eq!(
+        picked(&Choice::default()),
+        "codex-connection",
+        "without a schedule research keeps pool order"
+    );
+    assert_eq!(picked(&choice(&db)), "local-connection");
+    plan(
+        &mut db,
+        "codex-connection",
+        AccountPlan {
+            rank: Some(1),
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(picked(&choice(&db)), "local-connection");
+    plan(
+        &mut db,
+        "local-connection",
+        AccountPlan {
+            pin: Some(Pin::UseLast),
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(picked(&choice(&db)), "codex-connection");
+    plan(
+        &mut db,
+        "codex-connection",
+        AccountPlan {
+            reserve_percent: 10,
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(picked(&choice(&db)), "local-connection");
+    plan(
+        &mut db,
+        "local-connection",
+        AccountPlan {
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(
+        pick_scheduled(
+            &access,
+            "project-a",
+            "codex",
+            signed_in,
+            |_| None,
+            &choice(&db)
+        ),
+        AccountPick::Paused { until_ms: 9000 }
     );
 }

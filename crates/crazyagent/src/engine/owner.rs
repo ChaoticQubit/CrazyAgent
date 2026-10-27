@@ -148,6 +148,9 @@ pub enum OwnerMutation {
     Team {
         action: crate::team::TeamAction,
     },
+    AccountSchedule {
+        change: crate::scheduling::ScheduleChange,
+    },
     UpdateProjectSetup {
         project_id: ProjectId,
         expected_revision: u64,
@@ -309,6 +312,12 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::Team {
                     action: action.clone(),
+                }
+            }
+            Self::AccountSchedule { change } => {
+                change.validate()?;
+                Command::AccountSchedule {
+                    change: change.clone(),
                 }
             }
             Self::UpdateProjectSetup {
@@ -597,6 +606,7 @@ pub enum OwnerRead {
     PoolSummaries {
         offset: u8,
     },
+    AccountSchedule,
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -663,7 +673,8 @@ impl OwnerRead {
             | Self::Onboarding { .. }
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
-            | Self::PoolSummaries { .. } => return Ok(None),
+            | Self::PoolSummaries { .. }
+            | Self::AccountSchedule => return Ok(None),
             Self::Memories { search, limit, .. } => {
                 crate::memory::library::validate_page(search.as_deref(), *limit)?;
                 return Ok(None);
@@ -1041,6 +1052,9 @@ pub enum OwnerData {
     PoolSummaries {
         pools: Vec<crate::pools::PoolSummary>,
         next_offset: Option<u8>,
+    },
+    AccountSchedule {
+        schedule: crate::scheduling::Schedule,
     },
     Page {
         items: Vec<OwnerSummary>,
