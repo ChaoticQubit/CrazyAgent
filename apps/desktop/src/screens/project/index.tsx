@@ -7,11 +7,14 @@ import { displayText } from "../conversation";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
+import { IdeExtensionConfirm } from "./ide-extensions";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
+import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab } from "./overview";
 import { ProcessEditor } from "../process";
 import { pauseSummary, shouldPoll } from "./research";
+import { RecoveryBanner } from "./recovery-banner";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
@@ -166,6 +169,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     <PageHeader title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
       description={setup?.about ? <span className="pj-truncate" title={setup.about}>{displayText(setup.about.split("\n")[0])}</span> : undefined}
       actions={<ProjectMenu data={data} />} />
+    <RecoveryBanner key={projectId} project={projectId} />
     <Tabs label="Project" current={active}
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
@@ -177,6 +181,8 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
+    <IdeConfirm data={data} />
+    <IdeExtensionConfirm data={data} />
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
   </div>;
 }

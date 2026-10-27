@@ -42,11 +42,13 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide_extensions;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
+pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -1121,6 +1123,17 @@ impl OwnerRuntimeHandle {
         })
     }
 
+    /// Runs one domain command in this engine for the IDE bridge while the server is
+    /// usable; the bridge only builds commands for its capability's own project.
+    /// Input: the request. Output: the engine's reply, or `ide_unavailable`.
+    pub(crate) async fn ide_apply(
+        &self,
+        request: crate::protocol::WireRequest,
+    ) -> Result<crate::protocol::WireReply, EngineError> {
+        self.ide()?;
+        self.engine.apply(request).await
+    }
+
     /// This owner server's IDE capability grants, whether or not it still runs, so a
     /// capability can be revoked after the server stopped. Input: none. Output: the grants.
     pub(crate) fn ide_grants(&self) -> &crate::ide::bridge::Grants {
@@ -1388,6 +1401,9 @@ impl OwnerServer {
     }
 
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        if let Ok(root) = changes::engine_root(&self.authority) {
+            crate::ide::fetch::on_engine_start(&root);
+        }
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
         let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
@@ -1989,6 +2005,8 @@ enum Protocol {
     Changes,
     Cleanup,
     Usage,
+    IdeExtensions,
+    Recovery,
     NativeAuth,
     Process,
     Owner,
@@ -2016,6 +2034,8 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
+        ("ide_extensions", Protocol::IdeExtensions),
+        ("recovery", Protocol::Recovery),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
     ];
@@ -2076,6 +2096,7 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
+            Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => {
                 let served = cleanup::serve(stream, engine, authority, auth, &a, body);
                 return tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served)
@@ -2088,6 +2109,13 @@ async fn serve_admitted(
                 return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
                     .await
                     .map_err(|_| failure("usage_outcome_unknown"))?
+                    .map(|()| None);
+            }
+            Protocol::Recovery => {
+                let served = recovery::serve(stream, engine, authority, auth, &a, body);
+                return tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served)
+                    .await
+                    .map_err(|_| failure("recovery_outcome_unknown"))?
                     .map(|()| None);
             }
             Protocol::NativeAuth => {
@@ -2236,6 +2264,10 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::IdeExtensions(a) => {
+            let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2280,15 +2312,17 @@ struct Tasks {
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
-/// agent's process group or its host to end it, and Changes requests, which run git on
-/// the owner's checkout. Each carries the admission, and the projects home its validated
-/// request; the others read the request frame.
+/// agent's process group or its host to end it, Changes requests, which run git on the
+/// owner's checkout, and IDE extension approvals, which download and check a VSIX. Each
+/// carries the admission, and the projects home its validated request; the others read
+/// the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    IdeExtensions(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2327,6 +2361,8 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
+        Protocol::IdeExtensions => ide_extensions::refusal(code)?,
+        Protocol::Recovery => recovery::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         #[cfg(test)]

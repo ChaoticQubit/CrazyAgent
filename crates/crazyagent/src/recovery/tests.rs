@@ -1,4 +1,4 @@
-use super::{Interrupted, LastTurn, list, scan};
+use super::{Interrupted, LastTurn, RunState, list, scan};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
@@ -288,6 +288,8 @@ fn agent_running_at_stop_without_a_live_pane_is_recorded_interrupted() {
             cwd: Some(fixture.base.clone()),
             record_file: Some(fixture.base.join(format!("session-{sub}.jsonl"))),
             paused: false,
+            state: RunState::Interrupted,
+            reason: None,
         }
     );
     assert_eq!(list(&fixture.base, &fixture.project()).unwrap(), found);

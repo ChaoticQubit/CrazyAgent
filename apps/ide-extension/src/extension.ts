@@ -1,6 +1,15 @@
 import type * as vscode from "vscode";
+import { registerBaseContent } from "./base-content.js";
+import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
+import { extensions } from "./extensions.js";
 import { startLock } from "./lock.js";
+import { readonly } from "./readonly.js";
+import { sidebarAgents } from "./sidebar/agents.js";
+import { sidebarChanges } from "./sidebar/changes.js";
+import { sidebarContext } from "./sidebar/context.js";
+import { sidebarMemories } from "./sidebar/memories.js";
+import { registerChanges } from "./scm.js";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -8,7 +17,17 @@ import { startLock } from "./lock.js";
  */
 export type Feature = (context: vscode.ExtensionContext, engine: Engine) => void;
 
-const features: Feature[] = [];
+const features: Feature[] = [
+  registerBaseContent,
+  registerChanges,
+  registerComments,
+  sidebarMemories,
+  sidebarAgents,
+  sidebarChanges,
+  sidebarContext,
+  readonly,
+  extensions,
+];
 
 /**
  * Starts the settings lock, then every feature when the CrazyAgent engine launched this IDE

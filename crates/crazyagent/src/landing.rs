@@ -12,7 +12,10 @@ mod flow;
 #[cfg(unix)]
 mod git;
 #[cfg(unix)]
+pub(crate) mod ide;
+#[cfg(unix)]
 mod owner;
+pub mod owner_edit;
 #[cfg(unix)]
 mod retire;
 #[cfg(unix)]
@@ -177,7 +180,8 @@ pub enum FileKind {
 }
 
 /// A property of a changed path the owner should look at before accepting: an
-/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, or a mode change.
+/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
+/// an edit the owner made in the agent's worktree while the agent ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -186,6 +190,7 @@ pub enum FileMark {
     Attributes,
     Modules,
     Mode,
+    OwnerEdited,
 }
 
 /// One changed path. `old_path` is set for a rename.
@@ -261,7 +266,8 @@ pub fn record_worktree_start(
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
 /// fsmonitor off, and adds it to that worktree's open change set or opens one above the
 /// commit the worktree started from, or its HEAD when no start is recorded, so commits
-/// the agent made itself land too. A failed or cancelled turn commits too. Inputs: the
+/// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
+/// waiting in the worktree settle on the change set the turn end leaves open. Inputs: the
 /// store, the workspace and the turn end. Output: the change set the work now belongs
 /// to, None when nothing is pending.
 pub fn record_turn_end(
@@ -270,13 +276,17 @@ pub fn record_turn_end(
     turn: &TurnEnd,
 ) -> Result<Option<ChangeSetId>, EngineError> {
     #[cfg(unix)]
-    return flow::record(
-        db,
-        workspace,
-        turn,
-        &crate::worktrees::TREE_BOUNDS,
-        flow::now_ms()?,
-    );
+    {
+        let kept = flow::record(
+            db,
+            workspace,
+            turn,
+            &crate::worktrees::TREE_BOUNDS,
+            flow::now_ms()?,
+        )?;
+        owner_edit::settle(db, &workspace.worktree, kept.as_ref())?;
+        Ok(kept)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, workspace, turn);
@@ -313,14 +323,18 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, 
 }
 
 /// Reads one page of a change set's diff between its base and head, produced by the
-/// engine with no external diff or text conversion. Inputs: the store, the change set
-/// and the page. Output: the page.
+/// engine with no external diff or text conversion; files the owner edited in the agent's
+/// worktree before a turn end recorded them in this change set carry `OwnerEdited`.
+/// Inputs: the store, the change set and the page.
+/// Output: the page.
 pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
-        diff::page(&record.repository, &record.base, &record.head, page)
+        let mut shown = diff::page(&record.repository, &record.base, &record.head, page)?;
+        owner_edit::mark(db, &record.worktree, &record.id, &mut shown.files)?;
+        Ok(shown)
     }
     #[cfg(not(unix))]
     {

@@ -4,13 +4,17 @@ pub const FOLDER: &str = "ide";
 
 pub mod bridge;
 pub mod env;
+pub mod extensions;
+pub mod fetch;
 pub mod git;
+pub mod manifest;
 #[cfg(unix)]
 pub mod output;
 #[cfg(unix)]
 pub mod ports;
 #[cfg(unix)]
 pub mod proxy;
+pub mod readonly;
 #[cfg(unix)]
 pub mod sandbox;
 #[cfg(unix)]

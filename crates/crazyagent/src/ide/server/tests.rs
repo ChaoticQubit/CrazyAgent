@@ -888,6 +888,18 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     )
     .unwrap();
     assert_eq!(machine["chat.disableAIFeatures"], serde_json::json!(true));
+    assert_eq!(
+        machine["extensions.allowed"],
+        crate::ide::extensions::allowed_setting(data.path())["extensions.allowed"],
+        "each start writes the owner's extension pin list into the server's Remote settings"
+    );
+    assert_eq!(
+        machine["extensions.allowed"]
+            .as_object()
+            .map(|pins| pins.keys().cloned().collect::<Vec<_>>()),
+        Some(vec![crate::ide::extensions::BUILT_IN.to_owned()]),
+        "with nothing approved only the built-in is pinned"
+    );
     let text = fs::read_to_string(&profile).unwrap();
     assert!(text.contains("(local ip \"localhost:47931\")"), "{text}");
     assert!(!text.contains("47933"));

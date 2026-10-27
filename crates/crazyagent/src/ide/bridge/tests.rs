@@ -1,12 +1,17 @@
+use super::changes::change_sets;
+use super::changes::tests::{Case as ChangeCase, NOW};
 use super::*;
 use crate::engine::Engine;
 use crate::engine::owner::OwnerServer;
+use crate::landing::{AcceptOutcome, ChangeState};
 use crate::protocol::FRAME_BYTES_MAX;
 use serde_json::json;
 use std::ffi::OsStr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const HELD: Duration = Duration::from_secs(2);
 
 /// A real engine with its owner server running under a private temporary root.
 struct Case {
@@ -161,6 +166,26 @@ async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> UnixStream
     stream
 }
 
+/// A change set of a real repository in the running engine's own store, with the
+/// capability of its project. Input: the case. Output: the change set case, the owner
+/// socket and the capability's handshake.
+fn change_set(case: &Case) -> (ChangeCase, PathBuf, [u8; 37]) {
+    let changes = ChangeCase::in_store(Some(case.root.path()));
+    let capability = issue(&case.runtime, &changes.project).unwrap();
+    let socket = case.socket(&capability);
+    (changes, socket, packet(MAGIC, 0, &token(&capability)))
+}
+
+/// The handshake timeout of the case's engine, from the same files `Case::start` resolves.
+fn handshake_timeout(case: &Case) -> Duration {
+    let config = crate::config::resolve_config(
+        &case.root.path().join("global.toml"),
+        &case.root.path().join("project.toml"),
+    )
+    .unwrap();
+    Duration::from_millis(config.settings.timeout_ms)
+}
+
 /// A capability answers IDE requests for its own project only: another project, an owner
 /// request body, a call outside the IDE list and an owner handshake carrying its token are
 /// all refused, and a second project's capability is its own.
@@ -245,7 +270,15 @@ async fn ide_capability_allows_only_ide_requests_for_its_project() {
         exchange(&socket, ide, &request("alpha", owner_call)).await,
         rejected("ide_request_invalid")
     );
-    let unbuilt = json!({ "name": "ide.change_sets", "args": {} });
+    let change_sets = json!({ "name": "ide.change_sets", "args": {} });
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", change_sets)).await,
+        Some(IdeReply::Ok { data: json!([]) })
+    );
+    let unbuilt = json!({
+        "name": "ide.extension_request",
+        "args": { "id": "acme.tools", "version": "1.2.3" }
+    });
     assert_eq!(
         exchange(&socket, ide, &request("alpha", unbuilt)).await,
         rejected("ide_request_unavailable")
@@ -438,12 +471,13 @@ fn ide_frames_match_the_extension_fixture() {
 fn ide_request_bounds_are_refused() {
     let id = "0123456789abcdef0123456789abcdef";
     let refused = [
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "" } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1) } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs" } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "", "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs", "page": 0 } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 0, "text": "x" } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": " " } }),
-        json!({ "name": "ide.accept", "args": { "id": id, "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
+        json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": "x".repeat(COMMENT_BYTES_MAX + 1) } }),
+        json!({ "name": "ide.accept", "args": { "id": id, "head": "a".repeat(40), "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.extension_request", "args": { "id": "../evil", "version": "1.0.0" } }),
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),
     ];
@@ -461,6 +495,35 @@ fn ide_request_bounds_are_refused() {
     ))
     .unwrap();
     fine.validate().unwrap();
+}
+
+/// Every file tsc compiled into the extension's `out` folder ships in the embedded
+/// extension, so an import between its modules never fails inside the IDE.
+#[test]
+fn every_compiled_extension_file_is_embedded() {
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension/out");
+    let mut compiled = Vec::new();
+    let mut folders = vec![out.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else {
+                let name = path.strip_prefix(&out).unwrap().to_str().unwrap();
+                compiled.push(format!("out/{name}"));
+            }
+        }
+    }
+    compiled.sort();
+    let mut embedded: Vec<String> = EXTENSION_FILES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .filter(|name| name.starts_with("out/"))
+        .collect();
+    embedded.sort();
+    assert!(compiled.len() > 2, "{compiled:?}");
+    assert_eq!(embedded, compiled);
 }
 
 /// The extension installs as one folder named `publisher.name-version` from its
@@ -497,4 +560,84 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
         EXTENSION_FILES[1].1
     );
     assert_eq!(std::fs::read_dir(extensions.path()).unwrap().count(), 1);
+}
+
+/// An Accept slower than the handshake timeout, here because another writer holds the
+/// engine store for `HELD`, answers with the commit it landed instead of a timeout, and
+/// the owner's branch holds that commit.
+#[tokio::test]
+async fn a_slow_ide_accept_answers_with_the_commit_it_landed() {
+    let mut case = Case::start().await;
+    let (changes, socket, ide) = change_set(&case);
+    assert!(HELD > handshake_timeout(&case));
+    let set = changes.only(NOW);
+    let start = changes.owner_head();
+    let accept = json!({
+        "name": "ide.accept",
+        "args": { "id": set.id, "head": set.head, "message": "Land the agent's edits" }
+    });
+    changes.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let mut stream = send(&socket, ide, &request(changes.project.as_str(), accept)).await;
+    tokio::time::sleep(HELD).await;
+    assert_eq!(
+        changes.owner_head(),
+        start,
+        "the Accept waits for the store"
+    );
+    changes.db.execute_batch("COMMIT").unwrap();
+    let reply = read_reply(&mut stream).await;
+    assert!(started.elapsed() >= HELD);
+    let Some(IdeReply::Ok { data }) = reply else {
+        panic!("{reply:?}");
+    };
+    let landed: AcceptOutcome = serde_json::from_value(data).unwrap();
+    let AcceptOutcome::Landed { commit, branch } = landed else {
+        panic!("{landed:?}");
+    };
+    assert_eq!(branch, "main");
+    assert_ne!(commit, start);
+    assert_eq!(changes.owner_head(), commit);
+    assert!(
+        change_sets(&changes.db, &changes.project, NOW)
+            .unwrap()
+            .is_empty(),
+        "an accepted set has no group"
+    );
+    case.stop().await;
+}
+
+/// A Discard still running past the handshake timeout when its capability is revoked
+/// answers with what it did: the set is discarded and restorable until the time it names,
+/// while the revoked capability is refused from then on.
+#[tokio::test]
+async fn an_ide_discard_answers_with_its_outcome_after_its_capability_is_revoked() {
+    let mut case = Case::start().await;
+    let (changes, socket, ide) = change_set(&case);
+    assert!(HELD > handshake_timeout(&case));
+    let set = changes.only(NOW);
+    let discard = json!({ "name": "ide.discard", "args": { "id": set.id, "head": set.head } });
+    changes.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut stream = send(&socket, ide, &request(changes.project.as_str(), discard)).await;
+    tokio::time::sleep(HELD).await;
+    revoke(&case.runtime, &changes.project).unwrap();
+    changes.db.execute_batch("COMMIT").unwrap();
+    let reply = read_reply(&mut stream).await;
+    let Some(IdeReply::Ok { data }) = reply else {
+        panic!("{reply:?}");
+    };
+    let until: u64 = serde_json::from_value(data).unwrap();
+    let discarded = changes.only(until - 1);
+    assert_eq!(discarded.state, ChangeState::Discarded);
+    assert_eq!(discarded.restorable_until, Some(until));
+    assert_eq!(
+        exchange(
+            &socket,
+            ide,
+            &request(changes.project.as_str(), workspace())
+        )
+        .await,
+        rejected("ide_capability_refused")
+    );
+    case.stop().await;
 }

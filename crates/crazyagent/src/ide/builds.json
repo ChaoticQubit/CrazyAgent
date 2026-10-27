@@ -1,0 +1,30 @@
+{
+  "version": "1.143.17183",
+  "builds": {
+    "aarch64-apple-darwin": {
+      "url": "https://github.com/VSCodium/vscodium/releases/download/1.143.17183/vscodium-reh-web-darwin-arm64-1.143.17183.tar.gz",
+      "sha256": "bf9f1b87841ee4d7b15754698206eb360436bbdc2771553674e517e111b47784",
+      "bytes": 96507861
+    },
+    "x86_64-apple-darwin": {
+      "url": "https://github.com/VSCodium/vscodium/releases/download/1.143.17183/vscodium-reh-web-darwin-x64-1.143.17183.tar.gz",
+      "sha256": "6a2621bda92743da258241e5cafd7c799e7322e3c9926c53bde700a275866d13",
+      "bytes": 98186648
+    },
+    "x86_64-unknown-linux-gnu": {
+      "url": "https://github.com/VSCodium/vscodium/releases/download/1.143.17183/vscodium-reh-web-linux-x64-1.143.17183.tar.gz",
+      "sha256": "3ac6b8d71b147f0c55d1a230c6654883b401041018b44e9defa18a71c946f73e",
+      "bytes": 102751574
+    },
+    "aarch64-unknown-linux-gnu": {
+      "url": "https://github.com/VSCodium/vscodium/releases/download/1.143.17183/vscodium-reh-web-linux-arm64-1.143.17183.tar.gz",
+      "sha256": "053d93f009b72655b04f942ad65ecbc471fa7ae6d9c81e32f90555cfbe33c52b",
+      "bytes": 100314340
+    },
+    "x86_64-pc-windows-msvc": {
+      "url": "https://github.com/VSCodium/vscodium/releases/download/1.143.17183/vscodium-reh-web-win32-x64-1.143.17183.tar.gz",
+      "sha256": "8370063c99e0d46aef04b8a3f4ef6b1f45764d5cd0d250053e2d13b22b41336b",
+      "bytes": 95602953
+    }
+  }
+}

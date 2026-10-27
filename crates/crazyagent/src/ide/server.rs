@@ -1,5 +1,5 @@
 use super::ports::{self, Ports};
-use super::{env, output, proxy, sandbox, settings, token};
+use super::{env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
@@ -168,7 +168,8 @@ impl Servers {
 
     /// Opens a project's IDE server, starting it from `build` unless it already runs: the
     /// recorded ports while free, a new token, the allowlisted environment, its own process
-    /// group, its output redacted into [`LOG`], and the engine proxy in front of it. Returns
+    /// group, its output redacted into [`LOG`], its extensions brought to the owner's
+    /// approvals ([`extensions::on_server_start`]) and the engine proxy in front of it. Returns
     /// once the server listens on 127.0.0.1 and no other process holds its port. The server
     /// runs under its Seatbelt profile from [`sandbox::profile`]; where no sandbox is
     /// qualified it never starts. Inputs: the project, its canonical folder and the
@@ -226,16 +227,20 @@ impl Servers {
             let _ = token::remove(&folder);
             return Err(failure("ide_folder_unsafe"));
         };
-        let child = output::start(&folder.join(LOG), &token)
+        let started = match output::start(&folder.join(LOG), &token)
             .map_err(|_| failure("ide_state_unavailable"))
             .and_then(|output| command(&build, &folder, root, &info, output))
-            .and_then(|mut command| {
-                crate::spawn_gate::spawn(&mut command)
-                    .map_err(|_| failure("ide_server_start_failed"))
-            })
-            .inspect_err(|_| {
-                let _ = token::remove(&folder);
-            })?;
+        {
+            Ok(mut command) => match self.prepare_extensions(&build, &folder).await {
+                Ok(()) => crate::spawn_gate::spawn(&mut command)
+                    .map_err(|_| failure("ide_server_start_failed")),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        let child = started.inspect_err(|_| {
+            let _ = token::remove(&folder);
+        })?;
         let group = Pid::from_child(&child);
         assert!(group.as_raw_nonzero().get() > 1);
         record_group(&folder, group);
@@ -355,6 +360,37 @@ impl Servers {
             .values()
             .filter(|slot| locked(&slot.state).is_some())
             .count()
+    }
+
+    /// Brings a project's server extensions to the owner's approvals before it starts, after
+    /// [`command`] wrote the pin list into its Remote settings: every approved extension
+    /// installed from its verified VSIX and every other one but the built-in removed
+    /// ([`extensions::on_server_start`]), off the async runtime. A failure stops the start.
+    /// Inputs: the build root and the project's IDE folder. Output: Ok, or a plain refusal.
+    async fn prepare_extensions(&self, build: &Path, folder: &Path) -> Result<(), EngineError> {
+        let data = self
+            .folder
+            .parent()
+            .ok_or_else(|| failure("ide_state_unavailable"))?
+            .to_path_buf();
+        assert!(folder.starts_with(&self.folder));
+        let (build, extensions, home) = (
+            build.to_path_buf(),
+            folder.join(EXTENSIONS),
+            folder.join(SERVER_DATA),
+        );
+        tokio::task::spawn_blocking(move || {
+            extensions::on_server_start(
+                &data,
+                &extensions::Registry::open_vsx(),
+                &build,
+                &extensions,
+                &home,
+                crate::team::now_ms(),
+            )
+        })
+        .await
+        .map_err(|_| failure("ide_extension_install_failed"))?
     }
 
     fn prepare(&self, project: &ProjectId) -> Result<PathBuf, EngineError> {
@@ -560,7 +596,7 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let written = settings::write(folder, &home)?;
+    let written = settings::write(folder, &home, data)?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
     let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));

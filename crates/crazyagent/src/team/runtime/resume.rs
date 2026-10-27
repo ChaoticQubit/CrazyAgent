@@ -1,0 +1,491 @@
+use super::{Busy, Order, Report, TeamRuntime, error, full_stop};
+use crate::agents::Agents;
+use crate::config::ModelAccess;
+use crate::engine::EngineError;
+use crate::harnesses::interactive::{self, Support, Transcript};
+use crate::harnesses::terminal_session::{RecordSource, Resume};
+use crate::harnesses::transcript::{TranscriptReader, pending};
+use crate::project_setup::StoredSetup;
+use crate::protocol::CredentialRef;
+use crate::recovery::{self, Interrupted, RunState};
+use crate::team::master::{self, InputRefused};
+use crate::team::{AgentRole, AgentStatus, launch_harness, now_ms};
+use crate::terminal::PANES_PER_PROJECT_MAX;
+use rusqlite::{OptionalExtension, params};
+use std::collections::BTreeSet;
+use std::time::{Duration, UNIX_EPOCH};
+
+#[cfg(all(test, unix))]
+#[path = "resume/tests.rs"]
+mod tests;
+
+const RECORD_MISSING: &str = "its session record is missing";
+const RECORD_UNREADABLE: &str = "its session record can no longer be read";
+const NOT_RESUMABLE: &str = "its harness session has no id it can be resumed by";
+const NO_TERMINAL: &str = "its harness cannot resume in a terminal pane here";
+const STOPPED: &str = "it stopped before its session resumed";
+const NOTHING_WAITING: &str = "its task or message is no longer waiting";
+const LIVE_OFF: &str = "the live master is turned off";
+
+/// Where the work an interrupted run was doing stands: still waiting for the resume to
+/// hand it back, already handed to the resumed agent, or no longer the run's to finish.
+enum Work {
+    Waiting(Busy),
+    Handed,
+    Gone,
+}
+
+/// Names the harness conversation an interrupted run continues, as the harness resumes
+/// it: the id read from the exact session record the run kept, in the run's working folder.
+/// Takes the run. Returns the conversation, or the plain reason it cannot be resumed.
+pub(super) fn conversation(run: &Interrupted) -> Result<Resume, &'static str> {
+    let (Some(pane), Some(cwd), Some(file)) = (&run.record, &run.cwd, &run.record_file) else {
+        return Err(RECORD_MISSING);
+    };
+    if !file.is_file() {
+        return Err(RECORD_MISSING);
+    }
+    let source = match &pane.source {
+        RecordSource::CodexRollouts { sessions } => Transcript::CodexRollouts {
+            sessions: sessions.clone(),
+        },
+        RecordSource::ClaudeSession { file } => Transcript::ClaudeSession { file: file.clone() },
+    };
+    let reader =
+        TranscriptReader::resumed(source, cwd, file, None).map_err(|_| RECORD_UNREADABLE)?;
+    let (id, record) = reader.conversation().ok_or(RECORD_UNREADABLE)?;
+    if !interactive::resumable(&id) {
+        return Err(NOT_RESUMABLE);
+    }
+    Ok(Resume { id, record })
+}
+
+/// Writes the note an interrupted agent resumes with: when it was cut short, each command
+/// its session record started without a result, and that it verifies before it goes on,
+/// then finishes the task or answers the message it had. The commands may name secrets the
+/// agent itself used, so the note goes only to that agent and is never logged or stored.
+/// Takes the run. Returns the note, one paragraph of plain text.
+pub(super) fn note(run: &Interrupted) -> String {
+    let at = u64::try_from(run.at)
+        .ok()
+        .and_then(|ms| UNIX_EPOCH.checked_add(Duration::from_millis(ms)))
+        .unwrap_or(UNIX_EPOCH);
+    let unknown = match (&run.record, &run.cwd, &run.record_file) {
+        (Some(pane), Some(cwd), Some(record)) => pending::unknown(&pane.source, cwd, record),
+        _ => Vec::new(),
+    };
+    let outcomes = if unknown.is_empty() {
+        "No command it started is left with an unknown outcome".to_owned()
+    } else {
+        let listed: Vec<String> = unknown
+            .iter()
+            .map(|command| format!("{}: {}", command.tool, command.summary))
+            .collect();
+        format!(
+            "These commands have an unknown outcome: {}",
+            listed.join("; ")
+        )
+    };
+    let then = match (run.last_turn.task, run.last_turn.message) {
+        (Some(_), _) => {
+            " Then finish the task you were given and reply with a short summary of what you did."
+        }
+        (None, Some(_)) => " Then answer the message you were answering.",
+        (None, None) => "",
+    };
+    format!(
+        "You were interrupted at {}. {outcomes}. Verify before continuing.{then}",
+        crate::research::runner::utc_date(at)
+    )
+}
+
+impl TeamRuntime {
+    /// Resumes each interrupted run of a project in its own native harness session: a live
+    /// master gets its note once the live master is back in its conversation, any other
+    /// agent starts again in its worktree and home resuming the session it recorded, with
+    /// its held task or message and the note. A run that cannot resume is recorded failed
+    /// with its reason and waits for the owner's retry; its work never starts fresh.
+    /// Takes the setup, the live access and the paused accounts. Returns any SQLite failure.
+    pub(super) fn resume_interrupted(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        for run in recovery::open_runs(&self.connection, &stored.project_id)? {
+            match run.state {
+                RunState::Interrupted
+                    if run.kind == AgentRole::Master && run.last_turn.message.is_none() =>
+                {
+                    self.resume_live(stored, &run)?;
+                }
+                RunState::Interrupted => self.restart(stored, access, paused, &run)?,
+                RunState::Resuming => self.hand(stored, access, &run)?,
+                RunState::Resumed | RunState::Failed => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Types the note into the project's live master once it runs the run's agent again in
+    /// its kept conversation, briefed and idle; the live master's own start resumes that
+    /// conversation. Takes the setup and the run. Returns any SQLite failure.
+    fn resume_live(&mut self, stored: &StoredSetup, run: &Interrupted) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        if !master::live(&self.connection, project)? {
+            return self.fail(run, RunState::Interrupted, LIVE_OFF);
+        }
+        let Some(id) = self.master(project) else {
+            return Ok(());
+        };
+        if id != run.agent {
+            return self.fail(
+                run,
+                RunState::Interrupted,
+                "another live master runs the project now",
+            );
+        }
+        let Some(host) = self.terminal.clone() else {
+            return self.fail(run, RunState::Interrupted, NO_TERMINAL);
+        };
+        let worker = &self.workers[&id];
+        if !worker.live || !worker.briefed || worker.stopping {
+            return Ok(());
+        }
+        let typed = master::master_input(
+            &self.connection,
+            host.as_ref(),
+            self.agents.as_deref().map(Agents::typing),
+            project,
+            &note(run),
+        );
+        match typed {
+            Ok(()) => {
+                recovery::mark(
+                    &self.connection,
+                    run.id,
+                    RunState::Interrupted,
+                    RunState::Resumed,
+                    None,
+                )?;
+                Ok(())
+            }
+            Err(InputRefused::Invalid) => self.fail(
+                run,
+                RunState::Interrupted,
+                "its note could not be typed into the master",
+            ),
+            Err(InputRefused::Failed(code)) => self.fail(
+                run,
+                RunState::Interrupted,
+                &format!("its note could not be typed into the master: {code}"),
+            ),
+            Err(InputRefused::NoMaster | InputRefused::Busy | InputRefused::OwnerTyping) => Ok(()),
+        }
+    }
+
+    /// Starts a stopped agent again under its own id, worktree and home, resuming the
+    /// harness session its run recorded, then hands it the run's work. Waits while the
+    /// agent still runs or the team has no room; fails the run when it cannot resume.
+    /// Takes the setup, live access, paused accounts and the run. Returns any SQLite failure.
+    fn restart(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+        run: &Interrupted,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        if self.workers.contains_key(&run.agent) {
+            return Ok(());
+        }
+        let resume = match conversation(run) {
+            Ok(resume) => resume,
+            Err(reason) => return self.fail(run, RunState::Interrupted, reason),
+        };
+        let terminal = launch_harness(&run.harness)
+            .is_some_and(|launch| interactive::support(launch) == Support::Terminal);
+        if self.terminal.is_none() || !terminal {
+            return self.fail(run, RunState::Interrupted, NO_TERMINAL);
+        }
+        let Work::Waiting(busy) = self.work(run)? else {
+            return self.fail(run, RunState::Interrupted, NOTHING_WAITING);
+        };
+        let tools = match run.kind {
+            AgentRole::Sub => {
+                let Some(slot) = super::super::slot(&stored.team, &run.harness) else {
+                    return self.fail(
+                        run,
+                        RunState::Interrupted,
+                        "the team plan no longer has its harness",
+                    );
+                };
+                let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
+                if self.live(project, AgentRole::Sub, Some(&run.harness))
+                    >= usize::from(slot.agents)
+                    || self.live(project, AgentRole::Sub, None) >= subs_max
+                {
+                    return Ok(());
+                }
+                slot.tools
+            }
+            AgentRole::Master => {
+                if stored.team.master != run.harness {
+                    return self.fail(
+                        run,
+                        RunState::Interrupted,
+                        "the team plan has another master harness now",
+                    );
+                }
+                if master::live(&self.connection, project)? {
+                    return self.fail(run, RunState::Interrupted, "the master runs live now");
+                }
+                if self.master(project).is_some() {
+                    return Ok(());
+                }
+                stored.team.master_tools
+            }
+        };
+        if self.panes(project) >= PANES_PER_PROJECT_MAX {
+            return Ok(());
+        }
+        let account = match self.account_for(access, project, &run.harness, paused) {
+            Ok(account) => account,
+            Err(reason) => {
+                return self.fail(
+                    run,
+                    RunState::Interrupted,
+                    &format!("no account can run it: {reason}"),
+                );
+            }
+        };
+        self.resuming = Some((run.agent, resume));
+        let revived = self.revive(stored, run.agent, run.kind, &run.harness, tools, &account);
+        self.resuming = None;
+        if let Err(reason) = revived? {
+            return self.fail(
+                run,
+                RunState::Interrupted,
+                &format!("it could not start again: {reason}"),
+            );
+        }
+        self.workers
+            .get_mut(&run.agent)
+            .expect("a revived agent has a worker")
+            .busy = Some(busy);
+        recovery::mark(
+            &self.connection,
+            run.id,
+            RunState::Interrupted,
+            RunState::Resuming,
+            None,
+        )?;
+        self.hand(stored, access, run)
+    }
+
+    /// Hands a restarted agent its run's work with the note, once: the turn goes out with a
+    /// signed-in account's profile when its account is managed, and the work is marked
+    /// handed without a new attempt. A profile still in use waits for the next tick.
+    /// Takes the setup, live access and the run. Returns any SQLite failure.
+    fn hand(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        run: &Interrupted,
+    ) -> Result<(), EngineError> {
+        let Some(worker) = self.workers.get(&run.agent) else {
+            return self.fail(run, RunState::Resuming, STOPPED);
+        };
+        if worker.stopping {
+            return Ok(());
+        }
+        let managed = worker.managed;
+        let busy = match self.work(run)? {
+            Work::Waiting(busy) => busy,
+            Work::Handed => return Ok(()),
+            Work::Gone => {
+                self.stop(run.agent);
+                return self.fail(run, RunState::Resuming, NOTHING_WAITING);
+            }
+        };
+        let grant = if managed {
+            match self.grant(access, run.agent, &stored.project_id) {
+                Ok(Some(grant)) => Some(grant),
+                Ok(None) => return Ok(()),
+                Err(reason) => {
+                    self.stop(run.agent);
+                    return self.fail(
+                        run,
+                        RunState::Resuming,
+                        &format!("its account could not be handed to it: {reason}"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let worker = self
+            .workers
+            .get_mut(&run.agent)
+            .expect("the restarted agent has a worker");
+        assert_eq!(worker.busy, Some(busy));
+        if worker.orders.send(Order::Turn(note(run), grant)).is_err() {
+            return Ok(());
+        }
+        match busy {
+            Busy::Task(task) => {
+                self.connection
+                    .execute(
+                        "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL
+                         WHERE id=?1 AND status='queued'",
+                        params![task, run.agent, now_ms()],
+                    )
+                    .map_err(error)?;
+                self.mark_agent(run.agent, AgentStatus::Working, Some(task))
+            }
+            Busy::Message(message) => {
+                self.connection
+                    .execute(
+                        "UPDATE team_messages SET state='sent' WHERE id=?1 AND state='pending'",
+                        [message],
+                    )
+                    .map_err(error)?;
+                self.mark_agent(run.agent, AgentStatus::Working, None)
+            }
+        }
+    }
+
+    /// Follows one worker report for recovery before the runtime applies it: an agent that
+    /// starts its harness for each turn keeps that turn's session record while it runs, and
+    /// a run being resumed is resumed once its session is ready, or put back when its
+    /// session ended first: failed with the reason, or waiting again when the team paused.
+    /// Takes the agent and the report. Returns any SQLite failure.
+    pub(super) fn follow_resume(&mut self, id: i64, report: &Report) -> Result<(), EngineError> {
+        if !matches!(
+            report,
+            Report::Ready { .. } | Report::Finished { .. } | Report::Ended { .. }
+        ) {
+            return Ok(());
+        }
+        let Some(worker) = self.workers.get(&id) else {
+            return Ok(());
+        };
+        let per_turn = worker.managed && !worker.live;
+        match report {
+            Report::Ready {
+                pane: Some(record), ..
+            } if per_turn => recovery::remember(&self.connection, id, record)?,
+            Report::Finished { .. } if per_turn => recovery::forget(&self.connection, id)?,
+            Report::Ended { .. } => recovery::forget(&self.connection, id)?,
+            _ => {}
+        }
+        let Some(run) = recovery::resuming(&self.connection, id)? else {
+            return Ok(());
+        };
+        let cause = match report {
+            Report::Ready { .. } => {
+                recovery::mark(
+                    &self.connection,
+                    run.id,
+                    RunState::Resuming,
+                    RunState::Resumed,
+                    None,
+                )?;
+                return Ok(());
+            }
+            Report::Finished { cause, .. } => cause.as_deref(),
+            Report::Ended { problem } => problem.as_deref(),
+            _ => return Ok(()),
+        };
+        let worker = self.workers.get_mut(&id).expect("worker exists");
+        let held = worker.held;
+        if let Some(busy) = worker.busy.take() {
+            self.release(busy)?;
+        }
+        if held {
+            recovery::mark(
+                &self.connection,
+                run.id,
+                RunState::Resuming,
+                RunState::Interrupted,
+                None,
+            )?;
+            return Ok(());
+        }
+        let reason = format!(
+            "its session did not resume: {}",
+            cause.unwrap_or("its harness stopped")
+        );
+        self.fail(&run, RunState::Resuming, &reason)
+    }
+
+    /// Reads where the run's task or message stands. Takes the run. Returns it.
+    fn work(&self, run: &Interrupted) -> Result<Work, EngineError> {
+        match (run.last_turn.task, run.last_turn.message) {
+            (Some(task), _) => {
+                let row: Option<(String, Option<i64>)> = self
+                    .connection
+                    .query_row(
+                        "SELECT status,agent FROM team_tasks WHERE id=?1 AND project=?2",
+                        params![task, run.project.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(error)?;
+                Ok(match row {
+                    Some((status, _)) if status == "queued" => Work::Waiting(Busy::Task(task)),
+                    Some((status, Some(agent))) if status == "running" && agent == run.agent => {
+                        Work::Handed
+                    }
+                    _ => Work::Gone,
+                })
+            }
+            (None, Some(message)) => {
+                let state: Option<String> = self
+                    .connection
+                    .query_row(
+                        "SELECT state FROM team_messages WHERE id=?1 AND project=?2",
+                        params![message, run.project.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(error)?;
+                Ok(match state.as_deref() {
+                    Some("pending") => Work::Waiting(Busy::Message(message)),
+                    Some("sent") => Work::Handed,
+                    _ => Work::Gone,
+                })
+            }
+            (None, None) => Ok(Work::Gone),
+        }
+    }
+
+    /// Stops a restarted agent that will not get its run's work, freeing what it held.
+    fn stop(&mut self, id: i64) {
+        let worker = self.workers.get_mut(&id).expect("worker exists");
+        worker.busy = None;
+        worker.stopping = true;
+        let _ = worker.orders.send(Order::Stop);
+    }
+
+    /// Records a run's resume failed with its reason and tells the project once, so the
+    /// owner can retry it. Takes the run, the state it is in and the plain reason.
+    /// Returns any SQLite failure.
+    fn fail(&mut self, run: &Interrupted, from: RunState, reason: &str) -> Result<(), EngineError> {
+        if recovery::mark(
+            &self.connection,
+            run.id,
+            from,
+            RunState::Failed,
+            Some(reason),
+        )? {
+            self.note(
+                &run.project,
+                &full_stop(format!(
+                    "An agent cut short when CrazyAgent stopped could not resume: {reason}"
+                )),
+            )?;
+        }
+        Ok(())
+    }
+}

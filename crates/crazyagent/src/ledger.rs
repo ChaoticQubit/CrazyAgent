@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
@@ -17,8 +18,9 @@ pub const PENDING_MAX: usize = 512;
 pub const FINISHED_KEPT: usize = 1024;
 
 /// The engine actions the ledger records before their effect, so a restart can tell
-/// whether each one happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// whether each one happened. On the owner wire each is its stored snake_case name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     Message,
     Dispatch,
@@ -65,12 +67,21 @@ pub trait Check {
     fn check(&self, action: &Action) -> Resolution;
 }
 
-/// The pending actions of one kind after a check: those to complete now, and those
-/// whose outcome is unknown, which are shown to the owner and never replayed.
+/// The pending actions of one kind after a check. Finished: those whose effect happened,
+/// and those that never started, which the caller completes as new actions. Still pending:
+/// those whose outcome is unknown, which are shown to the owner and never replayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    pub done: Vec<Action>,
     pub not_started: Vec<Action>,
     pub unknown: Vec<Action>,
+}
+
+impl ActionId {
+    /// The number the ledger stores for this action, which the owner names to dismiss it.
+    pub fn get(self) -> i64 {
+        self.0
+    }
 }
 
 impl ActionKind {
@@ -111,8 +122,15 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     }
     let db = Connection::open(runtime.join("engine.db")).map_err(storage)?;
     db.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
-    store::initialize(&db)?;
+    initialize(&db)?;
     Ok(db)
+}
+
+/// Adds the ledger table to a connection of the engine database when missing, for a
+/// component that already holds one. Input: the connection. Output: done, or
+/// `ledger_unavailable`.
+pub fn initialize(db: &Connection) -> Result<(), EngineError> {
+    store::initialize(db)
 }
 
 /// Records the intent of an action before its effect runs. Inputs: the ledger, the kind,
@@ -140,7 +158,39 @@ pub fn begin(
 /// Inputs: the ledger, the action id and its outcome. Output: Ok, or `ledger_finished`
 /// when it already ended, or `ledger_missing` when no such action is kept.
 pub fn finish(db: &Connection, id: ActionId, outcome: Outcome) -> Result<(), EngineError> {
-    store::finish(db, id, outcome, crate::team::now_ms())
+    store::finish(db, None, id, outcome, crate::team::now_ms())
+}
+
+/// What the owner is shown for a pending action that waits for the owner, not a check: a
+/// notice whose payload holds `"unknown": true` shows Unknown, and an interrupted Accept
+/// listed with `"landed"` shows Done when it landed and Failed when it was dropped.
+/// Input: the action. Output: that outcome, none for an intent a check still settles.
+pub fn notice(action: &Action) -> Option<Outcome> {
+    let payload = serde_json::from_str::<serde_json::Value>(&action.payload).ok()?;
+    if payload.get("unknown") == Some(&serde_json::Value::Bool(true)) {
+        return Some(Outcome::Unknown);
+    }
+    match (action.kind, payload.get("landed")?.as_bool()?) {
+        (ActionKind::LandingAccept, true) => Some(Outcome::Done),
+        (ActionKind::LandingAccept, false) => Some(Outcome::Failed),
+        _ => None,
+    }
+}
+
+/// Closes one notice once the owner dismisses it, with the outcome `notice` says the owner
+/// was shown. Inputs: the ledger, and the kind and number the owner names. Output: that
+/// outcome, or `ledger_not_notice` for an intent a check still settles, `ledger_finished`
+/// when it already ended, or `ledger_missing` when no action of that kind has that number.
+pub fn dismiss(db: &Connection, kind: ActionKind, id: i64) -> Result<Outcome, EngineError> {
+    let Some(action) = pending(db, kind)?
+        .into_iter()
+        .find(|action| action.id.0 == id)
+    else {
+        return Err(store::ended(db, Some(kind), ActionId(id))?);
+    };
+    let shown = notice(&action).ok_or_else(|| failure("ledger_not_notice"))?;
+    store::finish(db, Some(kind), action.id, shown, crate::team::now_ms())?;
+    Ok(shown)
 }
 
 /// The pending actions of one kind, oldest first: intents recorded with no outcome, whose
@@ -150,26 +200,44 @@ pub fn pending(db: &Connection, kind: ActionKind) -> Result<Vec<Action>, EngineE
     store::pending(db, kind)
 }
 
-/// Checks every pending action of one kind against real state: a Done action is
-/// finished, a NotStarted one is returned to be completed, and an Unknown one stays
-/// pending, so each start shows it to the owner again until `finish(Outcome::Unknown)`
-/// closes it; it is never returned for replay. Inputs: the ledger, the kind and the
-/// check. Output: the actions to complete and the unknown ones.
+/// The pending action of one kind and key, if any. Inputs: the ledger, the kind and the
+/// key. Output: the action, or none when nothing of that key is pending.
+pub fn pending_key(
+    db: &Connection,
+    kind: ActionKind,
+    key: &str,
+) -> Result<Option<Action>, EngineError> {
+    store::pending_key(db, kind, key)
+}
+
+/// Checks every pending action of one kind against real state: a Done action is finished
+/// as done, a NotStarted one as failed, since its effect never happened and the caller
+/// completes it as a new action, and an Unknown one stays pending, so each start shows it
+/// to the owner again until `finish(Outcome::Unknown)` closes it; it is never returned for
+/// replay. Call it inside the transaction that acts on the lists, so a crash cannot finish
+/// an action and lose what the caller must do with it. Inputs: the ledger, the kind and
+/// the check. Output: the checked actions by resolution.
 pub fn resolve(
     db: &Connection,
     kind: ActionKind,
     check: &impl Check,
 ) -> Result<Resolved, EngineError> {
     let mut resolved = Resolved {
+        done: Vec::new(),
         not_started: Vec::new(),
         unknown: Vec::new(),
     };
     for action in pending(db, kind)? {
-        match check.check(&action) {
-            Resolution::Done => finish(db, action.id, Outcome::Done)?,
-            Resolution::NotStarted => resolved.not_started.push(action),
-            Resolution::Unknown => resolved.unknown.push(action),
-        }
+        let (outcome, list) = match check.check(&action) {
+            Resolution::Done => (Outcome::Done, &mut resolved.done),
+            Resolution::NotStarted => (Outcome::Failed, &mut resolved.not_started),
+            Resolution::Unknown => {
+                resolved.unknown.push(action);
+                continue;
+            }
+        };
+        finish(db, action.id, outcome)?;
+        list.push(action);
     }
     Ok(resolved)
 }
