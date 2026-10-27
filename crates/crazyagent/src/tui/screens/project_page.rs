@@ -182,6 +182,7 @@ pub(in crate::tui) struct ProjectPage {
     waiting: Option<Waiting>,
     retried: bool,
     renewed: bool,
+    live_shown: bool,
 }
 
 impl ProjectPage {
@@ -205,12 +206,36 @@ impl ProjectPage {
             waiting: None,
             retried: false,
             renewed: false,
+            live_shown: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
         page.screen.transcript = page.transcript();
         page.redraw(ctx);
         page
+    }
+
+    /// Opens the master's live terminal the first time the Conversation tab
+    /// shows for a master harness that runs its own app; going back from it
+    /// leaves the earlier conversation readable on this tab.
+    /// Input: none. Output: the flow opening the master view, or None.
+    fn live_master(&mut self) -> Option<Flow> {
+        if self.screen.tab != Tab::Conversation {
+            self.live_shown = false;
+            return None;
+        }
+        let live = self.screen.setup.as_ref().is_some_and(|setup| {
+            crate::harnesses::interactive::support(&setup.team.master)
+                == crate::harnesses::interactive::Support::Terminal
+        });
+        if !live || self.live_shown {
+            return None;
+        }
+        self.live_shown = true;
+        Some(Flow::Open(Place::Master {
+            id: self.screen.project.clone(),
+            name: self.screen.name.clone(),
+        }))
     }
 
     fn select_master(&mut self, ctx: &Ctx) {
@@ -781,7 +806,10 @@ impl ProjectPage {
         self.pump(ctx);
         self.say_problem(ctx);
         self.redraw(ctx);
-        flow
+        match flow {
+            Flow::Handled => self.live_master().unwrap_or(Flow::Handled),
+            other => other,
+        }
     }
 
     fn changes_have_keys(&self) -> bool {
@@ -918,7 +946,7 @@ impl Screen for ProjectPage {
         self.pump(ctx);
         self.say_problem(ctx);
         self.redraw(ctx);
-        Flow::Handled
+        self.live_master().unwrap_or(Flow::Handled)
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {

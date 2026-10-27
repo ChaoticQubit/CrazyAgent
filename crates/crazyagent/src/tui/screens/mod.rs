@@ -176,6 +176,10 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    Master {
+        id: ProjectId,
+        name: String,
+    },
     HomeFolder {
         first_run: bool,
     },
@@ -332,6 +336,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
