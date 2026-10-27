@@ -62,6 +62,9 @@ pub(in crate::tui) enum SettingsJob {
     ProjectPlugins {
         project: ProjectId,
     },
+    SkillDetail {
+        id: String,
+    },
     Plugin(PluginChange),
     AppSetup(AppSetupJob),
 }
@@ -136,6 +139,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
             Self::ProjectPlugins { .. } => "ProjectPlugins",
+            Self::SkillDetail { .. } => "SkillDetail",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
         })
@@ -232,6 +236,7 @@ pub(in crate::tui) enum SettingsEvent {
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
+    SkillDetail(Result<crate::skills::SkillDetail, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
 }
@@ -258,6 +263,7 @@ impl SettingsEvent {
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
+            SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
         }
@@ -378,6 +384,15 @@ impl NativeOwner {
                 project.clone(),
                 self.plugins(Some(project), lost).await,
             ),
+            SettingsJob::SkillDetail { id } => {
+                SettingsEvent::SkillDetail(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .skill_detail(id, None)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
@@ -1512,6 +1527,22 @@ mod tests {
         };
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].on_here, None, "Settings shows no project switch");
+        assert_eq!(skills[0].line, "Teaches release notes.");
+        match native
+            .settings(SettingsJob::SkillDetail {
+                id: skills[0].id.clone(),
+            })
+            .await
+        {
+            SettingsEvent::SkillDetail(Ok(detail)) => {
+                assert_eq!(detail.skill.id, skills[0].id);
+                assert!(detail.text.ends_with("\n\nSteps.\n"), "{}", detail.text);
+                let files: Vec<&str> = detail.files.iter().map(|file| file.path.as_str()).collect();
+                assert_eq!(files, vec!["SKILL.md"]);
+            }
+            SettingsEvent::SkillDetail(Err(code)) => panic!("skill detail failed: {code}"),
+            _ => panic!("a skill detail reply required"),
+        }
 
         let switched = native
             .settings(SettingsJob::Plugin(PluginChange::Switch {

@@ -10,6 +10,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         id: format!("skill-{name}"),
         name: name.into(),
         description: format!("How to do {name} work."),
+        line: format!("How to do {name} work."),
         scope: Scope::Global,
         scope_label: Scope::Global.label().into(),
         enabled,
