@@ -382,11 +382,12 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
 /// Refuses a change set past the bounds `check_bounds` applies to a worktree, whatever
 /// put the change in git: too many changed paths, a path too deep, too long or not
 /// UTF-8, too many bytes in the changed files, or a file added since `fresh` that the
-/// ignore rules exclude, which `add -A` never takes.
-/// Inputs: the repository, the trees the set spans, the tree its newest part starts
-/// from and the bounds. Output: Ok within the bounds.
+/// owner's ignore rules exclude, which `add -A` never takes.
+/// Inputs: the repository, the owner's checkout, the trees the set spans, the tree its
+/// newest part starts from and the bounds. Output: Ok within the bounds.
 fn check_change(
     repo: &Repo,
+    checkout: &Path,
     from: &str,
     to: &str,
     fresh: &str,
@@ -451,7 +452,7 @@ fn check_change(
         let since: BTreeSet<&[u8]> = since.split(|byte| *byte == 0).collect();
         added.retain(|path| since.contains(path.as_bytes()));
     }
-    if ignores_any(repo, &added)? {
+    if ignores_any(checkout, &added)? {
         return Err(failure("changes_ignored_files"));
     }
     Ok(())
@@ -488,16 +489,18 @@ fn blob_bytes(repo: &Repo, blobs: &[&str]) -> Result<u64, EngineError> {
     Ok(sizes.into_iter().fold(0, u64::saturating_add))
 }
 
-/// Tells whether the worktree's ignore rules exclude any of `paths`, tracked or not.
-/// Each name goes in behind `./`, since check-ignore takes no literal magic and would
-/// read a name starting with `:` as pathspec magic. Inputs: the repository and the
-/// paths. Output: the answer.
-fn ignores_any(repo: &Repo, paths: &[&str]) -> Result<bool, EngineError> {
+/// Tells whether the owner's ignore rules exclude any of `paths`, tracked or not: the
+/// rules in the owner's checkout, never files in the agent's worktree, which the agent
+/// can rewrite and hide with skip-worktree. Each name goes in behind `./`, since
+/// check-ignore takes no literal magic and would read a name starting with `:` as
+/// pathspec magic. Inputs: the owner's checkout and the paths. Output: the answer.
+fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
     if paths.is_empty() {
         return Ok(false);
     }
+    let owner = Repo::open(&checkout.join(".git"), Some(checkout))?;
     let input: String = paths.iter().map(|path| format!("./{path}\0")).collect();
-    let output = repo.exec(
+    let output = owner.exec(
         &["check-ignore", "-z", "--stdin", "--no-index"],
         Some(input.as_bytes()),
         &[],
@@ -513,11 +516,12 @@ fn ignores_any(repo: &Repo, paths: &[&str]) -> Result<bool, EngineError> {
 /// Stages everything in an agent worktree and makes it a commit object above `head`
 /// without moving any ref, or nothing when the tree equals `head`'s. The whole change
 /// set from `above` must stay within the bounds, staged files included.
-/// Inputs: the worktree, its root, the set's start, HEAD, the bounds and the message.
-/// Output: the commit.
+/// Inputs: the worktree, its root, the owner's checkout, the set's start, HEAD, the
+/// bounds and the message. Output: the commit.
 fn commit_worktree(
     repo: &Repo,
     worktree: &Path,
+    checkout: &Path,
     above: &str,
     head: &str,
     bounds: &TreeBounds,
@@ -529,7 +533,7 @@ fn commit_worktree(
     if tree == repo.tree_of(head)? {
         return Ok(None);
     }
-    if let Err(refusal) = check_change(repo, above, &tree, head, bounds) {
+    if let Err(refusal) = check_change(repo, checkout, above, &tree, head, bounds) {
         repo.run(&["read-tree", head])?;
         return Err(refusal);
     }
@@ -601,7 +605,7 @@ pub(super) fn record(
         .as_ref()
         .map_or(base.as_str(), |record| record.head.as_str());
     if above != head {
-        check_change(&repo, above, &head, fresh, bounds)?;
+        check_change(&repo, &workspace.repository, above, &head, fresh, bounds)?;
     }
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
     let line = subject(&turn.prompt_line, &roots);
@@ -610,7 +614,15 @@ pub(super) fn record(
         if line.is_empty() { "Agent turn" } else { &line },
         store::outcome_name(turn.outcome)
     );
-    let committed = commit_worktree(&repo, &workspace.worktree, above, &head, bounds, &message)?;
+    let committed = commit_worktree(
+        &repo,
+        &workspace.worktree,
+        &workspace.repository,
+        above,
+        &head,
+        bounds,
+        &message,
+    )?;
     let mut record = match open {
         None if committed.is_none() && head == base => return Ok(None),
         None => Record {

@@ -1058,14 +1058,15 @@ fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_change
         prompt_line: "Past the bounds".into(),
     };
     let long = "x".repeat(1025);
-    let ignore_env = |case: &Case| {
-        case.edit(".gitignore", "secret.env\n");
+    let skip_worktree_env = |case: &Case| {
+        case.agent(&["update-index", "--skip-worktree", ".gitignore"]);
+        case.edit(".gitignore", "");
         case.edit("secret.env", "TOKEN=x\n");
-        case.agent(&["add", "-f", "secret.env"]);
     };
-    let cases: Vec<(&str, Box<dyn Fn(&Case) + '_>, &str)> = vec![
+    let cases: Vec<(&str, &str, Box<dyn Fn(&Case) + '_>, &str)> = vec![
         (
             "a committed blob past the byte bound",
+            "",
             Box::new(|case| {
                 case.edit("large.txt", &"x".repeat(65));
                 case.agent_commit("Add a large file");
@@ -1074,6 +1075,7 @@ fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_change
         ),
         (
             "a committed path past the depth bound",
+            "",
             Box::new(|case| {
                 case.edit("one/two/three/deep.txt", "x");
                 case.agent_commit("Add a deep file");
@@ -1082,6 +1084,7 @@ fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_change
         ),
         (
             "a committed path past the length bound",
+            "",
             Box::new(|case| {
                 case.agent_plumbing_commit(long.as_bytes(), "x");
             }),
@@ -1089,23 +1092,26 @@ fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_change
         ),
         (
             "a committed path that is not UTF-8",
+            "",
             Box::new(|case| {
                 case.agent_plumbing_commit(b"bad-\xff.txt", "x");
             }),
             "changes_git_unsupported",
         ),
         (
-            "a committed file the ignore rules exclude",
+            "a committed file the owner's ignore rules exclude",
+            "secret.env\n",
             Box::new(|case| {
-                ignore_env(case);
+                case.edit("secret.env", "TOKEN=x\n");
+                case.agent(&["add", "-f", "secret.env"]);
                 case.agent_commit("Add the env file");
             }),
             "changes_ignored_files",
         ),
         (
-            "a committed file named like pathspec magic the ignore rules exclude",
+            "a committed file named like pathspec magic the owner's ignore rules exclude",
+            ":*\n",
             Box::new(|case| {
-                case.edit(".gitignore", ":*\n");
                 case.edit(":(top)keep.txt", "x");
                 case.agent(&["add", "-f", ":(literal):(top)keep.txt"]);
                 case.agent_commit("Add a file named like magic");
@@ -1113,17 +1119,36 @@ fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_change
             "changes_ignored_files",
         ),
         (
-            "a staged file the ignore rules exclude",
+            "a staged file the owner's ignore rules exclude",
+            "secret.env\n",
             Box::new(|case| {
-                case.edit(".gitignore", "secret.env\n");
-                case.agent_commit("Ignore the env file");
-                ignore_env(case);
+                case.edit("secret.env", "TOKEN=x\n");
+                case.agent(&["add", "-f", "secret.env"]);
+            }),
+            "changes_ignored_files",
+        ),
+        (
+            "a file the agent un-ignored behind a skip-worktree .gitignore",
+            "secret.env\n",
+            Box::new(skip_worktree_env),
+            "changes_ignored_files",
+        ),
+        (
+            "a committed file the agent un-ignored behind a skip-worktree .gitignore",
+            "secret.env\n",
+            Box::new(|case| {
+                skip_worktree_env(case);
+                case.agent_commit("Add the env file");
             }),
             "changes_ignored_files",
         ),
     ];
-    for (what, make, code) in cases {
+    for (what, rules, make, code) in cases {
         let case = Case::new();
+        if !rules.is_empty() {
+            case.owner_commit(".gitignore", rules, "Ignore files");
+            case.agent(&["checkout", "-q", "--detach", "main"]);
+        }
         case.start();
         make(&case);
         let head = case.agent_head();
