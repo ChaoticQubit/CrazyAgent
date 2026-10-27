@@ -128,7 +128,7 @@ impl AgentStatus {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|status| status.name() == value)
     }
 

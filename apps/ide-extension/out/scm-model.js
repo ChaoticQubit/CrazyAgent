@@ -1,12 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMENT_SENT = exports.REFUSAL_CODES = exports.BASE_SCHEME = void 0;
+exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.BASE_SCHEME = void 0;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
 exports.acceptedNote = acceptedNote;
 exports.basePath = basePath;
 exports.parseBasePath = parseBasePath;
 exports.scmGroups = scmGroups;
+exports.commentSent = commentSent;
+exports.commentTooLong = commentTooLong;
 exports.commentTarget = commentTarget;
 exports.commentRefusal = commentRefusal;
 exports.BASE_SCHEME = "crazyagent-base";
@@ -144,23 +146,34 @@ function scmGroups(sets, now) {
     return groups;
 }
 const COMMENT_STATES = new Set(["pending", "conflict", "updating"]);
+exports.COMMENT_BYTES_MAX = 2048;
 const COMMENT_REFUSALS = {
     changes_closed: "These changes were already accepted or discarded, so the agent can't act on this comment.",
+    ide_comment_master_unavailable: "Comments here reach team agents only. Write to this master in its conversation in CrazyAgent.",
+    ide_comment_too_long: "This comment is too long. Shorten it and send it again.",
+    team_agent_not_found: "That agent is no longer part of this team.",
+    team_agent_not_running: "That agent isn't running, so it can't read this comment. Start it again, then send the comment.",
+    team_agent_unreachable: "The agent's terminal didn't take this comment. Try again.",
     team_conversation_full: "Too many of your messages are waiting for the master. Send more once it has answered.",
     team_message_invalid: "The message is empty or too long.",
     project_setup_missing: "This project was created before project setup existed.",
 };
-exports.COMMENT_SENT = "Sent to the team conversation with its file and line.";
+function commentSent(agent) {
+    return `Sent to ${plainLine(agent)} with its file and line.`;
+}
+function commentTooLong(text) {
+    return new TextEncoder().encode(text).length > exports.COMMENT_BYTES_MAX;
+}
 function commentTarget(sets, fsPath) {
     for (const set of sets) {
-        if (!COMMENT_STATES.has(set.state) || set.problem !== null)
+        if (!COMMENT_STATES.has(set.state) || set.problem !== null || set.role !== "sub")
             continue;
         const root = `${set.worktree.replace(/\/+$/, "")}/`;
         if (!fsPath.startsWith(root))
             continue;
         const path = fsPath.slice(root.length);
         if (set.files.some((file) => file.path === path && file.status !== "deleted"))
-            return { id: set.id, path };
+            return { id: set.id, path, agent: set.agent };
     }
     return null;
 }

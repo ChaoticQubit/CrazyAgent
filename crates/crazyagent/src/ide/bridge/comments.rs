@@ -1,21 +1,30 @@
-use super::IdeCall;
 use super::changes::{agent_name, title};
+use super::{COMMENT_BYTES_MAX, IdeCall};
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
-use crate::landing::{self, ChangeSetId, ChangeState, FileStatus};
+use crate::landing::{self, AgentKind, ChangeSetId, ChangeState, FileStatus};
 use crate::protocol::{Outcome, ProjectId};
-use crate::team::TeamAction;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use crate::team::events::{SEND_BYTES_MAX, plain_brackets, send_to_agent};
+use crate::team::{AgentStatus, MESSAGE_BYTES_MAX, TeamAction, bound_text};
+use crate::terminal::Host;
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-const SHOWN_CHARS_MAX: usize = 200;
+const AGENT_BYTES_MAX: usize = 128;
+const TITLE_BYTES_MAX: usize = 256;
+const PATH_BYTES_MAX: usize = 1024;
+const HEADER_BYTES_MAX: usize = AGENT_BYTES_MAX + TITLE_BYTES_MAX + PATH_BYTES_MAX + 64;
+const _: () = assert!(HEADER_BYTES_MAX + COMMENT_BYTES_MAX <= SEND_BYTES_MAX);
+const _: () = assert!(SEND_BYTES_MAX <= MESSAGE_BYTES_MAX);
 
 /// Answers `ide.comment` on a blocking thread, as the other Changes calls run. Inputs: the
-/// engine root holding `engine.db`, the project and the call. Output: null once the
-/// comment is in the team conversation, or the refusal.
+/// engine root holding `engine.db`, the engine's terminal host when it has one, the project
+/// and the call. Output: null once the comment reached the set's agent, or the refusal.
 pub(crate) async fn answer(
     root: PathBuf,
+    host: Option<Arc<dyn Host>>,
     project: ProjectId,
     call: IdeCall,
 ) -> Result<serde_json::Value, EngineError> {
@@ -30,7 +39,7 @@ pub(crate) async fn answer(
     };
     tokio::task::spawn_blocking(move || {
         let db = landing::open(&root)?;
-        comment(&db, &project, &id, &path, line, &text)?;
+        comment(&db, host.as_deref(), &project, &id, &path, line, &text)?;
         Ok(serde_json::Value::Null)
     })
     .await
@@ -38,10 +47,11 @@ pub(crate) async fn answer(
 }
 
 /// Engine or agent text as one plain line inside the message: control characters become
-/// U+FFFD and it is cut at `SHOWN_CHARS_MAX` characters. Input: the text. Output: the line.
-fn shown(text: &str) -> String {
-    text.chars()
-        .take(SHOWN_CHARS_MAX)
+/// U+FFFD, square brackets and their look-alikes become parentheses so no `[owner]` tag can
+/// show, and it is cut to `max` bytes. Inputs: the text and the bound. Output: the line.
+fn shown(text: &str, max: usize) -> String {
+    let plain: String = text
+        .chars()
         .map(|character| {
             if character.is_control() {
                 '\u{fffd}'
@@ -49,30 +59,39 @@ fn shown(text: &str) -> String {
                 character
             }
         })
-        .collect()
+        .collect();
+    bound_text(&plain_brackets(&plain), max)
 }
 
 /// The one message a comment becomes: whose changes, which ones, the file and line, then
-/// the owner's words with Windows line ends made plain. Inputs: the agent, the set's title,
-/// the path, the line and the comment. Output: the message text.
+/// the owner's words with Windows and old Mac line ends made plain. Inputs: the agent, the
+/// set's title, the path, the line and the comment. Output: the message text.
 fn message(agent: &str, title: &str, path: &str, line: u32, text: &str) -> String {
+    let header = format!(
+        "On {}'s changes \"{}\", {} line {line}:",
+        shown(agent, AGENT_BYTES_MAX),
+        shown(title, TITLE_BYTES_MAX),
+        shown(path, PATH_BYTES_MAX),
+    );
+    assert!(header.len() <= HEADER_BYTES_MAX);
     format!(
-        "On {}'s changes \"{}\", {} line {line}:\n\n{}",
-        shown(agent),
-        shown(title),
-        shown(path),
-        text.replace("\r\n", "\n")
+        "{header}\n\n{}",
+        text.replace("\r\n", "\n").replace('\r', "\n")
     )
 }
 
-/// Sends an owner's diff comment to a change set's agent as one owner message in the
-/// project's team conversation, through the same `team::execute` Message path the owner's
-/// own messages take, so its bounds and refusals hold. Only an open set of the IDE's
-/// project and a file it changed that still exists take a comment. Inputs: the store, the
-/// project, the set, the path, the line from 1 and the text. Output: Ok once stored, or
-/// `changes_not_found`, `changes_closed` or the team's refusal.
+/// Sends an owner's diff comment to the agent that made the change set. A team master's
+/// set takes it as one owner message in the project's team conversation through the
+/// `team::execute` Message path; a sub-agent's set types it into that agent's live terminal
+/// as its master's messages are typed. An owner conversation's set is refused, since the IDE
+/// holds no owner admission to drive that conversation. Only an open set of the IDE's project
+/// and a file it changed that still exists take a comment. Inputs: the store, the terminal
+/// host, the project, the set, the path, the line from 1 and the text. Output: Ok once
+/// delivered, or `changes_not_found`, `changes_closed`, `ide_comment_master_unavailable` or
+/// the team's refusal.
 pub(crate) fn comment(
     db: &Connection,
+    host: Option<&dyn Host>,
     project: &ProjectId,
     id: &ChangeSetId,
     path: &str,
@@ -92,15 +111,53 @@ pub(crate) fn comment(
     if !changed {
         return Err(failure("changes_not_found"));
     }
+    if view.agent.kind == AgentKind::Master {
+        return Err(failure("ide_comment_master_unavailable"));
+    }
+    let Ok(agent) = view.agent.id.parse::<i64>() else {
+        return Err(failure("team_agent_not_found"));
+    };
+    let row: Option<(String, String)> = db
+        .query_row(
+            "SELECT role,status FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| failure("changes_unavailable"))?;
+    let text = message(
+        &agent_name(&view.agent.label),
+        &title(&view.message),
+        path,
+        line,
+        text,
+    );
+    match row {
+        Some((role, _)) if role == "master" => to_conversation(db, project, text),
+        Some((role, status)) if role == "sub" => {
+            if !AgentStatus::parse(&status).is_some_and(AgentStatus::live) {
+                return Err(failure("team_agent_not_running"));
+            }
+            let host = host.ok_or_else(|| failure("team_agent_unreachable"))?;
+            match send_to_agent(db, host, project, &format!("team-{agent}"), &text)? {
+                Ok(typed) => {
+                    assert_eq!(typed, agent);
+                    Ok(())
+                }
+                Err(code) => Err(failure(code)),
+            }
+        }
+        _ => Err(failure("team_agent_not_found")),
+    }
+}
+
+/// Stores a comment for the team master as one owner message in the project's team
+/// conversation, so the conversation's bounds and refusals hold. Inputs: the store, the
+/// project and the message. Output: Ok once stored, or the team's refusal.
+fn to_conversation(db: &Connection, project: &ProjectId, text: String) -> Result<(), EngineError> {
     let action = TeamAction::Message {
         project_id: project.clone(),
-        text: message(
-            &agent_name(&view.agent.label),
-            &title(&view.message),
-            path,
-            line,
-            text,
-        ),
+        text,
     };
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
         .map_err(|_| failure("changes_unavailable"))?;

@@ -218,26 +218,46 @@ export function scmGroups(sets: IdeChangeSet[], now: number): ScmGroup[] {
 
 const COMMENT_STATES: ReadonlySet<ChangeState> = new Set(["pending", "conflict", "updating"]);
 
+/** The most UTF-8 bytes one comment may hold, as the engine bounds it, so with its file and
+ * line it fits one typed agent prompt. */
+export const COMMENT_BYTES_MAX = 2048;
+
 const COMMENT_REFUSALS: Record<string, string> = {
   changes_closed: "These changes were already accepted or discarded, so the agent can't act on this comment.",
+  ide_comment_master_unavailable: "Comments here reach team agents only. Write to this master in its conversation in CrazyAgent.",
+  ide_comment_too_long: "This comment is too long. Shorten it and send it again.",
+  team_agent_not_found: "That agent is no longer part of this team.",
+  team_agent_not_running: "That agent isn't running, so it can't read this comment. Start it again, then send the comment.",
+  team_agent_unreachable: "The agent's terminal didn't take this comment. Try again.",
   team_conversation_full: "Too many of your messages are waiting for the master. Send more once it has answered.",
   team_message_invalid: "The message is empty or too long.",
   project_setup_missing: "This project was created before project setup existed.",
 };
 
-/** What the owner sees once a comment went out. */
-export const COMMENT_SENT = "Sent to the team conversation with its file and line.";
+/** What the owner sees once a comment went out. Input: the agent's name. Output: the
+ * sentence naming it. */
+export function commentSent(agent: string): string {
+  return `Sent to ${plainLine(agent)} with its file and line.`;
+}
+
+/** Whether a comment is over the engine's bound, counted in UTF-8 bytes as the engine counts
+ * it. Input: the comment. Output: true when it is too long to send. */
+export function commentTooLong(text: string): boolean {
+  return new TextEncoder().encode(text).length > COMMENT_BYTES_MAX;
+}
 
 /** The change set file a document is the agent side of, so a comment on it can go to that
- * set's agent: an open set whose files are shown, and a file it changed that still exists.
- * Inputs: the listed sets and the document's file path. Output: the set and path, or null. */
-export function commentTarget(sets: IdeChangeSet[], fsPath: string): { id: string; path: string } | null {
+ * set's agent: an open team agent's set whose files are shown, and a file it changed that
+ * still exists. An owner conversation master's set takes no comment here, since the IDE
+ * cannot reach that conversation. Inputs: the listed sets and the document's file path.
+ * Output: the set, path and agent, or null. */
+export function commentTarget(sets: IdeChangeSet[], fsPath: string): { id: string; path: string; agent: string } | null {
   for (const set of sets) {
-    if (!COMMENT_STATES.has(set.state) || set.problem !== null) continue;
+    if (!COMMENT_STATES.has(set.state) || set.problem !== null || set.role !== "sub") continue;
     const root = `${set.worktree.replace(/\/+$/, "")}/`;
     if (!fsPath.startsWith(root)) continue;
     const path = fsPath.slice(root.length);
-    if (set.files.some((file) => file.path === path && file.status !== "deleted")) return { id: set.id, path };
+    if (set.files.some((file) => file.path === path && file.status !== "deleted")) return { id: set.id, path, agent: set.agent };
   }
   return null;
 }
