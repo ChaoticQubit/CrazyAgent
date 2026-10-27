@@ -9,12 +9,17 @@ const BRIDGE_WAIT: Duration = Duration::from_secs(2);
 const BRIDGE_WAITERS_MAX: usize = 32;
 const BRIDGE_READERS_MAX: u32 = 4;
 
+const _: () =
+    assert!(2 * (2 * BRIDGE_READERS_MAX as usize) <= crazyagent::protocol::OWNER_CLIENTS_MAX);
+
 /// The one native bridge the window's calls share. A call that changes the bridge
 /// or the engine has it alone; plain reads share it, at most `BRIDGE_READERS_MAX`
-/// at once. Calls wait their turn first come first served, so a read asked after a
-/// change sees it, for at most `BRIDGE_WAIT`, with at most `BRIDGE_WAITERS_MAX`
-/// calls waiting at once. Past either bound the call is refused with `busy` before
-/// it does anything.
+/// at once, each with one engine connection, so with the connections they are still
+/// closing they take at most half of the engine's `OWNER_CLIENTS_MAX` and leave the
+/// rest to the terminal app and agents' team tools. Calls wait their turn first come
+/// first served, so a read asked after a change sees it, for at most `BRIDGE_WAIT`,
+/// with at most `BRIDGE_WAITERS_MAX` calls waiting at once. Past either bound the
+/// call is refused with `busy` before it does anything.
 pub struct BridgeQueue {
     bridge: Arc<RwLock<NativeBridge>>,
     waiting: AtomicUsize,
