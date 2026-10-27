@@ -961,6 +961,9 @@ struct Collector {
 
 impl Collector {
     fn push(&mut self, scope: ApprovedScope, kind: ApprovedKind, text: &str) {
+        if super::hidden_text(text) {
+            return;
+        }
         if !self.seen.insert(hash(text.trim().as_bytes())) {
             return;
         }
@@ -1018,6 +1021,8 @@ fn kind_of(origin: &MemoryOrigin) -> ApprovedKind {
 /// Returns the bounded owner-approved memories an agent in this project may read.
 /// Input: the engine transaction and project id. Output: project notes and kept
 /// project research first, then global memory, newest first, within the launch bounds.
+/// A memory saved before the hidden-text check that still holds hidden characters is
+/// never delivered.
 pub(crate) fn approved_for_project(
     tx: &Transaction<'_>,
     project: &ProjectId,

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
-pub(super) const CHECK_FOLDER: &str = "mcp-checks";
+pub(super) const CHECK_FOLDER: &str = crate::storage::plugins::CHECK_FOLDER;
 pub(super) const CHECK_PROFILES: &str = "profiles";
 pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;

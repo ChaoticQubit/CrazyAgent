@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
 
 #[cfg(unix)]
-const KEYS: &str = "account-keys";
+const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
 const LIST_PROBE: Duration = Duration::from_millis(400);
 const CHECK_PROBE: Duration = Duration::from_secs(4);

@@ -33,6 +33,7 @@ mod native_auth;
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
+pub(crate) mod trash;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
@@ -891,7 +892,8 @@ fn open_actor_database(
     } else {
         OpenFlags::SQLITE_OPEN_READ_WRITE
     };
-    let canonical_path = std::fs::canonicalize(parent).map_err(error)?.join(
+    let canonical_root = std::fs::canonicalize(parent).map_err(error)?;
+    let canonical_path = canonical_root.join(
         path.file_name()
             .ok_or_else(|| error("database name missing"))?,
     );
@@ -908,6 +910,7 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
+        trash::sweep(&connection, &canonical_root)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -934,6 +937,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::team::initialize(connection)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
+    accounts::initialize(connection)?;
+    trash::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
