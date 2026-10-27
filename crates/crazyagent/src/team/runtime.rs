@@ -2935,7 +2935,6 @@ impl TeamRuntime {
                 self.land_turn(
                     id,
                     &project,
-                    None,
                     format!("live-{turn}"),
                     format!("Master turn {turn}"),
                     "the live master's turn",
@@ -3053,10 +3052,6 @@ impl TeamRuntime {
                 .map(Option::unwrap_or_default)
                 .map_err(error)
         };
-        let task = match busy {
-            Busy::Task(task) => Some(task),
-            Busy::Message(_) => None,
-        };
         let (turn, line, what) = match busy {
             Busy::Task(task) => (
                 format!("task-{task}"),
@@ -3069,18 +3064,16 @@ impl TeamRuntime {
                 "the team master's turn".to_owned(),
             ),
         };
-        self.land_turn(id, project, task, turn, line, &what, end)
+        self.land_turn(id, project, turn, line, &what, end)
     }
 
     /// Lands one ended turn of an agent under its change-set turn key, as `land` does.
-    /// Inputs: the agent, its project, the task the turn worked on, the turn key, the prompt
-    /// line, what ended for the note and how it ended. Output: any SQLite failure writing the note.
-    #[allow(clippy::too_many_arguments)]
+    /// Inputs: the agent, its project, the turn key, the prompt line, what ended for the
+    /// note and how it ended. Output: any SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
         project: &ProjectId,
-        task: Option<i64>,
         turn: String,
         line: String,
         what: &str,
