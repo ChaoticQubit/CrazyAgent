@@ -1944,6 +1944,21 @@ async fn desktop_usage_refresh(
 }
 
 #[tauri::command]
+async fn desktop_ide_focus(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.ide_focus()?;
+    let focus = call.await?;
+    if focus.is_some() {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    Ok(focus)
+}
+
+#[tauri::command]
 async fn desktop_usage_set_reset(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2604,6 +2619,7 @@ pub fn run() {
             desktop_open_context_item,
             desktop_engine_versions,
             desktop_restart_engine,
+            desktop_ide_focus,
             desktop_update_settings,
             desktop_set_update_channel,
             desktop_check_update,

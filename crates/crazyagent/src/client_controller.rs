@@ -15,6 +15,7 @@ mod accounts;
 mod agents;
 mod changes;
 mod cleanup;
+mod ide;
 mod intake;
 mod memory;
 mod owner_setup;

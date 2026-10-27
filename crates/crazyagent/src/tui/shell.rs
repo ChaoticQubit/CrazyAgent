@@ -549,6 +549,11 @@ impl Shell {
                         ),
                     });
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Reveal(event) = event.as_ref()
+                {
+                    self.ctx.say(event.message());
+                }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
             _ => {}

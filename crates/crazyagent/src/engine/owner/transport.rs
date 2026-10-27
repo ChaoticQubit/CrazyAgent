@@ -42,6 +42,7 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide;
 pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
@@ -1995,6 +1996,7 @@ enum Protocol {
     Usage,
     NativeAuth,
     Process,
+    Ide,
     IdeTab,
     Owner,
     #[cfg(test)]
@@ -2023,6 +2025,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("usage", Protocol::Usage),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
+        ("ide", Protocol::Ide),
         ("ide_tab", Protocol::IdeTab),
     ];
     Ok(named
@@ -2103,6 +2106,12 @@ async fn serve_admitted(
             }
             Protocol::Process => {
                 return process::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::Ide if ide::deferred(body) => return Ok(Some(Deferred::Ide(a))),
+            Protocol::Ide => {
+                return ide::serve(stream, engine, authority, auth, &a, body)
                     .await
                     .map(|()| None);
             }
@@ -2243,6 +2252,10 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::Ide(a) => {
+            let served = ide::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+        }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
@@ -2301,6 +2314,7 @@ enum Deferred {
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    Ide(Admission),
     IdeTab(Admission),
 }
 
@@ -2342,6 +2356,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Usage => usage::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
+        Protocol::Ide => ide::refusal(code)?,
         Protocol::IdeTab => ide_tab::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,

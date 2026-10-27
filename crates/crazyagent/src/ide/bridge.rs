@@ -14,6 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
+pub mod reveal;
+
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
 
@@ -31,7 +33,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 5] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -43,6 +45,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
     (
         "out/extension.js",
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
+    ),
+    (
+        "out/reveal.js",
+        include_bytes!("../../../../apps/ide-extension/out/reveal.js"),
+    ),
+    (
+        "out/reveal-path.js",
+        include_bytes!("../../../../apps/ide-extension/out/reveal-path.js"),
     ),
 ];
 
@@ -247,10 +257,12 @@ pub(crate) struct IdeHost<'a> {
 
 /// The live IDE capabilities of one owner server, at most one per project and
 /// `GRANTS_MAX` in all. Each holds its token, its file and the sender of its project's
-/// events; dropping a grant kills its token and ends its subscriptions.
+/// events; dropping a grant kills its token and ends its subscriptions. The reveals the
+/// TUI sent wait here for their IDE to acknowledge them.
 #[derive(Default)]
 pub(crate) struct Grants {
     live: Mutex<Vec<Grant>>,
+    reveals: reveal::Reveals,
 }
 
 /// One project's capability for one IDE server launch.
@@ -549,8 +561,8 @@ async fn answer(
         | IdeCall::MemoryDecide { .. }
         | IdeCall::Agents {}
         | IdeCall::ExtensionRequest { .. }
-        | IdeCall::ExtensionDecide { .. }
-        | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
+        | IdeCall::ExtensionDecide { .. } => return Err(failure("ide_request_unavailable")),
+        IdeCall::RevealAck { request } => reveal::acked(runtime, project, &request)?,
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
     Ok(IdeReply::Ok { data })

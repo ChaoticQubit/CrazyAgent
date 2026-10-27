@@ -186,6 +186,7 @@
     "allow-desktop-restart-app",
     "allow-desktop-link-cli",
     "allow-desktop-engine-versions",
-    "allow-desktop-restart-engine"
+    "allow-desktop-restart-engine",
+    "allow-desktop-ide-focus"
   ]
 }

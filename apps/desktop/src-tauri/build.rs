@@ -182,6 +182,7 @@ fn main() {
         "desktop_link_cli",
         "desktop_engine_versions",
         "desktop_restart_engine",
+        "desktop_ide_focus",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

@@ -6,6 +6,7 @@ use super::new_project_view::wrap_words;
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
@@ -19,7 +20,7 @@ use crate::tui::ctx::Load;
 use crate::tui::seam::PoolScope;
 use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
@@ -495,6 +496,7 @@ pub(in crate::tui) enum ProjectReply {
     },
     Open(OpenRequest),
     Edit(OpenRequest),
+    Reveal(RevealTarget),
     PickPool,
     Assign(Option<crate::protocol::CredentialRef>),
     Send(String),
@@ -1045,6 +1047,23 @@ impl ProjectScreen {
             }
         }
         counts
+    }
+
+    /// Names one context file for the desktop IDE by its path inside the project folder.
+    /// Takes the path the context tree lists. Returns the target, or none before the
+    /// project folder is read or when the context folder is outside it.
+    pub fn ide_target(&self, path: &str) -> Option<RevealTarget> {
+        let setup = self.setup.as_ref()?;
+        let Some(OpenRequest::Context { folder, path }) = self.context_request(path) else {
+            return None;
+        };
+        let inside = Path::new(&folder)
+            .strip_prefix(setup.project_folder())
+            .ok()?
+            .join(path);
+        Some(RevealTarget::Project {
+            path: inside.to_str()?.to_owned(),
+        })
     }
 
     /// Names one context file to open: the folder its context paths start from, as the
@@ -1773,6 +1792,11 @@ impl ProjectScreen {
             KeyCode::Char('v') => {
                 if let Some(request) = item.and_then(|item| self.context_request(&item.path)) {
                     return ProjectReply::Edit(request);
+                }
+            }
+            KeyCode::Char('O') => {
+                if let Some(target) = item.and_then(|item| self.ide_target(&item.path)) {
+                    return ProjectReply::Reveal(target);
                 }
             }
             KeyCode::Char('a') => {
