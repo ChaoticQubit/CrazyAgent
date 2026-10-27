@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStrategy, type AccountView, type PoolSummary, type Result, type ScheduleChange } from "../../api";
+import { accountRanking, accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStanding, type AccountStrategy, type AccountView, type PoolRanking, type PoolSummary, type Result, type ScheduleChange } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, Notice, NotReady, Panel, Select, Skeleton, TextField } from "../../ui";
 
@@ -10,6 +10,73 @@ export const STRATEGIES: { value: AccountStrategy; label: string; hint: string }
 ];
 
 const DEFAULT_PLAN: AccountPlan = { rank: null, reserve_percent: 0, pin: null };
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** A local time a reset or pause ends at: "14:30" today, else "Mon 09:00".
+ * Inputs: the time and now in ms since the epoch. Output: the text. */
+export function atText(atMs: number, nowMs: number): string {
+  const at = new Date(atMs);
+  const now = new Date(nowMs);
+  const time = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  const today = at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate();
+  return today ? time : `${WEEKDAYS[at.getDay()]} ${time}`;
+}
+
+/** Says in a few words why an account stands where it does in its pool's ranking, such as
+ * "resets Mon 09:00, 40% left" or "5-hour cap until 14:30". Inputs: the standing and now.
+ * Output: the line. */
+export function standingLine(standing: AccountStanding, nowMs: number): string {
+  const at = (ms: number) => atText(ms, nowMs);
+  switch (standing.kind) {
+    case "next": {
+      const line = standing.weekly_left_percent === null ? "no usage read yet"
+        : standing.weekly_resets_ms === null ? `${standing.weekly_left_percent}% left`
+          : `resets ${at(standing.weekly_resets_ms)}, ${standing.weekly_left_percent}% left`;
+      return standing.use_last ? `${line}, used last` : line;
+    }
+    case "paused": return `paused until ${at(standing.until_ms)}`;
+    case "never_use": return "never use";
+    case "five_hour_cap": return standing.until_ms === null ? "5-hour cap reached" : `5-hour cap until ${at(standing.until_ms)}`;
+    case "reserve_reached":
+      if (standing.reserve_percent > 0) return `reserve reached (${standing.reserve_percent}%)`;
+      return standing.until_ms === null ? "weekly limit used up" : `weekly limit used up until ${at(standing.until_ms)}`;
+  }
+}
+
+/** One pool's next accounts: each account work would try now, in order, then each held
+ * account with why. Inputs: the ranking read, the pool, account names and now. */
+export function NextAccountsView({ ranking, pool, names, nowMs }: { ranking: Loaded<PoolRanking[]>; pool: string; names: Map<string, string>; nowMs: number }) {
+  if (ranking.kind === "loading") return <Skeleton shape="row" count={2} />;
+  if (ranking.kind === "not_ready") return null;
+  if (ranking.kind === "error") return <Notice tone="warn">Couldn't read the next accounts.</Notice>;
+  const found = ranking.value.find((item) => item.pool === pool);
+  if (!found || found.accounts.length === 0) return <p className="muted small">No accounts to rank yet.</p>;
+  const row = (connection: string, standing: AccountStanding) => <li key={connection} className="row">
+    <span className="grow ellipsis">{names.get(connection) ?? connection}</span><span className="small secondary">{standingLine(standing, nowMs)}</span>
+  </li>;
+  const next = found.accounts.filter((item) => item.standing.kind === "next");
+  const held = found.accounts.filter((item) => item.standing.kind !== "next");
+  return <div className="stack-small" aria-label="Next accounts">
+    <span className="small strong">Next accounts</span>
+    {next.length === 0 ? <p className="muted small">No account can take work now.</p>
+      : <ol className="stack-small">{next.map((item) => row(item.connection, item.standing))}</ol>}
+    {held.length > 0 && <ul className="plain-list">{held.map((item) => row(item.connection, item.standing))}</ul>}
+  </div>;
+}
+
+/** Settings, Usage: every pool's next accounts under its name. Inputs: the ranking and pools
+ * read, account names and now. */
+export function NextAccountsPanel({ ranking, pools, names, nowMs }: { ranking: Loaded<PoolRanking[]>; pools: Loaded<PoolSummary[]>; names: Map<string, string>; nowMs: number }) {
+  if (ranking.kind === "not_ready") return null;
+  const shown = pools.kind === "ok" ? pools.value : [];
+  return <Panel title="Next accounts">
+    {shown.length === 0 ? <p className="muted">No pools yet.</p>
+      : <div className="stack">{shown.map((pool) => <section key={pool.id} className="stack-small" aria-label={`${pool.name} next accounts`}>
+        <h3>{pool.name}</h3>
+        <NextAccountsView ranking={ranking} pool={pool.id} names={names} nowMs={nowMs} />
+      </section>)}</div>}
+  </Panel>;
+}
 
 /** The plain name of a strategy. Input: the strategy. Output: its label. */
 export function strategyLabel(strategy: AccountStrategy): string {
@@ -104,10 +171,12 @@ function PlanRow({ id, name, plan, onSave }: { id: string; name: string; plan: A
 /** The account choice panel as a pure view: the app strategy, each pool's strategy and each
  * member's rank, reserve and pin. Inputs: the schedule and pools read, account names and the
  * change action. */
-export function AccountChoiceView({ schedule, pools, names, onChange, onRetry }: {
+export function AccountChoiceView({ schedule, pools, names, ranking, nowMs, onChange, onRetry }: {
   schedule: Loaded<AccountSchedule>;
   pools: Loaded<PoolSummary[]>;
   names: Map<string, string>;
+  ranking?: Loaded<PoolRanking[]>;
+  nowMs?: number;
   onChange: (change: ScheduleChange) => Promise<Result<void>>;
   onRetry: () => void;
 }) {
@@ -138,6 +207,7 @@ export function AccountChoiceView({ schedule, pools, names, onChange, onRetry }:
             return <PlanRow key={`${member.id}-${JSON.stringify(plan)}`} id={`plan-${pool.id}-${member.id}`} name={names.get(member.id) ?? member.provider}
               plan={plan} onSave={(next) => send({ kind: "account", connection: member.id, plan: next })} />;
           })}</ul>}
+        {ranking && <NextAccountsView ranking={ranking} pool={pool.id} names={names} nowMs={nowMs ?? Date.now()} />}
       </div>)}
     </div>
   </Panel>;
@@ -147,10 +217,14 @@ export function AccountChoiceView({ schedule, pools, names, onChange, onRetry }:
 export function AccountChoice({ pools, accounts }: { pools: Loaded<PoolSummary[]>; accounts: Loaded<AccountView[]> }) {
   const session = useAppSession();
   const [schedule, reload] = useLoad(accountSchedule);
+  const [ranking, rerank] = useLoad(accountRanking);
   const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
-  return <AccountChoiceView schedule={schedule} pools={pools} names={names} onRetry={reload} onChange={async (change) => {
+  return <AccountChoiceView schedule={schedule} pools={pools} names={names} ranking={ranking} nowMs={Date.now()} onRetry={reload} onChange={async (change) => {
     const result = session.noteResult(await setAccountSchedule(change));
-    if (result.kind === "ok") reload();
+    if (result.kind === "ok") {
+      reload();
+      rerank();
+    }
     return result;
   }} />;
 }
