@@ -1,5 +1,5 @@
 use super::ports::{self, Ports};
-use super::{env, output, proxy, token};
+use super::{env, output, proxy, sandbox, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
@@ -38,6 +38,9 @@ pub const LOG: &str = "server.log";
 /// How long the server keeps a closed workbench's extension host for a reconnect; its own
 /// default is three hours.
 pub const RECONNECTION_GRACE: Duration = Duration::from_secs(30);
+
+/// The workspace file the engine writes in a project's IDE folder for the server to open.
+pub const WORKSPACE: &str = "crazyagent.code-workspace";
 
 const GROUP: &str = "server.pid";
 const SERVER_DATA: &str = "server-data";
@@ -164,11 +167,18 @@ impl Servers {
     /// Opens a project's IDE server, starting it from `build` unless it already runs: the
     /// recorded ports while free, a new token, the allowlisted environment, its own process
     /// group, its output redacted into [`LOG`], and the engine proxy in front of it. Returns
-    /// once the server listens on 127.0.0.1 and no other process holds its port. Inputs:
-    /// the project and the canonical root of a verified build. Output: where the IDE is
-    /// reached, or a plain refusal.
-    pub async fn open(&self, project: &ProjectId, build: &Path) -> Result<ServerInfo, EngineError> {
-        if !cfg!(target_os = "macos") {
+    /// once the server listens on 127.0.0.1 and no other process holds its port. The server
+    /// runs under its Seatbelt profile from [`sandbox::profile`]; where no sandbox is
+    /// qualified it never starts. Inputs: the project, its canonical folder and the
+    /// canonical root of a verified build. Output: where the IDE is reached, or a plain
+    /// refusal.
+    pub async fn open(
+        &self,
+        project: &ProjectId,
+        root: &Path,
+        build: &Path,
+    ) -> Result<ServerInfo, EngineError> {
+        if !sandbox::qualified() {
             return Err(failure("ide_platform_unqualified"));
         }
         let slot = self.slot(project)?;
@@ -211,7 +221,7 @@ impl Servers {
         };
         let child = output::start(&folder.join(LOG), &token)
             .map_err(|_| failure("ide_state_unavailable"))
-            .and_then(|output| command(&build, &folder, &info, output))
+            .and_then(|output| command(&build, &folder, root, &info, output))
             .and_then(|mut command| {
                 crate::spawn_gate::spawn(&mut command)
                     .map_err(|_| failure("ide_server_start_failed"))
@@ -519,32 +529,60 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
     Ok(real)
 }
 
-/// The server's command line, IDE-1 verdict 3: the build's launcher on 127.0.0.1 at the
-/// server port, the token file (never the token), separate server data, user data and
-/// extensions folders, license accepted, telemetry off, workspace trust off and a 30 s
-/// reconnection grace; a cleared environment holding only [`env::server_env`], stdout and
-/// stderr into the redacting `output` pipe, and its own process group.
+/// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
+/// this launch: the build's launcher on 127.0.0.1 at the server port, the token file (never
+/// the token), separate server data, user data and extensions folders, license accepted,
+/// telemetry off, workspace trust off and a 30 s reconnection grace; a cleared environment
+/// holding only [`env::server_env`] with TMPDIR at its short temp folder, stdout and stderr
+/// into the redacting `output` pipe, and its own process group.
 fn command(
     build: &Path,
     folder: &Path,
+    root: &Path,
     info: &ServerInfo,
     output: PipeWriter,
 ) -> Result<Command, EngineError> {
     let errors = output
         .try_clone()
         .map_err(|_| failure("ide_state_unavailable"))?;
-    let mut command = Command::new(build.join(LAUNCHER));
+    let data = folder
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| failure("ide_state_unavailable"))?;
+    let home = folder.join(SERVER_DATA);
+    let tmp = crate::sandbox::toolchains::make_tmp(&home)
+        .map_err(|_| failure("ide_state_unavailable"))?;
+    let (user_data, extensions, workspace) = (
+        folder.join(USER_DATA),
+        folder.join(EXTENSIONS),
+        folder.join(WORKSPACE),
+    );
+    let grants = sandbox::Grants {
+        data,
+        root,
+        build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[user_data.as_path(), extensions.as_path()],
+        readable: &[
+            info.token_path.as_path(),
+            info.capability_path.as_path(),
+            workspace.as_path(),
+        ],
+    };
+    let profile = sandbox::install(folder, &grants, info.server_port)?;
+    let mut command = sandbox::command(&profile, &build.join(LAUNCHER));
     command
         .args(["--host", "127.0.0.1", "--port"])
         .arg(info.server_port.to_string())
         .arg("--connection-token-file")
         .arg(&info.token_path)
         .arg("--server-data-dir")
-        .arg(folder.join(SERVER_DATA))
+        .arg(&home)
         .arg("--user-data-dir")
-        .arg(folder.join(USER_DATA))
+        .arg(&user_data)
         .arg("--extensions-dir")
-        .arg(folder.join(EXTENSIONS))
+        .arg(&extensions)
         .arg("--accept-server-license-terms")
         .args(["--telemetry-level", "off"])
         .arg("--disable-workspace-trust")
@@ -553,6 +591,7 @@ fn command(
         .current_dir(folder)
         .env_clear()
         .envs(env::server_env(std::env::vars_os(), &info.capability_path))
+        .env("TMPDIR", &tmp)
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
@@ -563,6 +602,7 @@ fn command(
             .all(|arg| arg != "--connection-token" && arg != "--without-connection-token")
     );
     assert!(command.get_envs().count() <= env::ENV_MAX);
+    assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
     Ok(command)
 }
 

@@ -109,10 +109,14 @@ fn group_listeners(group: i32) -> Vec<String> {
 
 #[tokio::test]
 async fn ide_server_listens_only_on_loopback() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("loopback");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let group = servers.group(&project).unwrap();
     assert_eq!(info.url, format!("http://127.0.0.1:{}/", info.port));
     assert_ne!(info.port, info.server_port);
@@ -135,7 +139,13 @@ async fn ide_server_listens_only_on_loopback() {
             format!("127.0.0.1:{}", info.port)
         )]
     );
-    assert_eq!(servers.open(&project, &cached_build()).await.unwrap(), info);
+    assert_eq!(
+        servers
+            .open(&project, checkout.path(), &cached_build())
+            .await
+            .unwrap(),
+        info
+    );
     assert_eq!(servers.group(&project), Some(group));
     servers.stop_all().await;
     gone(group).await;
@@ -145,10 +155,14 @@ async fn ide_server_listens_only_on_loopback() {
 
 #[tokio::test]
 async fn request_without_the_token_is_refused() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("refused");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let host = format!("127.0.0.1:{}", info.port);
     let token = fs::read_to_string(&info.token_path).unwrap();
     let wrong = "0".repeat(token.len());
@@ -190,11 +204,15 @@ async fn request_without_the_token_is_refused() {
 
 #[tokio::test]
 async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlist() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("token");
     let build = cached_build();
-    let first = servers.open(&project, &build).await.unwrap();
+    let first = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let folder = servers.project_folder(&project).unwrap();
     assert_eq!(first.token_path, folder.join(token::FILE));
     assert_eq!(first.capability_path, folder.join(CAPABILITY));
@@ -212,7 +230,10 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(old.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(servers.stop(&project).await);
     assert!(!first.token_path.exists());
-    let second = servers.open(&project, &build).await.unwrap();
+    let second = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_eq!(second.token_path, first.token_path);
     assert_eq!(mode(&second.token_path), 0o600);
     let new = fs::read_to_string(&second.token_path).unwrap();
@@ -321,11 +342,15 @@ fn server_env_holds_only_allowlisted_names() {
 
 #[tokio::test]
 async fn port_is_stable_for_a_project_across_restarts() {
+    let checkout = scratch();
     let data = scratch();
     let build = cached_build();
     let project = project("ports");
     let servers = Servers::new(data.path(), IDLE_LIMIT);
-    let first = servers.open(&project, &build).await.unwrap();
+    let first = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let folder = servers.project_folder(&project).unwrap();
     assert_ne!(first.port, first.server_port);
     assert_eq!(
@@ -336,7 +361,10 @@ async fn port_is_stable_for_a_project_across_restarts() {
         })
     );
     assert!(servers.stop(&project).await);
-    let again = servers.open(&project, &build).await.unwrap();
+    let again = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_eq!(
         (again.port, again.server_port),
         (first.port, first.server_port)
@@ -346,7 +374,10 @@ async fn port_is_stable_for_a_project_across_restarts() {
 
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
     let restarted = Servers::new(data.path(), IDLE_LIMIT);
-    let moved = restarted.open(&project, &build).await.unwrap();
+    let moved = restarted
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_ne!(moved.server_port, first.server_port);
     assert_eq!(moved.port, first.port);
     assert_eq!(
@@ -358,7 +389,10 @@ async fn port_is_stable_for_a_project_across_restarts() {
     );
     drop(held);
     assert!(restarted.stop(&project).await);
-    let kept = restarted.open(&project, &build).await.unwrap();
+    let kept = restarted
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_eq!(kept.server_port, moved.server_port);
     assert_eq!(kept.port, first.port);
     restarted.stop_all().await;
@@ -366,11 +400,15 @@ async fn port_is_stable_for_a_project_across_restarts() {
 
 #[tokio::test]
 async fn idle_server_stops_after_the_idle_limit() {
+    let checkout = scratch();
     let data = scratch();
     let idle = Duration::from_secs(3);
     let servers = Servers::new(data.path(), idle);
     let project = project("idle");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let group = servers.group(&project).unwrap();
     let mut untouched = Instant::now();
     for _ in 0..3 {
@@ -393,6 +431,7 @@ async fn idle_server_stops_after_the_idle_limit() {
 
 #[tokio::test]
 async fn no_ide_server_process_survives_engine_stop() {
+    let checkout = scratch();
     let root = scratch();
     let global = root.path().join("global.toml");
     fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
@@ -409,7 +448,10 @@ async fn no_ide_server_process_survives_engine_stop() {
     .unwrap();
     let project = project("engine-stop");
     let servers = service.owner_runtime().unwrap().ide();
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     assert!(
         info.token_path
             .starts_with(root.path().join(crate::ide::FOLDER))
@@ -436,15 +478,17 @@ async fn no_ide_server_process_survives_engine_stop() {
 
 #[tokio::test]
 async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_again() {
+    let checkout = scratch();
     let data = scratch();
     let build = cached_build();
     let forgotten = project("forgotten");
     let project = project("crashed");
-    let (left, path, name, other) = (
+    let (left, path, name, other, opened) = (
         data.path().to_path_buf(),
         build.clone(),
         project.clone(),
         forgotten.clone(),
+        checkout.path().to_path_buf(),
     );
     let (old, old_group, old_token, other_group) = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -452,8 +496,12 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .build()
             .unwrap();
         let crashed = Servers::new(&left, IDLE_LIMIT);
-        let info = runtime.block_on(crashed.open(&name, &path)).unwrap();
-        runtime.block_on(crashed.open(&other, &path)).unwrap();
+        let info = runtime
+            .block_on(crashed.open(&name, &opened, &path))
+            .unwrap();
+        runtime
+            .block_on(crashed.open(&other, &opened, &path))
+            .unwrap();
         let group = crashed.group(&name).unwrap();
         let other_group = crashed.group(&other).unwrap();
         let token = fs::read_to_string(&info.token_path).unwrap();
@@ -481,7 +529,10 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .join(GROUP)
             .exists()
     );
-    let info = servers.open(&project, &build).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let leader = Pid::from_raw(old_group).unwrap();
     assert!(
         rustix::process::waitpid(Some(leader), rustix::process::WaitOptions::NOHANG)
@@ -497,10 +548,14 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
 
 #[tokio::test]
 async fn the_server_log_never_holds_the_token() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("log");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
     let log = servers.project_folder(&project).unwrap().join(LOG);
     assert_eq!(mode(&log), 0o600);
@@ -537,11 +592,15 @@ async fn the_server_log_never_holds_the_token() {
 
 #[tokio::test]
 async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_policy() {
+    let checkout = scratch();
     let data = scratch();
     let build = cached_build();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("page");
-    let info = servers.open(&project, &build).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
     let cookie = format!("{}={token}", proxy::COOKIE);
     let port = info.port;
@@ -648,10 +707,14 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
 
 #[tokio::test]
 async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("socket");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
     let host = format!("127.0.0.1:{}", info.port);
     let upgrade = |cookie: &str| {
@@ -686,4 +749,74 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     assert!(head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
     drop(stream);
     servers.stop_all().await;
+}
+
+#[test]
+fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let project = project("command");
+    let folder = servers.prepare(&project).unwrap();
+    let build = cached_build();
+    let (token_path, token) = token::issue(&folder).unwrap();
+    let info = ServerInfo {
+        url: "http://127.0.0.1:47933/".to_owned(),
+        port: 47_933,
+        server_port: 47_931,
+        token_path: token_path.clone(),
+        capability_path: folder.join(CAPABILITY),
+    };
+    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let command = command(&build, &folder, checkout.path(), &info, writer).unwrap();
+    assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
+    let profile = folder.join(sandbox::PROFILE);
+    let expected: Vec<OsString> = [
+        OsString::from("-f"),
+        profile.clone().into(),
+        build.join("bin").join("codium-server").into(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        "47931".into(),
+        "--connection-token-file".into(),
+        token_path.clone().into(),
+        "--server-data-dir".into(),
+        folder.join("server-data").into(),
+        "--user-data-dir".into(),
+        folder.join("user-data").into(),
+        "--extensions-dir".into(),
+        folder.join("extensions").into(),
+        "--accept-server-license-terms".into(),
+        "--telemetry-level".into(),
+        "off".into(),
+        "--disable-workspace-trust".into(),
+        "--reconnection-grace-time".into(),
+        "30".into(),
+    ]
+    .into();
+    let args: Vec<OsString> = command.get_args().map(ToOwned::to_owned).collect();
+    assert_eq!(args, expected);
+    assert!(
+        args.iter()
+            .all(|arg| !arg.to_string_lossy().contains(&token))
+    );
+    assert_eq!(command.get_current_dir(), Some(folder.as_path()));
+    assert_eq!(mode(&token_path), 0o600);
+    for path in ["server-data", "user-data", "extensions"] {
+        assert_eq!(mode(&folder.join(path)), 0o700, "{path}");
+    }
+    let text = fs::read_to_string(&profile).unwrap();
+    assert!(text.contains("(local ip \"localhost:47931\")"), "{text}");
+    assert!(!text.contains("47933"));
+    for writable in ["user-data", "extensions", "server-data"] {
+        assert!(
+            text.contains(&format!(
+                "(subpath \"{}\")",
+                folder.join(writable).display()
+            )),
+            "{writable}"
+        );
+    }
+    assert!(text.contains(&format!("(literal \"{}\")", token_path.display())));
 }

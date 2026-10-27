@@ -10,6 +10,8 @@ pub mod ports;
 #[cfg(unix)]
 pub mod proxy;
 #[cfg(unix)]
+pub mod sandbox;
+#[cfg(unix)]
 pub mod server;
 #[cfg(unix)]
 pub mod token;
