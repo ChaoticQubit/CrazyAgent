@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.BASE_SCHEME = void 0;
+exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.HEAD_SCHEME = exports.BASE_SCHEME = void 0;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
 exports.acceptedNote = acceptedNote;
@@ -10,8 +10,10 @@ exports.scmGroups = scmGroups;
 exports.commentSent = commentSent;
 exports.commentTooLong = commentTooLong;
 exports.commentTarget = commentTarget;
+exports.headCommentTarget = headCommentTarget;
 exports.commentRefusal = commentRefusal;
 exports.BASE_SCHEME = "crazyagent-base";
+exports.HEAD_SCHEME = "crazyagent-head";
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -116,6 +118,7 @@ function resource(set, file) {
         path: file.path,
         file: `${set.worktree.replace(/\/+$/, "")}/${file.path}`,
         base: open === "diff" || open === "base" ? basePath(set.id, file.path) : null,
+        head: open === "diff" ? basePath(set.id, file.path) : null,
         open,
         letter: LETTERS[file.status],
         tooltip: tooltip(file),
@@ -176,6 +179,13 @@ function commentTarget(sets, fsPath) {
             return { id: set.id, path, agent: set.agent };
     }
     return null;
+}
+function headCommentTarget(sets, uriPath) {
+    const shown = parseBasePath(uriPath);
+    const set = shown === null ? undefined : sets.find((listed) => listed.id === shown.id);
+    if (shown === null || set === undefined)
+        return null;
+    return commentTarget([set], `${set.worktree.replace(/\/+$/, "")}/${shown.path}`);
 }
 function commentRefusal(code) {
     return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : refusal(code);

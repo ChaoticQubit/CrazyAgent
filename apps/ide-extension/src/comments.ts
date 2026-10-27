@@ -1,13 +1,22 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { type IdeChangeSet, commentRefusal, commentSent, commentTarget, commentTooLong, refusal } from "./scm-model.js";
+import {
+  HEAD_SCHEME,
+  type IdeChangeSet,
+  commentRefusal,
+  commentSent,
+  commentTarget,
+  commentTooLong,
+  headCommentTarget,
+  refusal,
+} from "./scm-model.js";
 
 const CONTROLLER = "crazyagent.comments";
 const FRESH_MS = 5_000;
 
-/** Lets the owner comment on the agent side of a team agent's change set diff, the file in
- * the agent's worktree: each comment goes to the engine with its file and line, which
- * delivers it to the agent that made the set. Inputs: the extension context and the engine
+/** Lets the owner comment on the agent side of a team agent's change set diff, the text at
+ * the head the set recorded, or on the file in the agent's worktree: each comment goes to
+ * the engine with its file and line, which delivers it to the agent that made the set. Inputs: the extension context and the engine
  * client. Output: none; all is disposed with the extension. */
 export function registerComments(context: vscode.ExtensionContext, engine: Engine): void {
   const controller = vscode.comments.createCommentController(CONTROLLER, "CrazyAgent comments");
@@ -38,11 +47,16 @@ export function registerComments(context: vscode.ExtensionContext, engine: Engin
     if (Date.now() - loaded > FRESH_MS) await load();
   };
 
+  const targetOf = (uri: vscode.Uri): { id: string; path: string; agent: string } | null => {
+    if (uri.scheme === HEAD_SCHEME) return headCommentTarget(sets, uri.path);
+    return uri.scheme === "file" ? commentTarget(sets, uri.fsPath) : null;
+  };
+
   controller.commentingRangeProvider = {
     provideCommentingRanges: async (document: vscode.TextDocument): Promise<vscode.Range[]> => {
-      if (document.uri.scheme !== "file") return [];
+      if (document.uri.scheme !== "file" && document.uri.scheme !== HEAD_SCHEME) return [];
       await fresh();
-      if (commentTarget(sets, document.uri.fsPath) === null) return [];
+      if (targetOf(document.uri) === null) return [];
       return [new vscode.Range(0, 0, Math.max(document.lineCount - 1, 0), 0)];
     },
   };
@@ -50,7 +64,7 @@ export function registerComments(context: vscode.ExtensionContext, engine: Engin
   const send = async (reply: vscode.CommentReply): Promise<void> => {
     const { thread, text } = reply;
     await fresh();
-    const target = commentTarget(sets, thread.uri.fsPath);
+    const target = targetOf(thread.uri);
     if (target === null) {
       void vscode.window.showErrorMessage(refusal("changes_not_found"));
       return;

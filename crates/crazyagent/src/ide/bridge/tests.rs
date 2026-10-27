@@ -904,6 +904,11 @@ fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_
             path: "src/lib.rs".into(),
             page: 0,
         },
+        IdeCall::HeadBlob {
+            id: id.clone(),
+            path: "src/lib.rs".into(),
+            page: 0,
+        },
     ];
     for call in &reads {
         let before = Instant::now();

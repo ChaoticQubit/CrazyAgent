@@ -1928,6 +1928,33 @@ fn all_pages(case: &Case, id: &ChangeSetId) -> Vec<ChangeDiff> {
 }
 
 #[test]
+fn a_change_sets_file_list_stays_when_other_diffs_push_its_diff_out() {
+    let case = Case::new();
+    case.edit("notes.txt", "a note\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &id).unwrap();
+    let first = diff::listed(&record.repository, &record.base, &record.head).unwrap();
+    let paths: Vec<&str> = first.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["notes.txt"]);
+    let mut from = case.tip();
+    for index in 0..=diff::RECENT_MAX {
+        let to = case.owner_commit("flood.txt", &format!("{index}\n"), "Flood the recent diffs");
+        diff::page(&record.repository, &from, &to, 0).unwrap();
+        from = to;
+    }
+    let (git, moved) = (case.repo.join(".git"), case.repo.join("git-moved"));
+    std::fs::rename(&git, &moved).unwrap();
+    let paged = diff::page(&record.repository, &record.base, &record.head, 0);
+    let again = diff::listed(&record.repository, &record.base, &record.head);
+    std::fs::rename(&moved, &git).unwrap();
+    assert!(
+        paged.is_err(),
+        "the flood left this diff among the recent diffs"
+    );
+    assert!(std::sync::Arc::ptr_eq(&first, &again.unwrap()));
+}
+
+#[test]
 fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     let case = Case::new();
     let big: String = (0..3000).map(|line| format!("line {line}\n")).collect();

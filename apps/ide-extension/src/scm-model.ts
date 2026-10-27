@@ -38,6 +38,7 @@ export interface ScmResource {
   path: string;
   file: string;
   base: string | null;
+  head: string | null;
   open: Opens;
   letter: string;
   tooltip: string;
@@ -58,6 +59,10 @@ export interface ScmGroup {
 }
 
 export const BASE_SCHEME = "crazyagent-base";
+
+/** The scheme of a diff's agent side: the file's text at the head the change set recorded,
+ * which Accept lands, served by the engine and never the agent's live worktree. */
+export const HEAD_SCHEME = "crazyagent-head";
 
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
@@ -135,14 +140,14 @@ export function acceptedNote(outcome: AcceptOutcome): string {
   return `These files also changed on your branch: ${shown}${more}. Ask the agent to update, or discard.`;
 }
 
-/** The path of a base-side document: the change set and the file. Inputs: the set id and
- * the file's path in the change set. Output: the URI path. */
+/** The path of a base-side or head-side document: the change set and the file. Inputs: the
+ * set id and the file's path in the change set. Output: the URI path. */
 export function basePath(id: string, path: string): string {
   return `/${id}/${path}`;
 }
 
-/** Reads a base-side document path back, refusing anything but a change set id and a
- * plain relative path. Input: the URI path. Output: the set and file, or null. */
+/** Reads a base-side or head-side document path back, refusing anything but a change set
+ * id and a plain relative path. Input: the URI path. Output: the set and file, or null. */
 export function parseBasePath(text: string): { id: string; path: string } | null {
   const match = /^\/([^/]+)\/(.+)$/s.exec(text);
   if (match === null || !SET_ID.test(match[1])) return null;
@@ -182,6 +187,7 @@ function resource(set: IdeChangeSet, file: IdeFile): ScmResource {
     path: file.path,
     file: `${set.worktree.replace(/\/+$/, "")}/${file.path}`,
     base: open === "diff" || open === "base" ? basePath(set.id, file.path) : null,
+    head: open === "diff" ? basePath(set.id, file.path) : null,
     open,
     letter: LETTERS[file.status],
     tooltip: tooltip(file),
@@ -260,6 +266,16 @@ export function commentTarget(sets: IdeChangeSet[], fsPath: string): { id: strin
     if (set.files.some((file) => file.path === path && file.status !== "deleted")) return { id: set.id, path, agent: set.agent };
   }
   return null;
+}
+
+/** The change set file a head-side document shows, so a comment on the agent side of a diff
+ * goes to that set's agent on the same terms as one on the worktree file. Inputs: the
+ * listed sets and the document's URI path. Output: the set, path and agent, or null. */
+export function headCommentTarget(sets: IdeChangeSet[], uriPath: string): { id: string; path: string; agent: string } | null {
+  const shown = parseBasePath(uriPath);
+  const set = shown === null ? undefined : sets.find((listed) => listed.id === shown.id);
+  if (shown === null || set === undefined) return null;
+  return commentTarget([set], `${set.worktree.replace(/\/+$/, "")}/${shown.path}`);
 }
 
 /** One plain sentence for a refused comment: the desktop's words for the team codes, the

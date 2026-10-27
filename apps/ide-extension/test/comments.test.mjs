@@ -36,6 +36,18 @@ test("no comment goes to a closed or unread set, a master conversation's set, a 
   assert.equal(model.commentTarget([], readme), null);
 });
 
+test("a comment on the agent side of a diff, the recorded head's text, goes to that set's agent on the same terms", () => {
+  assert.deepEqual(model.headCommentTarget([set()], `/${ID}/README.md`), { id: ID, path: "README.md", agent: "Ada (@builder)" });
+  assert.deepEqual(model.headCommentTarget([set()], `/${ID}/src/shop.ts`), { id: ID, path: "src/shop.ts", agent: "Ada (@builder)" });
+  assert.equal(model.headCommentTarget([set()], `/${ID}/old.txt`), null);
+  assert.equal(model.headCommentTarget([set()], `/${ID}/package.json`), null);
+  assert.equal(model.headCommentTarget([set({ role: "master", agent: "Master" })], `/${ID}/README.md`), null);
+  assert.equal(model.headCommentTarget([set({ state: "accepted" })], `/${ID}/README.md`), null);
+  assert.equal(model.headCommentTarget([set()], `/${"c".repeat(32)}/README.md`), null);
+  assert.equal(model.headCommentTarget([set()], `/${ID}/../README.md`), null);
+  assert.equal(model.headCommentTarget([set()], "/README.md"), null);
+});
+
 test("a refused comment reads as the desktop's sentence for the team codes, and as Changes words otherwise", () => {
   const desktop = readFileSync(new URL("../../desktop/src/api-projects.ts", import.meta.url), "utf8");
   const sentences = Object.fromEntries([...desktop.matchAll(/^ {2}([a-z_]+): "([^"]+)",$/gm)].map((match) => [match[1], match[2]]));

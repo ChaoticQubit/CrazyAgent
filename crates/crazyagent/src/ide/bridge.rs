@@ -175,6 +175,12 @@ pub enum IdeCall {
         path: String,
         page: u16,
     },
+    #[serde(rename = "ide.head_blob")]
+    HeadBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
     #[serde(rename = "ide.accept")]
     Accept {
         id: ChangeSetId,
@@ -280,7 +286,9 @@ impl IdeRequest {
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
-            IdeCall::BaseBlob { path, .. } | IdeCall::OwnerEdit { path, .. } => relative(path),
+            IdeCall::BaseBlob { path, .. }
+            | IdeCall::HeadBlob { path, .. }
+            | IdeCall::OwnerEdit { path, .. } => relative(path),
             IdeCall::Comment {
                 path, line, text, ..
             } => {
@@ -764,7 +772,7 @@ pub(crate) async fn serve(
 
 /// When one IDE call must be answered by. Accept, Discard and Restore run under the
 /// desktop's Changes bound, so a slow commit still lands and reports what it did; the
-/// three Changes reads run under READ_TIME, since the extension polls them again; every
+/// four Changes reads run under READ_TIME, since the extension polls them again; every
 /// other call keeps the handshake deadline. Inputs: the call and the handshake deadline.
 /// Output: the instant, never before the deadline.
 fn bound(call: &IdeCall, deadline: Instant) -> Instant {
@@ -772,7 +780,10 @@ fn bound(call: &IdeCall, deadline: Instant) -> Instant {
         IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
             CHANGES_TIMEOUT
         }
-        IdeCall::ChangeSets {} | IdeCall::ChangeDiff { .. } | IdeCall::BaseBlob { .. } => READ_TIME,
+        IdeCall::ChangeSets {}
+        | IdeCall::ChangeDiff { .. }
+        | IdeCall::BaseBlob { .. }
+        | IdeCall::HeadBlob { .. } => READ_TIME,
         _ => return deadline,
     };
     deadline.max(Instant::now() + time)
@@ -850,6 +861,7 @@ async fn answer(
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
+        | IdeCall::HeadBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }
