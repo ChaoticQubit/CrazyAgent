@@ -15,6 +15,7 @@
     "allow-desktop-reconcile",
     "allow-desktop-retry",
     "allow-desktop-projects",
+    "allow-desktop-project-list",
     "allow-desktop-create-project",
     "allow-desktop-project-catalog",
     "allow-desktop-setup-project",

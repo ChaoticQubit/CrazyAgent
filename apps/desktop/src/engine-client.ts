@@ -364,6 +364,13 @@ export interface ProjectPage {
   fresh: boolean;
 }
 
+/** The projects Home, the sidebar, Go to and the name checks list: at most the bridge's
+ * PROJECT_LIST_MAX in engine order, and whether the engine holds more. */
+export interface ProjectList {
+  items: ProjectPage["items"];
+  more: boolean;
+}
+
 export interface ConversationRow {
   kind: "message" | "brief";
   version: string | null;
@@ -407,6 +414,12 @@ export interface IntentReceipt extends PendingIntent {
 
 export function projects(next = false): Promise<ProjectPage> {
   return invoke<ProjectPage>("desktop_projects", { next });
+}
+
+/** Reads every project in one bridge call that pages with its own cursor, so overlapping
+ * reads never disturb each other. Input: none. Output: the projects, at most the bound. */
+export function projectList(): Promise<ProjectList> {
+  return invoke<ProjectList>("desktop_project_list");
 }
 
 export interface ProjectSpec {

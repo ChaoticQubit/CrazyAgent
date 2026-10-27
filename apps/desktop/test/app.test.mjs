@@ -1,6 +1,7 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -413,17 +414,18 @@ test("each project's onboarding review and settings get their own page, so a swi
 });
 
 test("Home, the sidebar and Go to keep every project up to the bound and say when more exist", async () => {
-  const { PROJECT_LIST_MAX, projectList } = await import("../src/api.ts");
+  const { PROJECT_LIST_MAX } = await import("../src/api.ts");
   const rows = (count) => Array.from({ length: count }, (_, at) => ({ id: `p-${at + 1}`, name: `Project ${at + 1}`, repository_count: 0 }));
+  const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
   assert.equal(PROJECT_LIST_MAX, 200);
-  assert.deepEqual(projectList(rows(20), false), { items: rows(20), more: false });
-  assert.deepEqual(projectList(rows(200), false), { items: rows(200), more: false });
-  const cut = projectList(rows(208), true);
-  assert.equal(cut.items.length, 200);
-  assert.equal(cut.items.at(-1).id, "p-200");
-  assert.equal(cut.more, true);
-  assert.equal(projectList(rows(205), false).more, true);
-  assert.equal(projectList(rows(16), true).more, true);
+  assert.match(source("src-tauri/src/bridge.rs"), new RegExp(`pub const PROJECT_LIST_MAX: usize = ${PROJECT_LIST_MAX};`));
+  const body = (text, name) => text.slice(text.indexOf(`function ${name}(`), text.indexOf("\n}\n", text.indexOf(`function ${name}(`)));
+  assert.match(body(source("src/api.ts"), "listProjects"), /call<ProjectList>\("desktop_project_list"\)/);
+  for (const name of ["loadProjects", "projectsUsing"]) {
+    const reader = body(source("src/api-projects.ts"), name);
+    assert.match(reader, /projectList\(\)/, `${name} reads the one-call list`);
+    assert.doesNotMatch(reader, /\bprojects\(/, `${name} never walks the shared page cursor`);
+  }
 
   const twenty = render({ projects: ok(rows(20)) });
   for (const at of [1, 17, 20]) assert.match(twenty, new RegExp(`<span class="name">Project ${at}</span>`));

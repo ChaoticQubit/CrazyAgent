@@ -13,7 +13,7 @@ use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
     ModelAccessDetail, ModelAccessPage, NativeAuthView, NativeBridge, PendingIntent, ProjectDetail,
-    ProjectPage,
+    ProjectList, ProjectPage,
 };
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::agents::{AccountUse, AgentView};
@@ -318,6 +318,15 @@ async fn desktop_projects(
 ) -> Result<ProjectPage, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.projects(next).await
+}
+
+#[tauri::command]
+async fn desktop_project_list(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ProjectList, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_list().await
 }
 
 #[tauri::command]
@@ -2346,6 +2355,7 @@ pub fn run() {
             desktop_reconcile,
             desktop_retry,
             desktop_projects,
+            desktop_project_list,
             desktop_create_project,
             desktop_project_catalog,
             desktop_setup_project,

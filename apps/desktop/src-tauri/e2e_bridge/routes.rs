@@ -110,6 +110,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.projects(next).await }.await;
             routed(result)
         }
+        "desktop_project_list" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.project_list().await }.await;
+            routed(result)
+        }
         "desktop_create_project" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
