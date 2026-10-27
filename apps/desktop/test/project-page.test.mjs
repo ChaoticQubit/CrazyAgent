@@ -570,7 +570,7 @@ test("a memory note must have text and fit the engine's 2,000 byte limit", async
   assert.equal(context.noteError("é".repeat(1001)), "This is too long for one memory. Keep it under 2,000 characters.");
 });
 
-const teamAgent = (id, status, extra = {}) => ({ id, role: "sub", harness: "codex", tools: true, account: null, worktree: null, status, status_label: "", task: null, turns: 0, problem: null, process_group: null, created_ms: 0, heartbeat_ms: 0, stopped_ms: null, ...extra });
+const teamAgent = (id, status, extra = {}) => ({ id, role: "sub", label: extra.role === "master" ? "Master" : `Sub-agent ${id}`, harness: "codex", tools: true, account: null, worktree: null, status, status_label: "", task: null, turns: 0, problem: null, process_group: null, created_ms: 0, heartbeat_ms: 0, stopped_ms: null, ...extra });
 const teamTask = (id, status, extra = {}) => ({ id, source: "master", harness: "codex", tools: true, prompt: `Task ${id}`, status, status_label: "", agent: null, attempts: 1, result: null, problem: null, delivered: false, output_bytes: 0, created_ms: 0, started_ms: null, finished_ms: null, ...extra });
 
 test("team agents and tasks use the design's status words", () => {
@@ -598,19 +598,19 @@ test("the Team panel names each agent, its account and current task, and lists t
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
     { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder" },
-    { key: "agent-2", role: "Sub-agent", name: "Codex 1", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2" },
-    { key: "agent-3", role: "Sub-agent", name: "Codex 2", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work", folder: "" },
+    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2" },
+    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "" },
   ]);
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
-    ["task-10", "From the master", "Codex 1", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
+    ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
-  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Codex 3", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "" });
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "" });
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
-    ["task-10", "Codex 1", "Running", "", "1 min", { task: 10, label: "Stop" }],
+    ["task-10", "Sub-agent 2", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
-    ["task-12", "Codex 2", "Done", "Login screen built, 4 tests pass.", "2 min", null],
+    ["task-12", "Sub-agent 3", "Done", "Login screen built, 4 tests pass.", "2 min", null],
     ["task-13", "Codex", "Failed", "No account in this project's pool can run codex", "", null],
   ]);
   assert.equal(all.tasks[2].result, "## Summary\n\nLogin screen built, 4 tests pass.");
@@ -632,11 +632,57 @@ test("a long task prompt shows its first line, cut to fit a row", () => {
   assert.equal(research.firstLine(""), "");
 });
 
+test("the Agents tab counts working team agents and running research like the project card", async () => {
+  const agents = await import("../src/screens/project/agents.tsx");
+  const team = { project_id: "p-1", keep_warm: false, paused: false, min_agents: 0, max_agents: 5, harnesses: [], messages: [], plan: [],
+    agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "working", { task: 11 }), teamAgent(4, "stopped")],
+    tasks: [teamTask(10, "running", { agent: 2 }), teamTask(11, "running", { agent: 3 })] };
+  const data = { ...tabData([job("running", { started_ms: 1_000 })]), setup: { kind: "ok", value: { team: { max_agents: 5 } } },
+    assigned: { pool: { id: "pool-1", name: "Work", members: ["a", "b"] } }, team: { result: { kind: "ok", value: team }, at: 1_000 } };
+  const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data }));
+  assert.match(markup, /3 agents working\. Work: 2 accounts\./);
+  assert.doesNotMatch(markup, /1 of 5 agents running/);
+});
+
 test("the Agents tab labels research and asks the engine for the live team", async () => {
   const agents = await import("../src/screens/project/agents.tsx");
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("running", { started_ms: 1_000 })]) }));
   assert.match(markup, /<h3>Research<\/h3><ul class="pj-rows" aria-label="Research agents">/);
   assert.match(markup, /Loading the team\.\.\./);
+});
+
+test("a team agent keeps the engine's name in every row, whatever its harness or place", () => {
+  const status = {
+    agents: [
+      teamAgent(1, "working", { role: "master", harness: "claude", label: "Master" }),
+      teamAgent(2, "idle", { label: "Sub-agent 2" }),
+      teamAgent(3, "working", { harness: "claude", task: 10, label: "Sub-agent 3" }),
+      teamAgent(4, "stopped", { label: "Sub-agent 4" }),
+    ],
+    tasks: [
+      teamTask(10, "running", { harness: "claude", agent: 3 }),
+      teamTask(11, "done", { agent: 4 }),
+    ],
+  };
+  const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
+  const all = research.teamPanel(status, [], label, "all", 0);
+  assert.deepEqual(all.agents.map((row) => [row.name, row.harness]),
+    [["Master", "Claude Code"], ["Sub-agent 2", "Codex"], ["Sub-agent 3", "Claude Code"], ["Sub-agent 4", "Codex"]]);
+  assert.deepEqual(all.tasks.map((row) => row.to), ["Sub-agent 3", "Sub-agent 4"]);
+});
+
+test("every team agent row shows its current task or, between tasks, its last one", () => {
+  const status = {
+    agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "idle"), teamAgent(4, "stopped"), teamAgent(5, "idle")],
+    tasks: [
+      teamTask(9, "done", { agent: 4, prompt: "Old work" }),
+      teamTask(10, "running", { agent: 2, prompt: "Build the login screen" }),
+      teamTask(11, "done", { agent: 4, prompt: "Fix the header\nand the footer" }),
+      teamTask(12, "failed", { agent: 3, prompt: "Write the tests" }),
+    ],
+  };
+  assert.deepEqual(research.teamPanel(status, [], (id) => id, "all", 0).agents.map((row) => row.task),
+    ["Build the login screen", "Last task: Write the tests", "Last task: Fix the header", "Waiting for work"]);
 });
 
 test("team tasks waiting for a pool ask the owner for one, with the engine's reason", () => {
@@ -723,6 +769,27 @@ test("Enter and the Send button follow one rule", () => {
   assert.equal(research.canSend("a".repeat(8192), false), true);
   assert.equal(research.canSend("a".repeat(8193), false), false);
   assert.equal(research.canSend("é".repeat(4097), false), false);
+});
+
+test("a turn the engine asked for shows the engine's line where the owner's message would be, as plain text", async () => {
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const line = "CrazyAgent asked the master to resolve the conflicts in README.md.";
+  const asked = { id: "t1", ordinal: 1, phase: "running", reason: null, reply: null, engine_request: { change_set: "c".repeat(32), line, text: "Resolve the conflicts." } };
+  assert.equal(research.engineLine(asked), line);
+  assert.equal(research.engineLine({ ...asked, engine_request: null }), null);
+  assert.equal(research.engineLine({ id: "t2", ordinal: 2, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
+  const html = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: asked, sent: undefined }));
+  assert.match(html, /data-testid="master-engine-request"/);
+  assert.ok(html.includes(line.replace("'", "&#x27;")), html);
+  assert.doesNotMatch(html, /Your message 1/);
+  assert.doesNotMatch(html, /Resolve the conflicts\./);
+  const tricky = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: { ...asked, engine_request: { ...asked.engine_request, line: "<b>x</b>\u001b[31m" } }, sent: undefined }));
+  assert.ok(tricky.includes("&lt;b&gt;x&lt;/b&gt;\\u001b[31m"), tricky);
+  const owner = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: { ...asked, engine_request: undefined }, sent: undefined }));
+  assert.match(owner, /Your message 1/);
+  const typed = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: asked, sent: "Fix it" }));
+  assert.match(typed, /Fix it/);
+  assert.doesNotMatch(typed, /master-engine-request/);
 });
 
 test("a master turn whose edits wait in Changes shows the engine's note, and a turn without one shows nothing", () => {

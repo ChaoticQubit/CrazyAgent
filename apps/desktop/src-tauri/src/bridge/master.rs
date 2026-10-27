@@ -122,7 +122,7 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         if generation == 0 || generation > 9_007_199_254_740_991 {
@@ -134,7 +134,7 @@ impl NativeBridge {
             | MasterOwnerAction::Submit { project_id, .. }
             | MasterOwnerAction::Cancel { project_id, .. }
             | MasterOwnerAction::Close { project_id, .. } => project_id,
-            MasterOwnerAction::RegisterRcliProfile { .. } => {
+            MasterOwnerAction::Resolve { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
                 return Err(failure("master_bridge_unavailable"));
             }
         };

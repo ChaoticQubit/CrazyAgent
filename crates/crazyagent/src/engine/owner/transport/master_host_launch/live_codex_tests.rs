@@ -195,9 +195,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
                 message,
                 will_retry: false,
             } => errors.push(message),
-            EventKind::AssistantDelta { item_id, text } => {
-                reply.push(Some(&item_id), &text, true).unwrap()
-            }
+            EventKind::AssistantDelta { item_id, text } => reply.push(Some(&item_id), &text, true),
             EventKind::ApprovalRequired { approval, .. } => steps.push(format!("{approval:?}")),
             EventKind::UnsupportedRequest { method, .. } => steps.push(method),
             EventKind::Unsupported {
@@ -423,9 +421,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
                 message,
                 will_retry: false,
             } => errors.push(message),
-            EventKind::AssistantDelta { item_id, text } => {
-                reply.push(Some(&item_id), &text, true).unwrap()
-            }
+            EventKind::AssistantDelta { item_id, text } => reply.push(Some(&item_id), &text, true),
             EventKind::ApprovalRequired { approval, .. } => steps.push(format!("{approval:?}")),
             EventKind::UnsupportedRequest { method, .. } => steps.push(method),
             EventKind::Unsupported {
