@@ -556,7 +556,7 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
 }
 
 #[test]
-fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_seven_tools() {
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_eight_tools() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
@@ -582,8 +582,15 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_seven_tools() {
             STATUS_TOOL,
             CHANGES_TOOL,
             ESCALATE_TOOL,
-            ASK_TOOL
+            ASK_TOOL,
+            RECORD_TOOL
         ]
+    );
+    let tools = answer["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools[6], ask_tool());
+    assert_eq!(
+        tools[6]["inputSchema"]["properties"]["options"]["maxItems"],
+        crate::questions::OPTIONS_MAX
     );
 }
 
@@ -628,49 +635,48 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
 }
 
 #[test]
-fn ask_owner_takes_a_bounded_question_or_only_a_chat_answer_and_the_engine_checks_it_again() {
+fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_checks_both_again() {
     let ask = |arguments: Value| live_call(ASK_TOOL, Some(&arguments)).unwrap();
-    let asked = Call::AskOwner {
+    let record = |arguments: Value| live_call(RECORD_TOOL, Some(&arguments)).unwrap();
+    let asked = Call::Ask {
         question: "Ship V2 on Friday?".into(),
         options: vec!["Yes".into(), "No, wait a week".into()],
-        recommended: Some("Yes: every slice is merged.".into()),
+        recommended: Some("Yes".into()),
         context: Some("One flaky test left.".into()),
     };
     assert_eq!(
         ask(json!({
             "question": " Ship V2 on Friday? ",
             "options": ["Yes", " No, wait a week "],
-            "recommended": "Yes: every slice is merged.",
+            "recommended": "Yes",
             "context": "One flaky test left.",
         })),
         Ok(asked.clone())
     );
     assert_eq!(checked(asked.clone()), Ok(asked));
-    let bare = Call::AskOwner {
+    let six: Vec<String> = (1..=6).map(|n| format!("option {n}")).collect();
+    let widest = ask(json!({"question": "Pick one?", "options": six.clone()}));
+    assert!(matches!(widest, Ok(Call::Ask { ref options, .. }) if options == &six));
+    let bare = Call::Ask {
         question: "Which name?".into(),
         options: vec![],
-        recommended: None,
+        recommended: Some("CrazyAgent, it is known.".into()),
         context: None,
     };
     assert_eq!(
-        ask(json!({"question": "Which name?", "options": null, "context": null})),
+        ask(
+            json!({"question": "Which name?", "options": null, "recommended": "CrazyAgent, it is known.", "context": null})
+        ),
         Ok(bare.clone())
     );
-    assert_eq!(
-        checked(bare),
-        Ok(Call::AskOwner {
-            question: "Which name?".into(),
-            options: vec![],
-            recommended: None,
-            context: None,
-        })
-    );
+    assert_eq!(checked(bare.clone()), Ok(bare));
     let recorded = Call::RecordAnswer {
-        id: 7,
-        answer: "Friday works.".into(),
+        question: 7,
+        version: 0,
+        owner_turn: 31,
     };
     assert_eq!(
-        ask(json!({"id": 7, "answer": " Friday works. "})),
+        record(json!({"question": 7, "version": 0, "owner_turn": 31})),
         Ok(recorded.clone())
     );
     assert_eq!(checked(recorded.clone()), Ok(recorded));
@@ -679,24 +685,39 @@ fn ask_owner_takes_a_bounded_question_or_only_a_chat_answer_and_the_engine_check
         json!({}),
         json!({"question": "  "}),
         json!({"question": "x".repeat(crate::questions::QUESTION_BYTES_MAX + 1)}),
-        json!({"question": "Pick?", "options": ["a", "b", "c", "d", "e"]}),
+        json!({"question": "Pick?", "options": ["a", "b", "c", "d", "e", "f", "g"]}),
         json!({"question": "Pick?", "options": ["a", "a"]}),
         json!({"question": "Pick?", "options": ["two\nlines"]}),
         json!({"question": "Pick?", "options": [1]}),
         json!({"question": "Pick?", "options": "a"}),
         json!({"question": "Pick?", "recommended": 3}),
+        json!({"question": "Pick?", "options": ["a", "b"], "recommended": "c"}),
+        json!({"question": "Pick?", "recommended": "r".repeat(crate::questions::RECOMMENDED_BYTES_MAX + 1)}),
+        json!({"question": "Pick \u{202e}one?"}),
+        json!({"question": "Pick?", "context": "zero\u{200b}width"}),
         json!({"question": "Pick?", "answer": "yes"}),
         json!({"question": "Pick?", "shell": "rm -rf /"}),
-        json!({"id": 7}),
-        json!({"id": 0, "answer": "yes"}),
-        json!({"id": "7", "answer": "yes"}),
-        json!({"id": 7, "answer": "yes", "question": "Pick?"}),
-        json!({"id": 7, "answer": "x".repeat(crate::questions::ANSWER_BYTES_MAX + 1)}),
-        json!({"id": 7, "answer": "bell \u{7}"}),
+        json!({"id": 7, "answer": "yes"}),
     ] {
         assert_eq!(ask(arguments.clone()), Err(ASK_INVALID), "{arguments}");
     }
-    let planted = Call::AskOwner {
+    for arguments in [
+        json!({}),
+        json!({"question": 7, "version": 0}),
+        json!({"question": 0, "version": 0, "owner_turn": 31}),
+        json!({"question": 7, "version": -1, "owner_turn": 31}),
+        json!({"question": 7, "version": 0, "owner_turn": 0}),
+        json!({"question": "7", "version": 0, "owner_turn": 31}),
+        json!({"question": 7, "version": 0, "owner_turn": 31, "answer": "Friday works."}),
+        json!({"question": 7, "version": 0, "owner_turn": u64::MAX}),
+    ] {
+        assert_eq!(
+            record(arguments.clone()),
+            Err(RECORD_INVALID),
+            "{arguments}"
+        );
+    }
+    let planted = Call::Ask {
         question: " untrimmed ".into(),
         options: vec![],
         recommended: None,
@@ -704,8 +725,9 @@ fn ask_owner_takes_a_bounded_question_or_only_a_chat_answer_and_the_engine_check
     };
     assert!(checked(planted).is_err());
     let planted = Call::RecordAnswer {
-        id: -1,
-        answer: "yes".into(),
+        question: 7,
+        version: 0,
+        owner_turn: -1,
     };
-    assert_eq!(checked(planted), Err(ASK_INVALID));
+    assert_eq!(checked(planted), Err(RECORD_INVALID));
 }
