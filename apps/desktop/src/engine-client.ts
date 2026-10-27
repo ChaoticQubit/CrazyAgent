@@ -758,6 +758,12 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
 }
 
+/** Turns the project's live master on or off. Inputs: the project id, the switch and a
+ * generation. Output: the commit receipt; a master with no terminal app is rejected. */
+export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, generation });
+}
+
 export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
 }
