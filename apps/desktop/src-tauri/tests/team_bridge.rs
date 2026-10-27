@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
