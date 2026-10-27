@@ -221,7 +221,7 @@ fn engine_like(line: &str) -> bool {
     if hashes > 0 && engine_section(text[hashes..].trim().trim_end_matches('#').trim()) {
         return true;
     }
-    let said = text.trim_start_matches(['>', ' ', '\t']);
+    let said = words(text.trim_start_matches(['>', ' ', '\t']));
     if said
         .get(..PROVENANCE_MARK.len())
         .is_some_and(|start| start.eq_ignore_ascii_case(PROVENANCE_MARK))
@@ -236,7 +236,7 @@ fn engine_like(line: &str) -> bool {
                 .then_some(&text[digits..])
                 .and_then(|rest| rest.strip_prefix(['.', ')']))
         })
-        .map(str::trim_start);
+        .map(words);
     listed.is_some_and(|item| {
         let Some(rest) = item
             .get(.."question ".len())
@@ -250,12 +250,19 @@ fn engine_like(line: &str) -> bool {
     })
 }
 
-/// Whether a heading text, without its marks, names an engine section, ignoring case.
-/// Takes the text. Returns true for a reserved name.
+/// Whether a heading text, without its marks, names an engine section, ignoring case and
+/// how many spaces or tabs part its words. Takes the text. Returns true for a reserved name.
 fn engine_section(text: &str) -> bool {
+    let text = words(text);
     ENGINE_SECTIONS
         .iter()
         .any(|name| text.eq_ignore_ascii_case(name))
+}
+
+/// A text's words joined by single spaces, so any run of white space reads as one space.
+/// Takes the text. Returns the words.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Whether a line is a setext heading underline: only `=` or only `-` marks.
@@ -401,9 +408,7 @@ fn answer_line(
     answer: Option<&str>,
 ) -> String {
     use crate::questions::AnsweredBy;
-    let flat = |text: &str| {
-        crate::memory::visible_text(&text.split_whitespace().collect::<Vec<_>>().join(" "))
-    };
+    let flat = |text: &str| crate::memory::visible_text(&words(text));
     let asked = question.map_or_else(String::new, |asked| format!(" {}", flat(&asked.question)));
     let outcome = match (answer, question.and_then(|asked| asked.answered_by)) {
         (None, _) => "The owner dismissed it.".to_owned(),
