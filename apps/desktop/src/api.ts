@@ -861,6 +861,13 @@ export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentRece
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
 }
 
+/** Turns the project's live master on or off; on, the engine keeps the master's own app running
+ * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
+ * or a plain error. */
+export function setLiveMaster(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_live_master", { id, on, generation: nextGeneration() });
+}
+
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan
  * or null for any, and the task. Output: the engine receipt, not ready, or a plain error. */
 export function delegateTeamTask(id: string, harness: string | null, prompt: string): Promise<Result<IntentReceipt>> {
