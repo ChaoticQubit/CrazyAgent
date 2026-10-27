@@ -882,3 +882,178 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         );
     }
 }
+
+fn finished(id: i64, label: &str, bytes: u64) -> crate::team::cleanup::FinishedAgent {
+    crate::team::cleanup::FinishedAgent {
+        id,
+        role: crate::team::AgentRole::Sub,
+        label: label.into(),
+        harness: "codex".into(),
+        stopped_ms: Some(2),
+        bytes,
+        counted_all: true,
+    }
+}
+
+fn cleanup_reply(
+    query: crate::tui::client::cleanup::CleanupQuery,
+    result: Result<crate::tui::client::cleanup::CleanupReply, String>,
+) -> Arrival {
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Cleanup(Box::new(
+        crate::tui::client::cleanup::CleanupEvent { query, result },
+    ))))
+}
+
+fn cleanup_sent(shell: &mut Shell) -> Vec<crate::tui::client::cleanup::CleanupQuery> {
+    requests(shell)
+        .into_iter()
+        .map(|request| match request {
+            Request::Cleanup(query) => *query,
+            other => panic!("only cleanup is sent, not {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Reading finished agents"), "{text}");
+
+    let agents = vec![
+        finished(4, "Ada (@login-page)", 3 * 1024 * 1024),
+        finished(2, "Grace (@signup)", 1024 * 1024),
+    ];
+    shell.arrive(cleanup_reply(read, Ok(CleanupReply::Finished(agents))));
+    let rows = render(&mut shell);
+    let text = rows.join("\n");
+    assert!(text.contains("Clean up 2 finished agents (4 MB)"), "{text}");
+    assert_eq!(
+        pane_row(&rows, 3),
+        padded("Ada (@login-page)  sub-agent, Codex  3 MB")
+    );
+    assert_eq!(
+        pane_row(&rows, 4),
+        padded("Grace (@signup)  sub-agent, Codex  1 MB")
+    );
+    assert!(
+        text.contains("y Remove and free 4 MB   n Keep them"),
+        "{text}"
+    );
+
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "the open box takes every key"
+    );
+    shell.key(Key::Char('y'));
+    let remove = CleanupQuery::Remove {
+        project: project(),
+        agents: vec![4, 2],
+    };
+    assert_eq!(cleanup_sent(&mut shell), vec![remove.clone()]);
+    assert!(render(&mut shell).join("\n").contains("Removing"));
+    shell.key(Key::Esc);
+    assert!(
+        render(&mut shell).join("\n").contains("Removing"),
+        "a removal under way stays on screen"
+    );
+
+    shell.arrive(cleanup_reply(remove, Ok(CleanupReply::Removed(vec![4, 2]))));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Removed 2 finished agents.");
+    assert_eq!(message.rest, "Freed 4 MB.");
+    let rows = render(&mut shell);
+    assert_eq!(
+        pane_row(&rows, 3),
+        padded("Enter on an agent opens its live terminal")
+    );
+}
+
+#[test]
+fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_nothing() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let read = CleanupQuery::Finished { project: project() };
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        read.clone(),
+        Ok(CleanupReply::Finished(Vec::new())),
+    ));
+    assert_eq!(shell.ctx.message().unwrap().lead, "Nothing to clean up.");
+    let rows = render(&mut shell);
+    assert_eq!(
+        pane_row(&rows, 3),
+        padded("Enter on an agent opens its live terminal")
+    );
+
+    shell.key(Key::Char('c'));
+    cleanup_sent(&mut shell);
+    let other = CleanupQuery::Finished {
+        project: ProjectId::new("project-other").unwrap(),
+    };
+    shell.arrive(cleanup_reply(
+        other,
+        Ok(CleanupReply::Finished(vec![finished(9, "Elsewhere", 1)])),
+    ));
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Reading finished agents")
+    );
+    let agents = vec![finished(3, "Lin (@docs)", 2048)];
+    shell.arrive(cleanup_reply(
+        read.clone(),
+        Ok(CleanupReply::Finished(agents.clone())),
+    ));
+    shell.key(Key::Char('n'));
+    assert!(requests(&mut shell).is_empty(), "n removes nothing");
+    assert!(!render(&mut shell).join("\n").contains("Lin (@docs)"));
+
+    shell.key(Key::Char('c'));
+    cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        read.clone(),
+        Ok(CleanupReply::Finished(agents)),
+    ));
+    shell.key(Key::Char('y'));
+    let sent = cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        sent[0].clone(),
+        Err("cleanup_worktree_dirty".into()),
+    ));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Cleanup kept an agent and stopped there.");
+    assert_eq!(
+        message.rest,
+        "An agent's working copy has changes that are not saved anywhere else."
+    );
+    assert!(!render(&mut shell).join("\n").contains("Lin (@docs)"));
+
+    shell.key(Key::Char('c'));
+    cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(read, Err(NOT_READY.into())));
+    assert_eq!(
+        shell.ctx.message().unwrap().rest,
+        "Cleanup is not available in this engine yet."
+    );
+    for code in crate::engine::owner::CLEANUP_CODES {
+        if code.starts_with("cleanup_")
+            && !code.ends_with("_bounds")
+            && *code != "cleanup_request_invalid"
+            && *code != "cleanup_outcome_unknown"
+        {
+            assert_ne!(
+                super::cleanup::words(code),
+                "The engine could not do this.",
+                "{code}"
+            );
+        }
+    }
+}
