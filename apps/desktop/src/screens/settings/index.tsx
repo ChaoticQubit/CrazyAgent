@@ -10,6 +10,7 @@ import { Pools } from "./pools";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
 import { UpdatesSettings } from "./updates";
+import { UsageSettings } from "./usage";
 
 const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Accounts", icon: "key-round" },
@@ -20,6 +21,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "home", label: "Projects folder", icon: "folder" },
   { id: "github", label: "GitHub", icon: "git-branch" },
   { id: "memory", label: "Memory", icon: "brain" },
+  { id: "usage", label: "Usage", icon: "trending-up" },
   { id: "profile", label: "Profile", icon: "user-round" },
   { id: "updates", label: "Updates", icon: "refresh-cw" },
 ];
@@ -40,6 +42,7 @@ export function Settings({ tab, action, account }: { tab: SettingsTab; action?: 
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
         : tab === "memory" ? <MemorySettings />
+        : tab === "usage" ? <UsageSettings />
         : tab === "updates" ? <UpdatesSettings />
         : <ProfileSettings />}
     </div>
