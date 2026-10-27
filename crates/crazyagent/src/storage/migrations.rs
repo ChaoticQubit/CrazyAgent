@@ -41,11 +41,44 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 3,
+        run: widen_empty_team_plans,
+    },
+    Step {
+        to: 4,
         run: master_sessions_parked,
     },
 ];
 
-/// Step 3: master sessions can be parked and resumed, and team tasks and agents record
+/// Step 3 (DEC-096 addendum 3): an empty sub-harness list now means any harness, so a saved
+/// plan that lists none and allows at most one agent, the old "master only" default, gets the
+/// team maximum. Runs once with the upgrade, so an owner who later sets one agent keeps it.
+/// A body that is not valid JSON is left as it is.
+fn widen_empty_team_plans(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let setups: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_setups')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !setups {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE project_setups SET body=json_set(body,'$.team.max_agents',?1)
+         WHERE CASE WHEN json_valid(body)
+             THEN json_type(body,'$.team.sub_harnesses')='array'
+                 AND json_array_length(body,'$.team.sub_harnesses')=0
+                 AND json_type(body,'$.team.max_agents')='integer'
+                 AND json_extract(body,'$.team.max_agents')<=1
+             ELSE 0 END",
+        [crate::project_setup::TEAM_AGENTS_MAX],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+/// Step 4: master sessions can be parked and resumed, and team tasks and agents record
 /// the session that owns them (DEC-096 addendum 4b).
 fn master_sessions_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
     super::master_session::allow_parked(tx)?;

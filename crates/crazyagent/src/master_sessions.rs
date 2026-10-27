@@ -23,7 +23,7 @@ pub const SUMMARY_BYTES_MAX: usize = 8192;
 /// The most rows of each kind the state section lists.
 pub const STATE_ROWS_MAX: usize = 12;
 
-const MARKS: &str = "CREATE TABLE IF NOT EXISTS master_session_marks (
+const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
     started_ms INTEGER NOT NULL CHECK(started_ms >= 0),
@@ -155,7 +155,7 @@ pub(crate) fn touch(
     };
     let now = i64::try_from(now).map_err(error)?;
     tx.execute(
-        "INSERT INTO master_session_marks(session,project,started_ms,active_ms) VALUES (?1,?2,?3,?3)
+        "INSERT INTO session_marks(session,project,started_ms,active_ms) VALUES (?1,?2,?3,?3)
          ON CONFLICT(session) DO UPDATE SET active_ms=MAX(active_ms,excluded.active_ms)",
         params![session, project.as_str(), now],
     )
@@ -190,7 +190,7 @@ pub(crate) fn list(
                     CASE WHEN length(s.phase)<=10 THEN s.phase END,
                     MAX(s.version,COALESCE((SELECT MAX(t.input) FROM master_turns t WHERE t.session=s.id),0)) AS active,
                     m.started_ms,m.active_ms
-             FROM master_sessions s LEFT JOIN master_session_marks m ON m.session=s.id
+             FROM master_sessions s LEFT JOIN session_marks m ON m.session=s.id
              WHERE s.project=?1
              ORDER BY s.phase='configured' DESC, active DESC, s.created DESC LIMIT ?2",
         )
@@ -701,19 +701,22 @@ fn stopped_master(
         .map_err(error)
 }
 
-/// The first line of a text, trimmed and cut to at most `max` characters with "..."
-/// marking a cut. Takes the text and bound. Returns None when nothing but space is left.
+/// The first line of a text with visible words, made one line by `flat`.
+/// Takes the text and bound. Returns None when no line has visible words.
 pub fn clip(text: &str, max: usize) -> Option<String> {
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    flat(line, max)
+    text.lines().find_map(|line| flat(line, max))
 }
 
-/// A whole text on one line, every run of white space made one space, cut to at most
-/// `max` characters with "..." marking a cut. Takes the text and bound. Returns None
-/// when nothing but space is left.
+/// A whole text on one line, every control character and run of white space made one
+/// space, so no terminal escape reaches a screen, cut to at most `max` characters with
+/// "..." marking a cut. Takes the text and bound. Returns None when nothing visible is left.
 pub fn flat(text: &str, max: usize) -> Option<String> {
     assert!(max > 3);
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let visible: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let joined = visible.split_whitespace().collect::<Vec<_>>().join(" ");
     if joined.is_empty() {
         return None;
     }
@@ -724,6 +727,7 @@ pub fn flat(text: &str, max: usize) -> Option<String> {
     kept.truncate(kept.trim_end().len());
     kept.push_str("...");
     assert!(kept.chars().count() <= max);
+    assert!(!kept.chars().any(char::is_control));
     Some(kept)
 }
 
@@ -743,4 +747,25 @@ fn fit(mut text: String, max: usize) -> String {
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clip, flat};
+
+    #[test]
+    fn listed_lines_hold_no_control_characters_and_stay_bounded() {
+        assert_eq!(
+            flat("Ship \u{1b}[31mnow\u{7}\u{0} please", 80).as_deref(),
+            Some("Ship [31mnow please")
+        );
+        assert_eq!(
+            clip("\n  \u{1b}\u{8}\n First line \r\nSecond", 80).as_deref(),
+            Some("First line")
+        );
+        assert_eq!(flat("\u{1b}\u{7} \t", 80), None);
+        let long = flat(&"word ".repeat(40), 12).unwrap();
+        assert_eq!(long, "word word...");
+        assert!(long.chars().count() <= 12);
+    }
 }

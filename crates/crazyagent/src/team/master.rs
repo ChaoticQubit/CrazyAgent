@@ -21,6 +21,14 @@ const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const NOT_WIRED: &str = "Team messaging is not available in this build yet.";
 const NO_TERMINALS: &str = "Not sent: the engine has no agent terminals right now.";
+const AGENT_SHOWN_MAX: usize = 64;
+const ESCALATIONS_PER_HOUR_MAX: i64 = 10;
+const HOUR_MS: i64 = 3_600_000;
+const ESCALATED: &str =
+    "The owner has been notified. Wait for their answer here and do not decide this yourself.";
+const ESCALATIONS_FULL: &str = "Not sent: the owner already has 10 questions from this project within the hour. Wait for their answers here.";
+const _: () = assert!(ESCALATIONS_PER_HOUR_MAX == 10);
+const _: () = assert!(ESCALATIONS_PER_HOUR_MAX < super::events::NOTIFICATIONS_PER_PROJECT_MAX);
 
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
 /// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
@@ -69,8 +77,8 @@ fn state(problem: impl std::fmt::Display) -> EngineError {
 }
 
 /// Creates the live master tables: the per-project live switch with its turn and owner
-/// typing state, the turns a live master ended, and the harness conversation each master
-/// session continues.
+/// typing state, the turns a live master ended and the harness conversation each master
+/// session continues. `names` keeps the role a delegation asked for.
 /// Takes the engine database. Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -460,9 +468,10 @@ fn keys(bytes: &[u8]) -> (bool, bool) {
 
 /// Answers the calls a live master's team server left in its mailbox, at most
 /// `CALLS_PER_TICK_MAX` per call, each checked again before it takes effect: `delegate`
-/// admits the task at once, `message`, `answer` and `status` go to the team event handlers
-/// and `changes` lists the pending change sets. Takes the engine database, what the
-/// answers need and the mailbox. Returns how many calls were answered, or a SQLite failure.
+/// admits the task at once, `message`, `answer` and `status` go to the team event handlers,
+/// `changes` lists the pending change sets and `escalate` notifies the owner. Takes the
+/// engine database, what the answers need and the mailbox. Returns how many calls were
+/// answered, or a SQLite failure.
 pub fn serve_calls(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -525,6 +534,7 @@ fn answer(
             },
         },
         Call::Changes => changes(answering),
+        Call::Escalate { text } => escalate(connection, project, &text)?,
     })
 }
 
@@ -582,6 +592,36 @@ fn delegate(
     ))
 }
 
+/// Raises an app notification for a decision only the owner makes, at most
+/// `ESCALATIONS_PER_HOUR_MAX` per project within an hour. Takes the database, the master's
+/// project and the question. Returns the sentence the master reads, or a SQLite failure.
+fn escalate(
+    connection: &Connection,
+    project: &ProjectId,
+    text: &str,
+) -> Result<(String, bool), EngineError> {
+    let now = now_ms();
+    let recent: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='escalation' AND created_ms>?2",
+            params![project.as_str(), now - HOUR_MS],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if recent >= ESCALATIONS_PER_HOUR_MAX {
+        return Ok((ESCALATIONS_FULL.to_owned(), true));
+    }
+    Ok(
+        match super::events::escalate(connection, project, text, now)? {
+            Ok(_) => (ESCALATED.to_owned(), false),
+            Err(_) => (
+                "Not sent: give the owner one plain question of up to 2000 bytes.".to_owned(),
+                true,
+            ),
+        },
+    )
+}
+
 fn changes(answering: &Answering<'_>) -> (String, bool) {
     let listed = crate::landing::open(answering.landing)
         .and_then(|db| crate::landing::list(&db, &answering.stored.project_id));
@@ -633,6 +673,97 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
         ),
         false,
     )
+}
+
+/// The team event handlers the engine gives a live master's `message`, `answer` and `status`
+/// tools: text typed into one of the project's running sub-agents, named by persona,
+/// `@handle` or `<harness>-<id>`, and the project's running sub-agents with their names and
+/// newest events.
+pub const EVENTS: TeamEvents = TeamEvents {
+    send_to_agent: message_agent,
+    answer: answer_agent,
+    status: status_text,
+};
+
+fn message_agent(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    type_to_agent(connection, host, project, agent, text).map(|name| format!("Sent to {name}."))
+}
+
+fn answer_agent(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    type_to_agent(connection, host, project, agent, text).map(|name| format!("Answered {name}."))
+}
+
+/// Types a master's text into the running sub-agent it names: a persona or `@handle` first,
+/// then the `<harness>-<id>` names events use. Takes the database, terminal host, project,
+/// the name and the text. Returns the agent's label, or the plain reason it was not sent.
+fn type_to_agent(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
+    let target = match super::names::resolve(connection, project, agent).map_err(unreadable)? {
+        Some(id) => format!("team-{id}"),
+        None => agent.to_owned(),
+    };
+    match super::events::send_to_agent(connection, host, project, &target, text)
+        .map_err(unreadable)?
+    {
+        Ok(id) => agent_label(connection, id).map_err(unreadable),
+        Err("team_message_invalid") => Err(format!(
+            "Not sent: give plain text up to {} bytes.",
+            super::events::SEND_BYTES_MAX
+        )),
+        Err("team_agent_not_running") => Err(format!("Not sent: {shown} is not running.")),
+        Err("team_agent_unreachable") => Err(format!(
+            "Not sent: the terminal of {shown} could not be reached."
+        )),
+        Err(_) => Err(format!(
+            "Not sent: no running sub-agent of this project is called {shown}. Call status() for their names."
+        )),
+    }
+}
+
+fn agent_label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
+    let name = super::names::name(connection, agent)?;
+    Ok(super::names::label(
+        super::AgentRole::Sub,
+        agent,
+        name.as_ref(),
+    ))
+}
+
+fn unreadable(problem: EngineError) -> String {
+    format!(
+        "Not done: the team state could not be read ({}).",
+        super::bound_text(&problem.0, 120)
+    )
+}
+
+/// Describes a project's running sub-agents for its live master, each named the way the
+/// owner sees it and the way events name it. Takes the database and the project. Returns
+/// the status text, or the plain reason it could not be read.
+fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, String> {
+    let mut status = super::events::status(connection, project).map_err(unreadable)?;
+    for line in &mut status.agents {
+        let label = agent_label(connection, line.agent).map_err(unreadable)?;
+        line.label = format!("{label} / {}", line.label);
+    }
+    Ok(status.text())
 }
 
 #[cfg(all(test, unix))]

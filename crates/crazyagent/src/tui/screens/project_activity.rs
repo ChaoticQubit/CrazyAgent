@@ -145,6 +145,7 @@ mod tests {
             account: None,
             agents: None,
             terminal: None,
+            questions: None,
         }
     }
 

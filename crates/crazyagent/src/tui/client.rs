@@ -54,6 +54,7 @@ enum Job {
     Shell(Box<crate::tui::seam::ShellRequest>),
     Settings(Box<settings::SettingsJob>),
     TeamGraph(Box<ProjectId>),
+    ProjectFiles(Box<(ProjectId, String)>),
     Intake(Box<intake::IntakeJob>),
     Changes(Box<changes::ChangesQuery>),
     Process(Box<process::ProcessQuery>),
@@ -169,6 +170,11 @@ pub(super) enum OwnerEvent {
     TeamGraph {
         project: ProjectId,
         result: Result<Box<crate::team::TeamGraph>, String>,
+    },
+    ProjectFiles {
+        project: ProjectId,
+        query: String,
+        result: Result<Vec<String>, String>,
     },
     Intake(Box<intake::IntakeEvent>),
     Changes(Box<changes::ChangesEvent>),
@@ -591,6 +597,41 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::ProjectFiles(job) => {
+                            let (project, query) = *job;
+                            let result = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let result =
+                                        runtime.block_on(native.project_files(&project, &query));
+                                    let problem = result.as_ref().err().map(String::as_str);
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        problem,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    result
+                                }
+                                None => Err("trusted_connection_unavailable".into()),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::ProjectFiles {
+                                        project,
+                                        query,
+                                        result,
+                                    },
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Intake(job) => {
                             let event = match native.as_mut() {
                                 Some(native) => {
@@ -866,6 +907,18 @@ impl Connection {
         self.owner_job(Job::TeamGraph(Box::new(project)))
     }
 
+    /// Lists one project's files for the console's `@` completion: at most
+    /// `project_files::FILES_MAX` paths that contain the query.
+    /// Input: the project and the query. Output: Ok once queued; the paths come back as
+    /// `OwnerEvent::ProjectFiles`.
+    pub(super) fn project_files(
+        &mut self,
+        project: ProjectId,
+        query: String,
+    ) -> Result<(), String> {
+        self.owner_job(Job::ProjectFiles(Box::new((project, query))))
+    }
+
     fn owner_job(&mut self, job: Job) -> Result<(), String> {
         if self.busy() {
             return Err("A native request is still pending".into());
@@ -1066,6 +1119,7 @@ impl NativeOwner {
                 context,
                 confirmation,
                 sessions,
+                known,
             } => {
                 let result = match self.master_controller(&context.identity) {
                     Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
@@ -1077,6 +1131,7 @@ impl NativeOwner {
                                 &context,
                                 confirmation.as_deref(),
                                 sessions,
+                                &known,
                             )
                             .await
                             {
@@ -1272,6 +1327,30 @@ impl NativeOwner {
             },
             Err(error) => Err(bounded_problem(&error.0)),
         }
+    }
+
+    /// Lists one project's files on the trusted owner connection.
+    /// Input: the project and the query. Output: the paths, or the engine's plain problem code.
+    async fn project_files(
+        &mut self,
+        project: &ProjectId,
+        query: &str,
+    ) -> Result<Vec<String>, String> {
+        if !self.ready {
+            return Err("trusted_connection_unavailable".into());
+        }
+        let controller = self
+            .controller
+            .as_mut()
+            .ok_or("trusted_connection_unavailable")?;
+        controller
+            .project_files(
+                project.clone(),
+                query.to_owned(),
+                crate::project_files::FILES_MAX,
+            )
+            .await
+            .map_err(|error| bounded_problem(&error.0))
     }
 
     async fn read_dispatch(&mut self, query: &dispatch::Query) -> Result<OwnerReadReply, String> {

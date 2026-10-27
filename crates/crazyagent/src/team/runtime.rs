@@ -306,6 +306,7 @@ pub struct TeamRuntime {
     terminal: Option<Arc<dyn Host>>,
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
+    watch: super::events::Watch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
 }
@@ -413,6 +414,7 @@ impl TeamRuntime {
             terminal: None,
             swept: None,
             events: None,
+            watch: super::events::Watch::default(),
             live_starts: BTreeMap::new(),
             resuming: None,
         })
@@ -703,7 +705,34 @@ impl TeamRuntime {
         self.collect()?;
         self.owner_controls()?;
         self.note_conversations()?;
+        self.watch_questions()?;
         self.sweep()
+    }
+
+    /// Reads each busy sub-agent's terminal for a question it waits on, at most once each
+    /// `events::SCAN_EVERY`, so the master hears it as an event. Returns any SQLite failure.
+    fn watch_questions(&mut self) -> Result<(), EngineError> {
+        let Some(host) = self.terminal.clone() else {
+            return Ok(());
+        };
+        if !self.watch.due() {
+            return Ok(());
+        }
+        let watched: Vec<super::events::Watched> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| worker.role == AgentRole::Sub && !worker.stopping)
+            .filter_map(|(id, worker)| match worker.busy {
+                Some(Busy::Task(task)) => Some(super::events::Watched {
+                    agent: *id,
+                    project: worker.project.clone(),
+                    task: Some(task),
+                }),
+                _ => None,
+            })
+            .collect();
+        self.watch
+            .scan(&self.connection, host.as_ref(), &watched, now_ms())
     }
 
     /// Writes the engine's note on each task a conversation master handed off that has
@@ -985,7 +1014,8 @@ impl TeamRuntime {
             .connection
             .prepare(
                 "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled'))
+                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
                  UNION SELECT project FROM team_settings WHERE keep_warm=1
                  UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
                  UNION SELECT project FROM team_live_masters WHERE live=1",
@@ -1037,14 +1067,16 @@ impl TeamRuntime {
         self.serve_live_calls(&stored, access)?;
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
+        let master_live = self.master(project).is_some();
+        super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
     }
 
     fn sync_pool(&mut self, stored: &StoredSetup, access: &ModelAccess) -> Result<(), EngineError> {
-        for slot in &stored.team.sub_harnesses {
-            let Some(launch) = launch_harness(&slot.harness) else {
+        for harness in super::plan_harnesses(&stored.team) {
+            let Some(launch) = launch_harness(&harness) else {
                 continue;
             };
             let usable = matches!(
@@ -1059,7 +1091,7 @@ impl TeamRuntime {
             self.connection
                 .execute(
                     "UPDATE team_tasks SET status=?3 WHERE project=?1 AND harness=?2 AND status=?4",
-                    params![stored.project_id.as_str(), slot.harness, to, from],
+                    params![stored.project_id.as_str(), harness, to, from],
                 )
                 .map_err(error)?;
         }
@@ -1466,7 +1498,11 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&framing(stored, team_tool));
+            prompt.push_str(&framing(
+                stored,
+                team_tool,
+                &super::available_harnesses(access, project),
+            ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -1722,7 +1758,11 @@ impl TeamRuntime {
         } else {
             None
         };
-        let mut framing = live_framing(stored, self.workers[&id].team_tool);
+        let mut framing = live_framing(
+            stored,
+            self.workers[&id].team_tool,
+            &super::available_harnesses(access, &stored.project_id),
+        );
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if let Some(seed) = worker.seed.take() {
             framing.push_str("\n\n");
@@ -1786,12 +1826,14 @@ impl TeamRuntime {
         };
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let speaker = if author == "owner" {
-            "[owner]"
+            "[owner] "
+        } else if text.starts_with("[team] ") {
+            ""
         } else {
-            "[team]"
+            "[team] "
         };
         let typed = bound_text(
-            &format!("{heard}{speaker} {text}"),
+            &format!("{heard}{speaker}{text}"),
             super::master::INPUT_TEXT_MAX,
         );
         let state =
@@ -1996,12 +2038,17 @@ impl TeamRuntime {
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         for (task, harness, prompt, pin) in queued {
-            let Some(slot) = stored
-                .team
-                .sub_harnesses
-                .iter()
-                .find(|s| s.harness == harness)
-            else {
+            let slot = if stored.team.sub_harnesses.is_empty() {
+                super::slot(&stored.team, &harness)
+            } else {
+                stored
+                    .team
+                    .sub_harnesses
+                    .iter()
+                    .find(|s| s.harness == harness)
+                    .cloned()
+            };
+            let Some(slot) = slot else {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
@@ -3023,6 +3070,7 @@ impl TeamRuntime {
                 self.land_turn(
                     id,
                     &project,
+                    None,
                     format!("live-{turn}"),
                     format!("Master turn {turn}"),
                     "the live master's turn",
@@ -3140,6 +3188,10 @@ impl TeamRuntime {
                 .map(Option::unwrap_or_default)
                 .map_err(error)
         };
+        let task = match busy {
+            Busy::Task(task) => Some(task),
+            Busy::Message(_) => None,
+        };
         let (turn, line, what) = match busy {
             Busy::Task(task) => (
                 format!("task-{task}"),
@@ -3152,16 +3204,18 @@ impl TeamRuntime {
                 "the team master's turn".to_owned(),
             ),
         };
-        self.land_turn(id, project, turn, line, &what, end)
+        self.land_turn(id, project, task, turn, line, &what, end)
     }
 
     /// Lands one ended turn of an agent under its change-set turn key, as `land` does.
-    /// Inputs: the agent, its project, the turn key, the prompt line, what ended for the
-    /// note and how it ended. Output: any SQLite failure writing the note.
+    /// Inputs: the agent, its project, the task the turn worked on, the turn key, the prompt
+    /// line, what ended for the note and how it ended. Output: any SQLite failure writing the note.
+    #[allow(clippy::too_many_arguments)]
     fn land_turn(
         &mut self,
         id: i64,
         project: &ProjectId,
+        task: Option<i64>,
         turn: String,
         line: String,
         what: &str,
@@ -3217,6 +3271,9 @@ impl TeamRuntime {
             worktree: PathBuf::from(worktree),
             git_dir: PathBuf::from(git_dir),
         };
+        let task = turn
+            .strip_prefix("task-")
+            .and_then(|task| task.parse::<i64>().ok());
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -3235,7 +3292,19 @@ impl TeamRuntime {
                 return Ok(());
             }
             Ok(crate::landing_turns::Landed::Added(_)) => {
-                format!("The edits from {what} are waiting for you in Changes.")
+                let note = format!("The edits from {what} are waiting for you in Changes.");
+                if AgentRole::parse(&role) == Some(AgentRole::Sub) {
+                    super::events::record(
+                        &self.connection,
+                        project,
+                        id,
+                        task,
+                        super::events::EventKind::ChangeSetReady,
+                        &note,
+                        now_ms(),
+                    )?;
+                }
+                note
             }
             Err(problem) => with_code(
                 &format!(
@@ -3320,7 +3389,8 @@ impl TeamRuntime {
         let result =
             (!text.trim().is_empty()).then(|| bound_text(text.trim(), super::RESULT_BYTES_MAX));
         let finished = status.finished().then(now_ms);
-        self.connection
+        let changed = self
+            .connection
             .execute(
                 "UPDATE team_tasks SET status=?2, agent=CASE WHEN ?2='queued' THEN NULL ELSE agent END, result=COALESCE(?3,result), error=?4, finished_ms=?5, output_bytes=?6 WHERE id=?1 AND status='running'",
                 params![
@@ -3333,6 +3403,10 @@ impl TeamRuntime {
                 ],
             )
             .map_err(error)?;
+        assert!(changed <= 1);
+        if changed == 1 {
+            super::events::task_ended(&self.connection, task, now_ms())?;
+        }
         Ok(())
     }
 
@@ -3471,24 +3545,12 @@ impl TeamRuntime {
 }
 
 /// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup and whether the team tool is on.
+/// and the project brief. Input: the setup, whether the team tool is on and, for an
+/// empty plan, the harnesses with an eligible account now.
 /// Output: the frame text, with the brief from `master_brief`.
-fn framing(stored: &StoredSetup, team_tool: bool) -> String {
+fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
     let brief = master_brief(stored);
-    let team = stored
-        .team
-        .sub_harnesses
-        .iter()
-        .map(|slot| {
-            format!(
-                "- {}: up to {} agents, tools {}",
-                slot.harness,
-                slot.agents,
-                if slot.tools { "on" } else { "off" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
@@ -3504,11 +3566,16 @@ fn framing(stored: &StoredSetup, team_tool: bool) -> String {
     )
 }
 
-/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
-/// how team events arrive and when to ask the owner. Takes the setup and whether it has
-/// the engine's team tools. Returns the text.
-fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
-    let team = stored
+/// Lists a master's sub-agents: each plan slot with its count and tools, or for an empty
+/// plan the harnesses it can use now under the team maximum. Takes the setup and the
+/// harnesses with an eligible account. Returns lines without a trailing newline.
+fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
+    if stored.team.sub_harnesses.is_empty() {
+        return super::any_harness_text(&stored.team, available)
+            .trim_end()
+            .to_owned();
+    }
+    stored
         .team
         .sub_harnesses
         .iter()
@@ -3521,22 +3588,31 @@ fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
+/// how team events arrive and when to ask the owner. Takes the setup, whether it has the
+/// engine's team tools and, for an empty plan, the harnesses with an eligible account now.
+/// Returns the text.
+fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
+    let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team and {}() lists the change sets waiting for the owner. Name sub-agents by their @role handle.\n",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
             tool::ANSWER_TOOL,
             tool::STATUS_TOOL,
-            tool::CHANGES_TOOL
+            tool::CHANGES_TOOL,
+            tool::ESCALATE_TOOL
         )
     } else {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
+        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
         stored.name,
         team,
         master_brief(stored)
@@ -4252,6 +4328,7 @@ fn run_code(error: &RunError) -> &str {
         RunError::Jobs(_) => "research_jobs_failed",
         RunError::Busy => "account_busy",
         RunError::Uncertain(code) => code,
+        RunError::Setup(code) => code,
     }
 }
 
@@ -4428,7 +4505,8 @@ pub fn start_for_engine(
         access,
         TeamLimits::default(),
     )
-    .map_err(|e| e.0)?;
+    .map_err(|e| e.0)?
+    .with_events(super::master::EVENTS);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,
@@ -4441,6 +4519,7 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
+    let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

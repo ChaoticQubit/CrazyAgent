@@ -50,9 +50,29 @@ test("a running reply asks the owner to confirm before a switch", () => {
   assert.match(api.failureCopy("master_session_closed"), /can't be resumed/);
 });
 
+test("a session the current settings or engine run no longer admit says to start a new one", () => {
+  assert.match(sessions.switchProblem("resume", "master_source_conflict"), /Start a new session/);
+  assert.equal(sessions.switchProblem("new", "master_source_conflict"), api.failureCopy({ code: "master_source_conflict" }));
+  assert.equal(sessions.switchProblem("resume", "master_session_live"), api.failureCopy({ code: "master_session_live" }));
+});
+
 test("the session header always shows New session and the Sessions list button", () => {
   const html = renderToStaticMarkup(createElement(sessions.SessionsBar, { ticket: "1", liveId: "live", onSwitched: async () => undefined }));
   assert.match(html, /data-testid="new-session"[^>]*>New session</);
   assert.match(html, /data-testid="sessions-toggle"[^>]*>Sessions</);
   assert.match(html, /No live session/);
+});
+
+test("a resumed session asks only for the owner lines it does not hold, at most 32 at once", () => {
+  const turn = (id, cursor) => ({ id, ordinal: 1, phase: "succeeded", reason: null, reply: null, input_cursor: cursor });
+  const turns = [turn("a", "11"), turn("b", "12"), turn("c", "13"), { id: "d", ordinal: 4, phase: "queued", reason: null, reply: null }];
+  assert.deepEqual(sessions.missingInputs(turns, { b: "typed here" }, { "13": "Held" }), ["11"]);
+  assert.deepEqual(sessions.missingInputs(turns, {}, { "11": "x", "12": "y", "13": "z" }), []);
+  const many = Array.from({ length: 40 }, (_, index) => turn(`t${index}`, String(100 + index)));
+  const asked = sessions.missingInputs(many, {}, {});
+  assert.equal(asked.length, 32);
+  assert.equal(asked[31], "139");
+  assert.equal(sessions.ownerText(turns[0], {}, { "11": "Plan the first slice" }), "Plan the first slice");
+  assert.equal(sessions.ownerText(turns[1], { b: "typed here" }, { "12": "older copy" }), "typed here");
+  assert.equal(sessions.ownerText(turns[3], {}, {}), undefined);
 });

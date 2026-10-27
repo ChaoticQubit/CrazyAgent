@@ -3,7 +3,7 @@ use super::project_time::clock;
 use crate::conversation::ConversationEntry;
 use crate::master_session::{MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView};
 
-const TURNS_SHOWN_MAX: usize = 200;
+pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
 
 /// The engine's master conversation for one project, as read through the owner connection.
 /// Holds the session phase (none before the master is opened), its turns in order and the owner's messages.

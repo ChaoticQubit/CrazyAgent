@@ -408,6 +408,59 @@ pub(crate) fn history(
     Ok(OwnerData::ConversationHistory { page })
 }
 
+/// The owner's messages one master session's turns took as input, so a client can show a
+/// resumed or parked session's whole history. Inputs: the transaction, project, session and
+/// at most `PAGE_ITEMS_MAX` input cursors from that session's turns. Output: the entries
+/// found, oldest first, within the page byte bound; a cursor that is not one of this
+/// session's inputs is skipped, and too many cursors is a plain error.
+pub(crate) fn master_inputs(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    session: &crate::protocol::SessionId,
+    cursors: &[Cursor],
+) -> Result<Vec<ConversationEntry>, EngineError> {
+    if cursors.len() > usize::from(PAGE_ITEMS_MAX) {
+        return Err(error("master_inputs_bounds"));
+    }
+    let mut wanted: Vec<i64> = cursors
+        .iter()
+        .map(|cursor| i64::try_from(cursor.value()).map_err(error))
+        .collect::<Result<_, _>>()?;
+    wanted.sort_unstable();
+    wanted.dedup();
+    let sql = format!(
+        "SELECT {RECORD_COLUMNS} FROM conversation_entries c LEFT JOIN owner_operations o ON o.event_cursor=c.event_cursor AND o.origin='native_owner'
+         WHERE c.project=?1 AND c.kind='message' AND c.event_cursor=?2
+         AND EXISTS (SELECT 1 FROM master_turns t WHERE t.session=?3 AND t.input=c.event_cursor)"
+    );
+    let mut stmt = tx.prepare(&sql).map_err(error)?;
+    let mut entries = Vec::with_capacity(wanted.len());
+    let mut bytes = 2usize;
+    for cursor in wanted {
+        let mut rows = stmt
+            .query(params![project.as_str(), cursor, session.as_str()])
+            .map_err(error)?;
+        let Some(row) = rows.next().map_err(error)? else {
+            continue;
+        };
+        let entry = decode_entry(tx, row)?;
+        let size = serde_json::to_vec(&entry).map_err(error)?.len() + 1;
+        if bytes + size > PAGE_BYTES_MAX {
+            break;
+        }
+        bytes += size;
+        entries.push(entry);
+    }
+    assert!(entries.len() <= usize::from(PAGE_ITEMS_MAX));
+    assert!(
+        entries
+            .windows(2)
+            .all(|w| w[0].event_cursor.value() < w[1].event_cursor.value())
+    );
+    assert!(serde_json::to_vec(&entries).map_err(error)?.len() <= PAGE_BYTES_MAX);
+    Ok(entries)
+}
+
 pub(crate) fn current_brief(
     tx: &Transaction<'_>,
     project: &ProjectId,

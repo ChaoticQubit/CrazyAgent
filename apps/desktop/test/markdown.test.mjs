@@ -4,8 +4,10 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
+import { bundle, withPage } from "./browser.mjs";
 
 const md = await import("../src/screens/project/markdown.tsx");
+const linksFixture = await bundle(new URL("./fixtures/markdown-links.mjs", import.meta.url).pathname);
 
 const render = (source) => renderToStaticMarkup(createElement(md.MarkdownView, { source, onOpenLink: () => {} }));
 
@@ -107,7 +109,7 @@ test("an XSS attempt renders as inert text", () => {
 test("links render as safe anchors and the sources list holds each link once", () => {
   const source = "See [Acme](https://acme.dev) and https://beta.dev/x.\n\n- [Acme again](https://acme.dev)\n- [bad](javascript:x)";
   const markup = render(source);
-  assert.match(markup, /<a href="https:\/\/acme.dev" target="_blank" rel="noopener noreferrer">Acme<\/a>/);
+  assert.match(markup, /<a href="https:\/\/acme.dev" title="https:\/\/acme.dev" target="_blank" rel="noopener noreferrer">Acme<\/a>/);
   assert.deepEqual(md.markdownLinks(md.parseMarkdown(source)), [
     { href: "https://acme.dev", text: "Acme" },
     { href: "https://beta.dev/x", text: "https://beta.dev/x" },
@@ -193,4 +195,55 @@ test("headings keep their closing-hash and empty-text rules", () => {
   assert.equal(md.parseMarkdown("    # four spaces")[0].kind, "paragraph");
   assert.deepEqual(md.parseMarkdown("-   spaced item\n+ next")[0].items, [[{ kind: "text", text: "spaced item" }], [{ kind: "text", text: "next" }]]);
   assert.equal(md.parseMarkdown("-nospace")[0].kind, "paragraph");
+});
+
+test("a link whose text looks like a URL on another host names the target host; other links do not", () => {
+  assert.equal(md.linkTargetHost("https://docs.example", "https://other.example/page"), "other.example");
+  assert.equal(md.linkTargetHost("docs.example.com/guide", "https://evil.example/login"), "evil.example");
+  assert.equal(md.linkTargetHost(" acme.dev ", "https://acme.dev.evil.example/"), "acme.dev.evil.example");
+  assert.equal(md.linkTargetHost("acme.dev", "https://acme.dev@evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("\u0430pple.com", "https://apple.com/"), "apple.com");
+  assert.equal(md.linkTargetHost("https://acme.dev/a", "https://acme.dev/b?c=1"), null);
+  assert.equal(md.linkTargetHost("ACME.dev", "https://acme.dev/"), null);
+  assert.equal(md.linkTargetHost("acme.dev", "https://www.acme.dev/"), null);
+  assert.equal(md.linkTargetHost("https://www.acme.dev", "https://acme.dev/"), null);
+  assert.equal(md.linkTargetHost("the docs", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("version 1.2", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("", "https://other.example/"), null);
+});
+
+test("every link shows its target on hover", () => {
+  const markup = render("[https://docs.example](https://other.example/x) and [docs](https://acme.dev/a)");
+  assert.match(markup, /<a href="https:\/\/other.example\/x" title="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a>/);
+  assert.match(markup, /<a href="https:\/\/acme.dev\/a" title="https:\/\/acme.dev\/a" [^>]*>docs<\/a>/);
+  assert.deepEqual(md.parseInline("[see https://a.example or <https://c.example> **now**](https://b.example)"), [{ kind: "link", href: "https://b.example", children: [
+    { kind: "text", text: "see https://a.example or https://c.example " }, { kind: "strong", children: [{ kind: "text", text: "now" }] }] }]);
+});
+
+test("a click on a link whose URL text names another host asks first; Cancel opens nothing, Open opens the target, other links open at once", async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(linksFixture);
+    return evaluate(`(async () => {
+      const tick = () => new Promise((done) => setTimeout(done, 0));
+      const link = (text) => [...document.querySelectorAll(".markdown a")].find((anchor) => anchor.textContent === text);
+      const button = (label) => [...document.querySelectorAll("dialog[open] button")].find((item) => item.textContent === label);
+      Fixture.mount("[https://docs.example](https://other.example/x), [acme.dev](https://www.acme.dev/a) and [the docs](https://third.example/)");
+      const steps = {};
+      link("https://docs.example").click(); await tick();
+      steps.asked = Fixture.state();
+      button("Cancel").click(); await tick();
+      steps.cancelled = Fixture.state();
+      link("https://docs.example").click(); await tick();
+      button("Open").click(); await tick();
+      steps.confirmed = Fixture.state();
+      link("acme.dev").click(); await tick();
+      link("the docs").click(); await tick();
+      steps.direct = Fixture.state();
+      return steps;
+    })()`);
+  });
+  assert.deepEqual(seen.asked, { opened: [], question: "Open other.example?", body: "The link text shows https://docs.example, but it opens https://other.example/x." });
+  assert.deepEqual(seen.cancelled, { opened: [], question: null, body: null });
+  assert.deepEqual(seen.confirmed, { opened: ["https://other.example/x"], question: null, body: null });
+  assert.deepEqual(seen.direct, { opened: ["https://other.example/x", "https://www.acme.dev/a", "https://third.example/"], question: null, body: null });
 });

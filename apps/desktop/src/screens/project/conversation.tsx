@@ -12,7 +12,7 @@ import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, sendsMessage, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
-import { SessionsBar } from "./sessions";
+import { SessionsBar, ownerText, withOwnerLines } from "./sessions";
 
 const sentByProject = new Map<string, Record<string, string>>();
 const sentAtByProject = new Map<string, Record<string, number>>();
@@ -57,6 +57,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const [master, setMaster] = useState<MasterState>();
   const [turns, setTurns] = useState<MasterTurn[]>([]);
   const [sent, setSentState] = useState<Record<string, string>>(() => sentByProject.get(data.id) ?? {});
+  const [lines, setLines] = useState<Record<string, string>>({});
   const [text, setText] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const [working, setWorking] = useState(false);
@@ -92,6 +93,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (state.session) {
       const read = unwrap(await readMasterTurns(useTicket, state.session.session_id));
       if (current.current === live) setTurns(read);
+      const held = await withOwnerLines(useTicket, state.session.session_id, read, sent, lines);
+      if (current.current === live) setLines((now) => ({ ...now, ...held }));
     } else setTurns([]);
   }
 
@@ -117,6 +120,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   useEffect(() => {
     setMaster(undefined);
     setTurns([]);
+    setLines({});
     setSentState(sentByProject.get(data.id) ?? {});
     setProblem("");
     setNeedsPool(false);
@@ -217,7 +221,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">
         Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>}
       {turns.map((turn) => <div key={turn.id} className="pj-turn" data-testid="master-turn">
-        <TurnOpening turn={turn} sent={sent[turn.id]} />
+        <TurnOpening turn={turn} sent={ownerText(turn, sent, lines)} />
         {turn.reply ? <div className="pj-msg-master"><ProjectMark />
           <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}

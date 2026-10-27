@@ -286,7 +286,7 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
     let mut features = std::process::Command::new(&launch.request.executable);
     features
         .args(
-            super::codex_configuration(&launch.request, false)
+            super::codex_configuration(&launch.request, false, None)
                 .iter()
                 .flat_map(|setting| ["-c", setting]),
         )

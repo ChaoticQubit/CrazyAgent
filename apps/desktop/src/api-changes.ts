@@ -60,6 +60,7 @@ const REFUSALS: Record<string, string> = {
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
+  changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",

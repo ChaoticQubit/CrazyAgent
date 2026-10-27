@@ -3,7 +3,7 @@ use crazyagent::engine::owner::{OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::master_session::{
     MasterCursor, MasterOwnerAction, MasterSessionView, MasterTurnPage,
 };
-use crazyagent::protocol::{ProjectId, RequestId, SessionId};
+use crazyagent::protocol::{Cursor, ProjectId, RequestId, SessionId};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -20,6 +20,19 @@ pub struct MasterSessions {
     pub ticket: String,
     pub revision: String,
     pub sessions: Vec<crazyagent::master_sessions::MasterSessionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OwnerLine {
+    pub input_cursor: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MasterInputs {
+    pub ticket: String,
+    pub revision: String,
+    pub entries: Vec<OwnerLine>,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,6 +322,59 @@ impl NativeBridge {
             revision: state.revision.value().to_string(),
             config_id: state.config_id.as_str().into(),
             page,
+        })
+    }
+
+    /// Reads the owner's messages behind some turns of a session of the selected project,
+    /// so a resumed or parked session shows its earlier lines. Inputs: the selection
+    /// ticket, the session id and at most 32 turn input cursors. Output: the lines found.
+    pub async fn master_inputs(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        cursors: &[String],
+    ) -> Result<MasterInputs, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        if cursors.is_empty()
+            || cursors.len() > usize::from(crazyagent::conversation::PAGE_ITEMS_MAX)
+        {
+            return Err(failure("stale_master"));
+        }
+        let wanted = cursors
+            .iter()
+            .map(|value| value.parse::<u64>().map(Cursor::new))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| failure("stale_master"))?;
+        let state = self
+            .controller()?
+            .read(OwnerRead::ProjectMasterInputs {
+                project_id,
+                session_id,
+                cursors: wanted.clone(),
+            })
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        let OwnerData::ProjectMasterInputs { entries } = state.data else {
+            return Err(failure("unexpected_reply"));
+        };
+        if entries.len() > wanted.len()
+            || entries
+                .iter()
+                .any(|entry| !wanted.contains(&entry.event_cursor))
+        {
+            return Err(failure("unexpected_reply"));
+        }
+        bounded(MasterInputs {
+            ticket: ticket.into(),
+            revision: state.revision.value().to_string(),
+            entries: entries
+                .into_iter()
+                .map(|entry| OwnerLine {
+                    input_cursor: entry.event_cursor.value().to_string(),
+                    text: entry.text,
+                })
+                .collect(),
         })
     }
 
