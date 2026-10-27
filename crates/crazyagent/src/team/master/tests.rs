@@ -605,20 +605,58 @@ fn a_live_master_s_escalations_stop_at_the_hourly_cap() {
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
 
+/// Appends one finished team message of the project, as the runtime keeps the chat.
+/// Inputs: the connection, the author and the text. Output: the message id.
+fn chat(connection: &Connection, author: crate::team::MessageAuthor, text: &str) -> i64 {
+    let project = ProjectId::new(PROJECT).unwrap();
+    let tx = connection.unchecked_transaction().unwrap();
+    let id = crate::team::append_message(
+        &tx,
+        &project,
+        author,
+        text,
+        crate::team::MessageState::Answered,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
+/// Sends one owner chat message of the project through the owner's team Message path,
+/// which records it as an owner turn. Inputs: the connection and the text. Output: the
+/// message id.
+fn typed_turn(connection: &Connection, text: &str) -> i64 {
+    let tx = connection.unchecked_transaction().unwrap();
+    let action = crate::team::TeamAction::Message {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        text: text.into(),
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &ModelAccess::default(), &action).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    let id = tx
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
 #[test]
-fn a_live_master_asks_the_owner_and_records_a_chat_answer_through_its_team_tool() {
+fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
+    use crate::team::MessageAuthor;
     let mut fixture = Fixture::new();
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let folder = PathBuf::from(&fixture.setup.folder);
     std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
-    fixture
-        .connection
-        .execute(
-            "INSERT INTO project_setups VALUES (?1,?2)",
-            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
-        )
-        .unwrap();
+    crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
     let ask =
         json!({"question": "Ship on Friday?", "options": ["Yes", "No"], "recommended": "Yes"});
     let answers = serve_while(
@@ -628,6 +666,7 @@ fn a_live_master_asks_the_owner_and_records_a_chat_answer_through_its_team_tool(
     );
     assert_eq!(text(&answers[0]), (NO_MASTER, true));
 
+    let before = typed_turn(&fixture.connection, "Yes, ship it.");
     fixture.live(Some(MASTER));
     let answers = serve_while(
         &mut fixture,
@@ -646,56 +685,86 @@ fn a_live_master_asks_the_owner_and_records_a_chat_answer_through_its_team_tool(
     let (said, error) = text(&answers[1]);
     assert!(error && said.starts_with("Not asked:"), "{said}");
 
+    let own = chat(
+        &fixture.connection,
+        MessageAuthor::Master,
+        "The owner said yes.",
+    );
+    let unrecorded = chat(&fixture.connection, MessageAuthor::Owner, "Yes, Friday.");
+    let owner = typed_turn(&fixture.connection, "Yes, Friday.");
+    let record = |id: u64, question: u64, turn: i64| {
+        tool_call(
+            id,
+            tool::RECORD_TOOL,
+            json!({"question": question, "version": 0, "owner_turn": turn}),
+        )
+    };
     let answers = serve_while(
         &mut fixture,
         &mailbox,
         vec![
-            tool_call(
-                3,
-                tool::ASK_TOOL,
-                json!({"id": 1, "answer": "Yes, Friday."}),
-            ),
-            tool_call(4, tool::ASK_TOOL, json!({"id": 1, "answer": "No."})),
-            tool_call(5, tool::ASK_TOOL, json!({"id": 9, "answer": "No."})),
+            record(3, 1, before),
+            record(4, 1, own),
+            record(5, 9, owner),
+            record(6, 1, owner + 100),
+            record(9, 1, unrecorded),
         ],
     );
+    assert_eq!(text(&answers[0]), (TURN_REFUSED, true));
+    assert_eq!(text(&answers[1]), (TURN_REFUSED, true));
+    assert_eq!(text(&answers[4]), (TURN_REFUSED, true));
     assert_eq!(
-        text(&answers[0]),
-        ("Recorded the owner's answer to question 1.", false)
-    );
-    assert_eq!(
-        text(&answers[1]),
+        text(&answers[2]),
         (
-            "Not recorded: question 1 is already answered or dismissed.",
+            "Not recorded: you asked no question 9 in this project.",
             true
         )
     );
-    assert_eq!(
-        text(&answers[2]),
-        ("Not recorded: this project has no question 9.", true)
-    );
+    assert_eq!(text(&answers[3]), (TURN_REFUSED, true));
     let project = fixture.setup.project_id.clone();
-    let listed = crate::questions::list(&fixture.connection, &project, false, None).unwrap();
-    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        crate::questions::pending(&fixture.connection, &project)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let answers = serve_while(&mut fixture, &mailbox, vec![record(7, 1, owner)]);
+    let recorded = format!("Recorded the owner's message {owner} as the answer to question 1.");
+    assert_eq!(text(&answers[0]), (recorded.as_str(), false));
+    let answers = serve_while(&mut fixture, &mailbox, vec![record(8, 1, owner)]);
+    assert_eq!(
+        text(&answers[0]),
+        (
+            "Not recorded: question 1 is already answered or dismissed, or changed since version 0.",
+            true
+        )
+    );
+
+    let page = crate::questions::page(&fixture.connection, &project, None).unwrap();
+    assert_eq!(page.items.len(), 1);
+    let question = &page.items[0];
     assert_eq!(
         (
-            listed[0].agent,
-            listed[0].answered_by,
-            listed[0].answer.as_deref(),
-            listed[0].options.clone()
+            question.asker.as_str(),
+            question.status,
+            question.answered_by,
+            question.answer.as_deref(),
+            question.version
         ),
         (
-            Some(MASTER),
-            Some(crate::questions::AnsweredBy::Master),
+            "master:41",
+            crate::questions::QuestionStatus::Answered,
+            Some(crate::questions::AnsweredBy::Chat),
             Some("Yes, Friday."),
-            vec!["Yes".to_owned(), "No".to_owned()]
+            1
         )
     );
     let messages: i64 = fixture
         .connection
         .query_row("SELECT COUNT(*) FROM team_messages", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(messages, 0);
+    assert_eq!(messages, 4);
     let page = std::fs::read_to_string(
         folder
             .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
@@ -703,7 +772,7 @@ fn a_live_master_asks_the_owner_and_records_a_chat_answer_through_its_team_tool(
     )
     .unwrap();
     assert!(
-        page.contains("Answered in chat, as the master recorded it"),
+        page.contains("Answered by the owner in the master chat"),
         "{page}"
     );
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);

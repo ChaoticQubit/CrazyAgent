@@ -2095,13 +2095,7 @@ async fn serve_admitted(
                     .map_err(|_| failure("recovery_outcome_unknown"))?
                     .map(|()| None);
             }
-            Protocol::Questions => {
-                let served = questions::serve(stream, engine, authority, auth, &a, body);
-                return tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served)
-                    .await
-                    .map_err(|_| failure("questions_outcome_unknown"))?
-                    .map(|()| None);
-            }
+            Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2248,6 +2242,10 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::Questions(a) => {
+            let served = questions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2292,15 +2290,17 @@ struct Tasks {
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
-/// agent's process group or its host to end it, and Changes requests, which run git on
-/// the owner's checkout. Each carries the admission, and the projects home its validated
-/// request; the others read the request frame.
+/// agent's process group or its host to end it, Changes requests, which run git on the
+/// owner's checkout, and Questions requests, which wait for the database write lock and
+/// rewrite a project's questions page. Each carries the admission, and the projects home
+/// its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    Questions(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply

@@ -1,95 +1,107 @@
 use super::{
-    AnsweredBy, COLUMNS, KEPT_PER_PROJECT_MAX, OPEN_PER_PROJECT_MAX, Question, State, select,
-    unavailable,
+    AnsweredBy, COLUMNS, PENDING_PER_PROJECT_MAX, Question, QuestionStatus, STORED_BYTES_MAX,
+    asker_label, ensure, immediate, is_terminal, select, unavailable,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
+use crate::memory::visible_text;
 use crate::protocol::ProjectId;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 use std::path::Path;
 
 /// The read-only questions page inside a project's `.crazyagent/` folder.
 pub const FILE: &str = "questions.md";
 /// The most bytes the questions page holds; older settled questions stay in the views.
 pub const PAGE_BYTES_MAX: usize = 1024 * 1024;
+/// The most settled questions the page shows, newest first.
+pub const SETTLED_SHOWN_MAX: i64 = 200;
 
 const PARTIAL: &str = "questions.md.partial";
-const TAIL_BYTES_MAX: usize = 128;
+const TAIL_BYTES_MAX: usize = 256;
+const ENTRY_BYTES_MAX: usize = STORED_BYTES_MAX + 16 * 40 + 512;
 const HEADER: &str = "# Questions for the owner\n\nCrazyAgent writes this page from its database, so editing it changes nothing. Answer in the Questions view, or tell the master in chat.\n";
 
 const _: () = assert!(
-    OPEN_PER_PROJECT_MAX as usize
-        * 2
-        * (super::QUESTION_BYTES_MAX
-            + super::OPTIONS_MAX * (super::OPTION_BYTES_MAX + 32)
-            + super::RECOMMENDED_BYTES_MAX
-            + super::CONTEXT_BYTES_MAX
-            + super::ANSWER_BYTES_MAX
-            + 512)
-        <= PAGE_BYTES_MAX / 2
+    PENDING_PER_PROJECT_MAX as usize * ENTRY_BYTES_MAX + HEADER.len() + 2 * TAIL_BYTES_MAX
+        <= PAGE_BYTES_MAX
 );
 
-/// Rewrites a project's `.crazyagent/questions.md` from the questions table inside the
-/// caller's transaction, so the page never shows a question the database rolled back.
-/// Inputs: the transaction and the project. Output: Ok once renamed into place, or
-/// `question_project_unknown` or `questions_page_unavailable`.
-pub(super) fn write(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
-    let folder = crate::project_setup::load_setup(tx, project)
-        .map_err(unavailable)?
-        .ok_or_else(|| failure("question_project_unknown"))?
-        .project_folder();
+/// Rewrites a project's questions page after a committed change, as a best effort: the page
+/// is derived from the database and never read back, so a project without its
+/// `.crazyagent/` folder, or a folder that cannot be written, never blocks asking,
+/// answering or dismissing. The write holds the database write lock, so the last page
+/// written shows the newest state. Inputs: the connection and the project.
+pub(super) fn refresh(db: &Connection, project: &ProjectId) {
+    if let Err(problem) = rewrite(db, project) {
+        eprintln!(
+            "questions_page_unwritten project={} cause={}",
+            project.as_str(),
+            problem.0
+        );
+    }
+}
+
+fn rewrite(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    let tx = immediate(db)?;
+    ensure(&tx)?;
+    let Some(setup) = crate::project_setup::load_setup(&tx, project).map_err(unavailable)? else {
+        return Ok(());
+    };
+    let folder = setup.project_folder();
     if !folder.is_absolute() {
         return Err(failure("questions_page_unavailable"));
     }
+    let (pending, settled) = shown(&tx, project)?;
+    replace(&folder, render(&pending, &settled).as_bytes())
+}
+
+/// Reads what the page shows: every pending question oldest first and the newest
+/// `SETTLED_SHOWN_MAX` settled ones. Inputs: the transaction and the project.
+fn shown(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<(Vec<Question>, Vec<Question>), EngineError> {
     let pending = select(
         tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND state='pending'
+            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending'
              ORDER BY id LIMIT ?2"
         ),
-        params![project.as_str(), OPEN_PER_PROJECT_MAX],
+        params![project.as_str(), PENDING_PER_PROJECT_MAX],
     )?;
     let settled = select(
         tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND state!='pending'
+            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status!='pending'
              ORDER BY id DESC LIMIT ?2"
         ),
-        params![
-            project.as_str(),
-            KEPT_PER_PROJECT_MAX + OPEN_PER_PROJECT_MAX
-        ],
+        params![project.as_str(), SETTLED_SHOWN_MAX],
     )?;
-    replace(&folder, render(&pending, &settled).as_bytes())
+    Ok((pending, settled))
 }
 
 /// Renders the questions page: the pending questions oldest first, then the settled ones
-/// newest first while they fit `PAGE_BYTES_MAX`. Every text an asker or answer gave sits
-/// in its own fence, so it can never add a heading or markup of its own. Inputs: the
-/// pending and settled questions. Output: the Markdown text.
+/// newest first, while they fit `PAGE_BYTES_MAX`. Every text an asker or answer gave sits
+/// in its own fence with hidden characters shown as escapes, so it can neither add a
+/// heading or markup of its own nor reorder what the owner reads. Inputs: the pending and
+/// settled questions. Output: the Markdown text.
 pub(super) fn render(pending: &[Question], settled: &[Question]) -> String {
     let mut page = String::from(HEADER);
     page.push_str(&format!("\n## Waiting for the owner ({})\n", pending.len()));
     if pending.is_empty() {
         page.push_str("\nNo question waits for you.\n");
     }
-    for question in pending {
-        entry(&mut page, question);
+    let left = entries(&mut page, pending);
+    if left > 0 {
+        page.push_str(&format!(
+            "\n{left} more waiting questions are only in the Questions view.\n"
+        ));
     }
     page.push_str("\n## Answered and dismissed, newest first\n");
     if settled.is_empty() {
         page.push_str("\nNone yet.\n");
     }
-    let mut left = settled.len();
-    for question in settled {
-        let mut one = String::new();
-        entry(&mut one, question);
-        if page.len() + one.len() + TAIL_BYTES_MAX > PAGE_BYTES_MAX {
-            break;
-        }
-        page.push_str(&one);
-        left -= 1;
-    }
+    let left = entries(&mut page, settled);
     if left > 0 {
         page.push_str(&format!(
             "\n{left} older questions are only in the Questions view.\n"
@@ -99,11 +111,27 @@ pub(super) fn render(pending: &[Question], settled: &[Question]) -> String {
     page
 }
 
+/// Adds the questions that fit, in order, keeping room for the closing lines. Inputs: the
+/// page and the questions. Output: how many did not fit.
+fn entries(page: &mut String, questions: &[Question]) -> usize {
+    let mut left = questions.len();
+    for question in questions {
+        let mut one = String::new();
+        entry(&mut one, question);
+        if page.len() + one.len() + 2 * TAIL_BYTES_MAX > PAGE_BYTES_MAX {
+            break;
+        }
+        page.push_str(&one);
+        left -= 1;
+    }
+    left
+}
+
 fn entry(page: &mut String, question: &Question) {
     page.push_str(&format!(
         "\n### Question {} from {}\n\n",
         question.id,
-        question.source.label()
+        visible_text(&asker_label(&question.asker))
     ));
     fenced(page, &question.question);
     if !question.options.is_empty() {
@@ -131,14 +159,20 @@ fn entry(page: &mut String, question: &Question) {
         page.push_str("\nContext:\n\n");
         fenced(page, context);
     }
-    match (question.state, question.answered_by) {
-        (State::Pending, _) => page.push_str("\nWaiting for your answer.\n"),
-        (State::Dismissed, _) => page.push_str("\nDismissed by the owner.\n"),
-        (State::Answered, by) => {
+    let terminal = is_terminal(&question.asker);
+    match (question.status, question.answered_by) {
+        (QuestionStatus::Pending, _) if terminal => {
+            page.push_str("\nWaiting for your answer in that agent's terminal.\n");
+        }
+        (QuestionStatus::Pending, _) => page.push_str("\nWaiting for your answer.\n"),
+        (QuestionStatus::Dismissed, _) => page.push_str("\nDismissed by the owner.\n"),
+        (QuestionStatus::AnsweredInTerminal, _) => {
+            page.push_str("\nAnswered by the owner in that agent's terminal.\n");
+        }
+        (QuestionStatus::Answered, by) => {
             let by = match by {
+                Some(AnsweredBy::Chat) => "Answered by the owner in the master chat",
                 Some(AnsweredBy::Owner) | None => "Answered by the owner",
-                Some(AnsweredBy::Master) => "Answered in chat, as the master recorded it",
-                Some(AnsweredBy::Terminal) => "Answered by the owner in the master's terminal",
             };
             match &question.answer {
                 Some(answer) => {
@@ -152,8 +186,10 @@ fn entry(page: &mut String, question: &Question) {
 }
 
 /// Adds a text inside a tilde fence longer than any tilde run in it, so no line of the
-/// text can close the fence. Inputs: the page and the text.
+/// text can close the fence, with every hidden character shown as an escape. Inputs: the
+/// page and the text.
 fn fenced(page: &mut String, text: &str) {
+    let text = visible_text(text);
     let mut longest = 0;
     let mut run = 0;
     for c in text.chars() {
@@ -163,7 +199,7 @@ fn fenced(page: &mut String, text: &str) {
     let fence = "~".repeat(longest.max(2) + 1);
     page.push_str(&fence);
     page.push_str("text\n");
-    page.push_str(text);
+    page.push_str(&text);
     page.push('\n');
     page.push_str(&fence);
     page.push('\n');

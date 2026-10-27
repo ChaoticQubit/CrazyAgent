@@ -1,5 +1,5 @@
 use super::*;
-use crate::questions::{Ask, State};
+use crate::questions::{Ask, Asker, Page, QuestionStatus, Settlement};
 use serde_json::json;
 
 const PROJECT: &str = "alpha";
@@ -34,18 +34,25 @@ fn send(root: &Path, body: serde_json::Value) -> Result<Reply, EngineError> {
     run(root, parse(&bytes)?)
 }
 
-fn listed(root: &Path, pending_only: bool, before: Option<i64>) -> Vec<Question> {
-    let body = json!({"questions": {"kind": "list", "project": PROJECT, "pending_only": pending_only, "before": before}});
+fn listed(root: &Path, after: Option<u64>) -> Page {
+    let body = json!({"questions": {"kind": "list", "project": PROJECT, "after": after}});
     match send(root, body).unwrap() {
-        Reply::Listed { questions } => questions,
-        other => panic!("expected a list, got {other:?}"),
+        Reply::Page { page } => page,
+        other => panic!("expected a page, got {other:?}"),
+    }
+}
+
+fn settled(reply: Result<Reply, EngineError>) -> Settlement {
+    match reply.unwrap() {
+        Reply::Settled { settlement } => settlement,
+        other => panic!("expected a settlement, got {other:?}"),
     }
 }
 
 fn asked(question: &str) -> Ask {
     Ask {
         question: question.into(),
-        options: vec![],
+        options: vec!["Yes".into(), "No".into()],
         recommended: None,
         context: None,
     }
@@ -55,106 +62,172 @@ fn asked(question: &str) -> Ask {
 fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
     let (_tmp, root, project) = engine();
     let db = questions::open(&root).unwrap();
-    let first = questions::ask(&db, &project, 41, &asked("Ship on Friday?"), 1)
-        .unwrap()
-        .unwrap();
-    let second = questions::ask(&db, &project, 41, &asked("Rename the app?"), 2)
-        .unwrap()
-        .unwrap();
+    let master = Asker::Master(41);
+    let first = questions::ask(&db, &project, &master, &asked("Ship on Friday?")).unwrap();
+    let second = questions::ask(&db, &project, &master, &asked("Rename the app?")).unwrap();
 
-    let pending = listed(&root, true, None);
+    let page = listed(&root, None);
     assert_eq!(
-        pending
+        page.items
             .iter()
-            .map(|q| (q.id, q.version))
+            .map(|q| (q.id, q.version, q.status))
             .collect::<Vec<_>>(),
-        [(second, 0), (first, 0)]
+        [
+            (first, 0, QuestionStatus::Pending),
+            (second, 0, QuestionStatus::Pending)
+        ]
     );
-    let answer = |id: i64, version: u64, text: &str| {
+    assert_eq!(page.next, None);
+    match send(&root, json!({"questions": {"kind": "counts"}})).unwrap() {
+        Reply::Counts { counts } => assert_eq!(counts, [(project.clone(), 2)]),
+        other => panic!("expected counts, got {other:?}"),
+    }
+    let answer = |id: u64, version: u64, choice: serde_json::Value| {
+        let mut body = json!({"kind": "answer", "id": id, "version": version});
+        body.as_object_mut()
+            .unwrap()
+            .extend(choice.as_object().unwrap().clone());
+        send(&root, json!({ "questions": body }))
+    };
+    let dismiss = |id: u64, version: u64| {
         send(
             &root,
-            json!({"questions": {"kind": "answer", "project": PROJECT, "id": id, "version": version, "answer": text}}),
+            json!({"questions": {"kind": "dismiss", "id": id, "version": version}}),
         )
     };
-    let dismiss = |id: i64, version: u64| {
-        send(
-            &root,
-            json!({"questions": {"kind": "dismiss", "project": PROJECT, "id": id, "version": version}}),
-        )
-    };
-    assert!(matches!(answer(first, 0, "Yes").unwrap(), Reply::Answered));
-    match answer(first, 0, "No").unwrap() {
-        Reply::Stale { question } => assert_eq!(
-            (question.state, question.answer.as_deref(), question.version),
-            (State::Answered, Some("Yes"), 1)
-        ),
-        other => panic!("expected stale, got {other:?}"),
-    }
-    match dismiss(second, 1).unwrap() {
-        Reply::Stale { question } => assert_eq!(
-            (question.id, question.state, question.version),
-            (second, State::Pending, 0)
-        ),
-        other => panic!("expected stale, got {other:?}"),
-    }
-    assert!(matches!(dismiss(second, 0).unwrap(), Reply::Dismissed));
-
-    assert!(listed(&root, true, None).is_empty());
-    assert_eq!(listed(&root, false, None).len(), 2);
     assert_eq!(
-        listed(&root, false, Some(second))
-            .iter()
-            .map(|q| q.id)
-            .collect::<Vec<_>>(),
-        [first]
+        settled(answer(first, 0, json!({"option": 0}))),
+        Settlement::Settled
     );
+    assert_eq!(
+        settled(answer(first, 0, json!({"text": "No"}))),
+        Settlement::Stale
+    );
+    assert_eq!(settled(dismiss(second, 1)), Settlement::Stale);
+    assert_eq!(settled(dismiss(second, 0)), Settlement::Settled);
+
+    let page = listed(&root, None);
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|q| (q.id, q.status, q.answer.as_deref(), q.version))
+            .collect::<Vec<_>>(),
+        [
+            (second, QuestionStatus::Dismissed, None, 1),
+            (first, QuestionStatus::Answered, Some("Yes"), 1)
+        ]
+    );
+    match send(&root, json!({"questions": {"kind": "counts"}})).unwrap() {
+        Reply::Counts { counts } => assert!(counts.is_empty()),
+        other => panic!("expected counts, got {other:?}"),
+    }
     let refused = [
-        answer(second + 1, 0, "Yes").unwrap_err().0,
-        answer(first, 1, " ").unwrap_err().0,
+        answer(second + 1, 0, json!({"text": "Yes"})).unwrap_err().0,
+        answer(first, 1, json!({"option": 0, "text": "Yes"}))
+            .unwrap_err()
+            .0,
+        answer(first, 1, json!({})).unwrap_err().0,
     ];
-    assert_eq!(refused, ["question_missing", "question_invalid"]);
-    let messages: i64 = db
-        .query_row("SELECT COUNT(*) FROM team_messages", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(messages, 2);
+    assert_eq!(
+        refused,
+        [
+            "questions_not_found",
+            "questions_answer_invalid",
+            "questions_answer_invalid"
+        ]
+    );
+    let third = questions::ask(&db, &project, &master, &asked("Use Postgres?")).unwrap();
+    let refused = [
+        answer(third, 0, json!({"option": 2})).unwrap_err().0,
+        answer(third, 0, json!({"text": "   "})).unwrap_err().0,
+        answer(third, 0, json!({"text": "yes\u{202e}no"}))
+            .unwrap_err()
+            .0,
+    ];
+    assert_eq!(
+        refused,
+        [
+            "questions_option_invalid",
+            "questions_answer_invalid",
+            "questions_text_invalid"
+        ]
+    );
+    let messages: Vec<(String, String)> = {
+        let mut statement = db
+            .prepare("SELECT author,text FROM team_messages ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        messages,
+        [
+            (
+                "owner".to_owned(),
+                format!("The owner answered your question {first} (\"Ship on Friday?\"):\nYes")
+            ),
+            (
+                "owner".to_owned(),
+                format!(
+                    "The owner dismissed your question {second} (\"Rename the app?\"). No answer comes."
+                )
+            ),
+        ]
+    );
     for code in &refused {
         assert!(QUESTIONS_CODES.contains(&code.as_str()), "{code}");
     }
 }
 
 #[test]
-fn a_full_list_of_the_largest_questions_fits_one_owner_frame() {
+fn a_full_page_of_the_largest_questions_fits_one_owner_frame() {
     let (_tmp, root, project) = engine();
     let db = questions::open(&root).unwrap();
-    for n in 0..questions::OPEN_PER_PROJECT_MAX {
+    let mut ids = Vec::new();
+    for n in 0..questions::PENDING_PER_PROJECT_MAX {
         let largest = Ask {
             question: format!("{n} {}", "\\".repeat(questions::QUESTION_BYTES_MAX - 4)),
-            options: ["a", "b", "c", "d"]
+            options: ["a", "b", "c", "d", "e", "f"]
                 .iter()
                 .map(|letter| letter.repeat(questions::OPTION_BYTES_MAX))
                 .collect(),
-            recommended: Some("\"".repeat(questions::RECOMMENDED_BYTES_MAX)),
+            recommended: Some("a".repeat(questions::OPTION_BYTES_MAX)),
             context: Some("c\n".repeat(questions::CONTEXT_BYTES_MAX / 2)),
         };
-        questions::ask(&db, &project, 41, &largest, 1)
-            .unwrap()
-            .unwrap();
+        let asker = Asker::Agent(1 + n / questions::PENDING_PER_ASKER_MAX);
+        ids.push(questions::ask(&db, &project, &asker, &largest).unwrap());
     }
-    let questions = listed(&root, false, None);
-    assert!(!questions.is_empty());
-    assert!(encode_frame(&Reply::Listed { questions }).is_ok());
+    let mut seen = Vec::new();
+    let mut after = None;
+    for _ in 0..ids.len() {
+        let page = listed(&root, after);
+        assert!(!page.items.is_empty());
+        seen.extend(page.items.iter().map(|q| q.id));
+        assert!(encode_frame(&Reply::Page { page: page.clone() }).is_ok());
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ids);
 }
 
 #[test]
 fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
     for body in [
-        r#"{"questions":{"kind":"list","project":"alpha"}}"#,
-        r#"{"questions":{"kind":"answer","project":"alpha","id":1,"answer":"x"}}"#,
-        r#"{"questions":{"kind":"answer","project":"a b","id":1,"version":0,"answer":"x"}}"#,
-        r#"{"questions":{"kind":"dismiss","project":"alpha","id":1,"version":-1}}"#,
-        r#"{"questions":{"kind":"dismiss","project":"alpha","id":1,"version":0,"force":true}}"#,
+        r#"{"questions":{"kind":"list"}}"#,
+        r#"{"questions":{"kind":"list","project":"alpha","pending_only":true}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"text":"x"}}"#,
+        r#"{"questions":{"kind":"list","project":"a b","after":null}}"#,
+        r#"{"questions":{"kind":"dismiss","id":1,"version":-1}}"#,
+        r#"{"questions":{"kind":"dismiss","id":1,"version":0,"force":true}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"option":256}}"#,
         r#"{"questions":{"kind":"ask","project":"alpha","question":"x"}}"#,
-        r#"{"questions":{"kind":"answer","project":"alpha","id":"1","version":0,"answer":"x"}}"#,
+        r#"{"questions":{"kind":"answer","id":"1","version":0,"text":"x"}}"#,
+        r#"{"questions":{"kind":"counts","project":"alpha"}}"#,
     ] {
         assert_eq!(
             parse(body.as_bytes()).unwrap_err().0,
@@ -163,32 +236,37 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
         );
     }
     let long = format!(
-        r#"{{"questions":{{"kind":"list","project":"alpha","pending_only":true,"before":null}},"pad":"{}"}}"#,
+        r#"{{"questions":{{"kind":"list","project":"alpha","after":null}},"pad":"{}"}}"#,
         "x".repeat(REQUEST_BYTES_MAX)
     );
     assert_eq!(
         parse(long.as_bytes()).unwrap_err().0,
         "questions_request_bounds"
     );
+    let largest = json!({"questions": {"kind": "answer", "id": u64::MAX, "version": u64::MAX, "text": "\\".repeat(questions::ANSWER_BYTES_MAX)}});
+    let bytes = serde_json::to_vec(&largest).unwrap();
+    assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
+    assert!(parse(&bytes).is_ok());
 }
 
 #[test]
-fn questions_codes_cover_every_refusal_of_the_protocol_and_log_and_stay_sorted() {
+fn questions_codes_cover_every_refusal() {
     let sources = [
         include_str!("questions.rs"),
         include_str!("../../../questions.rs"),
         include_str!("../../../questions/page.rs"),
+        include_str!("../../../storage/versioned.rs"),
     ];
     let found: Vec<&str> = sources
         .iter()
         .flat_map(|source| {
-            ["failure(\"", "code: \"", "Refusal::Code(\""]
+            ["failure(\"", "code: \""]
                 .into_iter()
                 .flat_map(move |opening| source.split(opening).skip(1))
         })
         .filter_map(|rest| rest.split('"').next())
         .collect();
-    assert!(found.len() >= 12, "{found:?}");
+    assert!(found.len() >= 20, "{found:?}");
     for code in found {
         assert!(
             QUESTIONS_CODES.contains(&code),
