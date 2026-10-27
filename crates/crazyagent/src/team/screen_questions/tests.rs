@@ -120,7 +120,7 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 #[test]
-fn only_harness_question_boxes_are_owner_questions_and_permission_or_approval_prompts_are_not() {
+fn only_a_harness_s_own_question_box_is_an_owner_question() {
     let codex_ask = "  Which database should the service use?\r\n\r\n\x1b[1m\u{203a} 1. Postgres\x1b[22m\r\n  2. SQLite\r\n  3. None of the above\r\n     Optionally, add details in notes (tab)\r\n\r\n  tab to add notes \u{b7} enter to submit answer \u{b7} esc to interrupt\r\n";
     assert_eq!(
         owner_question(CLAUDE_ASK.as_bytes()).as_deref(),
@@ -132,25 +132,6 @@ fn only_harness_question_boxes_are_owner_questions_and_permission_or_approval_pr
             "Which database should the service use? | 1. Postgres | 2. SQLite | 3. None of the above"
         )
     );
-
-    let prompts = [
-        "\u{2502} Bash command                    \u{2502}\r\n\u{2502}   cargo test                    \u{2502}\r\n\u{2502} Do you want to proceed?         \u{2502}\r\n\u{2502} \x1b[36m\u{276f} 1. Yes\x1b[0m                      \u{2502}\r\n\u{2502}   2. Yes, and don't ask again for cargo test commands \u{2502}\r\n\u{2502}   3. No, and tell Claude what to do differently (esc) \u{2502}\r\n",
-        "Would you like to run the following command?\r\n\r\n  $ cargo test -p crazyagent\r\n\r\n\x1b[1m\u{203a} 1. Yes, proceed (y)\x1b[22m\r\n  2. Yes, and don't ask again for this command in this session (a)\r\n  3. No, and tell Codex what to do differently (esc)\r\n",
-        " Would you like to proceed?\n \u{276f} 1. Yes, auto-accept edits\n   2. Yes, manually approve edits\n   3. No, keep planning\n",
-        " New MCP server found in .mcp.json: docs\n \u{276f} 1. Use this and all future MCP servers in this project\n   2. Use this MCP server\n   3. Continue without using this MCP server\n",
-        " Allow access to the host api.example.com?\n\u{203a} 1. Yes, just this once\n  2. Yes, and allow this host for this conversation\n  3. No, and block this host in the future\n",
-    ];
-    for prompt in prompts {
-        assert!(
-            question(prompt.as_bytes()).is_some(),
-            "the box is read as a choice: {prompt:?}"
-        );
-        assert_eq!(
-            owner_question(prompt.as_bytes()),
-            None,
-            "a permission or approval prompt is not an owner question: {prompt:?}"
-        );
-    }
 
     let named = " Should I Type something into the form?\n \u{276f} 1. Yes\n   2. No\n";
     assert_eq!(owner_question(named.as_bytes()), None);
@@ -186,13 +167,51 @@ fn only_harness_question_boxes_are_owner_questions_and_permission_or_approval_pr
 }
 
 #[test]
+fn a_permission_prompt_is_not_logged() {
+    let prompts = [
+        "\u{2502} Bash command                    \u{2502}\r\n\u{2502}   cargo test                    \u{2502}\r\n\u{2502} Do you want to proceed?         \u{2502}\r\n\u{2502} \x1b[36m\u{276f} 1. Yes\x1b[0m                      \u{2502}\r\n\u{2502}   2. Yes, and don't ask again for cargo test commands \u{2502}\r\n\u{2502}   3. No, and tell Claude what to do differently (esc) \u{2502}\r\n",
+        "Would you like to run the following command?\r\n\r\n  $ cargo test -p crazyagent\r\n\r\n\x1b[1m\u{203a} 1. Yes, proceed (y)\x1b[22m\r\n  2. Yes, and don't ask again for this command in this session (a)\r\n  3. No, and tell Codex what to do differently (esc)\r\n",
+        " Would you like to proceed?\n \u{276f} 1. Yes, auto-accept edits\n   2. Yes, manually approve edits\n   3. No, keep planning\n",
+        " New MCP server found in .mcp.json: docs\n \u{276f} 1. Use this and all future MCP servers in this project\n   2. Use this MCP server\n   3. Continue without using this MCP server\n",
+        " Allow access to the host api.example.com?\n\u{203a} 1. Yes, just this once\n  2. Yes, and allow this host for this conversation\n  3. No, and block this host in the future\n",
+    ];
+    for prompt in prompts {
+        assert!(
+            question(prompt.as_bytes()).is_some(),
+            "the box is read as a choice: {prompt:?}"
+        );
+        assert_eq!(
+            owner_question(prompt.as_bytes()),
+            None,
+            "a permission or approval prompt is not an owner question: {prompt:?}"
+        );
+    }
+
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    fixture.pane(&host, 42, PERMISSION, "unused");
+    until("the permission prompt on screen", || {
+        question(&screen(&host, 42)).is_some()
+    });
+    let masters = [master(42)];
+    let mut watch = MasterWatch::default();
+    for _ in 0..3 {
+        assert_eq!(
+            watch.scan(host.as_ref(), &masters, &[]),
+            vec![],
+            "a permission prompt waiting on a master's screen is never asked"
+        );
+    }
+}
+
+#[test]
 #[should_panic]
 fn only_a_master_the_last_scan_read_can_report_a_logged_question() {
     MasterWatch::default().logged(1, CLAUDE_LINE);
 }
 
 #[test]
-fn a_master_s_question_box_is_asked_once_and_answered_when_it_leaves_its_screen() {
+fn a_question_box_on_a_master_screen_is_logged_once() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let answered = fixture.base.join("answered.txt");
@@ -253,6 +272,27 @@ fn a_master_s_question_box_is_asked_once_and_answered_when_it_leaves_its_screen(
             restarted.scan(host.as_ref(), &masters, &[]),
             vec![],
             "a box the owner dismissed is not asked again while it stays on screen"
+        );
+    }
+}
+
+#[test]
+fn the_box_leaving_after_owner_input_marks_it_answered_in_terminal() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let answered = fixture.base.join("answered.txt");
+    fixture.pane(&host, 41, ASK, answered.to_str().unwrap());
+    until("the box on screen", || {
+        owner_question(&screen(&host, 41)).is_some()
+    });
+    let masters = [master(41)];
+    let logged = [pending(7, 41)];
+    let mut watch = MasterWatch::default();
+    for _ in 0..3 {
+        assert_eq!(
+            watch.scan(host.as_ref(), &masters, &logged),
+            vec![],
+            "a logged box still on screen is neither asked again nor answered"
         );
     }
 
