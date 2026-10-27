@@ -513,6 +513,9 @@ fn remember(
     }
     let entry = load_entry(tx, &id)?.ok_or_else(|| error("memory_insert_lost"))?;
     assert_eq!(&entry.project_id, project);
+    if super::hidden_text(&entry.text) {
+        return rejected("memory_text_hidden");
+    }
     if entry.status == KnowledgeStatus::Confirmed {
         return rejected("memory_duplicate");
     }
@@ -637,6 +640,9 @@ fn promote(
     }
     if !live_entry(tx, &entry)? {
         return rejected("memory_not_kept");
+    }
+    if super::hidden_text(&entry.text) {
+        return rejected("memory_note_invalid");
     }
     let digest = hash(format!("{}\n{}", entry.id.as_str(), entry.content_hash).as_bytes());
     let id = RequestId::new(format!("global-{}", &digest[..32])).map_err(error)?;
