@@ -1939,3 +1939,49 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.folders.is_none());
 }
+
+#[test]
+fn a_project_sets_its_own_account_order_or_follows_its_pool() {
+    use crate::scheduling::{Schedule, ScopedStrategy, Strategy};
+    let look = Look::plain();
+    let project = ProjectId::new("order").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('u'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the account order. Try again.")
+    );
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Accounts  Loading...   u Change order"),
+        "{shown}"
+    );
+    let mut schedule = Schedule {
+        strategy: Strategy::ManualRank,
+        ..Schedule::default()
+    };
+    screen.schedule = Some(schedule.clone());
+    assert_eq!(
+        screen.account_order().as_deref(),
+        Some("Default (Manual rank)")
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('u'))),
+        ProjectReply::AccountOrder(Some(Strategy::UseItOrLoseIt))
+    );
+    schedule.projects.push(ScopedStrategy {
+        id: CredentialRef::new("order").unwrap(),
+        strategy: Strategy::Balanced,
+    });
+    screen.schedule = Some(schedule);
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Accounts  Balanced (this project)   u Change order"),
+        "{shown}"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('u'))),
+        ProjectReply::AccountOrder(None)
+    );
+}
