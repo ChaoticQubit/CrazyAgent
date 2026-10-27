@@ -182,7 +182,7 @@ const RUNTIME_ENTRIES_MAX: usize = 1024;
 /// cannot carve the secret back out of a granted root.
 pub const SECRET_ROOT_REFUSED: &str = "sandbox roots must not hold or sit in a secret path";
 
-const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"];
+const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY"];
 
 const AGENT_ENV_MAX: usize = 128;
 
@@ -244,8 +244,8 @@ pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
 /// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
-/// names `ANTHROPIC_API_KEY` and `CRAZYAGENT_API_KEY`, which pass only with a placeholder
-/// (see [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
+/// name `ANTHROPIC_API_KEY`, which passes only with the local placeholder (see
+/// [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
 pub fn agent_env_refused(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return true;
@@ -262,23 +262,30 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 
 /// Tells whether one variable may reach an agent process with this value: a name
 /// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, or a model key
-/// name holding a CrazyAgent placeholder (the local placeholder or a key relay token),
-/// never a real provider key. Inputs: the name and value. Output: true when allowed.
+/// name holding the local placeholder, never a real provider key. No variable may hold a
+/// key relay token: any process of the owner's user can read another's environment, so a
+/// harness reads its token from the key file in its own home. Inputs: the name and value.
+/// Output: true when allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
+    let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
+    if value
+        .as_encoded_bytes()
+        .windows(token.len())
+        .any(|window| window == token)
+    {
+        return false;
+    }
     if AGENT_GIT_ENV
         .iter()
         .any(|(git, fixed)| name == *git && value == *fixed)
     {
         return true;
     }
-    let placeholder = value
-        .to_str()
-        .is_some_and(crate::model_gateway::relay::is_placeholder);
     if name
         .to_str()
         .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
     {
-        return placeholder;
+        return value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
     }
     !agent_env_refused(name)
 }
