@@ -482,12 +482,16 @@ async fn resume_swaps_the_live_session_atomically_and_keeps_every_turn() {
     );
 
     let db = case.db();
-    let ResumePlan::Fresh { seed, note } = crate::master_sessions::resume_harness(&db, &{
-        let mut parked = second.clone();
-        parked.phase = MasterSessionPhase::Parked;
-        parked
-    })
-    .unwrap();
+    let ResumePlan::Fresh { seed, note } = crate::master_sessions::resume_harness(
+        &db,
+        &second.project_id,
+        &second.session_id,
+        "codex",
+        "conn-1",
+    )
+    .unwrap() else {
+        panic!("a session with earlier turns and no kept conversation starts fresh");
+    };
     assert!(seed.contains("Owner: Write the release notes"), "{seed}");
     assert!(seed.contains("(No reply was received.)"), "{seed}");
     assert_eq!(note, crate::master_sessions::FRESH_NOTE);

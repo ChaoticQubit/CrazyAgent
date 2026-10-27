@@ -59,12 +59,15 @@ pub enum Support {
     Unavailable { reason: &'static str },
 }
 
-/// What one run adds to a launch request: the session id the harness records under and
-/// the key file `write_key` made for a keyed account, which only its path reaches argv.
+/// What one run adds to a launch request: the session id the harness records under, the
+/// key file `write_key` made for a keyed account, which only its path reaches argv, and
+/// whether the app resumes the conversation it recorded under that id instead of starting
+/// one. Codex records under its own id, so a fresh Codex run does not use `session_id`.
 #[derive(Clone, Copy, Debug)]
 pub struct Run<'a> {
     pub session_id: &'a str,
     pub key_file: Option<&'a Path>,
+    pub resume: bool,
 }
 
 /// One harness without a CrazyAgent launch adapter: its interactive subcommand and the
@@ -261,6 +264,12 @@ pub fn command(
             }
             argv.push(executable);
             argv.extend(codex(request, installed.is_some(), &cwd)?);
+            if run.resume {
+                argv.extend([
+                    "resume".to_owned(),
+                    session_id_checked(run.session_id)?.to_owned(),
+                ]);
+            }
             env.extend([
                 ("CODEX_HOME".to_owned(), home.clone()),
                 ("TMPDIR".to_owned(), home),
@@ -271,12 +280,7 @@ pub fn command(
         }
         "claude-code" => {
             argv.push(executable);
-            argv.extend(claude(
-                request,
-                installed,
-                run.session_id,
-                key_file.as_deref(),
-            )?);
+            argv.extend(claude(request, installed, run, key_file.as_deref())?);
             env.extend(claude_environment(request, &home));
             let folder = claude_project_folder(&cwd)
                 .ok_or_else(|| failure("launch_working_dir_too_long"))?;
@@ -373,7 +377,7 @@ fn codex(request: &LaunchRequest, context: bool, cwd: &Path) -> Result<Vec<Strin
 fn claude(
     request: &LaunchRequest,
     installed: Option<&Installed>,
-    session_id: &str,
+    run: &Run<'_>,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let mut settings = serde_json::json!({
@@ -391,8 +395,13 @@ fn claude(
         String::new(),
         "--settings".to_owned(),
         settings.to_string(),
-        "--session-id".to_owned(),
-        session_id_checked(session_id)?.to_owned(),
+        if run.resume {
+            "--resume"
+        } else {
+            "--session-id"
+        }
+        .to_owned(),
+        session_id_checked(run.session_id)?.to_owned(),
     ];
     match installed {
         Some(installed) => {
@@ -508,6 +517,12 @@ pub fn session_id() -> Result<String, LaunchError> {
     );
     assert!(session_id_checked(&id).is_ok());
     Ok(id)
+}
+
+/// Tells whether a stored conversation id has the form Codex and Claude Code resume by.
+/// Input: the id. Output: true for a lowercase UUID.
+pub fn resumable(id: &str) -> bool {
+    session_id_checked(id).is_ok()
 }
 
 fn session_id_checked(id: &str) -> Result<&str, LaunchError> {

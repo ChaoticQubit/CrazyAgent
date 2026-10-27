@@ -203,6 +203,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         since_ms: 1_793_000_000_000,
         pid: 4242,
         key: Some(PathBuf::from("/private/tmp/home/.key")),
+        resumed: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -217,6 +218,18 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let without_key = older.encode().unwrap().replace(",\"key\":null", "");
     assert!(!without_key.contains("key"));
     assert_eq!(PaneRecord::decode(&without_key), Some(older));
+    assert!(
+        !text.contains("resumed"),
+        "a fresh pane's record stays as before"
+    );
+    let mut resumed = record.clone();
+    resumed.resumed = Some((PathBuf::from("/private/tmp/home/sessions/r.jsonl"), 512));
+    assert_eq!(
+        PaneRecord::decode(&resumed.encode().unwrap()),
+        Some(resumed.clone())
+    );
+    resumed.resumed = Some((PathBuf::from("sessions/r.jsonl"), 512));
+    assert_eq!(PaneRecord::decode(&resumed.encode().unwrap()), None);
     let mut no_process = record.clone();
     no_process.pid = 0;
     assert_eq!(PaneRecord::decode(&no_process.encode().unwrap()), None);
