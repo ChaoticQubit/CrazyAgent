@@ -13,7 +13,7 @@ const NOW = Date.UTC(2026, 9, 26, 18, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 3, added: 12, removed: 4, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, conflicts: [], message: "Add a file", ...extra,
+  restorable_until_ms: null, conflicts: [], message: "Add a file", waiting: false, ...extra,
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
 
@@ -146,4 +146,14 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   const blank = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "" }), pending: false, onCancel() {}, onAccept() {} }));
   assert.match(blank, /Write a commit message of up to 4096 bytes to accept\./);
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
+});
+
+test("a set merged but not yet handed to its agent says so and can be asked again or discarded", () => {
+  const waiting = set({ state: "updating", waiting: true });
+  assert.deepEqual(model.stateBadge(waiting), { word: "Updated, waiting for the agent", tone: "warn" });
+  assert.equal(model.updatingNote(waiting), "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.");
+  assert.deepEqual(model.actions(waiting, NOW), { accept: false, discard: true, update: true, restore: false });
+  assert.deepEqual(model.actions(set({ state: "updating" }), NOW), { accept: false, discard: false, update: false, restore: false });
+  assert.deepEqual(model.stateBadge(set({ state: "pending", waiting: true })), { word: "Ready to review", tone: "info" });
+  assert.equal(client.changesRefusal({ code: "team_agent_not_found" }), "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.");
 });

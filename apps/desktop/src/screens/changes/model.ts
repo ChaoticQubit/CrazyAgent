@@ -49,7 +49,7 @@ export function sizeLine(set: ChangeSet): string {
 
 /** The status word and tone of a change set's state. Input: the change set. */
 export function stateBadge(set: ChangeSet): { word: string; tone: Tone } {
-  return STATES[set.state];
+  return set.state === "updating" && set.waiting ? { word: "Updated, waiting for the agent", tone: "warn" } : STATES[set.state];
 }
 
 /** Says plainly that CrazyAgent did not check a change set. Input: the change set.
@@ -70,10 +70,11 @@ export function outcomeNote(set: ChangeSet): string | null {
  * milliseconds. Output: which of Accept, Discard, Ask agent to update and Restore apply. */
 export function actions(set: ChangeSet, now: number): ChangeActions {
   const open = set.state === "pending" || set.state === "conflict";
+  const waiting = set.state === "updating" && set.waiting;
   return {
     accept: open,
-    discard: open,
-    update: set.state === "conflict",
+    discard: open || waiting,
+    update: set.state === "conflict" || waiting,
     restore: set.state === "discarded" && restorable(set, now),
   };
 }
@@ -94,7 +95,10 @@ export function restoreNote(set: ChangeSet, now: number): string | null {
 /** Says what happens while the agent resolves conflicts. Input: the change set. Output:
  * the note, or null in any other state. */
 export function updatingNote(set: ChangeSet): string | null {
-  return set.state === "updating" ? "The agent is resolving the conflicts with your branch. Review again when it finishes." : null;
+  if (set.state !== "updating") return null;
+  return set.waiting
+    ? "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard."
+    : "The agent is resolving the conflicts with your branch. Review again when it finishes.";
 }
 
 /** Names the files a conflicting change set clashes on. Input: the change set. Output:
