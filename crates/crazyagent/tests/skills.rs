@@ -296,11 +296,6 @@ async fn a_skill_detail_reads_the_whole_skill_md_its_files_and_the_project_switc
     case.close().await;
 }
 
-fn private_folder(path: &Path) {
-    fs::create_dir_all(path).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-}
-
 fn found_skill(folder: &Path, name: &str, guide: &str) {
     fs::create_dir_all(folder.join("references")).unwrap();
     fs::write(
@@ -319,8 +314,6 @@ async fn only_ticked_skills_are_imported_on_without_private_files_and_a_differin
     let project = create_project(&mut controller, "app").await;
     let root = case.root.path().to_path_buf();
     let home = root.join("home");
-    let scratch = root.join("scratch");
-    private_folder(&scratch);
     let claude = home.join(".claude/skills");
     let notes = claude.join("notes");
     found_skill(&notes, "notes", "Guide.\n");
@@ -330,12 +323,8 @@ async fn only_ticked_skills_are_imported_on_without_private_files_and_a_differin
     let graph = home.join(".codex/skills/graph");
     found_skill(&graph, "graph", "Graph.\n");
 
-    let list = skills::import::scan(
-        &home,
-        &skills::catalog(&controller, None).await.unwrap(),
-        &scratch,
-    )
-    .unwrap();
+    let list =
+        skills::import::scan(&home, &skills::catalog(&controller, None).await.unwrap()).unwrap();
     let names: Vec<&str> = list.found.iter().map(|found| found.name.as_str()).collect();
     assert_eq!(names, vec!["notes", "style", "graph"]);
     assert!(
@@ -395,7 +384,7 @@ async fn only_ticked_skills_are_imported_on_without_private_files_and_a_differin
     let notes_id = app[1].id.clone();
     let graph_id = app[0].id.clone();
     fs::write(notes.join("references/guide.md"), "Newer guide.\n").unwrap();
-    let again = skills::import::scan(&home, &app, &scratch).unwrap();
+    let again = skills::import::scan(&home, &app).unwrap();
     let states: Vec<(&str, &skills::import::ImportState)> = again
         .found
         .iter()
