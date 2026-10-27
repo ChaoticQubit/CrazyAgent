@@ -405,7 +405,7 @@ fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
     Ok(())
 }
 
-async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
 ) -> Result<Vec<u8>, EngineError> {
     let length = stream.read_u32().await.map_err(io_error)? as usize;
