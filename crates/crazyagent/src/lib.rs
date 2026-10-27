@@ -19,6 +19,7 @@ pub mod landing;
 pub(crate) mod landing_turns;
 pub mod launch_context;
 pub mod master_session;
+pub mod master_sessions;
 pub mod memory;
 pub mod model_gateway;
 pub mod onboarding;

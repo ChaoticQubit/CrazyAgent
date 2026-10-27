@@ -463,6 +463,7 @@ fn start_cause(error: &RunError) -> String {
         RunError::Account(_) => "account_unavailable".to_owned(),
         RunError::Busy => "account_busy".to_owned(),
         RunError::Uncertain(_) => "cleanup_uncertain".to_owned(),
+        RunError::Setup(code) => (*code).to_owned(),
         RunError::Io(error) => io_cause("io", error),
     };
     assert!(

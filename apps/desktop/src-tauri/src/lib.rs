@@ -746,6 +746,30 @@ async fn desktop_team_hand_off(
 }
 
 #[tauri::command]
+async fn desktop_team_events(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::team::events::AppEvents, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.team_events().await
+}
+
+#[tauri::command]
+async fn desktop_team_wake_rule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    target: crazyagent::team::events::RuleTarget,
+    rule: Option<crazyagent::team::events::WakeRule>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_wake_rule(target, rule, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_rename(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -759,6 +783,28 @@ async fn desktop_team_rename(
         .await?
         .team_rename(&id, agent, handle, generation)
         .await
+}
+
+#[tauri::command]
+async fn desktop_team_seen(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    upto: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.team_seen(&id, upto, generation).await
+}
+
+#[tauri::command]
+async fn desktop_team_attention(
+    window: WebviewWindow,
+    unseen: u32,
+    alert: bool,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    bridge::attention(&window, unseen, alert)
 }
 
 #[tauri::command]
@@ -1210,6 +1256,77 @@ async fn desktop_close_master(
     lock(&state)
         .await?
         .close_master(&ticket, &session_id, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_sessions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<bridge::master::MasterSessions, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.master_sessions(&ticket).await
+}
+
+#[tauri::command]
+async fn desktop_master_inputs(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cursors: Vec<String>,
+) -> Result<bridge::master::MasterInputs, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .master_inputs(&ticket, &session_id, &cursors)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_session_turns(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cursor: Option<crazyagent::master_session::MasterCursor>,
+) -> Result<bridge::master::MasterTurns, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .session_turns(&ticket, &session_id, cursor)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_new_master_session(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    cancel_running: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .new_master_session(&ticket, cancel_running, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_resume_master_session(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cancel_running: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .resume_master_session(&ticket, &session_id, cancel_running, generation)
         .await
 }
 
@@ -2230,6 +2347,10 @@ pub fn run() {
             desktop_team_hand_off,
             desktop_team_rename,
             desktop_team_graph,
+            desktop_team_events,
+            desktop_team_wake_rule,
+            desktop_team_seen,
+            desktop_team_attention,
             desktop_terminal_attach,
             desktop_terminal_input,
             desktop_terminal_prompt,
@@ -2279,6 +2400,11 @@ pub fn run() {
             desktop_open_master,
             desktop_submit_master,
             desktop_close_master,
+            desktop_master_sessions,
+            desktop_master_session_turns,
+            desktop_master_inputs,
+            desktop_new_master_session,
+            desktop_resume_master_session,
             desktop_cancel_master_turn,
             desktop_pending_intent,
             desktop_reconcile_intent,
