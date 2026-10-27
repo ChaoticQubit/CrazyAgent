@@ -1107,6 +1107,9 @@ impl ProjectScreen {
             self.input.insert_str(text);
             return ProjectReply::Handled;
         }
+        if self.tab == Tab::Changes && self.changes.paste(text) {
+            return ProjectReply::Handled;
+        }
         ProjectReply::Ignored
     }
 

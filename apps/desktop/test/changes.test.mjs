@@ -13,7 +13,7 @@ const NOW = Date.UTC(2026, 9, 26, 18, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 3, added: 12, removed: 4, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, conflicts: [], ...extra,
+  restorable_until_ms: null, conflicts: [], message: "Add a file", ...extra,
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
 
@@ -100,6 +100,7 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_owner_identity_missing" }), "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
+  assert.equal(client.changesRefusal({ code: "changes_message_invalid" }), "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_workspace_invalid" }), "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.");
   assert.equal(client.changesRefusal({ code: "changes_master_tools_off" }), "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.");
   assert.equal(client.changesRefusal({ code: "changes_master_closed" }), "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.");
@@ -127,4 +128,22 @@ test("Changes says Not ready yet when the engine or this build cannot land chang
   assert.equal(client.notReady({ kind: "ok", value: [] }), false);
   const html = renderToStaticMarkup(createElement(view.ChangesNotReady));
   assert.match(html, /Not ready yet: /);
+});
+
+test("Accept shows the proposed commit message to edit and sends only a usable one", () => {
+  assert.equal(model.commitMessage("  Owner title\r\n\r\nWhy it changed\n"), "Owner title\n\nWhy it changed");
+  assert.equal(model.commitMessage(" \r\n\t "), null);
+  assert.equal(model.commitMessage("x".repeat(4096)), "x".repeat(4096));
+  assert.equal(model.commitMessage("\u00e9".repeat(2049)), null);
+  const proposed = set({ message: "Add a main\n\n- Add the <fourth> line" });
+  const html = renderToStaticMarkup(createElement(view.AcceptDialog, { set: proposed, pending: false, onCancel() {}, onAccept() {} }));
+  assert.match(html, /Accept these changes\?/);
+  assert.match(html, /under your own Git name\. CrazyAgent did not check them\./);
+  assert.match(html, /<label for="[^"]+">Commit message<\/label>/);
+  assert.match(html, /<textarea[^>]*>Add a main\n\n- Add the &lt;fourth&gt; line<\/textarea>/);
+  assert.doesNotMatch(html, /Write a commit message/);
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
+  const blank = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "" }), pending: false, onCancel() {}, onAccept() {} }));
+  assert.match(blank, /Write a commit message of up to 4096 bytes to accept\./);
+  assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
 });

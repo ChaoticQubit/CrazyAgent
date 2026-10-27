@@ -24,15 +24,17 @@ impl OwnerController {
     }
 
     /// Lands a change set as one squash commit on the owner's checked-out branch.
-    /// Inputs: the change set and the head the owner reviewed. Output: the landed commit
-    /// and branch, or the files it conflicts on.
+    /// Inputs: the change set, the head the owner reviewed and the owner's edited
+    /// message, None for the proposed one. Output: the landed commit and branch, or the
+    /// files it conflicts on.
     pub async fn accept_changes(
         &self,
         id: ChangeSetId,
         expected_head: String,
+        message: Option<String>,
     ) -> Result<AcceptOutcome, EngineError> {
         self.changes_client()?
-            .accept_changes(id, expected_head)
+            .accept_changes(id, expected_head, message)
             .await
     }
 

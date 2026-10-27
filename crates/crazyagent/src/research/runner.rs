@@ -796,6 +796,7 @@ impl ResearchRunner {
                 model,
                 tools: job.tools,
                 sandbox_profile: Some(profile.clone()),
+                git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
                     output_bytes: usize::try_from(self.limits.output_bytes_max)
