@@ -1111,6 +1111,17 @@ impl OwnerRuntimeHandle {
         })
     }
 
+    /// Runs one domain command in this engine for the IDE bridge while the server is
+    /// usable; the bridge only builds commands for its capability's own project.
+    /// Input: the request. Output: the engine's reply, or `ide_unavailable`.
+    pub(crate) async fn ide_apply(
+        &self,
+        request: crate::protocol::WireRequest,
+    ) -> Result<crate::protocol::WireReply, EngineError> {
+        self.ide()?;
+        self.engine.apply(request).await
+    }
+
     /// This owner server's IDE capability grants, whether or not it still runs, so a
     /// capability can be revoked after the server stopped. Input: none. Output: the grants.
     pub(crate) fn ide_grants(&self) -> &crate::ide::bridge::Grants {

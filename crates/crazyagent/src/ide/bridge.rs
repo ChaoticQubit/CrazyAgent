@@ -14,6 +14,9 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
+pub mod agents;
+pub mod memory;
+
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
 
@@ -31,7 +34,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 9] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -43,6 +46,30 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
     (
         "out/extension.js",
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
+    ),
+    (
+        "out/sidebar/agents.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/agents.js"),
+    ),
+    (
+        "out/sidebar/changes.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/changes.js"),
+    ),
+    (
+        "out/sidebar/context.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/context.js"),
+    ),
+    (
+        "out/sidebar/memories.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/memories.js"),
+    ),
+    (
+        "out/sidebar/model.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/model.js"),
+    ),
+    (
+        "out/sidebar/tree.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/tree.js"),
     ),
 ];
 
@@ -98,7 +125,10 @@ pub enum IdeCall {
     #[serde(rename = "ide.owner_edit")]
     OwnerEdit { agent: AgentId, path: String },
     #[serde(rename = "ide.memories")]
-    Memories {},
+    Memories {
+        #[serde(default)]
+        after: Option<RequestId>,
+    },
     #[serde(rename = "ide.memory_decide")]
     MemoryDecide {
         id: RequestId,
@@ -107,6 +137,8 @@ pub enum IdeCall {
     },
     #[serde(rename = "ide.agents")]
     Agents {},
+    #[serde(rename = "ide.agent_message")]
+    AgentMessage { agent: i64, text: String },
     #[serde(rename = "ide.extension_request")]
     ExtensionRequest { id: String, version: String },
     #[serde(rename = "ide.extension_decide")]
@@ -181,6 +213,7 @@ impl IdeRequest {
                     && !text.trim().is_empty()
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
+            IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
             IdeCall::ExtensionRequest { id, version }
             | IdeCall::ExtensionDecide { id, version, .. } => {
                 extension_id(id) && extension_version(version)
@@ -191,7 +224,7 @@ impl IdeRequest {
             | IdeCall::ChangeDiff { .. }
             | IdeCall::Discard { .. }
             | IdeCall::Restore { .. }
-            | IdeCall::Memories {}
+            | IdeCall::Memories { .. }
             | IdeCall::MemoryDecide { .. }
             | IdeCall::Agents {}
             | IdeCall::RevealAck { .. }
@@ -537,6 +570,23 @@ async fn answer(
     let data = match call {
         IdeCall::Workspace {} => workspace(runtime, project, None).await?,
         IdeCall::ShowAllAgents { on } => workspace(runtime, project, Some(on)).await?,
+        IdeCall::Memories { after } => memory::memories(runtime, project, after).await?,
+        IdeCall::MemoryDecide {
+            id,
+            revision,
+            decision,
+        } => {
+            let decide = memory::Decide {
+                id,
+                revision,
+                decision,
+            };
+            return memory::decide(runtime, project, &decide).await;
+        }
+        IdeCall::Agents {} => agents::listed(runtime, project).await?,
+        IdeCall::AgentMessage { agent, text } => {
+            agents::sent(runtime, project, agent, text).await?
+        }
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
@@ -545,9 +595,6 @@ async fn answer(
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. }
         | IdeCall::OwnerEdit { .. }
-        | IdeCall::Memories {}
-        | IdeCall::MemoryDecide { .. }
-        | IdeCall::Agents {}
         | IdeCall::ExtensionRequest { .. }
         | IdeCall::ExtensionDecide { .. }
         | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
