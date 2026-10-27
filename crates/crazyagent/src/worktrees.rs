@@ -2034,7 +2034,9 @@ pub fn lock_existing(connection: &Connection) -> Result<usize, EngineError> {
         .prepare("SELECT body FROM worktree_leases LIMIT ?1")
         .map_err(error)?;
     for body in statement
-        .query_map([SWEEP_REPOSITORIES_MAX as i64], |row| row.get::<_, String>(0))
+        .query_map([SWEEP_REPOSITORIES_MAX as i64], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(error)?
     {
         let record: LeaseRecord = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
@@ -2604,11 +2606,7 @@ mod tests {
         longer.extend_from_slice(b"\n");
         let mut changed = REMOTE_LOCK[..REMOTE_LOCK.len() / 2].to_vec();
         changed[1] = b'x';
-        let foreign: [&[u8]; 3] = [
-            b"[core]\n\tfsmonitor = touch /tmp/x\n",
-            &longer,
-            &changed,
-        ];
+        let foreign: [&[u8]; 3] = [b"[core]\n\tfsmonitor = touch /tmp/x\n", &longer, &changed];
         for held in foreign {
             std::fs::write(&config, held).unwrap();
             assert_eq!(lock_state(metadata), LockState::Foreign, "{held:?}");

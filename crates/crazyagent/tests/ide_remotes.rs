@@ -288,7 +288,10 @@ async fn agent_worktrees_made_before_the_lock_are_locked_once_at_start_and_the_o
     .unwrap();
     assert!(git_run(&lease, &["fetch", "origin"]).status.success());
     let connection = rusqlite::Connection::open(project.root.join("db")).unwrap();
-    assert_eq!(crazyagent::worktrees::lock_existing(&connection).unwrap(), 2);
+    assert_eq!(
+        crazyagent::worktrees::lock_existing(&connection).unwrap(),
+        2
+    );
     for worktree in [&lease, &team] {
         assert_eq!(
             std::fs::read(metadata_of(worktree).join("config.worktree")).unwrap(),
@@ -302,12 +305,18 @@ async fn agent_worktrees_made_before_the_lock_are_locked_once_at_start_and_the_o
         );
     }
     assert!(!metadata_of(&owner).join("config.worktree").exists());
-    git(&owner, &["push", "-q", "origin", "HEAD:refs/heads/owner-feature"]);
+    git(
+        &owner,
+        &["push", "-q", "origin", "HEAD:refs/heads/owner-feature"],
+    );
     assert_eq!(
         git(&project.remote, &["for-each-ref", "--format=%(refname)"]).trim(),
         "refs/heads/owner-feature"
     );
-    assert_eq!(crazyagent::worktrees::lock_existing(&connection).unwrap(), 2);
+    assert_eq!(
+        crazyagent::worktrees::lock_existing(&connection).unwrap(),
+        2
+    );
 }
 
 #[tokio::test]
