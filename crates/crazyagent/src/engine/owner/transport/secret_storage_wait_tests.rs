@@ -53,6 +53,18 @@ impl Busy {
         handle.authority.root.path.parent().unwrap().to_path_buf()
     }
 
+    fn admission(&self) -> crate::engine::owner::Admission {
+        let mut packet = [0; 37];
+        packet[..4].copy_from_slice(b"CAO1");
+        packet[5..].copy_from_slice(&self.client.token);
+        self.service
+            .owner_runtime()
+            .unwrap()
+            .authority
+            .authenticate(&packet)
+            .unwrap()
+    }
+
     fn occupy_storage(&self) -> (PathBuf, oneshot::Receiver<Result<(), EngineError>>) {
         let swept = self
             .engine_root()
@@ -458,6 +470,132 @@ async fn a_secret_file_that_cannot_be_deleted_keeps_none_of_the_others_of_a_remo
         holders(&busy.engine_root(), second.as_bytes()),
         0,
         "one file that cannot be deleted must not keep the server's other secrets"
+    );
+    busy.stop().await;
+}
+
+/// Waits up to ten seconds until the path is gone: a late removal runs on a blocking
+/// thread of its own after the owner's wait. Input: the path. Output: true once gone.
+async fn gone(path: &Path) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while std::fs::symlink_metadata(path).is_ok() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    true
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder() {
+    let busy = Busy::start().await;
+    let value = format!("checked-busy-secret-{}", std::process::id());
+    let id = server_with_secrets(&busy, "busy-checked", &[("API_TOKEN", value.as_str())]).await;
+    let checked = busy
+        .engine_root()
+        .join(super::plugins::CHECK_FOLDER)
+        .join(&id);
+    let home = checked.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let cached = format!("cached-by-the-checked-server-{}", std::process::id());
+    std::fs::write(home.join("token-cache"), &cached).unwrap();
+
+    let (swept, sweep) = busy.occupy_storage();
+    let removed = busy.client.remove_mcp_server(id.clone()).await;
+    outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
+    settled(&swept, sweep).await;
+
+    assert!(
+        busy.client.plugin_server(id).await.is_err(),
+        "storage committed the removal after the wait"
+    );
+    assert!(
+        gone(&checked).await,
+        "what a check wrote while it held the server's secrets must not stay on disk"
+    );
+    assert_eq!(holders(&busy.engine_root(), cached.as_bytes()), 0);
+    assert!(none_hold(&busy.engine_root(), value.as_bytes()).await);
+    busy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
+    let busy = Busy::start().await;
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let first = format!("sk-before-replace-{}", std::process::id());
+    let added = busy
+        .client
+        .add_account(
+            AccountDraft {
+                provider: Provider::OpenaiCompatible,
+                method: SignInMethod::Url,
+                name: "Lab server".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(AccountSecret::new(first.as_bytes().to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    let handle = busy.service.owner_runtime().unwrap();
+    let admission = busy.admission();
+    let Ok(crate::storage::accounts::ResultValue::Account(listed)) = handle
+        .engine
+        .native_auth_job(|reply| {
+            crate::storage::Job::Accounts(
+                admission.clone(),
+                crate::storage::accounts::Command::Get(added.id.clone()),
+                reply,
+            )
+        })
+        .await
+    else {
+        panic!("storage lists the added account");
+    };
+    let crate::config::ModelAuthentication::ApiKey { credential_ref } =
+        listed.connection.auth.clone()
+    else {
+        panic!("the added account keeps an API key");
+    };
+
+    busy.client.remove_account(added.id.clone()).await.unwrap();
+    assert!(none_hold(&busy.engine_root(), first.as_bytes()).await);
+    let second = format!("sk-after-replace-{}", std::process::id());
+    super::accounts::replace_key(
+        &handle.authority.root,
+        &credential_ref,
+        AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        holders(&busy.engine_root(), second.as_bytes()),
+        1,
+        "a replace that read the account before the Remove recreates its key file"
+    );
+
+    let (swept, sweep) = busy.occupy_storage();
+    let replaced = super::accounts::key_replaced(
+        &handle.engine,
+        &admission,
+        &handle.authority,
+        added.id.clone(),
+        credential_ref,
+    )
+    .await;
+    outlasted_the_owner_wait(
+        replaced.map(|_| ()),
+        "native_auth_outcome_unknown_read_same_operation",
+    );
+    settled(&swept, sweep).await;
+
+    assert!(
+        none_hold(&busy.engine_root(), second.as_bytes()).await,
+        "a key replaced for an account storage removed must not stay on disk"
     );
     busy.stop().await;
 }

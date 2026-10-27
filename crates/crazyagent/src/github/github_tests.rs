@@ -367,6 +367,51 @@ fn a_device_token_github_grants_after_sign_out_is_never_saved() {
     assert!(!status.signed_in && !status.waiting, "{status:?}");
 }
 
+const SIGN_OUT_RACE_ROUNDS: usize = 12;
+
+#[test]
+fn a_token_pasted_during_sign_out_is_kept_with_its_record_or_removed_with_it() {
+    let scratch = Scratch::new();
+    let before = token();
+    let pasted = token();
+    let accepted = [before.clone(), pasted.clone()];
+    let server = Server::start(move |seen, _| {
+        if accepted.iter().any(|token| bearer(seen, token)) {
+            Answer::json(200, serde_json::json!({ "login": "octo-cat" }))
+        } else {
+            Answer::json(401, serde_json::json!({ "message": "Bad credentials" }))
+        }
+    });
+    let account = scratch.account(&server);
+    let item = reference(&format!("{}.github", scratch.namespace), "token").unwrap();
+    for round in 0..SIGN_OUT_RACE_ROUNDS {
+        assert!(account.use_token(secret(&before)).unwrap().signed_in);
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let paste = {
+            let (account, start, pasted) = (account.clone(), Arc::clone(&start), pasted.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                account.use_token(secret(&pasted))
+            })
+        };
+        start.wait();
+        assert!(!account.sign_out().unwrap().signed_in);
+        assert!(paste.join().unwrap().unwrap().signed_in);
+        assert_eq!(
+            scratch.state().is_some(),
+            scratch.store.get(&item).is_ok(),
+            "round {round}: a token in the credential store must have its saved sign-in, and a \
+             forgotten sign-in must leave no token behind"
+        );
+        assert!(!account.sign_out().unwrap().signed_in);
+        assert_eq!(scratch.state(), None);
+        assert_eq!(
+            scratch.store.get(&item).unwrap_err().0,
+            "credential_missing"
+        );
+    }
+}
+
 #[test]
 fn verification_page_on_another_host_is_refused() {
     let scratch = Scratch::new();

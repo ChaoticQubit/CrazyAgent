@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
-const CHECK_FOLDER: &str = "mcp-checks";
+pub(super) const CHECK_FOLDER: &str = "mcp-checks";
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
@@ -625,6 +625,20 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("plugin_store_unavailable"))
 }
 
+/// Deletes a removed server's check folder, with whatever its checks wrote there while
+/// they held the server's secrets, on a blocking thread of its own, so a storage answer
+/// that comes after the owner's wait still clears it. Input: the folder. A failure other
+/// than a missing folder is logged.
+fn remove_check_folder(checked: PathBuf) {
+    drop(tokio::task::spawn_blocking(move || {
+        if let Err(problem) = std::fs::remove_dir_all(checked)
+            && problem.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("plugin_check_folder_not_removed cause={problem}");
+        }
+    }));
+}
+
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -780,13 +794,16 @@ async fn handle(
         }
         Action::RemoveServer { id } => {
             let root = engine_root(authority)?;
-            let secrets = root.clone();
+            let checked = root.join(CHECK_FOLDER).join(&id);
             let removed = engine
                 .settled_job(
-                    |reply| Job::Plugins(Command::RemoveServer { id: id.clone() }, reply),
+                    move |reply| Job::Plugins(Command::RemoveServer { id }, reply),
                     move |result| match result {
                         Ok(ResultValue::Removed(references)) => {
-                            crate::storage::plugins::remove_secrets(&secrets, references)
+                            let secrets =
+                                crate::storage::plugins::remove_secrets(&root, references);
+                            remove_check_folder(checked);
+                            secrets
                         }
                         _ => Ok(()),
                     },
@@ -795,15 +812,6 @@ async fn handle(
             let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
-            let checked = root.join(CHECK_FOLDER).join(&id);
-            let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checked))
-                .await
-                .map_err(|_| unknown())?;
-            if let Err(problem) = removed
-                && problem.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
             Reply::Done
         }
         Action::Switch { project, id, on } => {

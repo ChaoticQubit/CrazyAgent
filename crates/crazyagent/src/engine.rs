@@ -485,8 +485,9 @@ impl Engine {
     /// Runs one storage job for a record that refers to files written before it, and hands
     /// storage's real answer to `settle` even when the owner stops waiting first, so a late
     /// commit never loses a file its record refers to. Inputs: the job and the settle step.
-    /// Output: the job's result with any settle error, or the outcome-unknown error while
-    /// storage has not answered in time or went away without answering.
+    /// Output: the settle step's error when it fails, else the job's result, or the
+    /// outcome-unknown error while storage has not answered in time or went away without
+    /// answering.
     async fn settled_job<T: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -502,8 +503,7 @@ impl Engine {
             let result = receive
                 .await
                 .map_err(|_| owner::native_auth::outcome_unknown())?;
-            let settled = settle(&result);
-            result.and_then(|value| settled.map(|()| value))
+            settle(&result).and(result)
         });
         tokio::time::timeout(self.timeout, answered)
             .await
