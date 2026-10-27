@@ -14,6 +14,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
     use crazyagent::protocol::ProjectSpec;
+    use crazyagent::scheduling::ScheduleChange;
     match command {
         "desktop_connect" => {
             let result: Result<_, BridgeError> = async { let mut bridge = lock(state).await?; bridge.connect().await }.await;
@@ -1076,14 +1077,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
-                change: crazyagent::scheduling::ScheduleChange,
+                change: ScheduleChange,
                 generation: u64,
             }
             let Args { change, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.set_account_schedule(change, generation).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_account_schedule(change, generation) .await }.await;
             routed(result)
         }
         "desktop_account_catalog" => {
