@@ -1720,7 +1720,7 @@ impl TeamRuntime {
         super::master::set_live(&self.connection, project, false)?;
         self.live_starts.remove(project);
         let line = full_stop(format!(
-            "{LIVE_STOPPED}: {reason}. Open the master again to start it"
+            "{LIVE_STOPPED}: {reason}. Start it again from the master view"
         ));
         if super::master::problem(&self.connection, project, Some(&line))? {
             self.note(project, &line)?;

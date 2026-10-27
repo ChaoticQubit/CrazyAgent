@@ -224,6 +224,24 @@ pub fn live(connection: &Connection, project: &ProjectId) -> Result<bool, Engine
         .map_err(state)
 }
 
+/// Reads a project's live master switch as the owner sees it, with why it last could not start.
+/// Takes the engine database and the project.
+/// Returns the switch, None when never set, and the reason, or a SQLite failure.
+pub fn switch(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<(Option<bool>, Option<String>), EngineError> {
+    let row: Option<(bool, Option<String>)> = connection
+        .query_row(
+            "SELECT live,problem FROM team_live_masters WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    Ok(row.map_or((None, None), |(on, problem)| (Some(on), problem)))
+}
+
 /// Keeps why a project's live master could not start, so the runtime says it once.
 /// Takes the engine database, the project and the reason, none once it started.
 /// Returns whether a new reason was recorded, or a SQLite failure.

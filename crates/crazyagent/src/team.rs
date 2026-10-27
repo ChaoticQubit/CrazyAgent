@@ -1609,6 +1609,10 @@ pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
     pub paused: bool,
+    #[serde(default)]
+    pub live_master: Option<bool>,
+    #[serde(default)]
+    pub live_problem: Option<String>,
     pub min_agents: u8,
     pub max_agents: u8,
     pub harnesses: Vec<TeamHarness>,
@@ -1852,10 +1856,13 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         None => Vec::new(),
     };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
+    let (live_master, live_problem) = master::switch(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
         paused: paused(connection, project)?,
+        live_master,
+        live_problem,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
         harnesses,
