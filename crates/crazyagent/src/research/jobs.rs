@@ -490,6 +490,15 @@ impl ResearchJobs {
         crate::sandbox::extra_paths::load(&self.connection, project.as_str())
     }
 
+    /// Reads the agent policy the owner saved for a project, see
+    /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
+    pub fn agent_policy(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<crate::sandbox::policy::AgentPolicy> {
+        crate::sandbox::policy::load(&self.connection, project.as_str())
+    }
+
     /// Proves a managed connection is signed in for the running engine, with
     /// the check every master and team turn uses, on the engine database this
     /// queue lives in. Returns the engine host and the sign-in, or a plain code

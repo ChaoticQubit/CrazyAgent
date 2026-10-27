@@ -2404,6 +2404,18 @@ fn owner_read(
                 .map(|path| path.display().to_string())
                 .collect(),
         },
+        OwnerRead::ProjectAgentPolicy { project_id } => {
+            let setup = crate::project_setup::load_setup(&tx, project_id)?
+                .ok_or_else(|| error("invalid_project"))?;
+            let homes = crate::sandbox::toolchains::ToolHomes::owner()
+                .map_err(|_| error("agent_policy_unreadable"))?;
+            OwnerData::ProjectAgentPolicy {
+                project_id: project_id.clone(),
+                policy: crate::sandbox::policy::load(&tx, project_id.as_str())
+                    .map_err(error)?
+                    .view(&setup.project_folder(), &homes),
+            }
+        }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?

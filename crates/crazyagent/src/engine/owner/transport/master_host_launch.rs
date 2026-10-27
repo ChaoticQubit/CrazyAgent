@@ -12,6 +12,9 @@ use crate::master_session::MasterBackend;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
+use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::policy::AgentPolicy;
+#[cfg(unix)]
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 #[cfg(unix)]
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
@@ -117,6 +120,7 @@ impl OwnerRuntimeHandle {
             runtime_ref: &runtime_ref,
             repository: &prepared.repository,
             worktree: &prepared.cwd,
+            policy: &prepared.agent_policy,
         };
         let engine = if prepared.tools {
             Some(self.registered_engine_executable()?)
@@ -200,6 +204,7 @@ pub(super) struct MasterTurnPlace<'a> {
     pub(super) runtime_ref: &'a RequestId,
     pub(super) repository: &'a Path,
     pub(super) worktree: &'a Path,
+    pub(super) policy: &'a AgentPolicy,
 }
 
 /// One master turn's command and Seatbelt boundary, the home both name, the account
@@ -251,6 +256,7 @@ pub(super) fn claude_master_turn(
                 &home,
                 executable,
                 &connection.endpoint,
+                place.policy,
             )?,
             None,
         ),
@@ -264,6 +270,7 @@ pub(super) fn claude_master_turn(
                 executable,
                 &connection.endpoint,
                 engine,
+                place.policy,
             )?;
             let drop = sandbox
                 .sandbox()
@@ -324,6 +331,7 @@ pub(super) fn codex_master_turn(
                 &home,
                 executable,
                 &connection.endpoint,
+                place.policy,
             )?,
             home,
             credential,
@@ -339,6 +347,7 @@ pub(super) fn codex_master_turn(
         executable,
         &connection.endpoint,
         engine,
+        place.policy,
     )?;
     let drop = sandbox
         .sandbox()
@@ -728,6 +737,7 @@ fn delegate_servers(
 /// and reaches only its model endpoint (HTTPS for a native account) because its tools
 /// are off. Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
     root: &Root,
     runtime_ref: &RequestId,
@@ -736,6 +746,7 @@ pub(super) fn master_sandbox(
     home: &Path,
     executable: &Path,
     endpoint: &ModelEndpoint,
+    policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -746,6 +757,7 @@ pub(super) fn master_sandbox(
         executable,
         endpoint,
         None,
+        policy,
     )
 }
 
@@ -765,6 +777,7 @@ pub(super) fn master_tools_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     engine: &Path,
+    policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -775,6 +788,7 @@ pub(super) fn master_tools_sandbox(
         executable,
         endpoint,
         Some(engine),
+        policy,
     )
 }
 
@@ -789,7 +803,11 @@ fn turn_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     engine: Option<&Path>,
+    policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
+    if policy.access.unavailable().is_some() {
+        return Err(failure("agent_access_unavailable"));
+    }
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -810,7 +828,10 @@ fn turn_sandbox(
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
     let network = SandboxNetwork::Only(vec![remote]);
-    let tools = Toolchains::detect(repository, &ToolHomes::owner().map_err(refused)?);
+    let tools = Toolchains::grant(
+        &ToolHomes::owner().map_err(refused)?,
+        &policy.allowed(repository),
+    );
     let sandbox = match engine {
         None => ProjectSandbox::new(repository, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_worktree(worktree)),
@@ -832,6 +853,11 @@ fn turn_sandbox(
     .map_err(refused)?;
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
+    let installed = if policy.access == AgentAccess::Full {
+        installed.unconfined()
+    } else {
+        installed
+    };
     verify_master_runtime(root, &runtime, &name)?;
     assert!(installed.profile().starts_with(&runtime.path));
     assert!(
@@ -862,6 +888,7 @@ pub(super) fn master_sandbox(
     _home: &Path,
     _executable: &Path,
     _endpoint: &ModelEndpoint,
+    _policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -880,6 +907,7 @@ pub(super) fn master_tools_sandbox(
     _executable: &Path,
     _endpoint: &ModelEndpoint,
     _engine: &Path,
+    _policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1255,6 +1283,7 @@ mod tests {
             &home,
             &executable,
             &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1320,6 +1349,7 @@ mod tests {
             &home,
             &executable,
             &native,
+            &AgentPolicy::default(),
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1490,7 +1520,8 @@ mod tests {
                 &worktree,
                 &home,
                 &executable,
-                &native
+                &native,
+                &AgentPolicy::default(),
             )
             .is_err()
         );
@@ -1516,7 +1547,8 @@ mod tests {
                     &worktree,
                     &home,
                     &executable,
-                    endpoint
+                    endpoint,
+                    &AgentPolicy::default(),
                 )
                 .unwrap_err()
                 .0,
@@ -1541,6 +1573,7 @@ mod tests {
             &home,
             &executable,
             &endpoint,
+            &AgentPolicy::default(),
         )
         .unwrap()
         .sandbox()
@@ -1605,6 +1638,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &engine,
+            &AgentPolicy::default(),
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));

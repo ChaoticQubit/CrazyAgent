@@ -583,3 +583,50 @@ fn an_agent_never_writes_the_owner_toolchains_or_reads_their_credentials() {
     assert!(!credential.status.success());
     assert!(!String::from_utf8_lossy(&credential.stdout).contains("FIXTURE"));
 }
+
+#[test]
+fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_readable() {
+    use crazyagent::sandbox::toolchains::Toolchain;
+    let case = case();
+    let homes = fake_tool_homes(&case.tools);
+    write(&case.project.join("Cargo.toml"), "[package]\n");
+    let used: Vec<Toolchain> = Toolchain::ALL
+        .into_iter()
+        .filter(|toolchain| toolchain.used_by(&case.project))
+        .collect();
+    assert_eq!(used, [Toolchain::Rust]);
+    let probe = |chosen: &[Toolchain], name: &str| {
+        let sandbox = ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_tools(&Toolchains::grant(&homes, chosen))
+        .unwrap();
+        let profile = case.profiles.join(name);
+        [
+            case.tools.join(".cargo/bin/cargo"),
+            case.tools.join(".rustup/settings.toml"),
+            case.tools.join(".nvm/versions/node/v1/bin/node"),
+        ]
+        .map(|file| {
+            run(
+                &sandbox,
+                &profile,
+                &format!("cat {} > /dev/null", quoted(&file)),
+            )
+            .status
+            .success()
+        })
+    };
+    assert_eq!(probe(&[], "none.sb"), [false, false, false]);
+    assert_eq!(probe(&[Toolchain::Rust], "rust.sb"), [true, true, false]);
+    assert_eq!(probe(&[Toolchain::Node], "node.sb"), [false, false, true]);
+    assert_eq!(
+        Toolchains::grant(&homes, &[Toolchain::Rust]).roots(),
+        Toolchains::detect(&case.project, &homes).roots(),
+        "a project that uses Rust gets the same grant as the Rust switch"
+    );
+}

@@ -154,6 +154,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         runtime_ref: &off_ref,
         repository: &repository,
         worktree: &worktree,
+        policy: &AgentPolicy::default(),
     };
     let MasterTurnLaunch {
         command,
@@ -211,6 +212,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         runtime_ref: &tools_ref,
         repository: &repository,
         worktree: &worktree,
+        policy: &AgentPolicy::default(),
     };
     let MasterTurnLaunch {
         command,

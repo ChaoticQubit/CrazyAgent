@@ -84,6 +84,12 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
+            controller
+                .project_agent_policy(project)
+                .await
+                .map_err(problem)?,
+        ),
         SetupQuery::ReviewMemory {
             project,
             entry_id,

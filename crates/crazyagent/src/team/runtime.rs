@@ -24,6 +24,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
+use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -132,6 +133,7 @@ struct Plan {
     model: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
+    access: AgentAccess,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
@@ -148,7 +150,9 @@ impl Plan {
             account,
             model: self.model.clone(),
             tools: self.tools,
-            sandbox_profile: Some(self.sandbox_profile.clone()),
+            sandbox_profile: (self.access != AgentAccess::Full)
+                .then(|| self.sandbox_profile.clone()),
+            unconfined: self.access == AgentAccess::Full,
             git_identity: self.git_identity.clone(),
             limits: self.limits,
         }
@@ -2620,6 +2624,11 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
+        let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
+            .map_err(|_| with_code("the project's agent access could not be read", None))?;
+        if let Some(reason) = policy.access.unavailable() {
+            return Err(with_code(reason, Some("agent_access_unavailable")));
+        }
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
@@ -2632,7 +2641,7 @@ impl TeamRuntime {
         let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::detect(&root, &homes))
+            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
@@ -2673,9 +2682,11 @@ impl TeamRuntime {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
-        sandbox = sandbox
-            .confine_to_worktree(&working_dir)
-            .map_err(sandboxed)?;
+        sandbox = match policy.access {
+            AgentAccess::Sandboxed => sandbox.confine_to_worktree(&working_dir),
+            AgentAccess::OwnBranch | AgentAccess::Full => sandbox.confine_to_clone(&working_dir),
+        }
+        .map_err(sandboxed)?;
         if let Some(engine) = self
             .delegation_tool
             .as_ref()
@@ -2697,6 +2708,7 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
+            access: policy.access,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),

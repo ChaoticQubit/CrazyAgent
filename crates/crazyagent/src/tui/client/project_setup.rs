@@ -61,6 +61,12 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
+                controller
+                    .project_agent_policy(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             SetupQuery::Item {
                 project,
                 path,
@@ -188,6 +194,11 @@ impl NativeOwner {
                     SetupAction::SetReadPaths { project_id, paths } => {
                         controller
                             .set_project_read_paths(project_id, paths, generation)
+                            .await
+                    }
+                    SetupAction::SetAgentPolicy { project_id, policy } => {
+                        controller
+                            .set_project_agent_policy(project_id, policy, generation)
                             .await
                     }
                 }

@@ -163,6 +163,7 @@ fn request(case: &Case, harness: &str, home: &Path, tools: bool) -> LaunchReques
         model: Some("qwen2.5:0.5b".into()),
         tools,
         sandbox_profile: Some(profile),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     }

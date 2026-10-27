@@ -67,6 +67,7 @@ impl Case {
             model: None,
             tools,
             sandbox_profile: Some(self.profile()),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
         }
