@@ -209,6 +209,7 @@ pub struct SkillView {
     pub on_here: Option<bool>,
     pub source: String,
     pub folder: String,
+    pub refused: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +335,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "skill_description_invalid",
         "The description in SKILL.md must be 1 to 1024 characters.",
+    ),
+    (
+        "skill_description_hidden",
+        "The description in SKILL.md has characters you cannot see, so agents could read something you did not approve.",
     ),
     (
         "skill_too_many_files",

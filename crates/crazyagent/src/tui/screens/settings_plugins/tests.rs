@@ -21,6 +21,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         on_here: None,
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
+        refused: None,
     }
 }
 
@@ -1169,4 +1170,98 @@ fn the_import_page_scrolls_and_says_why_the_scan_failed() {
             plugin_plain("skill_link_outside")
         )
     );
+}
+
+#[test]
+fn hidden_characters_in_a_skill_or_a_found_folder_are_drawn_as_escapes() {
+    let ctx = plugin_ctx(80, 24);
+    let mut shown = detail(true);
+    shown.skill.description = "Formats changed files.\u{e0041}\u{e0042}".into();
+    shown.skill.source = "/Users/mira/Skills/fmt\u{202e}".into();
+    shown.files[1].path = "references/\u{200b}tokens.md".into();
+    let lines = texts(&SkillDetailPage::with(shown).lines(70, &ctx));
+    assert!(
+        lines.contains(&"Formats changed files.\\u{e0041}\\u{e0042}".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"From ~/Skills/fmt\\u202e".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("references/\\u200btokens.md")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !crate::memory::hidden_text(line)),
+        "{lines:?}"
+    );
+
+    let mut tagged = found("fmt\u{e0041}", ImportFrom::Claude, ImportState::New);
+    tagged.line = "Formats changed files.\u{e0041}".into();
+    let page = ImportSkillsPage::with(ImportList {
+        found: vec![tagged],
+        more: 0,
+    });
+    let (lines, _) = page.lines(76, &ctx);
+    let lines = texts(&lines);
+    assert!(
+        lines.iter().any(|line| line.contains("[ ] fmt\\u{e0041}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Formats changed files.\\u{e0041}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !crate::memory::hidden_text(line)),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
+    let (mut skills, servers) = lists();
+    skills[0].refused = Some("skill_description_hidden".into());
+    let mut shell = Shell::with(
+        plugin_ctx(120, 36),
+        Box::new(Plugins::with(skills, servers)),
+    );
+    let rows = render(&mut shell, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("frontend-design")
+                && row.contains("Agents don't get this skill.")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("tiger-style") && row.contains("~/Skills/tiger-style")),
+        "a skill agents get still shows its folder: {rows:?}"
+    );
+
+    let ctx = plugin_ctx(80, 24);
+    let mut refused = detail(true);
+    refused.skill.refused = Some("skill_description_hidden".into());
+    let lines = texts(&SkillDetailPage::with(refused).lines(70, &ctx));
+    assert!(
+        lines[0].starts_with("frontend-design  Not given to agents"),
+        "{lines:?}"
+    );
+    let said = lines.join(" ");
+    assert!(said.contains("Agents don't get this skill."), "{lines:?}");
+    assert!(
+        said.contains(plugin_plain("skill_description_hidden")),
+        "{lines:?}"
+    );
+    assert!(
+        said.contains("Remove it in Settings, Plugins and skills."),
+        "{lines:?}"
+    );
+    let shown = texts(&SkillDetailPage::with(detail(true)).lines(70, &ctx));
+    assert!(shown.iter().all(|line| !line.contains("Agents don't get")));
 }

@@ -14,6 +14,7 @@ import { navigate } from "../../ui/router";
 import { MarkdownView } from "../project/markdown";
 import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
+import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
 
 const ARGS_MAX = 32;
@@ -127,6 +128,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
   return { checked: item.enabled, label: item.scope.kind === "global" ? "On for every project" : "On", project: false };
 }
 
+/** Says that agents do not get a stored skill the engine refuses now, and why.
+ * Input: the refusal code. Output: the sentence. */
+export function skillUnused(code: string): string {
+  return `Agents don't get this skill. ${plainError(code)}`;
+}
+
 /** The skills list as a pure view of the engine read. Inputs: the read, the project id when
  * shown in a project, the last failure and the actions. */
 export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen, onToggle, onRemove, onRetry }: {
@@ -159,7 +166,8 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
         return <div className="item-row" key={skill.id}>
           <div className="stack-small"><span className="title"><SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]}
             onOpen={() => onOpen(skill)} /></span><span className="secondary">{skill.description}</span>
-            <span className="mono muted small">{homePath(skill.source)}</span></div>
+            <span className="mono muted small">{homePath(skill.source)}</span>
+            {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span className="secondary">{skillUnused(skill.refused)}</span></span>}</div>
           <span className="row">
             <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
             <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -207,6 +215,7 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
   const on = pluginSwitch(skill, projectId);
   return <div className="stack">
     <p className="secondary">{skill.description}</p>
+    {skill.refused && <Notice tone="danger">{skillUnused(skill.refused)} Remove it in Settings, Plugins and skills.</Notice>}
     <div className="row between">
       <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -297,7 +306,7 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
   const { found, more } = list.value;
   return <div className="stack-small">
     <p className="secondary">From ~/.claude/skills and ~/.codex/skills. Ticked skills are copied into CrazyAgent and turned on for every project. Dotfiles and files that look like keys or passwords are left out, and your folders don't change.</p>
-    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{importSentence(outcome)}</Notice>)}
+    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{displayText(importSentence(outcome))}</Notice>)}
     {found.length === 0 ? <EmptyState icon="folder-input" title="No skills found in those folders" compact /> : <Panel padded={false}><div className="rows">
       {found.map((item) => {
         const word = importWord(item.state);
@@ -305,8 +314,8 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
           : item.state.kind === "differs" ? "Importing replaces the added copy and keeps its project switches." : "";
         return <div className="item-row" key={item.folder}>
           <Checkbox checked={ticked.has(item.folder)} disabled={!importable(item.state)} onChecked={(on) => onTick(item, on)}
-            label={<span className="stack-small"><span className="title">{item.name}</span>{item.line && <span className="secondary">{item.line}</span>}
-              <span className="mono muted small">{IMPORT_FROM[item.from]}: {homePath(item.folder)}</span>{why && <span className="secondary">{why}</span>}</span>} />
+            label={<span className="stack-small"><span className="title">{displayText(item.name)}</span>{item.line && <span className="secondary">{displayText(item.line)}</span>}
+              <span className="mono muted small">{IMPORT_FROM[item.from]}: {displayText(homePath(item.folder))}</span>{why && <span className="secondary">{why}</span>}</span>} />
           {word && <StatusBadge word={word} tone={item.state.kind === "unusable" ? "danger" : item.state.kind === "differs" ? "warn" : "neutral"} />}
         </div>;
       })}
