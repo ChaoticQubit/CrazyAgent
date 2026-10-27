@@ -2030,6 +2030,7 @@ fn console_screen() -> ProjectScreen {
         account: None,
         agents: None,
         terminal: None,
+        questions: None,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),

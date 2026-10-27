@@ -872,6 +872,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
         tasks: Vec::new(),
         messages: Vec::new(),
         plan: Vec::new(),
+        events: crate::team::events::EventsView::default(),
     };
     Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
         crate::tui::client::SetupEvent {

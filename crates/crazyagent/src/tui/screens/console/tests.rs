@@ -18,6 +18,7 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         account: None,
         agents: None,
         terminal: None,
+        questions: None,
     }
 }
 
