@@ -1,4 +1,4 @@
-use super::capture::Tokens;
+use super::capture::{Attribution, Format, Tokens};
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -8,11 +8,27 @@ use serde::{Deserialize, Serialize};
 pub const ROWS_MAX: usize = 25;
 pub const DAYS_MAX: usize = 60;
 pub const LIMITS_MAX: usize = 64;
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+pub const HARNESSES_MAX: usize = 32;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+const DAY_MS: i64 = 24 * HOUR_MS;
 const OFFSET_MINUTES_MAX: i32 = 14 * 60;
+const AGENT_BYTES_MAX: usize = 192;
+const HARNESS_BYTES_MAX: usize = 128;
+
+pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_unreported (
+    hour_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),
+    project TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    last_ms INTEGER NOT NULL,
+    PRIMARY KEY (hour_ms, kind, project, agent, harness)
+);
+CREATE INDEX IF NOT EXISTS usage_unreported_hour ON usage_unreported(hour_ms);";
 
 /// Tokens and runs counted against one project, pool, account or agent, and when it last
-/// used any.
+/// used any. `not_reported_by` names a harness that also ran for it but reports no usage,
+/// so its tokens are missing from the row rather than zero.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageRow {
@@ -20,6 +36,8 @@ pub struct UsageRow {
     pub tokens: Tokens,
     pub runs: u64,
     pub last_ms: i64,
+    #[serde(default)]
+    pub not_reported_by: Option<String>,
 }
 
 /// Tokens counted on one local day, which starts at `day_ms`.
@@ -59,8 +77,8 @@ pub struct AgentLinesRow {
 }
 
 /// The usage page's numbers for one range: app totals, the largest projects, pools,
-/// accounts and agents, tokens per local day, lines changed per project, and every
-/// account's limits.
+/// accounts and agents, tokens per local day, lines changed per project, every account's
+/// limits, and the harnesses that ran in the range without reporting usage.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageReport {
@@ -75,6 +93,127 @@ pub struct UsageReport {
     pub lines: Vec<LinesRow>,
     pub agent_lines: Vec<AgentLinesRow>,
     pub limits: Vec<AccountLimits>,
+    #[serde(default)]
+    pub not_reported_by: Vec<String>,
+}
+
+/// Marks that a run of a harness the engine has no usage reader for worked in the hour of
+/// `now_ms`, so the report says its usage is not reported instead of showing zero. Inputs:
+/// the store, the attribution and the time. Output: done, `usage_attribution_invalid` for a
+/// harness with a reader or a missing or oversized agent or harness, or `usage_unavailable`.
+pub fn mark_unreported(
+    db: &Connection,
+    attribution: &Attribution,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    if attribution.agent.is_empty()
+        || attribution.agent.len() > AGENT_BYTES_MAX
+        || attribution.harness.is_empty()
+        || attribution.harness.len() > HARNESS_BYTES_MAX
+        || Format::of(&attribution.harness).is_some()
+    {
+        return Err(failure("usage_attribution_invalid"));
+    }
+    db.execute(
+        "INSERT INTO usage_unreported (hour_ms,kind,project,agent,harness,last_ms)
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(hour_ms,kind,project,agent,harness)
+         DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)",
+        params![
+            now_ms - now_ms.rem_euclid(HOUR_MS),
+            attribution.kind.name(),
+            attribution.project.as_ref().map_or("", ProjectId::as_str),
+            attribution.agent,
+            attribution.harness,
+            now_ms,
+        ],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// The name a harness id shows under: its catalog name, or the id itself.
+fn harness_name(id: &str) -> String {
+    crate::harnesses::spec(id).map_or_else(|| id.to_owned(), |spec| spec.name.to_owned())
+}
+
+/// Flags the rows whose key ran a harness without a reader in the range, newest harness
+/// first, and adds a row for each such key that counted no tokens, after the counted rows.
+/// Inputs: the store, the rows, the grouping column, the project or none, the range start.
+/// Output: the rows, at most `2 * ROWS_MAX`.
+fn flag_unreported(
+    db: &Connection,
+    mut rows: Vec<UsageRow>,
+    column: &str,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<Vec<UsageRow>, EngineError> {
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {column},harness,MAX(last_ms) FROM usage_unreported
+             WHERE hour_ms>=?1 AND (?2 IS NULL OR project=?2)
+             GROUP BY {column},harness ORDER BY MAX(last_ms) DESC,{column},harness LIMIT ?3"
+        ))
+        .map_err(storage)?;
+    let marks: Vec<(String, String, i64)> = statement
+        .query_map(params![since_ms, project, (2 * ROWS_MAX) as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let counted = rows.len();
+    for (key, harness, last_ms) in marks {
+        match rows.iter_mut().find(|row| row.key == key) {
+            Some(row) => {
+                row.not_reported_by
+                    .get_or_insert_with(|| harness_name(&harness));
+                row.last_ms = row.last_ms.max(last_ms);
+            }
+            None if rows.len() < counted + ROWS_MAX => rows.push(UsageRow {
+                key,
+                tokens: Tokens::default(),
+                runs: 0,
+                last_ms,
+                not_reported_by: Some(harness_name(&harness)),
+            }),
+            None => {}
+        }
+    }
+    assert!(rows.len() <= counted + ROWS_MAX);
+    assert!(
+        rows[counted..]
+            .iter()
+            .all(|row| row.not_reported_by.is_some())
+    );
+    Ok(rows)
+}
+
+/// The names of the harnesses without a reader that ran in the range, sorted, at most
+/// `HARNESSES_MAX`. Inputs: the store, the project or none and the range start.
+fn unreported_harnesses(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT harness FROM usage_unreported
+             WHERE hour_ms>=?1 AND (?2 IS NULL OR project=?2) ORDER BY harness LIMIT ?3",
+        )
+        .map_err(storage)?;
+    let ids: Vec<String> = statement
+        .query_map(params![since_ms, project, HARNESSES_MAX as i64], |row| {
+            row.get(0)
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let mut names: Vec<String> = ids.iter().map(|id| harness_name(id)).collect();
+    names.sort();
+    names.dedup();
+    assert!(names.len() <= HARNESSES_MAX);
+    Ok(names)
 }
 
 fn count(value: i64) -> u64 {
@@ -120,6 +259,7 @@ fn rows(
                     tokens: tokens(row, 1)?,
                     runs: count(row.get(5)?),
                     last_ms: row.get(6)?,
+                    not_reported_by: None,
                 })
             },
         )
@@ -275,17 +415,31 @@ pub fn report(
         since_ms,
         total,
         runs,
-        projects: rows(db, "project", true, project, since)?,
+        projects: flag_unreported(
+            db,
+            rows(db, "project", true, project, since)?,
+            "project",
+            project,
+            since,
+        )?,
         pools: rows(db, "pool", false, project, since)?,
         accounts: rows(db, "account", true, project, since)?,
-        agents: rows(db, "agent", false, project, since)?,
+        agents: flag_unreported(
+            db,
+            rows(db, "agent", false, project, since)?,
+            "agent",
+            project,
+            since,
+        )?,
         days,
         lines: lines(db, project, since)?,
         agent_lines: agent_lines(db, project, since)?,
         limits,
+        not_reported_by: unreported_harnesses(db, project, since)?,
     };
-    assert!(report.projects.len() <= ROWS_MAX && report.days.len() <= DAYS_MAX);
-    assert!(report.agent_lines.len() <= ROWS_MAX);
+    assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
+    assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);
+    assert!(report.not_reported_by.len() <= HARNESSES_MAX);
     Ok(report)
 }
 

@@ -249,6 +249,7 @@ impl OwnerRuntimeHandle {
         let observed = self
             .collect_rcli_master_turn(prepared, turn_id, &mut active)
             .await;
+        self.mark_master_unreported(prepared).await;
         let cancel = !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. }));
         let retirement = active.custody.retire(cancel.then_some(turn_id));
         let capture = if active.capture.sequence() > 0 {

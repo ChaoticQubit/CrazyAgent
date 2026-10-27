@@ -1,5 +1,6 @@
 use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
+use super::report::mark_unreported;
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
@@ -197,9 +198,19 @@ impl Usage {
     }
 
     fn scan_team(&self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
-        let rows: Vec<(i64, String, String, String, Option<String>)> = {
+        type Row = (
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            bool,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = {
             let mut statement = match self.db.prepare(
-                "SELECT id,project,role,harness,connection FROM team_agents
+                "SELECT id,project,role,harness,connection,
+                    status IN ('starting','idle','working'),stopped_ms FROM team_agents
                  WHERE status IN ('starting','idle','working') OR stopped_ms>=?1
                  ORDER BY id DESC LIMIT ?2",
             ) {
@@ -216,6 +227,8 @@ impl Usage {
                             row.get(2)?,
                             row.get(3)?,
                             row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
                         ))
                     },
                 )
@@ -223,10 +236,7 @@ impl Usage {
                 .collect::<Result<_, _>>()
                 .map_err(storage)?
         };
-        for (id, project, role, harness, connection) in rows {
-            let Some(format) = Format::of(&harness) else {
-                continue;
-            };
+        for (id, project, role, harness, connection, live, stopped_ms) in rows {
             let attribution = team_attribution(
                 id,
                 &project,
@@ -235,6 +245,14 @@ impl Usage {
                 connection.as_deref(),
                 access,
             );
+            let Some(format) = Format::of(&harness) else {
+                let ran_ms = match (live, stopped_ms) {
+                    (false, Some(stopped)) => stopped.min(now_ms),
+                    _ => now_ms,
+                };
+                mark_unreported(&self.db, &attribution, ran_ms)?;
+                continue;
+            };
             let home = self
                 .team
                 .join("agents")
