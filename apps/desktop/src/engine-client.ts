@@ -234,6 +234,8 @@ export function errorMessage(error: unknown): string {
     skill_name_taken: "A skill with this name already exists here.",
     skill_limit: "You can add up to 100 skills here.",
     skill_not_found: "This skill was removed.",
+    skill_text_too_large: "This SKILL.md is too large to show here.",
+    skill_page_invalid: "This skill changed while it was read. Open it again.",
     server_name_invalid: "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
     server_name_taken: "An MCP server with this name already exists here.",
     server_limit: "You can add up to 50 MCP servers here.",
@@ -1300,12 +1302,25 @@ export interface SkillView {
   id: string;
   name: string;
   description: string;
+  line: string;
   scope: PluginScope;
   scope_label: string;
   enabled: boolean;
   on_here: boolean | null;
   source: string;
   folder: string;
+}
+
+export interface SkillFile {
+  path: string;
+  bytes: number;
+}
+
+export interface SkillDetail {
+  skill: SkillView;
+  text: string;
+  files: SkillFile[];
+  files_more: number;
 }
 
 export interface McpServerView {
@@ -1353,6 +1368,11 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView
 /** Removes a skill and the engine's copy of its folder. */
 export function removeSkill(id: string): Promise<void> {
   return invoke<void>("desktop_remove_skill", { id });
+}
+
+/** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
+export function skillDetail(id: string, projectId?: string): Promise<SkillDetail> {
+  return invoke<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
 }
 
 /** Adds an MCP server that waits for approval. Secret values go to the engine and are never returned. */
