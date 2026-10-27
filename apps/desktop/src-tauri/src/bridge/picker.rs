@@ -1,4 +1,5 @@
 use super::{BridgeError, failure};
+use serde::Deserialize;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -13,6 +14,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "linux")]
 const FOLDER_TITLE: &str = "Choose a skill folder. It holds a SKILL.md file.";
 #[cfg(target_os = "linux")]
+const PROJECT_FOLDER_TITLE: &str = "Choose the project folder to add.";
+#[cfg(target_os = "linux")]
+const PROJECTS_HOME_TITLE: &str = "Choose the folder that holds your projects.";
+#[cfg(target_os = "linux")]
 const DOCUMENTS_TITLE: &str = "Choose documents to add";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
@@ -21,6 +26,14 @@ const CANCELED: &str = "(-128)";
 /// The macOS folder chooser for a skill folder. Fixed text: nothing the owner or the web view
 /// sends is ever placed into a script.
 pub const FOLDER_SCRIPT: &str = "POSIX path of (choose folder with prompt \"Choose a skill folder. It holds a SKILL.md file.\")";
+
+/// The macOS folder chooser for an existing project folder to add. Fixed text.
+pub const PROJECT_FOLDER_SCRIPT: &str =
+    "POSIX path of (choose folder with prompt \"Choose the project folder to add.\")";
+
+/// The macOS folder chooser for the folder that holds the owner's projects. Fixed text.
+pub const PROJECTS_HOME_SCRIPT: &str =
+    "POSIX path of (choose folder with prompt \"Choose the folder that holds your projects.\")";
 
 /// The macOS file chooser for project documents, one POSIX path per line. Fixed text.
 pub const DOCUMENTS_SCRIPT: &str = "set picked to choose file with prompt \"Choose documents to add\" with multiple selections allowed
@@ -34,8 +47,40 @@ return reply";
 /// Nothing the owner or the web view sends is ever placed into it.
 pub const WINDOWS_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a skill folder. It holds a SKILL.md file.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
 
+/// The Windows folder chooser for an existing project folder to add. Fixed text.
+pub const WINDOWS_PROJECT_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose the project folder to add.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
+
+/// The Windows folder chooser for the folder that holds the owner's projects. Fixed text.
+pub const WINDOWS_PROJECTS_HOME_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose the folder that holds your projects.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
+
 /// The Windows document chooser, a fixed PowerShell script that prints one chosen path per line.
 pub const WINDOWS_DOCUMENTS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose documents to add'; $d.Multiselect = $true; if ($d.ShowDialog() -eq 'OK') { foreach ($f in $d.FileNames) { [Console]::Out.Write($f + [char]10) } }";
+
+/// What a folder chooser is for: a skill folder, an existing project folder to add, or the
+/// folder that holds the owner's projects. The web view names one of these; each has its own
+/// fixed prompt, so no text from the web view reaches a chooser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderPurpose {
+    Skill,
+    Project,
+    ProjectsHome,
+}
+
+impl FolderPurpose {
+    /// Every purpose, in the order the choosers are listed.
+    pub const ALL: [Self; 3] = [Self::Skill, Self::Project, Self::ProjectsHome];
+
+    /// The fixed macOS script of this purpose's chooser; it also picks the Linux title and the
+    /// Windows script. Input: the purpose. Output: one of the folder scripts.
+    pub fn script(self) -> &'static str {
+        match self {
+            Self::Skill => FOLDER_SCRIPT,
+            Self::Project => PROJECT_FOLDER_SCRIPT,
+            Self::ProjectsHome => PROJECTS_HOME_SCRIPT,
+        }
+    }
+}
 
 /// What the owner did in a native chooser: closed it, or chose absolute paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,15 +127,17 @@ pub fn read_reply(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<Pick, B
 }
 
 /// The command for one fixed chooser on this system: osascript on macOS, zenity or kdialog
-/// from a fixed folder on Linux, PowerShell with Windows Forms on Windows. Input: the folder
-/// or documents script. Output: the command, or `picker_unavailable` when this system has no
-/// chooser.
+/// from a fixed folder on Linux, PowerShell with Windows Forms on Windows. Input: one of the
+/// folder scripts or the documents script. Output: the command, or `picker_unavailable` when
+/// this system has no chooser.
 pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
-    assert!(script == FOLDER_SCRIPT || script == DOCUMENTS_SCRIPT);
-    let folder = script == FOLDER_SCRIPT;
+    let purpose = FolderPurpose::ALL
+        .into_iter()
+        .find(|purpose| purpose.script() == script);
+    assert!(purpose.is_some() || script == DOCUMENTS_SCRIPT);
     #[cfg(target_os = "macos")]
     {
-        let _ = folder;
+        let _ = purpose;
         let mut command = Command::new(OSASCRIPT);
         command.arg("-e").arg(script);
         Ok(command)
@@ -106,22 +153,25 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
         if let Some(zenity) = tool("zenity") {
             let mut command = Command::new(zenity);
             command.arg("--file-selection");
-            if folder {
-                command
-                    .arg("--directory")
-                    .arg(format!("--title={FOLDER_TITLE}"));
-            } else {
-                command
-                    .args(["--multiple", "--separator=\n"])
-                    .arg(format!("--title={DOCUMENTS_TITLE}"));
+            match purpose {
+                Some(purpose) => {
+                    command
+                        .arg("--directory")
+                        .arg(format!("--title={}", linux_title(purpose)));
+                }
+                None => {
+                    command
+                        .args(["--multiple", "--separator=\n"])
+                        .arg(format!("--title={DOCUMENTS_TITLE}"));
+                }
             }
             return Ok(command);
         }
         if let Some(kdialog) = tool("kdialog") {
             let mut command = Command::new(kdialog);
-            if folder {
+            if let Some(purpose) = purpose {
                 command.args(["--getexistingdirectory", "."]);
-                command.args(["--title", FOLDER_TITLE]);
+                command.args(["--title", linux_title(purpose)]);
             } else {
                 command.args(["--getopenfilename", ".", "--multiple", "--separate-output"]);
                 command.args(["--title", DOCUMENTS_TITLE]);
@@ -145,18 +195,28 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
         );
         command
             .args(["-NoProfile", "-NonInteractive", "-STA", "-Command"])
-            .arg(if folder {
-                WINDOWS_FOLDER_SCRIPT
-            } else {
-                WINDOWS_DOCUMENTS_SCRIPT
+            .arg(match purpose {
+                Some(FolderPurpose::Skill) => WINDOWS_FOLDER_SCRIPT,
+                Some(FolderPurpose::Project) => WINDOWS_PROJECT_FOLDER_SCRIPT,
+                Some(FolderPurpose::ProjectsHome) => WINDOWS_PROJECTS_HOME_SCRIPT,
+                None => WINDOWS_DOCUMENTS_SCRIPT,
             })
             .creation_flags(CREATE_NO_WINDOW);
         Ok(command)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = folder;
+        let _ = purpose;
         Err(failure("picker_unavailable"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_title(purpose: FolderPurpose) -> &'static str {
+    match purpose {
+        FolderPurpose::Skill => FOLDER_TITLE,
+        FolderPurpose::Project => PROJECT_FOLDER_TITLE,
+        FolderPurpose::ProjectsHome => PROJECTS_HOME_TITLE,
     }
 }
 

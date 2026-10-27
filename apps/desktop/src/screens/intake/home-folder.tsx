@@ -59,7 +59,7 @@ export function HomeFolderPicker({ onSaved, onContinue }: { onSaved?: () => void
 
   const choose = async () => {
     setProblem("");
-    const result = await pickFolder();
+    const result = await pickFolder("projects_home");
     if (result.kind !== "ok") {
       setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message);
       return;

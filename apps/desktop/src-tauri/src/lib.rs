@@ -6,7 +6,7 @@ mod native_refresh_observation;
 
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryList, MemoryNote};
-use bridge::picker::Pick;
+use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::terminal::Terminals;
 use bridge::{
@@ -2099,17 +2099,18 @@ async fn desktop_default_process(
 }
 
 #[tauri::command]
-async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
+async fn desktop_pick_folder(
+    window: WebviewWindow,
+    purpose: FolderPurpose,
+) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
-    Ok(
-        match bridge::picker::choose(bridge::picker::FOLDER_SCRIPT).await? {
-            Pick::Canceled => None,
-            Pick::Paths(mut paths) => {
-                assert!(!paths.is_empty());
-                Some(paths.swap_remove(0))
-            }
-        },
-    )
+    Ok(match bridge::picker::choose(purpose.script()).await? {
+        Pick::Canceled => None,
+        Pick::Paths(mut paths) => {
+            assert!(!paths.is_empty());
+            Some(paths.swap_remove(0))
+        }
+    })
 }
 
 #[tauri::command]

@@ -435,7 +435,7 @@ export function AddSkillDialog({ open, scope, message, onClose, onAdded }: {
   const choose = async () => {
     setPicking(true);
     setForm(undefined);
-    const picked = await pickFolder();
+    const picked = await pickFolder("skill");
     setPicking(false);
     if (picked.kind === "ok") {
       if (picked.value) { setFolder(picked.value); setError(undefined); }
@@ -640,7 +640,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   const addSkillFromChooser = async () => {
     setFailure("");
-    const picked = await pickFolder();
+    const picked = await pickFolder("skill");
     if (picked.kind !== "ok") return setAdding({ kind: "skill", message: picked.kind === "not_ready" ? "The folder chooser isn't ready in this build. Type the full path instead." : picked.message });
     const folder = picked.value;
     if (folder === null) return;
