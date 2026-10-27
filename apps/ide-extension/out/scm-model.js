@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.BASE_SCHEME = void 0;
+exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.IDE_CONFIG = exports.CONFIG_SCHEME = exports.BASE_SCHEME = void 0;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
 exports.acceptedNote = acceptedNote;
@@ -12,6 +12,8 @@ exports.commentTooLong = commentTooLong;
 exports.commentTarget = commentTarget;
 exports.commentRefusal = commentRefusal;
 exports.BASE_SCHEME = "crazyagent-base";
+exports.CONFIG_SCHEME = "crazyagent-config";
+exports.IDE_CONFIG = "ide_config";
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -28,6 +30,7 @@ const MARKS = {
     mode: "File mode changed",
     attributes: ".gitattributes: changes how Git treats files",
     modules: ".gitmodules: changes the project's submodules",
+    ide_config: "IDE settings: changes how the IDE behaves in this project",
 };
 const SUFFIXES = {
     open: "",
@@ -102,7 +105,7 @@ function context(set, now) {
 }
 function opens(file) {
     if (file.kind !== "text")
-        return file.status === "deleted" ? "none" : "file";
+        return file.status === "deleted" || file.marks.includes(exports.IDE_CONFIG) ? "none" : "file";
     return file.status === "deleted" ? "base" : "diff";
 }
 function tooltip(file) {
@@ -116,6 +119,7 @@ function resource(set, file) {
         path: file.path,
         file: `${set.worktree.replace(/\/+$/, "")}/${file.path}`,
         base: open === "diff" || open === "base" ? basePath(set.id, file.path) : null,
+        config: open === "diff" && file.marks.includes(exports.IDE_CONFIG) ? basePath(set.id, file.path) : null,
         open,
         letter: LETTERS[file.status],
         tooltip: tooltip(file),

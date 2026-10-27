@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerTrust = registerTrust;
 const vscode = __importStar(require("vscode"));
+const scm_model_js_1 = require("./scm-model.js");
 const trust_model_js_1 = require("./trust-model.js");
 const POLL_MS = 5_000;
 const BADGE = "!";
@@ -66,17 +67,20 @@ function registerTrust(context, engine) {
         });
         return loading;
     };
+    const flagged = (tooltip, propagate) => {
+        const decoration = new vscode.FileDecoration(BADGE, tooltip, new vscode.ThemeColor("list.warningForeground"));
+        decoration.propagate = propagate;
+        return decoration;
+    };
     const provider = {
         onDidChangeFileDecorations: changed.event,
         provideFileDecoration: (uri) => {
+            if (uri.scheme === scm_model_js_1.CONFIG_SCHEME)
+                return flagged(trust_model_js_1.IDE_CONFIG_NOTE, false);
             if (uri.scheme !== "file")
                 return undefined;
             const agent = files.get(uri.fsPath);
-            if (agent === undefined)
-                return undefined;
-            const decoration = new vscode.FileDecoration(BADGE, `${trust_model_js_1.IDE_CONFIG_NOTE} (${agent})`, new vscode.ThemeColor("list.warningForeground"));
-            decoration.propagate = true;
-            return decoration;
+            return agent === undefined ? undefined : flagged(`${trust_model_js_1.IDE_CONFIG_NOTE} (${agent})`, true);
         },
     };
     const timer = setInterval(() => void load(), POLL_MS);

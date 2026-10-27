@@ -38,6 +38,7 @@ export interface ScmResource {
   path: string;
   file: string;
   base: string | null;
+  config: string | null;
   open: Opens;
   letter: string;
   tooltip: string;
@@ -59,6 +60,13 @@ export interface ScmGroup {
 
 export const BASE_SCHEME = "crazyagent-base";
 
+/** The scheme of an agent's IDE settings file as its change set has it, served by the
+ * engine because the IDE server cannot read agent `.vscode` or `*.code-workspace` files. */
+export const CONFIG_SCHEME = "crazyagent-config";
+
+/** The mark the engine puts on a file the IDE reads as its settings. */
+export const IDE_CONFIG = "ide_config";
+
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -76,6 +84,7 @@ const MARKS: Record<string, string> = {
   mode: "File mode changed",
   attributes: ".gitattributes: changes how Git treats files",
   modules: ".gitmodules: changes the project's submodules",
+  ide_config: "IDE settings: changes how the IDE behaves in this project",
 };
 const SUFFIXES: Record<GroupContext, string> = {
   open: "",
@@ -135,14 +144,14 @@ export function acceptedNote(outcome: AcceptOutcome): string {
   return `These files also changed on your branch: ${shown}${more}. Ask the agent to update, or discard.`;
 }
 
-/** The path of a base-side document: the change set and the file. Inputs: the set id and
- * the file's path in the change set. Output: the URI path. */
+/** The path of a base-side or IDE settings document: the change set and the file. Inputs:
+ * the set id and the file's path in the change set. Output: the URI path. */
 export function basePath(id: string, path: string): string {
   return `/${id}/${path}`;
 }
 
-/** Reads a base-side document path back, refusing anything but a change set id and a
- * plain relative path. Input: the URI path. Output: the set and file, or null. */
+/** Reads a base-side or IDE settings document path back, refusing anything but a change
+ * set id and a plain relative path. Input: the URI path. Output: the set and file, or null. */
 export function parseBasePath(text: string): { id: string; path: string } | null {
   const match = /^\/([^/]+)\/(.+)$/s.exec(text);
   if (match === null || !SET_ID.test(match[1])) return null;
@@ -166,7 +175,7 @@ function context(set: IdeChangeSet, now: number): GroupContext | null {
 }
 
 function opens(file: IdeFile): Opens {
-  if (file.kind !== "text") return file.status === "deleted" ? "none" : "file";
+  if (file.kind !== "text") return file.status === "deleted" || file.marks.includes(IDE_CONFIG) ? "none" : "file";
   return file.status === "deleted" ? "base" : "diff";
 }
 
@@ -182,6 +191,7 @@ function resource(set: IdeChangeSet, file: IdeFile): ScmResource {
     path: file.path,
     file: `${set.worktree.replace(/\/+$/, "")}/${file.path}`,
     base: open === "diff" || open === "base" ? basePath(set.id, file.path) : null,
+    config: open === "diff" && file.marks.includes(IDE_CONFIG) ? basePath(set.id, file.path) : null,
     open,
     letter: LETTERS[file.status],
     tooltip: tooltip(file),

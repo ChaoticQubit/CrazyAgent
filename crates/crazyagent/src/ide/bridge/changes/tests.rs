@@ -1,6 +1,6 @@
 use super::*;
 use crate::landing::{
-    ChangeAgent, FileKind, FileStatus, RESTORE_WINDOW_MS, TurnEnd, TurnOutcome, Workspace,
+    ChangeAgent, FileKind, FileMark, FileStatus, RESTORE_WINDOW_MS, TurnEnd, TurnOutcome, Workspace,
 };
 use crate::protocol::FRAME_BYTES_MAX;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,16 @@ impl Case {
 
     /// The case with its change set made by `agent`.
     pub(in crate::ide::bridge) fn with(agent: ChangeAgent) -> Self {
+        Self::with_files(agent, &[], &[])
+    }
+
+    /// The case with extra files in the owner's first commit and extra agent edits in its
+    /// turn, `None` deleting a file. Inputs: the agent, the base files and the edits.
+    pub(in crate::ide::bridge) fn with_files(
+        agent: ChangeAgent,
+        base: &[(&str, &str)],
+        edits: &[(&str, Option<&str>)],
+    ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let (repo, home, engine) = (root.join("repo"), root.join("home"), root.join("engine"));
@@ -69,7 +79,12 @@ impl Case {
         owner(&["config", "user.email", "owner@example.invalid"]);
         std::fs::write(repo.join("README"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(repo.join("OLD"), "gone soon\n").unwrap();
-        owner(&["add", "README", "OLD"]);
+        for (path, text) in base {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        }
+        owner(&["add", "-A"]);
         owner(&["commit", "-q", "-m", "Start"]);
         let worktree = root.join("agent-7");
         owner(&[
@@ -92,6 +107,16 @@ impl Case {
         std::fs::write(worktree.join("README"), "uno\ntwo\nthree\n").unwrap();
         std::fs::write(worktree.join("NOTES"), "added by the agent\n").unwrap();
         std::fs::remove_file(worktree.join("OLD")).unwrap();
+        for (path, text) in edits {
+            let file = worktree.join(path);
+            match text {
+                Some(text) => {
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(file, text).unwrap();
+                }
+                None => std::fs::remove_file(file).unwrap(),
+            }
+        }
         let end = TurnEnd {
             outcome: TurnOutcome::Succeeded,
             turn: "turn-1".into(),
@@ -288,6 +313,91 @@ fn the_base_side_of_a_diff_is_the_file_before_the_agent_touched_it() {
             "{outside}"
         );
     }
+}
+
+#[test]
+fn agent_ide_settings_are_read_from_the_change_set_head_by_the_engine_only() {
+    let old_tasks = "{\"tasks\": []}\n";
+    let tasks = "{\"tasks\": [{\"label\": \"x\", \"runOptions\": {\"runOn\": \"folderOpen\"}}]}\n";
+    let settings = "{\"chat.disableAIFeatures\": false, \"files.readonlyInclude\": {}}\n";
+    let workspace = "{\"folders\": [{\"path\": \"/\"}]}\n";
+    let case = Case::with_files(
+        ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "7".into(),
+            label: "Ada (@builder) \u{b7} Codex".into(),
+        },
+        &[
+            (".vscode/tasks.json", old_tasks),
+            (".vscode/extensions.json", "{}\n"),
+        ],
+        &[
+            (".vscode/settings.json", Some(settings)),
+            (".vscode/tasks.json", Some(tasks)),
+            (".vscode/extensions.json", None),
+            ("shop.code-workspace", Some(workspace)),
+        ],
+    );
+    let set = case.only(NOW);
+    let whole = |text: &str| BasePage {
+        text: text.into(),
+        next: None,
+    };
+    let marked: Vec<&str> = set
+        .files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::IdeConfig))
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            ".vscode/extensions.json",
+            ".vscode/settings.json",
+            ".vscode/tasks.json",
+            "shop.code-workspace"
+        ]
+    );
+    let config = |path: &str, page: u16| config_blob(&case.db, &case.project, &set.id, path, page);
+    assert_eq!(config(".vscode/settings.json", 0).unwrap(), whole(settings));
+    assert_eq!(config(".vscode/tasks.json", 0).unwrap(), whole(tasks));
+    assert_eq!(config("shop.code-workspace", 0).unwrap(), whole(workspace));
+    assert_eq!(
+        base_blob(&case.db, &case.project, &set.id, ".vscode/tasks.json", 0).unwrap(),
+        whole(old_tasks)
+    );
+    std::fs::write(
+        case.worktree.join(".vscode/settings.json"),
+        "{\"later\": true}\n",
+    )
+    .unwrap();
+    assert_eq!(config(".vscode/settings.json", 0).unwrap(), whole(settings));
+    assert_eq!(
+        config(".vscode/settings.json", 1).unwrap_err().0,
+        "changes_not_found"
+    );
+    for refused in [
+        ".vscode/extensions.json",
+        "README",
+        "NOTES",
+        "OLD",
+        "../agent-7/.vscode/settings.json",
+        ".git/config",
+        "",
+    ] {
+        assert_eq!(
+            config(refused, 0).unwrap_err().0,
+            "changes_not_found",
+            "{refused}"
+        );
+    }
+    let other = ProjectId::new("project-2").unwrap();
+    assert_eq!(
+        config_blob(&case.db, &other, &set.id, ".vscode/settings.json", 0)
+            .unwrap_err()
+            .0,
+        "changes_not_found"
+    );
 }
 
 #[test]

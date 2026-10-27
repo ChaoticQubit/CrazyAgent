@@ -113,6 +113,12 @@ pub enum IdeCall {
         path: String,
         page: u16,
     },
+    #[serde(rename = "ide.config_blob")]
+    ConfigBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
     #[serde(rename = "ide.accept")]
     Accept {
         id: ChangeSetId,
@@ -207,7 +213,9 @@ impl IdeRequest {
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
-            IdeCall::BaseBlob { path, .. } | IdeCall::OwnerEdit { path, .. } => relative(path),
+            IdeCall::BaseBlob { path, .. }
+            | IdeCall::ConfigBlob { path, .. }
+            | IdeCall::OwnerEdit { path, .. } => relative(path),
             IdeCall::Comment {
                 path, line, text, ..
             } => {
@@ -576,6 +584,7 @@ async fn answer(
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
+        | IdeCall::ConfigBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }

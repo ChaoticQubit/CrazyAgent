@@ -446,6 +446,8 @@ fn ide_request_bounds_are_refused() {
         json!({ "name": "ide.base_blob", "args": { "id": id, "path": "", "page": 0 } }),
         json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
         json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs", "page": 0 } }),
+        json!({ "name": "ide.config_blob", "args": { "id": id, "path": "", "page": 0 } }),
+        json!({ "name": "ide.config_blob", "args": { "id": id, "path": "../agent-7/.vscode/settings.json", "page": 0 } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 0, "text": "x" } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": " " } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": "x".repeat(COMMENT_BYTES_MAX + 1) } }),

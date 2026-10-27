@@ -37,8 +37,17 @@ exports.registerBaseContent = registerBaseContent;
 const vscode = __importStar(require("vscode"));
 const scm_model_js_1 = require("./scm-model.js");
 const PAGES_MAX = 512;
+const SIDES = [
+    [scm_model_js_1.BASE_SCHEME, "ide.base_blob"],
+    [scm_model_js_1.CONFIG_SCHEME, "ide.config_blob"],
+];
 function registerBaseContent(context, engine) {
-    const provider = {
+    for (const [scheme, call] of SIDES) {
+        context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(scheme, provider(engine, call)));
+    }
+}
+function provider(engine, call) {
+    return {
         async provideTextDocumentContent(uri) {
             const target = (0, scm_model_js_1.parseBasePath)(uri.path);
             if (target === null)
@@ -48,7 +57,7 @@ function registerBaseContent(context, engine) {
             for (;;) {
                 if (parts.length >= PAGES_MAX)
                     throw new Error((0, scm_model_js_1.refusal)("changes_too_large"));
-                const reply = await engine.request("ide.base_blob", { id: target.id, path: target.path, page });
+                const reply = await engine.request(call, { id: target.id, path: target.path, page });
                 if (reply.kind !== "ok")
                     throw new Error((0, scm_model_js_1.refusal)(reply.code));
                 const data = reply.data ?? {};
@@ -64,5 +73,4 @@ function registerBaseContent(context, engine) {
             }
         },
     };
-    context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(scm_model_js_1.BASE_SCHEME, provider));
 }

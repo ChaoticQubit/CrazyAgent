@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const model = await import("../src/trust-model.ts");
+const scm = await import("../src/scm-model.ts");
 
 const file = (path, extra = {}) => ({ path, status: "added", marks: [], ...extra });
 const set = (extra = {}) => ({
@@ -46,4 +47,5 @@ test("the decoration words match the desktop's and the engine's mark name", () =
   assert.ok(desktop.includes(`  ${model.IDE_CONFIG}: "${model.IDE_CONFIG_NOTE}",`));
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/changes.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`FileMark::IdeConfig => "${model.IDE_CONFIG_NOTE}",`));
+  assert.equal(model.IDE_CONFIG, scm.IDE_CONFIG);
 });

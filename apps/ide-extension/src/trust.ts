@@ -1,14 +1,16 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
+import { CONFIG_SCHEME } from "./scm-model.js";
 import { IDE_CONFIG_NOTE, type MarkedSet, ideConfigFiles, ideConfigWarning, warningKey } from "./trust-model.js";
 
 const POLL_MS = 5_000;
 const BADGE = "!";
 
 /** Flags agent changes to IDE settings: each `.vscode` or `*.code-workspace` file an open
- * change set changed is decorated in the agent's worktree, and one warning names them once
- * per change set head. Inputs: the extension context and the engine client. Output: none;
- * all is disposed with the extension. */
+ * change set changed is decorated in the agent's worktree and in the engine's read-only
+ * copy the diff opens, and one warning names them once per change set head. Inputs: the
+ * extension context and the engine client. Output: none; all is disposed with the
+ * extension. */
 export function registerTrust(context: vscode.ExtensionContext, engine: Engine): void {
   const changed = new vscode.EventEmitter<vscode.Uri[] | undefined>();
   const warned = new Set<string>();
@@ -41,15 +43,19 @@ export function registerTrust(context: vscode.ExtensionContext, engine: Engine):
     return loading;
   };
 
+  const flagged = (tooltip: string, propagate: boolean): vscode.FileDecoration => {
+    const decoration = new vscode.FileDecoration(BADGE, tooltip, new vscode.ThemeColor("list.warningForeground"));
+    decoration.propagate = propagate;
+    return decoration;
+  };
+
   const provider: vscode.FileDecorationProvider = {
     onDidChangeFileDecorations: changed.event,
     provideFileDecoration: (uri: vscode.Uri): vscode.FileDecoration | undefined => {
+      if (uri.scheme === CONFIG_SCHEME) return flagged(IDE_CONFIG_NOTE, false);
       if (uri.scheme !== "file") return undefined;
       const agent = files.get(uri.fsPath);
-      if (agent === undefined) return undefined;
-      const decoration = new vscode.FileDecoration(BADGE, `${IDE_CONFIG_NOTE} (${agent})`, new vscode.ThemeColor("list.warningForeground"));
-      decoration.propagate = true;
-      return decoration;
+      return agent === undefined ? undefined : flagged(`${IDE_CONFIG_NOTE} (${agent})`, true);
     },
   };
 
