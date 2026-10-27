@@ -39,6 +39,7 @@ mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
 pub(crate) mod changes;
+pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
 mod native_auth;
@@ -1902,6 +1903,7 @@ enum Protocol {
     Plugins,
     Agents,
     Changes,
+    Cleanup,
     Usage,
     NativeAuth,
     Process,
@@ -1928,6 +1930,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("plugins", Protocol::Plugins),
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
+        ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
@@ -1989,6 +1992,13 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
+            Protocol::Cleanup => {
+                let served = cleanup::serve(stream, engine, authority, auth, &a, body);
+                return tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served)
+                    .await
+                    .map_err(|_| failure("cleanup_outcome_unknown"))?
+                    .map(|()| None);
+            }
             Protocol::Usage => {
                 let served = usage::serve(stream, engine, authority, auth, &a, body);
                 return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
@@ -2229,6 +2239,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
+        Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
