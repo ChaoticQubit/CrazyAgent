@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
@@ -174,6 +174,21 @@ struct Held {
     launches: u64,
     opening: HashMap<String, u64>,
     asks: u64,
+    engine: HashMap<String, Order>,
+}
+
+/// One project's place in the queue of engine opens and stops: the turn each holds while the
+/// engine runs it, and the ticket of the project's newest open.
+struct Order {
+    turn: Arc<tokio::sync::Mutex<()>>,
+    begun: u64,
+}
+
+/// A project page's close waiting to stop its IDE server: the project's turn and the last
+/// ticket handed out when the page closed.
+pub struct Closing {
+    turn: Arc<tokio::sync::Mutex<()>>,
+    epoch: u64,
 }
 
 impl Held {
@@ -218,7 +233,78 @@ impl IdeViews {
         held.asks += 1;
         let ticket = held.asks;
         held.opening.insert(project.as_str().to_owned(), ticket);
+        held.engine
+            .entry(project.as_str().to_owned())
+            .or_insert_with(|| Order {
+                turn: Arc::default(),
+                begun: ticket,
+            })
+            .begun = ticket;
         ticket
+    }
+
+    /// Whether this project's IDE webview is loaded, shown or hidden. Input: the project.
+    /// Output: true while it is loaded.
+    pub fn loaded(&self, project: &ProjectId) -> bool {
+        self.lock().loaded.contains_key(project.as_str())
+    }
+
+    /// The turn an open holds while the engine opens the project's server, so a stop from
+    /// a page close runs wholly before or wholly after it. Input: the project, after
+    /// [`IdeViews::begin`]. Output: the turn.
+    pub fn turn(&self, project: &ProjectId) -> Arc<tokio::sync::Mutex<()>> {
+        let held = self.lock();
+        let order = held
+            .engine
+            .get(project.as_str())
+            .expect("an open takes its turn after begin");
+        Arc::clone(&order.turn)
+    }
+
+    /// Notes a project page's close, before any await, when an open asked the engine for
+    /// that project's server since the last close. Input: the project. Output: the close
+    /// to stop the server with, or none when no open asked for one.
+    pub fn closing(&self, project: &ProjectId) -> Option<Closing> {
+        let held = self.lock();
+        let order = held.engine.get(project.as_str())?;
+        Some(Closing {
+            turn: Arc::clone(&order.turn),
+            epoch: held.asks,
+        })
+    }
+
+    /// Runs a closed page's server stop in the project's turn, unless an open of that
+    /// project began after the close and wants the server, then forgets the project's order
+    /// once nothing else holds it. Inputs: the project, its close and the stop. Output: the
+    /// stop's answer, or false when it was skipped.
+    pub async fn stop_closed<F, S>(
+        &self,
+        project: &ProjectId,
+        closing: Closing,
+        stop: S,
+    ) -> Result<bool, BridgeError>
+    where
+        S: FnOnce() -> F,
+        F: std::future::Future<Output = Result<bool, BridgeError>>,
+    {
+        let turn = closing.turn.lock().await;
+        let reopened = self
+            .lock()
+            .engine
+            .get(project.as_str())
+            .is_some_and(|order| order.begun > closing.epoch);
+        let stopped = if reopened { Ok(false) } else { stop().await };
+        drop(turn);
+        let mut held = self.lock();
+        let idle = held.engine.get(project.as_str()).is_some_and(|order| {
+            Arc::ptr_eq(&order.turn, &closing.turn)
+                && order.begun <= closing.epoch
+                && Arc::strong_count(&order.turn) == 2
+        });
+        if idle {
+            held.engine.remove(project.as_str());
+        }
+        stopped
     }
 }
 
@@ -602,6 +688,70 @@ mod tests {
             views.lock().admit(&beta, other),
             "cancelling one project leaves the other"
         );
+    }
+
+    #[tokio::test]
+    async fn a_closed_page_stops_its_server_in_turn_unless_a_newer_open_wants_it() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        assert!(
+            views.closing(&alpha).is_none(),
+            "a page that never asked for a server stops nothing"
+        );
+
+        views.begin(&alpha);
+        let open = views.turn(&alpha);
+        let opening = open.lock().await;
+        let closing = views.closing(&alpha).unwrap();
+        let stop = tokio::spawn({
+            let views = Arc::new(views);
+            let alpha = alpha.clone();
+            let shared = Arc::clone(&views);
+            async move {
+                let stopped = shared
+                    .stop_closed(&alpha, closing, || async { Ok(true) })
+                    .await;
+                (stopped.map_err(|error| error.code), views)
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!stop.is_finished(), "the stop waits while the open runs");
+        drop(opening);
+        drop(open);
+        let (stopped, views) = stop.await.unwrap();
+        assert_eq!(stopped, Ok(true), "then the closed page's server stops");
+        assert!(
+            views.closing(&alpha).is_none(),
+            "a stopped project is forgotten"
+        );
+
+        views.begin(&alpha);
+        let closing = views.closing(&alpha).unwrap();
+        views.begin(&alpha);
+        assert_eq!(
+            views
+                .stop_closed(&alpha, closing, || async { Ok(true) })
+                .await
+                .map_err(|error| error.code),
+            Ok(false),
+            "an open that began after the close keeps its server"
+        );
+        assert!(
+            views.closing(&alpha).is_some(),
+            "the newer open's order stays"
+        );
+        let closing = views.closing(&alpha).unwrap();
+        assert_eq!(
+            views
+                .stop_closed(&alpha, closing, || async {
+                    Err(refused("ide_tab_outcome_unknown"))
+                })
+                .await
+                .map_err(|error| error.code),
+            Err("ide_tab_outcome_unknown"),
+            "a refused stop reaches the caller"
+        );
+        assert!(views.closing(&alpha).is_none());
     }
 
     #[test]

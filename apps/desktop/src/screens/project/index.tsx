@@ -4,7 +4,7 @@ import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, load
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
-import { closeIde, ideView } from "../../api-ide";
+import { HEARTBEAT_MS, closeIde, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
@@ -175,6 +175,12 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   }, [projectId]);
 
   useEffect(() => {
+    if (ide?.tab !== "on") return;
+    const beat = window.setInterval(() => void touchIde(projectId), HEARTBEAT_MS);
+    return () => window.clearInterval(beat);
+  }, [projectId, ide?.tab]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!shortcutKey(event)) return;
       const position = Number(event.key) - 1;
@@ -204,8 +210,8 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
       {active === "ide" && <IdeTab key={data.id} projectId={projectId} />}
     </div>
-    <IdeConfirm data={data} />
-    <IdeExtensionConfirm data={data} />
+    {ide?.tab === "on" && <IdeConfirm data={data} />}
+    {ide?.tab === "on" && <IdeExtensionConfirm data={data} />}
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
   </div>;
 }

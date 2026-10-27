@@ -87,4 +87,13 @@ impl NativeBridge {
             client.ide_tab_touch(project).await.map_err(ide_error)
         }))
     }
+
+    /// Stops a project's IDE server after its project page closed, run without the bridge
+    /// lock. Input: the project. Output: whether a server was running.
+    pub fn ide_stop(&self, project: ProjectId) -> Result<Unlocked<bool>, BridgeError> {
+        let client = self.ide_client()?;
+        Ok(Box::pin(async move {
+            client.ide_tab_stop(project).await.map_err(ide_error)
+        }))
+    }
 }

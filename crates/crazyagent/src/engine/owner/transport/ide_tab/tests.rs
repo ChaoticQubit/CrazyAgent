@@ -60,7 +60,24 @@ async fn ide_tab_reads_the_build_and_never_opens_a_server_before_it_is_ready() {
         !root.path().join("ide").join(project.as_str()).exists(),
         "a refused open leaves no server state"
     );
+    assert!(
+        !client.ide_tab_stop(project.clone()).await.unwrap(),
+        "stopping a project whose IDE server never ran stops nothing"
+    );
     assert!(IDE_TAB_CODES.contains(&"ide_build_not_ready"));
+    for code in [
+        "ide_extension_install_failed",
+        "ide_capability_capacity",
+        "ide_capability_unavailable",
+        "ide_entropy_unavailable",
+        "ide_folder_unavailable",
+    ] {
+        assert_eq!(
+            public_code(EngineError(code.into())),
+            code,
+            "an open refused while installing the built-in extension or issuing its capability names why"
+        );
+    }
     assert_eq!(
         public_code(EngineError("rusqlite says no".into())),
         "ide_tab_outcome_unknown",

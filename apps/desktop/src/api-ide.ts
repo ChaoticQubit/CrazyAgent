@@ -2,7 +2,8 @@ import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
 
-/** How often a shown IDE tab tells the engine the owner still uses it, in milliseconds. */
+/** How often a project page with its IDE loaded tells the engine the owner still uses it, in
+ * milliseconds. */
 export const HEARTBEAT_MS = 60_000;
 
 /** Where the engine's pinned IDE build stands. */
@@ -93,6 +94,12 @@ export function bounds(box: { left: number; top: number; width: number; height: 
   const height = Math.round(box.height);
   if (width < 1 || height < 1) return null;
   return { x: Math.max(0, Math.round(box.left)), y: Math.max(0, Math.round(box.top)), width, height };
+}
+
+/** Whether the panel kept the box the IDE webview was last placed at. Inputs: the box now
+ * and the one last placed, null before the first. Output: true when nothing moved. */
+export function sameBounds(box: IdeBounds, last: IdeBounds | null): boolean {
+  return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height;
 }
 
 /** Reads what the IDE tab shows; with `retry` the engine first starts the build download

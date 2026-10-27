@@ -462,9 +462,13 @@ async fn desktop_project_memories(
 async fn desktop_ide_asks(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
     id: String,
 ) -> Result<Vec<IdeAskItem>, BridgeError> {
     main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(Vec::new());
+    }
     read(&state).await?.ide_asks(&id).await
 }
 
@@ -2018,9 +2022,13 @@ async fn desktop_usage_set_reset(
 async fn desktop_ide_extension_asks(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<Vec<AskView>, BridgeError> {
     main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(Vec::new());
+    }
     let call = lock(&state).await?.ide_extension_asks(project_id)?;
     call.await
 }
@@ -2203,8 +2211,13 @@ async fn desktop_ide_open(
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
     let ticket = views.begin(&project);
-    let call = read(&state).await?.ide_open(project.clone())?;
-    let workbench = ide::workbench(&call.await?)?;
+    let turn = views.turn(&project);
+    let opened = {
+        let _turn = turn.lock().await;
+        let call = read(&state).await?.ide_open(project.clone())?;
+        call.await?
+    };
+    let workbench = ide::workbench(&opened)?;
     ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
 }
 
@@ -2236,21 +2249,38 @@ async fn desktop_ide_hide(
 async fn desktop_ide_close(
     window: WebviewWindow,
     app: AppHandle,
+    state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    ide::close(&app, &views, &bridge::ide::ide_project(&project_id)?)
+    let project = bridge::ide::ide_project(&project_id)?;
+    let closing = views.closing(&project);
+    ide::close(&app, &views, &project)?;
+    let Some(closing) = closing else {
+        return Ok(());
+    };
+    views
+        .stop_closed(&project, closing, || async {
+            let call = read(&state).await?.ide_stop(project.clone())?;
+            call.await
+        })
+        .await
+        .map(|_| ())
 }
 
 #[tauri::command]
 async fn desktop_ide_touch(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<bool, BridgeError> {
     main_window(&window)?;
     let project = bridge::ide::ide_project(&project_id)?;
+    if !views.loaded(&project) {
+        return Ok(false);
+    }
     let call = read(&state).await?.ide_touch(project)?;
     call.await
 }

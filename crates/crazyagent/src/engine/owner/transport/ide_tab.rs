@@ -14,6 +14,11 @@ pub(super) const IDE_TAB_TIMEOUT: Duration = Duration::from_secs(120);
 pub const IDE_TAB_CODES: &[&str] = &[
     "ide_build_invalid",
     "ide_build_not_ready",
+    "ide_capability_capacity",
+    "ide_capability_unavailable",
+    "ide_entropy_unavailable",
+    "ide_extension_install_failed",
+    "ide_folder_unavailable",
     "ide_folder_unsafe",
     "ide_path_unreadable",
     "ide_platform_unqualified",
@@ -86,6 +91,7 @@ enum Action {
     Retry,
     Open { project: ProjectId },
     Touch { project: ProjectId },
+    Stop { project: ProjectId },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,6 +100,7 @@ enum Reply {
     State { state: IdeTabState },
     Opened { server: IdeTabServer },
     Touched { running: bool },
+    Stopped { stopped: bool },
     Rejected { code: String },
 }
 
@@ -134,6 +141,15 @@ impl OwnerClient {
     pub async fn ide_tab_touch(&self, project: ProjectId) -> Result<bool, EngineError> {
         match self.ide_tab_exchange(Action::Touch { project }).await? {
             Reply::Touched { running } => Ok(running),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Stops a project's IDE server once its project page closes, after any open still
+    /// starting it. Input: the project. Output: whether a server was running.
+    pub async fn ide_tab_stop(&self, project: ProjectId) -> Result<bool, EngineError> {
+        match self.ide_tab_exchange(Action::Stop { project }).await? {
+            Reply::Stopped { stopped } => Ok(stopped),
             _ => Err(unknown()),
         }
     }
@@ -250,6 +266,9 @@ async fn handle(
         Action::Touch { project } => Ok(Reply::Touched {
             running: touch(authority, &project),
         }),
+        Action::Stop { project } => Ok(Reply::Stopped {
+            stopped: stop(authority, &project).await,
+        }),
     }
 }
 
@@ -308,6 +327,16 @@ fn touch(authority: &Authority, project: &ProjectId) -> bool {
 
 #[cfg(not(unix))]
 fn touch(_authority: &Authority, _project: &ProjectId) -> bool {
+    false
+}
+
+#[cfg(unix)]
+async fn stop(authority: &Authority, project: &ProjectId) -> bool {
+    authority.ide_servers.stop(project).await
+}
+
+#[cfg(not(unix))]
+async fn stop(_authority: &Authority, _project: &ProjectId) -> bool {
     false
 }
 
