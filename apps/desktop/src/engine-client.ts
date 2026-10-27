@@ -657,6 +657,7 @@ export interface TeamHarness {
 export interface TeamAgent {
   id: number;
   role: TeamRole;
+  label: string;
   harness: string;
   tools: boolean;
   account: string | null;

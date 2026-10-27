@@ -5,6 +5,7 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
     TeamAgent {
         id,
         role,
+        label: role.agent_label(id),
         harness: harness.into(),
         tools: true,
         account: Some(format!("acct-{id}")),
@@ -124,6 +125,10 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
     assert_eq!(working.parent.as_deref(), Some("group:claude-code"));
     assert_eq!(working.status, Some(AgentStatus::Working));
     assert_eq!(working.terminal, Some(AgentId::team(3).unwrap()));
+    assert_eq!(
+        working.label, "Sub-agent 3",
+        "an agent node carries the engine's one name for the agent"
+    );
     let failed = &graph.nodes[4];
     assert_eq!(failed.status, Some(AgentStatus::Failed));
     assert_eq!(failed.terminal, None, "a failed agent has no live terminal");

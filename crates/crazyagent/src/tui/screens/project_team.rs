@@ -592,7 +592,7 @@ impl TeamView {
         for (index, agent) in agents.iter().enumerate().skip(first).take(agent_rows) {
             let current = agent.task.and_then(|id| self.task(id));
             let mut cells = vec![
-                Row::of(self.agent_name(agent), look.fg),
+                Row::of(agent.label.clone(), look.fg),
                 Row::of(harness_name(&agent.harness, None), look.fg),
             ];
             if wide {
@@ -692,19 +692,6 @@ impl TeamView {
         spread(content, left, right)
     }
 
-    fn agent_name(&self, agent: &TeamAgent) -> String {
-        if agent.role == AgentRole::Master {
-            return "Master".into();
-        }
-        let before = self
-            .status
-            .iter()
-            .flat_map(|status| status.agents.iter())
-            .filter(|other| other.role == AgentRole::Sub && other.id < agent.id)
-            .count();
-        format!("Sub-agent {}", before + 1)
-    }
-
     fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
         let entry =
             |label: &str, value: String| Row::of(label, look.muted).pad(14).push(value, look.fg);
@@ -724,7 +711,7 @@ impl TeamView {
                 };
                 rows.push(spread(
                     content,
-                    Row::of(self.agent_name(agent), look.heading),
+                    Row::of(agent.label.clone(), look.heading),
                     Row::of(when, look.muted),
                 ));
                 rows.push(entry(
@@ -778,7 +765,7 @@ impl TeamView {
                     .agent
                     .and_then(|id| self.agents().into_iter().find(|agent| agent.id == id))
                 {
-                    rows.push(entry("Agent", self.agent_name(agent)));
+                    rows.push(entry("Agent", agent.label.clone()));
                 }
                 if task.attempts > 1 {
                     rows.push(entry("Tries", task.attempts.to_string()));

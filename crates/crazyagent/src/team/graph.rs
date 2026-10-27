@@ -150,7 +150,7 @@ pub fn graph(status: &TeamStatus) -> TeamGraph {
             id: terminal.to_string(),
             kind: NodeKind::Agent,
             parent: Some(parent),
-            label: format!("{} {}", agent.harness, agent.id),
+            label: agent.label.clone(),
             harness: agent.harness.clone(),
             status: Some(agent.status),
             status_label: Some(agent.status_label.clone()),
