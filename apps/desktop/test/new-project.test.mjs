@@ -100,13 +100,21 @@ test("team defaults with no research run any harness up to the team maximum and 
 test("an empty agent list reads as any harness, and the total as up to the team maximum", () => {
   const any = engineTeam("codex", 0);
   assert.equal(wizard.ANY_HARNESS_NOTE, "Any harness, no limit. Add a harness to limit which ones run and how many.");
-  assert.equal(wizard.anyHarnessTotal(any), "Any harness, up to 64 agents");
+  assert.equal(wizard.anyHarnessTotal(any), "Any harness, up to 63 agents");
+  assert.equal(wizard.anyHarnessNote(any), wizard.ANY_HARNESS_NOTE);
   assert.equal(wizard.agentTotalText(any), "This team has up to 64 agents.");
   assert.equal(wizard.agentTotalText({ ...any, max_agents: 5 }), "This team has up to 5 agents.");
   const chosen = wizard.addHarnessRow(any, catalog);
   assert.deepEqual(chosen.sub_harnesses, [{ harness: "codex", agents: 1, tools: true }]);
   assert.equal(wizard.agentTotalText(chosen), "This team has 2 agents.");
   assert.equal(wizard.agentTotalText({ ...engineTeam("codex", 0), sub_harnesses: [], max_agents: 1 }), "This team has up to 1 agent.");
+});
+
+test("an empty agent list with a team maximum of one says no sub-agent runs", () => {
+  const alone = { ...engineTeam("codex", 0), max_agents: 1 };
+  assert.equal(wizard.anyHarnessTotal(alone), "No sub-agents (team maximum is 1)");
+  assert.equal(wizard.anyHarnessTotal({ ...alone, max_agents: 2 }), "Any harness, up to 1 agent");
+  assert.equal(wizard.anyHarnessNote(alone), "No sub-agents run with a team maximum of 1. Raise the maximum to let any harness run.");
 });
 
 test("a harness whose tools can't be turned off keeps tools on", () => {
