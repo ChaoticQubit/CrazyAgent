@@ -1128,6 +1128,25 @@ pub(crate) fn lease_git_dir(
     Ok(metadata)
 }
 
+/// Names the branch of the lease whose worktree is at `path`, the only ref a master
+/// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
+/// the worktree path. Output: the branch, or `lease_missing`.
+pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
+    let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
+    let body: Option<String> = connection
+        .query_row(
+            "SELECT body FROM worktree_leases WHERE path=?1",
+            [path],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let record: LeaseRecord =
+        serde_json::from_str(&body.ok_or_else(|| error("lease_missing"))?).map_err(error)?;
+    assert_eq!(record.lease.path, path);
+    Ok(record.lease.branch)
+}
+
 fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError> {
     assert_record_consistent(record);
     let count = connection
