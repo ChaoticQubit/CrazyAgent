@@ -3,7 +3,7 @@ import type { ITerminalOptions } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
-import { Button, Icon, NotReady, StatusBadge, keyLabel, shortcutKey } from "../../ui";
+import { Button, Icon, NotReady, StatusBadge, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
 import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
@@ -54,7 +54,10 @@ export function promptCopy(node: GraphNode): { label: string; placeholder: strin
     : { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
 }
 
-function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
+/** The prompt box under an agent's terminal: Enter sends the text as one message, Shift+Enter
+ * adds a line. Inputs: the node, whether the terminal is live and the send action, which says
+ * whether the prompt was queued. Output: the form. */
+export function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
   const [text, setText] = useState("");
   const id = `tg-prompt-${node.id}`;
   const copy = promptCopy(node);
@@ -68,9 +71,9 @@ function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSe
     <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} disabled={!live}
       placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
       onChange={(event) => setText(event.target.value)}
-      onKeyDown={(event) => { if (event.key === "Enter" && shortcutKey(event)) { event.preventDefault(); send(); } }} />
+      onKeyDown={(event) => { if (sendsMessage(event.nativeEvent)) { event.preventDefault(); send(); } }} />
     <div className="tg-composer-foot">
-      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Opens once the terminal is live." : check.kind === "too_long" ? check.reason : keyLabel("Sends the text as one message, then Enter. Cmd+Enter to send.")}</span>
+      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Opens once the terminal is live." : check.kind === "too_long" ? check.reason : "Sends the text as one message, then Enter. Enter to send, Shift+Enter for a new line."}</span>
       <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || check.kind !== "ok"}>Send</Button>
     </div>
   </form>;

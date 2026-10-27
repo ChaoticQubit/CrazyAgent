@@ -470,7 +470,7 @@ export function restartForSettings(receipt: IntentReceipt): boolean {
 /** The most bytes one message to the master may hold; the bridge refuses more. */
 export const MESSAGE_BYTES_MAX = 8192;
 
-/** Whether the composer may send its draft now, the one rule for the Send button and Cmd+Enter.
+/** Whether the composer may send its draft now, the one rule for the Send button and Enter.
  * Inputs: the draft and whether sending is blocked (an action running, no ticket, a reply in
  * progress or the master unreachable). Output: true for a non-blank draft within the byte limit. */
 export function canSend(text: string, blocked: boolean): boolean {
