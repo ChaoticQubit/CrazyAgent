@@ -157,6 +157,24 @@ fn server_tree(root: &Path) -> PathBuf {
     source
 }
 
+/// Makes a symbolic link at `at` that reads `target`, a folder link when `folder`.
+fn link(target: &str, at: &Path, folder: bool) {
+    #[cfg(unix)]
+    {
+        let _ = folder;
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let target = target.replace('/', "\\");
+        if folder {
+            std::os::windows::fs::symlink_dir(target, at).unwrap();
+        } else {
+            std::os::windows::fs::symlink_file(target, at).unwrap();
+        }
+    }
+}
+
 /// Packs a folder's contents into a gzip tar with the system tar.
 fn pack(source: &Path, archive: &Path) -> Vec<u8> {
     run(Command::new("tar")
@@ -368,11 +386,38 @@ fn extract_refuses_entries_outside_the_target() {
     std::os::windows::fs::symlink_dir("C:\\Windows", rooted.join("system")).unwrap();
     let rooted_archive = root.join("rooted.tar.gz");
     pack(&rooted, &rooted_archive);
+    let through = root.join("through");
+    write(&through.join("product.json"), "{}\n");
+    link(".", &through.join("L"), true);
+    link("L/..", &through.join("M"), true);
+    let through_archive = root.join("through.tar.gz");
+    pack(&through, &through_archive);
+    let chained = root.join("chained");
+    write(&chained.join("product.json"), "{}\n");
+    link(".", &chained.join("a"), true);
+    link("a/../product.json", &chained.join("b"), false);
+    let chained_archive = root.join("chained.tar.gz");
+    pack(&chained, &chained_archive);
+    let dangling = root.join("dangling");
+    write(&dangling.join("product.json"), "{}\n");
+    link("missing.json", &dangling.join("gone.json"), false);
+    let dangling_archive = root.join("dangling.tar.gz");
+    pack(&dangling, &dangling_archive);
+    let looping = root.join("looping");
+    write(&looping.join("product.json"), "{}\n");
+    link("second", &looping.join("first"), false);
+    link("first", &looping.join("second"), false);
+    let looping_archive = root.join("looping.tar.gz");
+    pack(&looping, &looping_archive);
     for (case, archive) in [
         ("absolute", &absolute_archive),
         ("dots", &dots_archive),
         ("link", &link_archive),
         ("rooted", &rooted_archive),
+        ("through", &through_archive),
+        ("chained", &chained_archive),
+        ("dangling", &dangling_archive),
+        ("looping", &looping_archive),
     ] {
         let place = root.join(format!("case-{case}"));
         std::fs::create_dir(&place).unwrap();
@@ -404,7 +449,15 @@ fn extract_refuses_entries_outside_the_target() {
 fn verified_archive_extracts_atomically_and_reports_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let runtime = runtime(tmp.path());
-    let bytes = pack(&server_tree(tmp.path()), &tmp.path().join("build.tar.gz"));
+    let source = server_tree(tmp.path());
+    std::fs::create_dir(source.join("resources")).unwrap();
+    link(
+        "../product.json",
+        &source.join("resources/product.json"),
+        false,
+    );
+    link("bin", &source.join("current"), true);
+    let bytes = pack(&source, &tmp.path().join("build.tar.gz"));
     let server = Server::start(bytes.clone(), false);
     let finished = fetch(&runtime, &build(&server.url, &bytes));
     let root = runtime.join("ide/builds").join(VERSION);
@@ -423,6 +476,20 @@ fn verified_archive_extracts_atomically_and_reports_ready() {
     assert_eq!(
         std::fs::read_to_string(root.join("product.json")).unwrap(),
         "{\"nameShort\":\"VSCodium\"}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("resources/product.json")).unwrap(),
+        "{\"nameShort\":\"VSCodium\"}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("current/codium-server")).unwrap(),
+        "#!/bin/sh\necho ok\n"
+    );
+    assert!(
+        std::fs::symlink_metadata(root.join("current"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
     );
     #[cfg(unix)]
     {
