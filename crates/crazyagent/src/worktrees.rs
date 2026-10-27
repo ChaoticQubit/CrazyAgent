@@ -33,11 +33,11 @@ const LINKS_LEFT_OUT_MAX: usize = 64;
 #[cfg(unix)]
 const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
 
-/// The Git config the engine writes as an agent worktree's `config.worktree`, which Git
-/// reads last for that worktree alone once `extensions.worktreeConfig` is on: every
-/// transport is refused, each built-in one by name too, so neither an owner URL rewrite nor
-/// an owner per-transport allow carries a remote past it, and a URL no owner rule rewrites
-/// goes to the rule's transport. The project folder keeps its remotes and credentials.
+/// The Git config the engine writes as an agent worktree's `config.worktree`, the last config
+/// file Git reads there once `extensions.worktreeConfig` is on: every transport is refused,
+/// each built-in one by name, over any rewrite or allow in an owner config file, and a URL no
+/// rule rewrites goes to the rule's transport. Not covered: `GIT_ALLOW_PROTOCOL`, `-c` or
+/// environment config, and a custom remote helper the owner allows by name.
 pub const REMOTE_LOCK: &[u8] = concat!(
     "[protocol]\n\tallow = never\n",
     "[protocol \"file\"]\n\tallow = never\n",
