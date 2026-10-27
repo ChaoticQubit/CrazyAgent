@@ -149,7 +149,7 @@ export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolde
  * sets one up on a pool, opens or continues one, and removes a project whose folder is gone. */
 export function FoundProjects() {
   const session = useAppSession();
-  const [home, reloadHome] = useLoad(loadProjectsHome);
+  const [home, reloadHome] = useLoad(loadProjectsHome, [], "projects-home");
   const [found, setFound] = useState<Loaded<FoundProject[]>>({ kind: "loading" });
   const [tick, setTick] = useState(0);
   const [settingUp, setSettingUp] = useState<FoundProject | null>(null);

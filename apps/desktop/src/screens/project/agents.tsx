@@ -70,7 +70,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
   const harnesses = valueOf(data.harnesses);
-  const [loadedAccounts] = useLoad(listAccounts, []);
+  const [loadedAccounts] = useLoad(listAccounts, [], "accounts");
   const named = loadedAccounts.kind === "ok" ? loadedAccounts.value : [];
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
