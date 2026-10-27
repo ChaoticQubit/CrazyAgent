@@ -229,7 +229,8 @@ impl Case {
             "{}",
             notice.payload
         );
-        crate::ledger::dismiss(&ledger, kind, notice.id.get(), Outcome::Unknown).unwrap();
+        let shown = crate::ledger::dismiss(&ledger, kind, notice.id.get()).unwrap();
+        assert_eq!(shown, Outcome::Unknown);
     }
 }
 
@@ -253,8 +254,10 @@ fn worktree_create_interrupted_is_completed_or_cleaned_never_duplicated() {
     begin_worktree(&case.base, foreign, &case.repo, &case.worktree(foreign)).unwrap();
     std::fs::create_dir(case.worktree(foreign)).unwrap();
     std::fs::write(case.worktree(foreign).join("notes.txt"), "kept\n").unwrap();
-    let again = begin_worktree(&case.base, partial, &case.repo, &case.worktree(partial));
-    assert!(again.unwrap_err().contains("ledger_pending"));
+    unsettled(
+        begin_worktree(&case.base, partial, &case.repo, &case.worktree(partial)),
+        "An earlier add of this agent's worktree is still being checked",
+    );
     assert_eq!(case.pending(ActionKind::WorktreeCreate), 5);
 
     drop(case.runtime());
@@ -286,7 +289,7 @@ fn worktree_create_interrupted_is_completed_or_cleaned_never_duplicated() {
     assert!(case.worktree(foreign).join("notes.txt").is_file());
     unsettled(
         begin_worktree(&case.base, foreign, &case.repo, &case.worktree(foreign)),
-        "An earlier add of this agent's worktree is still unsettled",
+        "An earlier add of this agent's worktree has an unknown outcome. Check its folder, then dismiss it in Recovery",
     );
 
     begin_worktree(&case.base, partial, &case.repo, &case.worktree(partial)).unwrap();
@@ -329,16 +332,17 @@ fn agent_spawn_interrupted_does_not_start_a_second_harness() {
     begin_spawn(&case.base, never, true).unwrap();
     let piped = case.agent();
     begin_spawn(&case.base, piped, false).unwrap();
-    let still = "An earlier start of this agent is still unsettled";
-    unsettled(begin_spawn(&case.base, running, true), still);
+    let checking = "An earlier start of this agent is still being checked";
+    let noticed = "An earlier start of this agent has an unknown outcome. Check the agent, then dismiss it in Recovery";
+    unsettled(begin_spawn(&case.base, running, true), checking);
     assert_eq!(case.pending(ActionKind::AgentSpawn), 3);
     let team = AgentId::team(running).unwrap();
     assert!(host.alive().unwrap().contains(&team));
 
     let headless = case.runtime();
     assert_eq!(case.pending(ActionKind::AgentSpawn), 3);
-    unsettled(begin_spawn(&case.base, running, true), still);
-    unsettled(begin_spawn(&case.base, piped, false), still);
+    unsettled(begin_spawn(&case.base, running, true), checking);
+    unsettled(begin_spawn(&case.base, piped, false), noticed);
     let runtime = headless.with_terminal(host.clone()).unwrap();
     assert!(!host.alive().unwrap().contains(&team));
     let settled = vec![
@@ -352,7 +356,7 @@ fn agent_spawn_interrupted_does_not_start_a_second_harness() {
     assert_eq!(case.pending(ActionKind::AgentSpawn), 2);
     drop(runtime);
 
-    unsettled(begin_spawn(&case.base, running, true), still);
+    unsettled(begin_spawn(&case.base, running, true), noticed);
     settle(&case.team, &case.base, running, false);
     spawned(&case.base, piped, Outcome::Failed);
     drop(case.runtime().with_terminal(host.clone()).unwrap());

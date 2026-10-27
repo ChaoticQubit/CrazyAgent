@@ -1655,13 +1655,12 @@ fn an_interrupted_accept_is_listed_in_the_ledger_once_settled() {
         let notice: serde_json::Value = serde_json::from_str(&shown[0].payload).unwrap();
         assert_eq!(notice["change_set"], id.as_str(), "{step:?}");
         assert_eq!(notice["landed"], landed, "{step:?}");
-        crate::ledger::dismiss(
+        let dismissed = crate::ledger::dismiss(
             &ledger,
             crate::ledger::ActionKind::LandingAccept,
             shown[0].id.get(),
-            outcome,
-        )
-        .unwrap();
+        );
+        assert_eq!(dismissed.unwrap(), outcome, "{step:?}");
         reconcile(&case.db).unwrap();
         let name = if landed { "done" } else { "failed" };
         let dismissed = (

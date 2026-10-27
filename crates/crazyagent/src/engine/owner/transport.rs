@@ -47,6 +47,7 @@ pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
+pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -1905,6 +1906,7 @@ enum Protocol {
     Changes,
     Cleanup,
     Usage,
+    Recovery,
     NativeAuth,
     Process,
     Owner,
@@ -1932,6 +1934,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
+        ("recovery", Protocol::Recovery),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
     ];
@@ -2004,6 +2007,13 @@ async fn serve_admitted(
                 return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
                     .await
                     .map_err(|_| failure("usage_outcome_unknown"))?
+                    .map(|()| None);
+            }
+            Protocol::Recovery => {
+                let served = recovery::serve(stream, engine, authority, auth, &a, body);
+                return tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served)
+                    .await
+                    .map_err(|_| failure("recovery_outcome_unknown"))?
                     .map(|()| None);
             }
             Protocol::NativeAuth => {
@@ -2241,6 +2251,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
+        Protocol::Recovery => recovery::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         #[cfg(test)]

@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
@@ -17,8 +18,9 @@ pub const PENDING_MAX: usize = 512;
 pub const FINISHED_KEPT: usize = 1024;
 
 /// The engine actions the ledger records before their effect, so a restart can tell
-/// whether each one happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// whether each one happened. On the owner wire each is its stored snake_case name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     Message,
     Dispatch,
@@ -150,17 +152,36 @@ pub fn finish(db: &Connection, id: ActionId, outcome: Outcome) -> Result<(), Eng
     store::finish(db, None, id, outcome, crate::team::now_ms())
 }
 
-/// Closes a pending action the owner was shown once the owner dismisses it, with the
-/// outcome the owner was shown. Inputs: the ledger, the kind and number the owner names,
-/// and that outcome. Output: Ok, or `ledger_finished` when it already ended, or
-/// `ledger_missing` when no action of that kind has that number.
-pub fn dismiss(
-    db: &Connection,
-    kind: ActionKind,
-    id: i64,
-    shown: Outcome,
-) -> Result<(), EngineError> {
-    store::finish(db, Some(kind), ActionId(id), shown, crate::team::now_ms())
+/// What the owner is shown for a pending action that waits for the owner, not a check: a
+/// notice whose payload holds `"unknown": true` shows Unknown, and an interrupted Accept
+/// listed with `"landed"` shows Done when it landed and Failed when it was dropped.
+/// Input: the action. Output: that outcome, none for an intent a check still settles.
+pub fn notice(action: &Action) -> Option<Outcome> {
+    let payload = serde_json::from_str::<serde_json::Value>(&action.payload).ok()?;
+    if payload.get("unknown") == Some(&serde_json::Value::Bool(true)) {
+        return Some(Outcome::Unknown);
+    }
+    match (action.kind, payload.get("landed")?.as_bool()?) {
+        (ActionKind::LandingAccept, true) => Some(Outcome::Done),
+        (ActionKind::LandingAccept, false) => Some(Outcome::Failed),
+        _ => None,
+    }
+}
+
+/// Closes one notice once the owner dismisses it, with the outcome `notice` says the owner
+/// was shown. Inputs: the ledger, and the kind and number the owner names. Output: that
+/// outcome, or `ledger_not_notice` for an intent a check still settles, `ledger_finished`
+/// when it already ended, or `ledger_missing` when no action of that kind has that number.
+pub fn dismiss(db: &Connection, kind: ActionKind, id: i64) -> Result<Outcome, EngineError> {
+    let Some(action) = pending(db, kind)?
+        .into_iter()
+        .find(|action| action.id.0 == id)
+    else {
+        return Err(store::ended(db, Some(kind), ActionId(id))?);
+    };
+    let shown = notice(&action).ok_or_else(|| failure("ledger_not_notice"))?;
+    store::finish(db, Some(kind), action.id, shown, crate::team::now_ms())?;
+    Ok(shown)
 }
 
 /// The pending actions of one kind, oldest first: intents recorded with no outcome, whose

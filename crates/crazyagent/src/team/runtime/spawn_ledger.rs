@@ -72,7 +72,8 @@ pub(super) fn begin_worktree(
         serde_json::to_string(&intent),
         [
             "the agent worktree could not be recorded",
-            "An earlier add of this agent's worktree is still unsettled; it settles at the next engine start or when you dismiss it",
+            "An earlier add of this agent's worktree is still being checked; it settles at the next engine start",
+            "An earlier add of this agent's worktree has an unknown outcome. Check its folder, then dismiss it in Recovery to start the agent again",
         ],
     )
 }
@@ -94,33 +95,39 @@ pub(super) fn begin_spawn(root: &Path, agent: i64, pane: bool) -> Result<(), Str
         serde_json::to_string(&intent),
         [
             "the agent's start could not be recorded",
-            "An earlier start of this agent is still unsettled; it settles once agent terminals are available or when you dismiss it",
+            "An earlier start of this agent is still being checked; it settles once agent terminals are available",
+            "An earlier start of this agent has an unknown outcome. Check the agent, then dismiss it in Recovery to start it again",
         ],
     )
 }
 
 /// Records one intent under the agent's key. Inputs: the engine root, the kind, the agent,
-/// the payload, and the owner sentences for a ledger failure and for an earlier intent of
-/// the agent still pending. Output: Ok, or the sentence with its plain code.
+/// the payload, and the owner sentences for a ledger failure, for an earlier intent of the
+/// agent a check still settles, and for an earlier one left as a notice the owner
+/// dismisses. Output: Ok, or the sentence with its plain code.
 fn begin(
     root: &Path,
     kind: ActionKind,
     agent: i64,
     payload: serde_json::Result<String>,
-    [failed, unsettled]: [&str; 2],
+    [failed, checking, noticed]: [&str; 3],
 ) -> Result<(), String> {
     let payload = payload.map_err(|_| super::with_code(failed, Some("ledger_invalid")))?;
-    ledger::open(root)
-        .and_then(|ledger| ledger::begin(&ledger, kind, &key(agent), &payload))
-        .map(|_| ())
-        .map_err(|problem| {
-            let sentence = if problem.0 == "ledger_pending" {
-                unsettled
-            } else {
-                failed
-            };
-            super::with_code(sentence, Some(&problem.0))
-        })
+    let ledger =
+        ledger::open(root).map_err(|problem| super::with_code(failed, Some(&problem.0)))?;
+    let Err(problem) = ledger::begin(&ledger, kind, &key(agent), &payload) else {
+        return Ok(());
+    };
+    if problem.0 != "ledger_pending" {
+        return Err(super::with_code(failed, Some(&problem.0)));
+    }
+    let notice = ledger::pending(&ledger, kind).is_ok_and(|actions| {
+        actions
+            .iter()
+            .any(|action| action.key == key(agent) && ledger::notice(action).is_some())
+    });
+    let sentence = if notice { noticed } else { checking };
+    Err(super::with_code(sentence, Some(&problem.0)))
 }
 
 /// Ends the pending start of a team agent's harness: Done once its worker is ready (a
