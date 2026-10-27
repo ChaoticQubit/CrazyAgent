@@ -1836,7 +1836,7 @@ async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
-    const UNTIL_MS: i64 = 1_792_729_920_000;
+    const UNTIL_MS: i64 = 4_102_444_800_000;
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
     let asked = Arc::new(Mutex::new(0_usize));
