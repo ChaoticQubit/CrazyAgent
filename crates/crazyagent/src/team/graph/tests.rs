@@ -94,6 +94,7 @@ fn status() -> TeamStatus {
         ],
         messages: Vec::new(),
         plan: Vec::new(),
+        events: Default::default(),
     }
 }
 
@@ -192,6 +193,33 @@ fn a_team_with_no_agents_yet_is_the_master_and_its_groups() {
     assert_eq!(graph.nodes[0].status, None);
     assert_eq!(graph.nodes[0].terminal, None);
     assert!(graph.edges.is_empty());
+}
+
+#[test]
+fn only_agent_nodes_carry_their_queued_question_count() {
+    let mut status = status();
+    status.events.questions = vec![crate::team::events::AgentQuestions { agent: 3, count: 4 }];
+    let graph = graph(&status);
+    let questions = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap_or_else(|| panic!("no node {id}"))
+            .questions
+    };
+    assert_eq!(questions("team-3"), Some(4));
+    assert_eq!(questions("team-5"), Some(0));
+    assert_eq!(questions("master"), None);
+    assert_eq!(questions("group:claude-code"), None);
+    let text = serde_json::to_value(&graph.nodes[0]).unwrap();
+    let mut old = text.clone();
+    old.as_object_mut().unwrap().remove("questions");
+    assert_eq!(
+        serde_json::from_value::<GraphNode>(old).unwrap().questions,
+        None,
+        "a node from a build before the count still reads"
+    );
 }
 
 #[test]

@@ -299,6 +299,7 @@ pub struct TeamRuntime {
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     swept: Option<Instant>,
+    watch: super::events::Watch,
     events: Option<super::master::TeamEvents>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
 }
@@ -405,6 +406,7 @@ impl TeamRuntime {
             agents: None,
             terminal: None,
             swept: None,
+            watch: super::events::Watch::default(),
             events: None,
             live_starts: BTreeMap::new(),
         })
@@ -689,7 +691,34 @@ impl TeamRuntime {
         self.collect()?;
         self.owner_controls()?;
         self.note_conversations()?;
+        self.watch_questions()?;
         self.sweep()
+    }
+
+    /// Reads each busy sub-agent's terminal for a question it waits on, at most once each
+    /// `events::SCAN_EVERY`, so the master hears it as an event. Returns any SQLite failure.
+    fn watch_questions(&mut self) -> Result<(), EngineError> {
+        let Some(host) = self.terminal.clone() else {
+            return Ok(());
+        };
+        if !self.watch.due() {
+            return Ok(());
+        }
+        let watched: Vec<super::events::Watched> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| worker.role == AgentRole::Sub && !worker.stopping)
+            .filter_map(|(id, worker)| match worker.busy {
+                Some(Busy::Task(task)) => Some(super::events::Watched {
+                    agent: *id,
+                    project: worker.project.clone(),
+                    task: Some(task),
+                }),
+                _ => None,
+            })
+            .collect();
+        self.watch
+            .scan(&self.connection, host.as_ref(), &watched, now_ms())
     }
 
     /// Writes the engine's note on each task a conversation master handed off that has
@@ -1023,6 +1052,8 @@ impl TeamRuntime {
         self.serve_live_calls(&stored, access)?;
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
+        let master_live = self.master(project).is_some();
+        super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -1696,12 +1727,14 @@ impl TeamRuntime {
         };
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let speaker = if author == "owner" {
-            "[owner]"
+            "[owner] "
+        } else if text.starts_with("[team] ") {
+            ""
         } else {
-            "[team]"
+            "[team] "
         };
         let typed = bound_text(
-            &format!("{heard}{speaker} {text}"),
+            &format!("{heard}{speaker}{text}"),
             super::master::INPUT_TEXT_MAX,
         );
         let state =
@@ -3087,6 +3120,9 @@ impl TeamRuntime {
             worktree: PathBuf::from(worktree),
             git_dir: PathBuf::from(git_dir),
         };
+        let task = turn
+            .strip_prefix("task-")
+            .and_then(|task| task.parse::<i64>().ok());
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -3105,7 +3141,19 @@ impl TeamRuntime {
                 return Ok(());
             }
             Ok(crate::landing_turns::Landed::Added(_)) => {
-                format!("The edits from {what} are waiting for you in Changes.")
+                let note = format!("The edits from {what} are waiting for you in Changes.");
+                if AgentRole::parse(&role) == Some(AgentRole::Sub) {
+                    super::events::record(
+                        &self.connection,
+                        project,
+                        id,
+                        task,
+                        super::events::EventKind::ChangeSetReady,
+                        &note,
+                        now_ms(),
+                    )?;
+                }
+                note
             }
             Err(problem) => with_code(
                 &format!(
@@ -3190,7 +3238,8 @@ impl TeamRuntime {
         let result =
             (!text.trim().is_empty()).then(|| bound_text(text.trim(), super::RESULT_BYTES_MAX));
         let finished = status.finished().then(now_ms);
-        self.connection
+        let changed = self
+            .connection
             .execute(
                 "UPDATE team_tasks SET status=?2, agent=CASE WHEN ?2='queued' THEN NULL ELSE agent END, result=COALESCE(?3,result), error=?4, finished_ms=?5, output_bytes=?6 WHERE id=?1 AND status='running'",
                 params![
@@ -3203,6 +3252,10 @@ impl TeamRuntime {
                 ],
             )
             .map_err(error)?;
+        assert!(changed <= 1);
+        if changed == 1 {
+            super::events::task_ended(&self.connection, task, now_ms())?;
+        }
         Ok(())
     }
 
@@ -4307,6 +4360,7 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
+    let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 
