@@ -1,19 +1,23 @@
 import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
+import { formatRoute } from "../../ui";
 import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
 import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
-import { MarkdownView } from "./markdown";
-import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, changesLine, delegating, engineLine, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
-import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
+import { useTeamGraph } from "../team";
+import { Console, type ConsoleLine } from "./console";
+import { agentMentions } from "./console-model";
+import { useProjectFiles } from "./project-files";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
+import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Menu, sendsMessage, type Tone } from "../../ui";
-import { useLinkOpener } from "./links";
+import { Menu, type Tone } from "../../ui";
 import { SessionsBar, ownerText, withOwnerLines } from "./sessions";
 
+const READ_ONLY = "Read-only: the master runs live in its terminal now.";
 const sentByProject = new Map<string, Record<string, string>>();
 const sentAtByProject = new Map<string, Record<string, number>>();
 
@@ -39,26 +43,49 @@ function confirm(receipt: IntentReceipt) {
   if (state.kind === "unconfirmed") throw { code: "master_outcome_pending" };
 }
 
-/** What opens a master turn in the thread: the owner's message as this window sent it, the
- * engine's plain line for a turn Ask agent to update started, or a placeholder for a
- * message another window sent. Inputs: the turn and the text this window sent, if any. */
-export function TurnOpening({ turn, sent }: { turn: MasterTurn; sent: string | undefined }) {
-  if (sent !== undefined) return <div className="pj-msg-owner"><p>{displayText(sent)}</p></div>;
-  const line = engineLine(turn);
-  if (line !== null) return <p className="pj-small pj-muted" data-testid="master-engine-request">{displayText(line)}</p>;
-  return <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>;
+/** The console lines of the master conversation: each turn's opening (the owner's message as
+ * this window sent it or as read back from the engine, the engine's line for a turn it asked
+ * for, or a placeholder for a message whose text is not read yet), the reply or the turn's
+ * status line, its task and account lines, then the messages this window sent that no turn
+ * shows yet. Inputs: the turns, the texts this window sent by turn id, when each was sent,
+ * the current time and the owner lines read back by input cursor. Output: the lines in
+ * order, each with an id that stays the same while it is shown. */
+export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {}): ConsoleLine[] {
+  const lines: ConsoleLine[] = [];
+  for (const turn of turns) {
+    const engine = engineLine(turn);
+    const id = `${turn.id}-owner`;
+    const owner = ownerText(turn, sent, held);
+    lines.push(owner !== undefined ? { id, kind: "owner", text: owner }
+      : { id, kind: "engine", text: engine ?? `Your message ${turn.ordinal} (its text stays in the window that sent it)` });
+    if (turn.reply) lines.push({ id: `${turn.id}-reply`, kind: "reply", text: turn.reply.text });
+    else {
+      const failed = turnSettled(turn) && turn.phase !== "succeeded";
+      lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine", text: turn.phase === "running" ? thinkingLine(sentAt?.[turn.id], now) : turnLine(turn) });
+    }
+    taskLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-task-${index}`, kind: "delegate", text }));
+    const changes = changesLine(turn);
+    if (changes !== null) lines.push({ id: `${turn.id}-changes`, kind: "tool", text: changes });
+    accountLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
+  }
+  for (const [id, text] of Object.entries(sent)) {
+    if (turns.some((turn) => turn.id === id)) continue;
+    lines.push({ id: `${id}-owner`, kind: "owner", text }, { id: `${id}-status`, kind: "engine", text: thinkingLine(sentAt?.[id], now) });
+  }
+  return lines;
 }
 
-/** Conversation tab: the project's master conversation with replies as safe Markdown.
- * Input: the project data. Output: the thread and composer; it polls every two seconds
- * while a reply is still coming. */
-export function ConversationTab({ data }: { data: ProjectData }) {
+/** Conversation tab: the project's master conversation as a terminal-style console with `/`
+ * commands and `@` tags for the team's agents. Inputs: the project data and whether the
+ * conversation is only read, as the one from before a live master. Output: the console and,
+ * unless read-only, the conversation's actions; it polls every two seconds while a reply is
+ * still coming. */
+export function ConversationTab({ data, readOnly = false }: { data: ProjectData; readOnly?: boolean }) {
   const [ticket, setTicket] = useState("");
   const [master, setMaster] = useState<MasterState>();
   const [turns, setTurns] = useState<MasterTurn[]>([]);
   const [sent, setSentState] = useState<Record<string, string>>(() => sentByProject.get(data.id) ?? {});
-  const [lines, setLines] = useState<Record<string, string>>({});
-  const [text, setText] = useState("");
+  const [held, setHeld] = useState<Record<string, string>>({});
   const [now, setNow] = useState(() => Date.now());
   const [working, setWorking] = useState(false);
   const [problem, setProblem] = useState("");
@@ -67,8 +94,9 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const [notReady, setNotReady] = useState(false);
   const current = useRef(data.id);
   current.current = data.id;
-  const thread = useRef<HTMLDivElement>(null);
-  const open = useLinkOpener(data.notify);
+  const [graph] = useTeamGraph(data.id);
+  const [tag, setTag] = useState<string | null>(null);
+  const files = useProjectFiles(data.id, readOnly ? null : tag);
   const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
   const session = master?.ticket === ticket ? master.session : null;
@@ -93,8 +121,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     if (state.session) {
       const read = unwrap(await readMasterTurns(useTicket, state.session.session_id));
       if (current.current === live) setTurns(read);
-      const held = await withOwnerLines(useTicket, state.session.session_id, read, sent, lines);
-      if (current.current === live) setLines((now) => ({ ...now, ...held }));
+      const owned = await withOwnerLines(useTicket, state.session.session_id, read, sent, held);
+      if (current.current === live) setHeld((known) => ({ ...known, ...owned }));
     } else setTurns([]);
   }
 
@@ -120,7 +148,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   useEffect(() => {
     setMaster(undefined);
     setTurns([]);
-    setLines({});
+    setHeld({});
     setSentState(sentByProject.get(data.id) ?? {});
     setProblem("");
     setNeedsPool(false);
@@ -142,11 +170,6 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     return () => window.clearInterval(timer);
   }, [waiting, unseen, handedOff, ticket, session?.session_id]);
 
-  useEffect(() => {
-    const element = thread.current;
-    if (element && nearBottom(element)) element.scrollTop = element.scrollHeight;
-  }, [turns.length, Object.keys(sent).length]);
-
   async function begin() {
     confirm(unwrap(await startMaster(ticket, nextGeneration())));
     setNeedsPool(false);
@@ -157,8 +180,8 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     return state.session;
   }
 
-  const send = (again?: string) => act(async () => {
-    const message = (again ?? text).trim();
+  const send = (text: string) => act(async () => {
+    const message = text.trim();
     const at = Date.now();
     if (!message || !ticket) return;
     setNote("");
@@ -176,7 +199,6 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     confirm(receipt);
     sentAtByProject.set(data.id, { ...(fresh ? {} : sentAtByProject.get(data.id)), [receipt.operation_id]: at });
     setSent({ ...(fresh ? {} : sent), [receipt.operation_id]: message });
-    if (again === undefined) setText("");
     await refresh();
   }, sendFailureLine);
 
@@ -197,60 +219,46 @@ export function ConversationTab({ data }: { data: ProjectData }) {
     await refresh();
   });
 
-  const bytes = new TextEncoder().encode(text).length;
   const blocked = working || !ticket || waiting || notReady;
-  const sendable = canSend(text, blocked);
   const again = resendText(turns, sent);
-  const latest = turns.reduce((most, turn) => Math.max(most, turn.ordinal), 0);
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
+  const told = consoleLines(turns, sent, sentAtByProject.get(data.id), now, held);
+  const lines: ConsoleLine[] = told.length > 0 ? told : [{ id: "empty", kind: "engine", text: readOnly
+    ? "No earlier conversation. Messages sent to the master before it ran live stay here to read."
+    : `No messages yet. Ask the master anything about ${data.name || "this project"}. It has read the brief, documents and research.` }];
+  const agents = agentMentions(graph.shown?.kind === "ok" ? graph.shown.value.nodes : []);
+  const offer = (text: string) => {
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes > MESSAGE_BYTES_MAX) return setProblem(`Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes. Press Up to get it back and shorten it.`);
+    void send(text);
+  };
 
   return <div className="pj-convo">
-    <div className="pj-convo-head">
+    {!readOnly && <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
         <Menu label="Conversation actions" items={[
           ...(active && !working ? [{ label: "End conversation", icon: "circle-stop" as const, onSelect: () => void end() }] : []),
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
-    </div>
-    <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} onSwitched={() => { setSent({}); return refresh(); }} />
+    </div>}
+    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} onSwitched={() => { setSent({}); return refresh(); }} />}
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
-    <div className="pj-thread" ref={thread} aria-live="polite">
-      {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">
-        Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>}
-      {turns.map((turn) => <div key={turn.id} className="pj-turn" data-testid="master-turn">
-        <TurnOpening turn={turn} sent={ownerText(turn, sent, lines)} />
-        {turn.reply ? <div className="pj-msg-master"><ProjectMark />
-          <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
-          : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}
-        {taskLines(turn).map((line, index) => <p key={`task-${index}`} className="pj-small pj-muted" data-testid="master-task">{displayText(line)}</p>)}
-        {changesLine(turn) !== null && <p className="pj-small pj-muted" data-testid="master-changes">{displayText(changesLine(turn) ?? "")}</p>}
-        {accountLines(turn).map((line) => <p key={line} className="pj-small pj-muted" data-testid="master-account">{displayText(line)}</p>)}
-        {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
-      </div>)}
-      {Object.entries(sent).filter(([id]) => !turns.some((turn) => turn.id === id)).map(([id, message]) =>
-        <div key={`pending-${id}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">{thinkingLine(sentAtByProject.get(data.id)?.[id], now)}</p></div>)}
-    </div>
-    {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
-      <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
-    {noPool && <div className="pj-note warn" role="alert"><p>Pick a pool to start. The master replies once this project has one.</p>
-      <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
-    {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
-      <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
-    {note && <p className="pj-small pj-muted" role="status">{note}</p>}
-    {problem && <p className="pj-error" role="alert">{problem}</p>}
-    <form className="pj-composer" onSubmit={(event) => { event.preventDefault(); if (sendable) void send(); }}>
-      <label htmlFor="pj-composer" className="pj-sr">Message the master</label>
-      <textarea className="pj-input" id="pj-composer" rows={3} value={text} aria-describedby="pj-composer-help" data-testid="master-message"
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => { if (sendsMessage(event.nativeEvent)) { event.preventDefault(); if (sendable) void send(); } }} />
-      <div className="pj-row between">
-        <span className="pj-help" id="pj-composer-help">{bytes > MESSAGE_BYTES_MAX ? `Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes.` : "Enter to send, Shift+Enter for a new line"}</span>
-        <span className="pj-row">{waiting && <button type="button" className="btn" onClick={() => void stopReply()}>Stop</button>}
-          <button type="submit" className="btn primary" disabled={!sendable} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button></span>
-      </div>
-    </form>
+    {!readOnly && <>
+      {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
+        <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
+      {noPool && <div className="pj-note warn" role="alert"><p>Pick a pool to start. The master replies once this project has one.</p>
+        <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
+      {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
+        <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
+      {note && <p className="pj-small pj-muted" role="status">{note}</p>}
+      {problem && <p className="pj-error" role="alert">{problem}</p>}
+      {again !== null && <div className="pj-row"><button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button></div>}
+    </>}
+    <Console projectId={data.id} lines={lines} agents={agents} files={files} onTagQuery={setTag}
+      canSend={!readOnly && !blocked} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
+      onSend={offer} onStop={() => void stopReply()} onNavigate={(route) => data.navigate(formatRoute(route).slice(1))} />
   </div>;
 }

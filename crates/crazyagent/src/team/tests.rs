@@ -822,6 +822,25 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
 }
 
 #[test]
+fn the_team_status_tells_the_live_master_switch_and_why_it_could_not_start() {
+    let (_directory, connection) = database();
+    let setup = stored("live-switch", Vec::new());
+    let switch = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        (team.live_master, team.live_problem)
+    };
+    assert_eq!(switch(&connection), (None, None), "never set");
+    master::set_live(&connection, &setup.project_id, true).unwrap();
+    assert_eq!(switch(&connection), (Some(true), None));
+    let line = "The live master could not start: no signed-in account.";
+    assert!(master::problem(&connection, &setup.project_id, Some(line)).unwrap());
+    master::set_live(&connection, &setup.project_id, false).unwrap();
+    assert_eq!(switch(&connection), (Some(false), Some(line.to_owned())));
+    master::problem(&connection, &setup.project_id, None).unwrap();
+    assert_eq!(switch(&connection), (Some(false), None));
+}
+
+#[test]
 fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
     let (_directory, mut connection) = database();
     let setup = stored(

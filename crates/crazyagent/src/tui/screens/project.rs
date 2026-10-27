@@ -1,4 +1,5 @@
 use super::changes::ProjectChanges;
+use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
@@ -136,13 +137,37 @@ pub(in crate::tui) fn project_pool(
 }
 
 /// Who wrote one transcript message.
-/// You is the owner, Master the leading harness, Notice a plain status from CrazyAgent.
+/// You is the owner, Master the leading harness, Notice a plain status from CrazyAgent and
+/// Task the line of a task a reply handed to the team.
 /// Notices that are errors carry the error flag on the message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum Speaker {
     You,
     Master,
     Notice,
+    Task,
+}
+
+/// What the prompt's inline menu offers at the cursor: the commands matching a `/` word, or
+/// the tags completing an `@` word with how many characters that word has, `@` included.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Picks {
+    None,
+    Commands(Vec<&'static console::Command>),
+    Tags { typed: usize, tags: Vec<String> },
+}
+
+impl Picks {
+    /// Counts the menu's entries.
+    /// Takes the menu.
+    /// Returns how many entries it shows.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Commands(commands) => commands.len(),
+            Self::Tags { tags, .. } => tags.len(),
+        }
+    }
 }
 
 /// One message in the master conversation.
@@ -476,7 +501,9 @@ pub(in crate::tui) enum ProjectReply {
     EndConversation,
     Retry,
     Team,
+    Master,
     Process,
+    Usage,
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
 }
@@ -503,6 +530,11 @@ pub(in crate::tui) struct ProjectScreen {
     pub team: Load<Box<TeamGraph>>,
     pub input: TextInput,
     pub typing: bool,
+    pub history: console::History,
+    pub menu_cursor: usize,
+    pub console_note: Vec<String>,
+    pub cleared: Option<(usize, Message)>,
+    pub files: Option<(String, Vec<String>)>,
     pub transcript_scroll: usize,
     pub overview_cursor: usize,
     pub agents_cursor: usize,
@@ -563,6 +595,11 @@ impl ProjectScreen {
             team: Load::Idle,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
+            history: console::History::default(),
+            menu_cursor: 0,
+            console_note: Vec::new(),
+            cleared: None,
+            files: None,
             transcript_scroll: 0,
             overview_cursor: 0,
             agents_cursor: 0,
@@ -1099,7 +1136,9 @@ impl ProjectScreen {
         match key.code {
             KeyCode::Left if shift => return self.tab_by(-1),
             KeyCode::Right if shift => return self.tab_by(1),
-            KeyCode::Tab if self.tab == Tab::Conversation => {
+            KeyCode::Tab
+                if self.tab == Tab::Conversation && !(self.typing && self.picks().len() > 0) =>
+            {
                 self.typing = !self.typing;
                 return ProjectReply::Handled;
             }
@@ -1177,21 +1216,58 @@ impl ProjectScreen {
 
     fn input_key(&mut self, key: KeyEvent) -> ProjectReply {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let picks = self.picks();
+        let shown = picks.len();
         match key.code {
-            KeyCode::Esc => {
-                self.typing = false;
+            KeyCode::Esc if !self.input.value().is_empty() => {
+                self.input.set("");
+                self.menu_cursor = 0;
+                self.console_note.clear();
                 ProjectReply::Handled
             }
+            KeyCode::Esc => {
+                self.typing = false;
+                self.console_note.clear();
+                ProjectReply::Handled
+            }
+            KeyCode::Up if shown > 0 => {
+                self.menu_cursor = self.menu_cursor.min(shown - 1).saturating_sub(1);
+                ProjectReply::Handled
+            }
+            KeyCode::Down if shown > 0 => {
+                self.menu_cursor = (self.menu_cursor + 1).min(shown - 1);
+                ProjectReply::Handled
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let older = key.code == KeyCode::Up;
+                if let Some(text) = self.history.step(older, self.input.value()) {
+                    self.input.set(&text);
+                }
+                ProjectReply::Handled
+            }
+            KeyCode::Tab if shown > 0 => self.pick(picks),
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.input.insert_str("\n");
                 ProjectReply::Handled
             }
+            KeyCode::Enter if matches!(picks, Picks::Tags { .. }) => self.pick(picks),
             KeyCode::Enter => {
+                if let Picks::Commands(commands) = &picks
+                    && let Some(command) =
+                        commands.get(self.menu_cursor.min(shown.saturating_sub(1)))
+                {
+                    return self.run(Ok(command.action));
+                }
                 let text = self.input.value().trim().to_owned();
+                if let Some(found) = console::command(&text) {
+                    return self.run(found);
+                }
                 if text.is_empty() || !self.master_usable() {
                     return ProjectReply::Handled;
                 }
+                self.history.push(&text);
                 self.input.set("");
+                self.console_note.clear();
                 self.transcript_scroll = 0;
                 ProjectReply::Send(text)
             }
@@ -1199,13 +1275,126 @@ impl ProjectScreen {
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             _ => {
-                if self.input.handle(key) || matches!(key.code, KeyCode::Char(_)) && !control {
+                if self.input.handle(key) {
+                    self.menu_cursor = 0;
+                    ProjectReply::Handled
+                } else if matches!(key.code, KeyCode::Char(_)) && !control {
                     ProjectReply::Handled
                 } else {
                     ProjectReply::Ignored
                 }
             }
         }
+    }
+
+    /// Gives the prompt's inline menu at the cursor while the owner types to the master.
+    /// Takes the screen; tags come from the team graph and the project context as read.
+    /// Returns the matching commands for a `/` word, the completing tags for an `@` word, or
+    /// None.
+    pub fn picks(&self) -> Picks {
+        if self.tab != Tab::Conversation || !self.typing {
+            return Picks::None;
+        }
+        if let Some(commands) = console::menu(self.input.value()) {
+            return Picks::Commands(commands);
+        }
+        let head = self.input.head();
+        let Some(query) = console::tag_query(head) else {
+            return Picks::None;
+        };
+        let graph = self.team.ready().map(|graph| graph.as_ref());
+        let files = self.files.as_ref().map(|(_, paths)| paths.as_slice());
+        let candidates = console::tags(graph, files, self.context.as_ref());
+        let tags: Vec<String> = console::completions(&candidates, query)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if tags.is_empty() {
+            return Picks::None;
+        }
+        Picks::Tags {
+            typed: query.chars().count() + 1,
+            tags,
+        }
+    }
+
+    /// The project file query for the `@` word the owner is typing to the master.
+    /// Takes the screen. Returns the query, or None while no tag is typed.
+    pub fn files_query(&self) -> Option<String> {
+        if self.tab != Tab::Conversation || !self.typing {
+            return None;
+        }
+        console::tag_query(self.input.head()).map(console::files_query)
+    }
+
+    fn pick(&mut self, picks: Picks) -> ProjectReply {
+        let at = self.menu_cursor.min(picks.len().saturating_sub(1));
+        match picks {
+            Picks::None => {}
+            Picks::Commands(commands) => self.input.set(&format!("/{}", commands[at].name)),
+            Picks::Tags { typed, tags } => {
+                self.input.replace_back(typed, &format!("{} ", tags[at]))
+            }
+        }
+        self.menu_cursor = 0;
+        ProjectReply::Handled
+    }
+
+    fn run(&mut self, found: Result<console::Action, String>) -> ProjectReply {
+        let typed = self.input.value().trim().to_owned();
+        self.history.push(&typed);
+        self.input.set("");
+        self.menu_cursor = 0;
+        self.console_note.clear();
+        let action = match found {
+            Ok(action) => action,
+            Err(word) => {
+                self.console_note = vec![format!(
+                    "Unknown command {word}. Type /help for the commands."
+                )];
+                return ProjectReply::Handled;
+            }
+        };
+        match action {
+            console::Action::Help => {
+                self.console_note = console::COMMANDS
+                    .iter()
+                    .map(|command| format!("/{:<8} {}", command.name, command.about))
+                    .collect();
+            }
+            console::Action::Clear => {
+                self.cleared = self.transcript.as_ref().and_then(|transcript| {
+                    let last = transcript.messages.last()?;
+                    Some((transcript.messages.len(), last.clone()))
+                });
+                self.transcript_scroll = 0;
+            }
+            console::Action::Master if self.live_master() => return ProjectReply::Master,
+            console::Action::Master => {
+                self.console_note = vec![
+                    "This master has no live terminal; its conversation is this console.".into(),
+                ];
+            }
+            console::Action::Agents => self.open(Tab::Agents),
+            console::Action::Changes => self.open(Tab::Changes),
+            console::Action::Usage => return ProjectReply::Usage,
+            console::Action::Process => return ProjectReply::Process,
+            console::Action::Stop => return ProjectReply::StopTurn,
+        }
+        ProjectReply::Handled
+    }
+
+    /// Gives the transcript messages the console shows: those after a `/clear`, or all of
+    /// them once the conversation no longer holds the message the clear ended on.
+    /// Takes the transcript.
+    /// Returns the messages to draw.
+    pub fn shown_messages<'a>(&self, transcript: &'a Transcript) -> &'a [Message] {
+        let skip = self
+            .cleared
+            .as_ref()
+            .filter(|(count, last)| transcript.messages.get(count.wrapping_sub(1)) == Some(last))
+            .map_or(0, |(count, _)| *count);
+        &transcript.messages[skip..]
     }
 
     /// Says whether the master can take a message now.
@@ -1224,6 +1413,17 @@ impl ProjectScreen {
     fn scroll_transcript(&mut self, by: isize) -> ProjectReply {
         self.transcript_scroll = self.transcript_scroll.saturating_add_signed(by);
         ProjectReply::Handled
+    }
+
+    /// Says whether the project's master runs as its own app in a live terminal, which
+    /// `/master` opens from the console.
+    /// Takes the screen.
+    /// Returns true for a Codex or Claude Code master in the stored team plan.
+    pub fn live_master(&self) -> bool {
+        self.setup.as_ref().is_some_and(|setup| {
+            crate::harnesses::interactive::support(&setup.team.master)
+                == crate::harnesses::interactive::Support::Terminal
+        })
     }
 
     fn conversation_key(&mut self, key: KeyEvent) -> ProjectReply {

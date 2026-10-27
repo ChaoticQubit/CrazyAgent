@@ -185,9 +185,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.capture("team");
 
       await me.click("Conversation", "a, button, [role=tab]");
-      await me.waitFor("the master conversation", (text) => text.includes("Message the master") || text.includes("Send"));
-      await me.type("#pj-composer", "Hello master, what is in this repository?");
-      await me.click("Send");
+      await me.waitFor("the master conversation", (text) => text.includes("Enter to send"));
+      await me.type(".cs textarea", "Hello master, what is in this repository?");
+      await me.enter();
       const line = /Waiting to start|Thinking\.\.\.|The master stopped|Not signed in|Sign-in is out of date|Couldn't send|isn't installed/;
       const turned = await me.waitFor("the master's first turn", (text) => line.test(text), STEP_MS);
       await me.capture("master-turn");
@@ -219,8 +219,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.click("End conversation", "[role=menuitem]");
       await me.waitFor("the master conversation ended", (text) => /\bStopped\b/.test(text));
       await me.capture("master-ended");
-      await me.type("#pj-composer", "Hello again, master.");
-      await me.click("Send");
+      await me.type(".cs textarea", "Hello again, master.");
+      await me.enter();
       await me.waitFor("a new master conversation", (text) => text.includes("Hello again, master.") && line.test(text), STEP_MS);
       assert.deepEqual(masterPhases(database), ["closed", "configured"], "End conversation closed the first conversation and the next message opened a new one");
       const closes = () => log.trail.filter((entry) => entry.cmd === "desktop_close_master").length;
