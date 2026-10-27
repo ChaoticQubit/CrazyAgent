@@ -135,7 +135,8 @@ fn second_pending_action_for_one_key_is_refused() {
 }
 
 #[test]
-fn resolution_finishes_done_returns_not_started_and_never_returns_unknown_for_replay() {
+fn resolution_finishes_done_and_not_started_and_keeps_an_unknown_one_pending_until_the_owner_closes_it()
+ {
     let (root, db) = store();
     let folder = root.path().join("work");
     std::fs::create_dir(&folder).unwrap();
@@ -171,36 +172,119 @@ fn resolution_finishes_done_returns_not_started_and_never_returns_unknown_for_re
     )
     .unwrap();
     std::fs::write(&applied, "").unwrap();
+    drop(db);
 
+    let db = open(root.path()).unwrap();
     let resolved = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
+    assert_eq!(ids(&resolved.done), vec![done]);
     assert_eq!(ids(&resolved.not_started), vec![not_started]);
     assert_eq!(ids(&resolved.unknown), vec![unknown]);
     assert_eq!(stored_outcome(&db, done).as_deref(), Some("done"));
+    assert_eq!(
+        stored_outcome(&db, not_started).as_deref(),
+        Some("failed"),
+        "an action that never started is closed; the caller completes it as a new one"
+    );
     assert_eq!(
         stored_outcome(&db, unknown),
         None,
         "an unknown action stays open until the owner closes it"
     );
     assert_eq!(
+        ids(&pending(&db, ActionKind::WorktreeCreate).unwrap()),
+        vec![unknown]
+    );
+    assert_eq!(
         stored_outcome(&db, other_kind),
         None,
         "another kind is not checked"
     );
-    drop(db);
 
+    drop(db);
     let db = open(root.path()).unwrap();
     let again = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
-    assert_eq!(ids(&again.not_started), vec![not_started]);
+    assert!(
+        again.done.is_empty() && again.not_started.is_empty(),
+        "a second start finds nothing to replay"
+    );
     assert_eq!(
         ids(&again.unknown),
         vec![unknown],
-        "an unknown action is surfaced again, never offered for replay"
+        "an unknown action is shown again, never offered for replay"
+    );
+    assert_eq!(stored_outcome(&db, unknown), None);
+    let redo = begin(
+        &db,
+        ActionKind::WorktreeCreate,
+        "alpha/w-2",
+        absent.to_str().unwrap(),
+    )
+    .unwrap();
+    assert_ne!(redo, not_started);
+    assert_eq!(
+        pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-2")
+            .unwrap()
+            .map(|action| action.id),
+        Some(redo)
+    );
+    assert_eq!(
+        pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-3")
+            .unwrap()
+            .map(|action| action.id),
+        Some(unknown)
     );
 
     finish(&db, unknown, Outcome::Unknown).unwrap();
     let closed = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
-    assert!(closed.unknown.is_empty());
+    assert!(closed.unknown.is_empty(), "the owner closed it");
     assert_eq!(stored_outcome(&db, unknown).as_deref(), Some("unknown"));
+    assert_eq!(
+        pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-3").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn only_a_second_pending_action_reads_as_pending_and_any_kind_is_stored() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE ledger_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK(kind IN ('message')),
+            action_key TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            started_ms INTEGER NOT NULL,
+            outcome TEXT CHECK(outcome IN ('done','failed','unknown')),
+            finished_ms INTEGER,
+            CHECK((outcome IS NULL) = (finished_ms IS NULL))
+        );",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    assert_eq!(
+        code(begin(&db, ActionKind::LandingAccept, "alpha/c-1", "{}")),
+        "ledger_unavailable",
+        "a table that refuses the kind is a storage failure, not a pending action"
+    );
+    begin(&db, ActionKind::Message, "alpha/m-1", "{}").unwrap();
+    assert_eq!(
+        code(begin(&db, ActionKind::Message, "alpha/m-1", "{}")),
+        "ledger_pending"
+    );
+    drop(db);
+
+    let (_fresh_root, fresh) = store();
+    for kind in [
+        ActionKind::Message,
+        ActionKind::Dispatch,
+        ActionKind::WorktreeCreate,
+        ActionKind::AgentSpawn,
+        ActionKind::LandingAccept,
+    ] {
+        begin(&fresh, kind, "alpha/one", "{}").unwrap();
+        assert_eq!(pending(&fresh, kind).unwrap().len(), 1);
+    }
 }
 
 #[test]
@@ -259,4 +343,104 @@ fn pending_actions_are_bounded_and_finished_ones_are_pruned_to_the_kept_count() 
         "a pending action is never pruned"
     );
     assert_eq!(stored_outcome(&db, oldest), None);
+}
+
+#[test]
+fn the_owner_dismisses_only_a_notice_of_its_kind_with_the_outcome_it_shows() {
+    let (root, db) = store();
+    let starting = begin(&db, ActionKind::AgentSpawn, "team-4", "{\"team_agent\":4}").unwrap();
+    let notice_text = "{\"team_agent\":5,\"pane\":false,\"unknown\":true}";
+    let start = begin(&db, ActionKind::AgentSpawn, "team-5", notice_text).unwrap();
+    let landed = begin(&db, ActionKind::LandingAccept, "set-9", "{\"landed\":true}").unwrap();
+    let dropped = begin(
+        &db,
+        ActionKind::LandingAccept,
+        "set-8",
+        "{\"landed\":false}",
+    )
+    .unwrap();
+    drop(db);
+
+    let db = open(root.path()).unwrap();
+    assert_eq!(
+        code(dismiss(&db, ActionKind::AgentSpawn, starting.get())),
+        "ledger_not_notice"
+    );
+    assert_eq!(
+        code(dismiss(&db, ActionKind::LandingAccept, start.get())),
+        "ledger_missing"
+    );
+    assert_eq!(
+        code(dismiss(&db, ActionKind::AgentSpawn, dropped.get() + 100)),
+        "ledger_missing"
+    );
+    assert_eq!(
+        stored_outcome(&db, starting),
+        None,
+        "a refused dismiss changes nothing"
+    );
+    assert_eq!(
+        ids(&pending(&db, ActionKind::AgentSpawn).unwrap()),
+        vec![starting, start]
+    );
+
+    assert_eq!(
+        dismiss(&db, ActionKind::AgentSpawn, start.get()).unwrap(),
+        Outcome::Unknown
+    );
+    assert_eq!(
+        dismiss(&db, ActionKind::LandingAccept, landed.get()).unwrap(),
+        Outcome::Done
+    );
+    assert_eq!(
+        dismiss(&db, ActionKind::LandingAccept, dropped.get()).unwrap(),
+        Outcome::Failed
+    );
+    assert_eq!(stored_outcome(&db, start).as_deref(), Some("unknown"));
+    assert_eq!(stored_outcome(&db, landed).as_deref(), Some("done"));
+    assert_eq!(stored_outcome(&db, dropped).as_deref(), Some("failed"));
+    assert_eq!(
+        ids(&pending(&db, ActionKind::AgentSpawn).unwrap()),
+        vec![starting]
+    );
+    assert!(pending(&db, ActionKind::LandingAccept).unwrap().is_empty());
+    assert_eq!(
+        code(dismiss(&db, ActionKind::AgentSpawn, start.get())),
+        "ledger_finished"
+    );
+    begin(&db, ActionKind::AgentSpawn, "team-5", "{\"team_agent\":5}").unwrap();
+}
+
+#[test]
+fn only_marked_actions_and_listed_accepts_are_notices() {
+    let action = |kind, payload: &str| Action {
+        id: ActionId(1),
+        kind,
+        key: "k".to_owned(),
+        payload: payload.to_owned(),
+        started_ms: 1,
+    };
+    let unknown = "{\"unknown\":true}";
+    assert_eq!(
+        notice(&action(ActionKind::WorktreeCreate, unknown)),
+        Some(Outcome::Unknown)
+    );
+    assert_eq!(
+        notice(&action(ActionKind::Message, unknown)),
+        Some(Outcome::Unknown)
+    );
+    assert_eq!(
+        notice(&action(ActionKind::AgentSpawn, "{\"unknown\":false}")),
+        None
+    );
+    assert_eq!(
+        notice(&action(ActionKind::AgentSpawn, "{\"landed\":true}")),
+        None
+    );
+    assert_eq!(
+        notice(&action(ActionKind::LandingAccept, "{\"landed\":1}")),
+        None
+    );
+    assert_eq!(notice(&action(ActionKind::LandingAccept, "not json")), None);
+    assert_eq!(notice(&action(ActionKind::Dispatch, "{}")), None);
 }
