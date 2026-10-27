@@ -415,9 +415,8 @@ test("project empty states show the brand mark, hidden from screen readers and w
   assert.match(noFiles, /<h3>Nothing here yet<\/h3>/);
   const conversation = await import("../src/screens/project/conversation.tsx");
   const noMessages = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: tabData([]) }));
-  assert.match(noMessages, mark);
-  assert.match(noMessages, /<h3>No messages yet<\/h3>/);
-  assert.match(noMessages, /Ask the master anything about (<!-- -->)?Harbor Notes(<!-- -->)?\. It has read the brief/);
+  assert.doesNotMatch(noMessages, /pj-empty|brand-mark/, "the console has no empty-state card");
+  assert.match(noMessages, /<p class="cs-line cs-engine"[^>]*>No messages yet\. Ask the master anything about Harbor Notes\. It has read the brief/);
 });
 
 test("the master's reply mark is the small mark with the reduced drawing for low density screens", async () => {
@@ -788,18 +787,18 @@ test("a turn the engine asked for shows the engine's line where the owner's mess
   assert.equal(research.engineLine(asked), line);
   assert.equal(research.engineLine({ ...asked, engine_request: null }), null);
   assert.equal(research.engineLine({ id: "t2", ordinal: 2, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
-  const html = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: asked, sent: undefined }));
-  assert.match(html, /data-testid="master-engine-request"/);
+  const opening = (turn, sent) => conversation.consoleLines([turn], sent === undefined ? {} : { [turn.id]: sent }, {}, 0)[0];
+  assert.deepEqual(opening(asked), { id: "t1-owner", kind: "engine", text: line });
+  assert.deepEqual(opening({ ...asked, engine_request: undefined }), { id: "t1-owner", kind: "engine", text: "Your message 1 (its text stays in the window that sent it)" });
+  assert.deepEqual(opening(asked, "Fix it"), { id: "t1-owner", kind: "owner", text: "Fix it" });
+  const { Console } = await import("../src/screens/project/console.tsx");
+  const draw = (turn) => renderToStaticMarkup(createElement(Console, { projectId: "p-1", lines: conversation.consoleLines([turn], {}, {}, 0), agents: [], onSend: () => {}, onStop: () => {}, onNavigate: () => {} }));
+  const html = draw(asked);
   assert.ok(html.includes(line.replace("'", "&#x27;")), html);
-  assert.doesNotMatch(html, /Your message 1/);
   assert.doesNotMatch(html, /Resolve the conflicts\./);
-  const tricky = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: { ...asked, engine_request: { ...asked.engine_request, line: "<b>x</b>\u001b[31m" } }, sent: undefined }));
-  assert.ok(tricky.includes("&lt;b&gt;x&lt;/b&gt;\\u001b[31m"), tricky);
-  const owner = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: { ...asked, engine_request: undefined }, sent: undefined }));
-  assert.match(owner, /Your message 1/);
-  const typed = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: asked, sent: "Fix it" }));
-  assert.match(typed, /Fix it/);
-  assert.doesNotMatch(typed, /master-engine-request/);
+  const tricky = draw({ ...asked, engine_request: { ...asked.engine_request, line: "<b>x</b>\u001b[31m" } });
+  assert.ok(tricky.includes("&lt;b&gt;x&lt;/b&gt;"), tricky);
+  assert.doesNotMatch(tricky, /<b>x<\/b>/);
 });
 
 test("a master turn whose edits wait in Changes shows the engine's note, and a turn without one shows nothing", () => {

@@ -248,5 +248,8 @@ export function owner({ evaluate, send }, evidence) {
     assert.ok(focused, `no ${selector} to type into`);
     await send("Input.insertText", { text });
   };
-  return { seen, waitFor, click, follow, type, capture };
+  const enter = async () => {
+    for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  };
+  return { seen, waitFor, click, follow, type, enter, capture };
 }

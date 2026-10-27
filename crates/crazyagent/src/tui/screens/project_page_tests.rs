@@ -151,6 +151,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("team graph");
                     connection.team_graph(project).unwrap();
                 }
+                Request::ProjectFiles { project, query } => {
+                    sent.push("project files");
+                    connection.project_files(project, query).unwrap();
+                }
                 other => panic!("project pages never send {other:?}"),
             }
         }
@@ -623,6 +627,62 @@ fn t_on_the_agents_tab_opens_the_project_team() {
         })
     );
     assert_eq!(shell.depth(), 2);
+}
+
+#[test]
+fn an_at_file_read_dropped_on_a_full_queue_is_asked_again_on_the_next_key() {
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let files = |shell: &mut Shell| {
+        let mut asked = Vec::new();
+        while let Some(request) = shell.ctx.next_request() {
+            if let Request::ProjectFiles { project, query } = request {
+                assert_eq!(project, notes);
+                asked.push(query);
+            }
+        }
+        asked
+    };
+    files(&mut shell);
+    let mut filled = 0;
+    while filled < 64 && {
+        let queued = shell.ctx.queued();
+        shell.ctx.request(Request::TeamGraph {
+            project: notes.clone(),
+        });
+        shell.ctx.queued() > queued
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+    shell.key(Key::Char('@'));
+    assert_eq!(
+        files(&mut shell),
+        Vec::<String>::new(),
+        "the full queue dropped it"
+    );
+    shell.key(Key::Char('p'));
+    assert_eq!(
+        files(&mut shell),
+        ["p"],
+        "the dropped read is not counted as out"
+    );
+    shell.key(Key::Char('l'));
+    assert_eq!(
+        files(&mut shell),
+        Vec::<String>::new(),
+        "one read out at a time"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1642,6 +1702,68 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
         "{shown}"
     );
     assert!(!engine.home.path().join("tidepool").exists(), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let setup = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let folder = std::path::PathBuf::from(&setup.folder);
+    let status = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q", "--template="])
+            .current_dir(&folder)
+            .env_clear()
+            .env("HOME", engine.root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1"),
+    )
+    .unwrap()
+    .status;
+    assert!(status.success());
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(folder.join("src/planner.rs"), "fn plan() {}\n").unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"project files"), "{sent:?}");
+    for typed in "ask @pl".chars() {
+        shell.key(Key::Char(typed));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        sent.iter().filter(|name| **name == "project files").count(),
+        2,
+        "one read for the bare @, then one for the word typed while it was out: {sent:?}"
+    );
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("@src/planner.rs"), "{shown}");
+    shell.key(Key::Tab);
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("> ask @src/planner.rs"), "{shown}");
+    for typed in "now".chars() {
+        shell.key(Key::Char(typed));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        !sent.contains(&"project files"),
+        "no read while no @ word is typed: {sent:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

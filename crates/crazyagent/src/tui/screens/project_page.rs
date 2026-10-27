@@ -187,6 +187,7 @@ pub(in crate::tui) struct ProjectPage {
     renewed: bool,
     schedule_asked: bool,
     team_asked: Option<(i64, bool)>,
+    files_asked: Option<String>,
     covered: bool,
 }
 
@@ -213,6 +214,7 @@ impl ProjectPage {
             renewed: false,
             schedule_asked: false,
             team_asked: None,
+            files_asked: None,
             covered: false,
         };
         page.refresh_pool(ctx);
@@ -239,6 +241,34 @@ impl ProjectPage {
         ctx.request(Request::TeamGraph {
             project: self.screen.project.clone(),
         });
+    }
+
+    /// Lists the project files for the `@` word the owner is typing: one read out at a time,
+    /// and only when the word differs from the last listed one. A read the full request
+    /// queue drops is not counted as out, so the next key asks again. Takes the context.
+    fn ask_files(&mut self, ctx: &mut Ctx) {
+        if self.covered || self.files_asked.is_some() || ctx.link != Link::Ready {
+            return;
+        }
+        let Some(query) = self.screen.files_query() else {
+            return;
+        };
+        if self
+            .screen
+            .files
+            .as_ref()
+            .is_some_and(|(listed, _)| *listed == query)
+        {
+            return;
+        }
+        let queued = ctx.queued();
+        ctx.request(Request::ProjectFiles {
+            project: self.screen.project.clone(),
+            query: query.clone(),
+        });
+        if ctx.queued() > queued {
+            self.files_asked = Some(query);
+        }
     }
 
     fn select_master(&mut self, ctx: &Ctx) {
@@ -826,10 +856,15 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Master => Flow::Open(Place::Master {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
             ProjectReply::Process => Flow::Open(Place::ProjectProcess {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Usage => Flow::Open(Place::Usage),
             ProjectReply::AccountOrder(strategy) => {
                 self.set_order(strategy, ctx);
                 Flow::Handled
@@ -975,6 +1010,7 @@ impl Screen for ProjectPage {
         let flow = self.reply(reply, ctx);
         self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
         self.ask_team(ctx);
+        self.ask_files(ctx);
         flow
     }
 
@@ -1001,6 +1037,18 @@ impl Screen for ProjectPage {
                 self.redraw(ctx);
                 return Flow::Handled;
             }
+            Arrival::ProjectFiles {
+                project,
+                query,
+                result,
+            } if *project == self.screen.project => {
+                self.files_asked = None;
+                let paths = result.as_ref().map_or_else(|_| Vec::new(), Clone::clone);
+                self.screen.files = Some((query.clone(), paths));
+                self.ask_files(ctx);
+                self.redraw(ctx);
+                return Flow::Handled;
+            }
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Setup(event) => self.setup_arrived(event, ctx),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
@@ -1022,6 +1070,8 @@ impl Screen for ProjectPage {
                 self.screen.schedule = None;
                 self.schedule_asked = false;
                 self.team_asked = None;
+                self.files_asked = None;
+                self.screen.files = None;
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
                 self.screen.changes.forget_reads();

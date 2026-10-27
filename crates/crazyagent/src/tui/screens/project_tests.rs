@@ -601,6 +601,9 @@ fn tabs_input_and_escape_follow_the_design_keys() {
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
     assert_eq!(screen.input.value(), "[", "no pool means nothing is sent");
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "", "Esc clears the prompt first");
+    assert!(screen.typing);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(!screen.typing);
     assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
     assert!(screen.typing);
@@ -1070,6 +1073,43 @@ fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
 }
 
 #[test]
+fn with_a_live_master_the_conversation_tab_stays_the_console_and_slash_master_opens_its_terminal() {
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.transcript = Some(Transcript {
+        harness: "Codex".into(),
+        account: None,
+        tools: true,
+        open: true,
+        status: MasterStatus::Stopped,
+        messages: Vec::new(),
+    });
+    screen.open(Tab::Conversation);
+    assert!(screen.typing, "the console takes typing for every master");
+    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("Message the master"), "{shown}");
+    assert!(!shown.contains("Read-only"), "{shown}");
+    type_text(&mut screen, "/master");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Master);
+    assert_eq!(screen.input.value(), "");
+
+    screen.setup.as_mut().expect("loaded").team.master = "rcli".into();
+    type_text(&mut screen, "/master");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.console_note,
+        ["This master has no live terminal; its conversation is this console."]
+    );
+}
+
+#[test]
 fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
     let mut screen = ProjectScreen::new(
         ProjectId::new("notes-cli").unwrap(),
@@ -1116,6 +1156,9 @@ fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
         "r types while the input has the keys"
     );
 
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "", "the first Esc clears the prompt");
+    assert!(screen.typing);
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(drawn.help.contains(&("r", "Try again")), "{:?}", drawn.help);
@@ -1185,6 +1228,9 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
     assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Handled);
     assert_eq!(screen.input.value(), "t");
 
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "", "the first Esc clears the prompt");
+    assert!(screen.typing);
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     let drawn = project_screen(&mut screen, 140, 24, &look);
     assert!(drawn.help.contains(&("t", "Team")), "{:?}", drawn.help);
@@ -1939,6 +1985,379 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     );
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.folders.is_none());
+}
+
+fn console_screen() -> ProjectScreen {
+    use super::project::{Message, Speaker};
+    use crate::project_setup::{ContextItem, ProjectContext};
+    use crate::team::{GraphNode, NodeKind, TeamGraph};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.setup.as_mut().expect("loaded").team.master = "rcli".into();
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    let said = |speaker, text: &str| Message {
+        speaker,
+        time: None,
+        text: text.into(),
+        error: false,
+    };
+    screen.transcript = Some(Transcript {
+        harness: "RCLI".into(),
+        account: None,
+        tools: true,
+        open: true,
+        status: MasterStatus::Ready,
+        messages: vec![
+            said(Speaker::You, "Ask @page to fix the header"),
+            said(Speaker::Master, "I handed it to Ada."),
+            said(Speaker::Task, "Task 8 is still with a sub-agent."),
+            said(Speaker::Notice, "Its edits wait in Changes."),
+        ],
+    });
+    let node = |id: &str, kind, label: &str| GraphNode {
+        id: id.into(),
+        kind,
+        parent: None,
+        label: label.into(),
+        harness: "codex".into(),
+        status: None,
+        status_label: None,
+        account: None,
+        agents: None,
+        terminal: None,
+        questions: None,
+    };
+    screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
+        project_id: project.clone(),
+        nodes: vec![
+            node("master", NodeKind::Master, "Master"),
+            node("agent-1", NodeKind::Agent, "Ada (@page)"),
+        ],
+        edges: vec![],
+    }));
+    screen.context = Some(ProjectContext {
+        project_id: project,
+        folder: "/private/tmp/ca-notes-cli".into(),
+        items: vec![ContextItem {
+            path: "docs/brief.md".into(),
+            kind: ContextKind::Document,
+            bytes: 10,
+        }],
+    });
+    screen.open(Tab::Conversation);
+    assert!(screen.typing);
+    screen
+}
+
+fn type_text(screen: &mut ProjectScreen, text: &str) {
+    for character in text.chars() {
+        assert_eq!(
+            screen.key(key(KeyCode::Char(character))),
+            ProjectReply::Handled
+        );
+    }
+}
+
+#[test]
+fn the_master_console_draws_the_transcript_and_prompt_like_a_terminal() {
+    let mut screen = console_screen();
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let shown = rows.join("\n");
+    assert!(
+        rows.iter()
+            .any(|row| row.trim() == "> Ask @page to fix the header"),
+        "{shown}"
+    );
+    assert!(
+        rows.iter().any(|row| row.trim() == "I handed it to Ada."),
+        "{shown}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.trim() == "\u{2022} Task 8 is still with a sub-agent."),
+        "{shown}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.trim() == "Its edits wait in Changes."),
+        "{shown}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.trim() == "You" || row.trim() == "RCLI"),
+        "no chat headers:\n{shown}"
+    );
+    let prompt = rows
+        .iter()
+        .rposition(|row| row.trim() == "> Message the master, / for commands, @ to tag")
+        .expect("one prompt line");
+    assert!(rows[prompt - 1].trim().starts_with('\u{2500}'), "{shown}");
+    assert_eq!(drawn.cursor, Some((4, u16::try_from(prompt).unwrap())));
+    let owner = drawn
+        .rows
+        .iter()
+        .find(|row| row.text().trim().starts_with("> Ask"))
+        .unwrap();
+    let tag = owner
+        .0
+        .iter()
+        .find(|span| span.content == "@page")
+        .expect("the tag is its own span");
+    assert_eq!(tag.style, look.accent);
+    let notice = drawn
+        .rows
+        .iter()
+        .find(|row| row.text().trim().starts_with("Its edits"))
+        .unwrap();
+    assert!(
+        notice
+            .0
+            .iter()
+            .filter(|span| !span.content.trim().is_empty())
+            .all(|span| span.style == look.muted),
+        "engine lines are dimmed"
+    );
+
+    type_text(&mut screen, "first");
+    for _ in 0..9 {
+        screen.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut screen, "x");
+    }
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let rule = rows
+        .iter()
+        .rposition(|row| row.trim().starts_with('\u{2500}'))
+        .unwrap();
+    let prompt: Vec<&str> = rows[rule + 1..]
+        .iter()
+        .map(|row| row.trim_end())
+        .take_while(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        prompt,
+        ["    x"; 8],
+        "the prompt grows to at most 8 lines and follows the cursor line:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(drawn.cursor, Some((5, u16::try_from(rule + 8).unwrap())));
+}
+
+#[test]
+fn the_console_sends_on_enter_breaks_lines_recalls_history_and_clears_on_escape() {
+    let mut screen = console_screen();
+    type_text(&mut screen, "hello");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("hello".into())
+    );
+    assert_eq!(screen.input.value(), "");
+    type_text(&mut screen, "a");
+    assert_eq!(screen.key(shifted(KeyCode::Enter)), ProjectReply::Handled);
+    screen.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    type_text(&mut screen, "b");
+    assert_eq!(screen.input.value(), "a\n\nb");
+    assert_eq!(screen.key(key(KeyCode::Up)), ProjectReply::Handled);
+    assert_eq!(
+        screen.input.value(),
+        "a\n\nb",
+        "Up recalls only from an empty prompt"
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "");
+    assert!(screen.typing, "Esc clears the prompt first");
+    screen.key(key(KeyCode::Up));
+    assert_eq!(screen.input.value(), "hello");
+    screen.key(key(KeyCode::Down));
+    assert_eq!(screen.input.value(), "");
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(!screen.typing, "Esc on an empty prompt leaves it");
+}
+
+#[test]
+fn a_path_message_and_a_draft_ending_in_a_slash_word_are_sent_not_run() {
+    use super::project::Picks;
+    let mut screen = console_screen();
+    type_text(&mut screen, "/etc/hosts has a bad entry, fix it");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("/etc/hosts has a bad entry, fix it".into())
+    );
+    assert!(screen.console_note.is_empty(), "{:?}", screen.console_note);
+    type_text(&mut screen, "/tmp is full");
+    screen.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    type_text(&mut screen, "clean it");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("/tmp is full\nclean it".into()),
+        "a draft starting with a /word is a message"
+    );
+    type_text(&mut screen, "/stop now");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("/stop now".into())
+    );
+    type_text(&mut screen, "/deploy");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "");
+    screen.key(key(KeyCode::Up));
+    assert_eq!(
+        screen.input.value(),
+        "/deploy",
+        "a command's text stays in history"
+    );
+    screen.key(key(KeyCode::Esc));
+    screen.console_note.clear();
+
+    for last in ["/help", "/st"] {
+        type_text(&mut screen, "Steps:");
+        screen.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        type_text(&mut screen, last);
+        assert!(
+            matches!(screen.picks(), Picks::None),
+            "{last}: a later line opens no menu"
+        );
+        let draft = format!("Steps:\n{last}");
+        assert_eq!(screen.input.value(), draft);
+        assert_eq!(
+            screen.key(key(KeyCode::Enter)),
+            ProjectReply::Send(draft.clone()),
+            "{last}: the whole draft is sent, nothing runs"
+        );
+        assert!(screen.console_note.is_empty(), "{:?}", screen.console_note);
+    }
+}
+
+#[test]
+fn slash_opens_the_command_menu_and_runs_the_chosen_command() {
+    use super::project::Picks;
+    let mut screen = console_screen();
+    type_text(&mut screen, "/c");
+    let names = |screen: &ProjectScreen| match screen.picks() {
+        Picks::Commands(commands) => commands
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(names(&screen), ["clear", "changes"]);
+    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
+    let shown = text(&drawn.rows);
+    assert!(
+        shown.contains("\u{25b8} /clear    Clear this view; nothing is deleted"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("  /changes  Open the Changes tab"),
+        "{shown}"
+    );
+    assert!(drawn.help.contains(&("Enter", "Run")), "{:?}", drawn.help);
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "/changes");
+    assert!(
+        screen.typing,
+        "Tab completes in the menu instead of leaving the prompt"
+    );
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(screen.tab, Tab::Changes);
+
+    let mut screen = console_screen();
+    for (typed, reply) in [
+        ("/stop", ProjectReply::StopTurn),
+        ("/usage", ProjectReply::Usage),
+        ("/process", ProjectReply::Process),
+    ] {
+        type_text(&mut screen, typed);
+        assert_eq!(screen.key(key(KeyCode::Enter)), reply, "{typed}");
+        assert_eq!(screen.input.value(), "");
+    }
+    type_text(&mut screen, "/deploy");
+    assert_eq!(names(&screen), Vec::<&str>::new());
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(shown.contains("  Unknown command"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.console_note,
+        ["Unknown command /deploy. Type /help for the commands."]
+    );
+    type_text(&mut screen, "/help");
+    screen.key(key(KeyCode::Enter));
+    assert_eq!(screen.console_note.len(), 8);
+    assert_eq!(screen.console_note[0], "/help     Show the commands");
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(
+        shown.contains("/stop     Stop the master's turn"),
+        "{shown}"
+    );
+    type_text(&mut screen, "/clear");
+    screen.key(key(KeyCode::Enter));
+    let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(
+        !shown.contains("Ask @page"),
+        "/clear empties the view:\n{shown}"
+    );
+    assert_eq!(
+        screen.transcript.as_ref().unwrap().messages.len(),
+        4,
+        "nothing is deleted"
+    );
+}
+
+#[test]
+fn at_completes_agent_handles_and_project_files_and_inserts_the_tag() {
+    use super::project::Picks;
+    let mut screen = console_screen();
+    type_text(&mut screen, "ask @");
+    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
+    let shown = text(&drawn.rows);
+    for tag in ["\u{25b8} @master", "  @page", "  @docs/brief.md"] {
+        assert!(shown.contains(tag), "{tag}:\n{shown}");
+    }
+    type_text(&mut screen, "p");
+    assert_eq!(
+        screen.picks(),
+        Picks::Tags {
+            typed: 2,
+            tags: vec!["@page".into()]
+        }
+    );
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "ask @page ");
+    type_text(&mut screen, "to read @do");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Handled,
+        "Enter takes the tag, not the send"
+    );
+    assert_eq!(screen.input.value(), "ask @page to read @docs/brief.md ");
+    assert_eq!(screen.picks(), Picks::None);
+    assert_eq!(screen.files_query(), None);
+    type_text(&mut screen, "@pla");
+    assert_eq!(screen.files_query().as_deref(), Some("pla"));
+    assert_eq!(screen.picks(), Picks::None);
+    screen.files = Some(("pla".into(), vec!["src/planner.rs".into()]));
+    assert_eq!(
+        screen.picks(),
+        Picks::Tags {
+            typed: 4,
+            tags: vec!["@src/planner.rs".into()]
+        },
+        "the engine's file list completes the word"
+    );
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("ask @page to read @docs/brief.md @src/planner.rs".into())
+    );
 }
 
 #[test]
