@@ -131,7 +131,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             Call::Delegate {
                 task: "Write apple.txt".into(),
                 harness: Some("codex".into()),
-                role: Some("@apple-writer".into()),
+                role: Some("apple-writer".into()),
             },
             "Task 7 is queued for codex.",
             false,

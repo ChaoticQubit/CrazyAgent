@@ -448,8 +448,26 @@ fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
     assert!(report.starts_with("# Design research\n"), "{report}");
 }
 
+/// The tools a Responses API request body offers the model: each function tool by
+/// name and every other tool by type. Takes the body. Returns them in order.
+fn offered_tools(body: &str) -> Vec<String> {
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    body["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no tools list: {body}"))
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .or_else(|| tool["type"].as_str())
+                .unwrap_or_else(|| panic!("unnamed tool: {tool}"))
+                .to_owned()
+        })
+        .collect()
+}
+
 #[test]
-fn codex_research_offers_its_model_web_search_only_with_tools_on() {
+fn codex_research_offers_its_model_tools_only_with_tools_on() {
     for tools in [true, false] {
         let case = case("A mobile app that stores family recipes.");
         let jobs = ResearchJobs::open(&case.database).unwrap();
@@ -484,12 +502,16 @@ fn codex_research_offers_its_model_web_search_only_with_tools_on() {
             })
             .unwrap_or_else(|| panic!("no content length: {head}"));
         assert_eq!(body.len(), length, "{head}");
-        assert!(body.contains("\"tools\":["), "{body}");
-        assert_eq!(
-            body.contains("\"type\":\"web_search\""),
-            tools,
-            "tools {tools}: {body}"
-        );
+        let offered = offered_tools(body);
+        if tools {
+            assert!(
+                offered.iter().any(|tool| tool == "web_search"),
+                "{offered:?}"
+            );
+            assert!(offered.len() > 1, "{offered:?}");
+        } else {
+            assert_eq!(offered, Vec::<String>::new());
+        }
     }
 }
 

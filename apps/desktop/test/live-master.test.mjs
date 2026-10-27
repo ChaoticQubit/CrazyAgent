@@ -191,3 +191,8 @@ test("in a real xterm, Shift+Enter types Ctrl+J once and Enter still types Enter
   });
   assert.deepEqual(typed, ["\n", "\r", "a"]);
 });
+
+test("the terminal hands Shift+Enter to the key override before xterm reads it", () => {
+  const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*const override = keyOverride\(event\);/);
+});

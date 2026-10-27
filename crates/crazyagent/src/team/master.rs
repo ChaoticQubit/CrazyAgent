@@ -500,8 +500,7 @@ fn delegate(
         )
         .map_err(state)?;
     if let Some(role) = role {
-        let bare = role.strip_prefix('@').unwrap_or(role);
-        super::names::set_task_role(&tx, project, id, bare)?;
+        super::names::set_task_role(&tx, project, id, role)?;
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {

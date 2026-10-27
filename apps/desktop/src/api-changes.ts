@@ -21,6 +21,7 @@ export interface ChangeSet {
   restorable_until_ms: number | null;
   conflicts: string[];
   message: string;
+  waiting: boolean;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -73,6 +74,7 @@ const REFUSALS: Record<string, string> = {
   changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
   changes_master_tools_off: "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
   changes_master_closed: "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.",
+  team_agent_not_found: "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.",
   changes_master_not_started: "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends.",
 };
 

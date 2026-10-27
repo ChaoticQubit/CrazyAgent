@@ -503,6 +503,7 @@ pub(in crate::tui) enum ProjectReply {
     Master,
     Process,
     Usage,
+    AccountOrder(Option<crate::scheduling::Strategy>),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -545,6 +546,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
     pub read_paths: Option<Vec<String>>,
+    pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
     pub log: Option<JobLog>,
@@ -606,6 +608,7 @@ impl ProjectScreen {
             adding: None,
             folders: None,
             read_paths: None,
+            schedule: None,
             general: None,
             removed: false,
             log: None,
@@ -1889,8 +1892,52 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('i') => ProjectReply::Process,
+            KeyCode::Char('u') => match &self.schedule {
+                Some(schedule) => ProjectReply::AccountOrder(
+                    crate::tui::screens::settings::account_choice::cycle(
+                        self.own_order(schedule),
+                        true,
+                        true,
+                    ),
+                ),
+                None => {
+                    self.problem = Some("Still loading the account order. Try again.".into());
+                    ProjectReply::Handled
+                }
+            },
             _ => ProjectReply::Ignored,
         }
+    }
+
+    fn own_order(
+        &self,
+        schedule: &crate::scheduling::Schedule,
+    ) -> Option<crate::scheduling::Strategy> {
+        schedule
+            .projects
+            .iter()
+            .find(|entry| entry.id.as_str() == self.project.as_str())
+            .map(|entry| entry.strategy)
+    }
+
+    /// The project's account order for its Settings tab: its own strategy, or the one it
+    /// follows from its pool or the app. Takes the screen. Returns the text, or none while
+    /// the schedule loads.
+    pub fn account_order(&self) -> Option<String> {
+        let schedule = self.schedule.as_ref()?;
+        if let Some(own) = self.own_order(schedule) {
+            return Some(format!("{} (this project)", own.label()));
+        }
+        let pools: Vec<&CredentialRef> = self
+            .pool
+            .iter()
+            .filter(|pool| pool.assigned)
+            .map(|pool| &pool.id)
+            .collect();
+        Some(format!(
+            "Default ({})",
+            schedule.strategy_for(None, &pools).label()
+        ))
     }
 
     /// Handles one key in the read-only folders box: Enter saves the folders typed between

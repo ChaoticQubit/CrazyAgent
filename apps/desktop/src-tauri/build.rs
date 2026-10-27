@@ -103,6 +103,7 @@ fn main() {
         "desktop_save_owner_profile",
         "desktop_pool_summaries",
         "desktop_account_schedule",
+        "desktop_account_ranking",
         "desktop_set_account_schedule",
         "desktop_account_catalog",
         "desktop_list_accounts",

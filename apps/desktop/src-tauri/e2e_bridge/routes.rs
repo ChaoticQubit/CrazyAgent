@@ -1088,6 +1088,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.account_schedule().await }.await;
             routed(result)
         }
+        "desktop_account_ranking" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.account_ranking().await }.await;
+            routed(result)
+        }
         "desktop_set_account_schedule" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

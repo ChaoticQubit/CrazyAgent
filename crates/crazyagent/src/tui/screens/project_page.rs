@@ -10,13 +10,14 @@ use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
-use super::settings_plugins::{AddPlugin, EditServer};
+use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Link, Load};
@@ -184,6 +185,7 @@ pub(in crate::tui) struct ProjectPage {
     waiting: Option<Waiting>,
     retried: bool,
     renewed: bool,
+    schedule_asked: bool,
     team_asked: Option<(i64, bool)>,
     covered: bool,
 }
@@ -209,6 +211,7 @@ impl ProjectPage {
             waiting: None,
             retried: false,
             renewed: false,
+            schedule_asked: false,
             team_asked: None,
             covered: false,
         };
@@ -709,6 +712,10 @@ impl ProjectPage {
         {
             send_settings(ctx, job);
         }
+        if self.screen.tab == Tab::Settings && !self.schedule_asked {
+            self.schedule_asked = true;
+            send_settings(ctx, SettingsJob::Schedule);
+        }
         if self.sent.len() >= SENT_MAX {
             return;
         }
@@ -811,12 +818,52 @@ impl ProjectPage {
                 name: self.screen.name.clone(),
             }),
             ProjectReply::Usage => Flow::Open(Place::Usage),
+            ProjectReply::AccountOrder(strategy) => {
+                self.set_order(strategy, ctx);
+                Flow::Handled
+            }
         };
         self.sync_master(ctx);
         self.pump(ctx);
         self.say_problem(ctx);
         self.redraw(ctx);
         flow
+    }
+
+    fn set_order(&mut self, strategy: Option<crate::scheduling::Strategy>, ctx: &mut Ctx) {
+        let Ok(project) = CredentialRef::new(self.screen.project.as_str()) else {
+            self.screen.problem = Some("This project can't keep its own account order.".into());
+            return;
+        };
+        let generation = ctx.next_generation();
+        send_settings(
+            ctx,
+            SettingsJob::SetSchedule {
+                change: crate::scheduling::ScheduleChange::ProjectStrategy { project, strategy },
+                generation,
+            },
+        );
+    }
+
+    fn schedule_arrived(&mut self, event: &SettingsEvent, ctx: &mut Ctx) {
+        let failed = |code: &str, fallback: &'static str| {
+            crate::config::plain_problem(code)
+                .unwrap_or(fallback)
+                .to_owned()
+        };
+        match event {
+            SettingsEvent::Schedule(Ok(schedule)) => self.screen.schedule = Some(schedule.clone()),
+            SettingsEvent::Schedule(Err(code)) => {
+                self.screen.problem = Some(failed(code, "Could not read the account order."));
+            }
+            SettingsEvent::ScheduleSet(result) => {
+                if let Err(code) = result {
+                    self.screen.problem = Some(failed(code, "Could not save the account order."));
+                }
+                send_settings(ctx, SettingsJob::Schedule);
+            }
+            _ => {}
+        }
     }
 
     fn changes_have_keys(&self) -> bool {
@@ -849,6 +896,11 @@ impl ProjectPage {
             }
             PluginsReply::AddServer => {
                 return Flow::Replace(Box::new(AddPlugin::server().for_project(project, name)));
+            }
+            PluginsReply::OpenSkill { id, name: skill } => {
+                return Flow::Replace(Box::new(
+                    SkillDetailPage::new(id, skill).for_project(project, name),
+                ));
             }
             PluginsReply::Edit(server) => {
                 return Flow::Replace(Box::new(
@@ -940,7 +992,10 @@ impl Screen for ProjectPage {
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Setup(event) => self.setup_arrived(event, ctx),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
-                OwnerEvent::Settings(event) => self.screen.plugins.apply(event),
+                OwnerEvent::Settings(event) => {
+                    self.schedule_arrived(event, ctx);
+                    self.screen.plugins.apply(event);
+                }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
                 _ => return Flow::Handled,
             },
@@ -952,6 +1007,8 @@ impl Screen for ProjectPage {
             }
             Arrival::Disconnected(_) => {
                 self.sent.clear();
+                self.screen.schedule = None;
+                self.schedule_asked = false;
                 self.team_asked = None;
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
@@ -976,6 +1033,7 @@ impl Screen for ProjectPage {
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Pools);
         ctx.request(Request::PoolProjects);
+        self.schedule_asked = false;
         self.covered = false;
         self.ask_team(ctx);
         self.refresh_pool(ctx);

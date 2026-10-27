@@ -1569,7 +1569,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
 const LIVE_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
-f="$d/rollout-2026-10-27T00-00-00-live.jsonl"
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
 printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
 printf '\033[?2004hCodex stand-in ready\n'
 e=$(printf '\033')
@@ -1580,6 +1580,7 @@ while IFS= read -r line; do
     *"$e[200~"*) open=1; continue ;;
     *) [ "$open" = 1 ] && continue ;;
   esac
+  [ "$line" = "/exit" ] && exit 0
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   case "$line" in *"write page"*) echo 'Written by the live master.' > page.md ;; esac
   /bin/sleep 0.3
@@ -1587,6 +1588,160 @@ while IFS= read -r line; do
   printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
 done
 "#;
+
+fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, script).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let access = fixture.access.clone();
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap()
+}
+
+fn masters(connection: &Connection) -> Vec<i64> {
+    connection
+        .prepare("SELECT id FROM team_agents WHERE project=?1 AND role='master' ORDER BY id")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn turned_off(fixture: &Fixture, why: &str) -> bool {
+    !super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap()
+        && fixture.status().messages.iter().any(|message| {
+            message.state == MessageState::Note
+                && message
+                    .text
+                    .starts_with(&format!("The live master was turned off: {why}"))
+        })
+}
+
+fn idle_ticks(team: &mut TeamRuntime) {
+    for _ in 0..20 {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A live master that ends on its own, as when the owner types /exit, turns its switch off
+/// with one note instead of starting again every tick; turned on again, it starts under the
+/// same agent row in the same worktree and home it left.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_that_ends_by_itself_turns_off_and_starts_again_in_its_own_worktree() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    let worktree = |f: &Fixture| -> Vec<String> {
+        f.connection
+            .prepare("SELECT worktree FROM team_worktrees WHERE project=?1")
+            .unwrap()
+            .query_map([PROJECT], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let first = worktree(&fixture);
+    assert_eq!(first.len(), 1);
+
+    host.input(&AgentId::team(master).unwrap(), b"/exit\r")
+        .unwrap();
+    fixture.until(&mut team, "the ended master turns its switch off", |f| {
+        turned_off(f, "its terminal ended")
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "no master starts while off"
+    );
+
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the master starts again and is briefed", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "the same master row starts again"
+    );
+    assert_eq!(worktree(&fixture), first, "in the same worktree");
+    assert_eq!(host.alive().unwrap(), names(&[master]));
+    assert_eq!(fixture.agent_status(master).0, AgentStatus::Idle);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+}
+
+/// A live master that cannot start, first because its sandbox profile cannot be written and
+/// then because its harness exits at once, turns its switch off after one try each time and
+/// adds no agent rows while it is off.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_that_cannot_start_turns_off_after_one_try() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, "#!/bin/sh\nexit 3\n");
+    let project = fixture.setup.project_id.clone();
+    let blocked = fixture
+        .base
+        .join("team")
+        .join("profiles")
+        .join("agent-1.sb");
+    std::fs::create_dir(&blocked).unwrap();
+
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "a prepare failure turns the switch off", |f| {
+        turned_off(f, "it could not start")
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [1],
+        "one try while it could not prepare"
+    );
+    assert_eq!(fixture.agent_status(1).0, AgentStatus::Failed);
+
+    std::fs::remove_dir(&blocked).unwrap();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "a harness that exits at once turns the switch off",
+        |f| turned_off(f, "its terminal ended"),
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection).len(),
+        2,
+        "one more try, then none while off"
+    );
+    let notes = fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.text.starts_with("The live master was turned off"))
+        .count();
+    assert_eq!(notes, 2, "one note for each time it turned off");
+    team.shutdown().unwrap();
+}
 
 fn live_turns(connection: &Connection) -> (i64, bool) {
     connection
@@ -1658,7 +1813,9 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     let landing = crate::landing::open(&fixture.base).unwrap();
     let sets = crate::landing::list(&landing, &project).unwrap();
     assert_eq!(sets.len(), 1, "{sets:#?}");
-    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Master);
+    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Sub);
+    assert_eq!(sets[0].agent.id, master.to_string());
+    assert_eq!(sets[0].agent.label, "Team master (codex)");
     assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
     assert_eq!(sets[0].files, 1);
 
