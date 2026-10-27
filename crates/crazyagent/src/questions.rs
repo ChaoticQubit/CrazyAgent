@@ -1,9 +1,10 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
-use crate::protocol::ProjectId;
+use crate::memory::hidden_text;
+use crate::protocol::{ProjectId, SessionId};
 use crate::storage::versioned::{self, Item, Writer};
 use crate::team::events::{self, NotificationKind};
-use crate::team::{MessageAuthor, MessageState, append_message, bound_text};
+use crate::team::{MessageAuthor, MessageState, append_message, bound_text, now_ms};
 use crate::terminal::AgentId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -15,106 +16,134 @@ mod page;
 mod tests;
 
 /// The most bytes of one question.
-pub const QUESTION_BYTES_MAX: usize = 2000;
+pub const QUESTION_BYTES_MAX: usize = 2048;
 /// The most options one question offers.
-pub const OPTIONS_MAX: usize = 4;
+pub const OPTIONS_MAX: usize = 6;
 /// The most bytes of one option, a single line.
 pub const OPTION_BYTES_MAX: usize = 200;
-/// The most bytes of the answer the asker recommends.
-pub const RECOMMENDED_BYTES_MAX: usize = 500;
-/// The most bytes of the context the asker gives with a question.
-pub const CONTEXT_BYTES_MAX: usize = 2000;
+/// The most bytes of a recommended answer, a single line.
+pub const RECOMMENDED_BYTES_MAX: usize = 200;
+/// The most bytes of the context an asker gives with a question.
+pub const CONTEXT_BYTES_MAX: usize = 4096;
 /// The most bytes of one answer.
-pub const ANSWER_BYTES_MAX: usize = 2000;
-/// The most bytes of a question a master's terminal shows, a single line.
-pub const TERMINAL_BYTES_MAX: usize = 1000;
-/// The most questions of one project that are open: waiting for the owner, or answered
-/// and not yet taken by the engine step that asked. A new question waits for room.
-pub const OPEN_PER_PROJECT_MAX: i64 = 32;
-/// How many settled questions of one project are kept, newest first; older ones are pruned.
-pub const KEPT_PER_PROJECT_MAX: i64 = 256;
-/// The most questions one list returns.
+pub const ANSWER_BYTES_MAX: usize = 4096;
+/// The most bytes of the research kind or change set an engine asker names.
+pub const NAME_BYTES_MAX: usize = 64;
+/// The most questions of one asker that wait for the owner at once.
+pub const PENDING_PER_ASKER_MAX: i64 = 8;
+/// The most questions of one project that wait for the owner at once.
+pub const PENDING_PER_PROJECT_MAX: i64 = 64;
+/// How many questions one project keeps; the oldest settled ones are pruned first.
+pub const KEPT_PER_PROJECT_MAX: i64 = 1024;
+/// The most questions one page holds.
 pub const LISTED_MAX: usize = 50;
-/// The most bytes the questions of one list hold as JSON, so a list fits one owner frame.
+/// The most bytes the questions of one page hold as JSON, so a page fits one owner frame.
 pub const LISTED_BYTES_MAX: usize = 48 * 1024;
+/// The most projects one pending count lists.
+pub const COUNTED_PROJECTS_MAX: i64 = 256;
+/// The most notes a conversation master is given before one turn.
+pub const NOTES_MAX: usize = 16;
 
 const QUOTED_BYTES_MAX: usize = 200;
 const BUSY_WAIT: Duration = Duration::from_secs(5);
-const COLUMNS: &str = "id,project,source,agent,question,options,recommended,context,state,answer,answered_by,asked_ms,resolved_ms";
+const COLUMNS: &str = "id,project,asker,question,options_json,recommended,context,status,answer,answered_by,created_ms,settled_ms";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
-    source TEXT NOT NULL CHECK(source IN ('master','mapping','research','landing','terminal')),
-    agent INTEGER,
+    asker TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('master','session','agent','engine','terminal')),
     question TEXT NOT NULL,
-    options TEXT NOT NULL,
+    options_json TEXT NOT NULL,
     recommended TEXT,
     context TEXT,
-    state TEXT NOT NULL CHECK(state IN ('pending','answered','dismissed')),
+    status TEXT NOT NULL CHECK(status IN ('pending','answered','dismissed','answered_in_terminal')),
     answer TEXT,
-    answered_by TEXT CHECK(answered_by IN ('owner','master','terminal')),
-    handed INTEGER NOT NULL CHECK(handed IN (0,1)),
+    answered_by TEXT CHECK(answered_by IN ('owner','chat')),
     message INTEGER,
-    asked_ms INTEGER NOT NULL,
-    resolved_ms INTEGER
+    turn_floor INTEGER NOT NULL,
+    noted_ms INTEGER,
+    created_ms INTEGER NOT NULL,
+    settled_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS owner_questions_open ON owner_questions(project, state, handed, id);";
+CREATE INDEX IF NOT EXISTS owner_questions_status ON owner_questions(project, status, id);
+CREATE INDEX IF NOT EXISTS owner_questions_asker ON owner_questions(project, asker, status);";
 
-const _: () = assert!(
-    2 * (QUESTION_BYTES_MAX
-        + OPTIONS_MAX * OPTION_BYTES_MAX
-        + RECOMMENDED_BYTES_MAX
-        + CONTEXT_BYTES_MAX
-        + ANSWER_BYTES_MAX)
-        + 1024
-        <= LISTED_BYTES_MAX
-);
+/// The most bytes one question's stored texts hold.
+const STORED_BYTES_MAX: usize = QUESTION_BYTES_MAX
+    + OPTIONS_MAX * OPTION_BYTES_MAX
+    + RECOMMENDED_BYTES_MAX
+    + CONTEXT_BYTES_MAX
+    + ANSWER_BYTES_MAX
+    + 256;
+
+const _: () = assert!(2 * STORED_BYTES_MAX + 1024 <= LISTED_BYTES_MAX);
 const _: () = assert!(LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX);
-const _: () = assert!(TERMINAL_BYTES_MAX <= QUESTION_BYTES_MAX);
-const _: () = assert!(QUESTION_BYTES_MAX <= events::ESCALATION_BYTES_MAX);
+const _: () = assert!(OPTIONS_MAX <= u8::MAX as usize);
+const _: () = assert!(PENDING_PER_ASKER_MAX < PENDING_PER_PROJECT_MAX);
+const _: () = assert!(PENDING_PER_PROJECT_MAX < KEPT_PER_PROJECT_MAX);
 
-/// Who asked an owner question: a project's master through its ask tool, an engine step
-/// (mapping "Open questions", research, a landing conflict), or a master's own terminal
-/// question box the engine saw on its screen. On the owner wire each is its snake_case name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Source {
-    Master,
-    Mapping,
-    Research,
-    Landing,
-    Terminal,
+/// Who asked the owner, apart from the engine's own steps: a team master (live or run
+/// through drop files) by its team agent id, a conversation master by its session, a team
+/// sub-agent by its team agent id, or a question box a screen watch saw on an agent's own
+/// terminal. Stored as `master:<id>`, `master:session:<session>`, `agent:<id>` and
+/// `terminal:<id>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asker {
+    Master(i64),
+    Session(SessionId),
+    Agent(i64),
+    Terminal(i64),
 }
 
-/// The engine steps that raise their own owner questions and take each answer once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Step {
+/// The engine steps that raise their own questions, stored as `engine:mapping`,
+/// `engine:research:<kind>`, `engine:landing:<change set>` and `engine:planning`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineSource {
     Mapping,
-    Research,
-    Landing,
+    Research(String),
+    Landing(String),
+    Planning,
 }
 
-/// Where an owner question stands: waiting for the owner until answered or dismissed.
+/// Where a question stands. It waits for the owner until answered or dismissed; a box the
+/// owner answered on an agent's own screen is answered in the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum State {
+pub enum QuestionStatus {
     Pending,
     Answered,
     Dismissed,
+    AnsweredInTerminal,
 }
 
-/// Who settled an answered question: the owner in a Questions view, the master recording
-/// what the owner told it in chat, or the owner on the master's own terminal.
+/// Where an answer came from: the owner in a Questions view, or an owner message in the
+/// team master's chat that the master named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnsweredBy {
     Owner,
-    Master,
-    Terminal,
+    Chat,
 }
 
-/// One question for the owner as an asker gives it: the question, up to `OPTIONS_MAX`
-/// single-line options, the answer the asker recommends and the context the owner needs.
+/// The owner's answer: one of the question's options by position, or typed text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    Option(u8),
+    Text(String),
+}
+
+/// How a settling write ended: recorded, or refused because the question was settled or
+/// changed since the writer read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settlement {
+    Settled,
+    Stale,
+}
+
+/// One question as an asker gives it: the question, up to `OPTIONS_MAX` single-line options,
+/// the recommended answer (one of the options, or short text when there are none) and the
+/// context the owner needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     pub question: String,
@@ -123,105 +152,108 @@ pub struct Ask {
     pub context: Option<String>,
 }
 
-/// One logged owner question with its outcome and its versioned-write version: 0 while it
-/// is pending, which every answer or dismissal names as the version it read.
+/// One logged question with its outcome and the version an answer or dismissal names: 0
+/// while pending, written once when it settles (SS-1 item `question:<project>:<id>`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
-    pub id: i64,
-    pub project_id: ProjectId,
-    pub source: Source,
-    pub agent: Option<i64>,
+    pub id: u64,
+    pub project: ProjectId,
+    pub asker: String,
     pub question: String,
     pub options: Vec<String>,
     pub recommended: Option<String>,
     pub context: Option<String>,
-    pub state: State,
+    pub status: QuestionStatus,
+    pub version: u64,
     pub answer: Option<String>,
     pub answered_by: Option<AnsweredBy>,
-    pub asked_ms: i64,
-    pub resolved_ms: Option<i64>,
-    pub version: u64,
+    pub created_ms: u64,
+    pub settled_ms: Option<u64>,
 }
 
-/// Why an answer or dismissal did not land: a plain code, or the question was already
-/// settled or changed since the writer read it, with its current state to re-read.
+/// One page of a project's questions, pending ones first; `next` goes back as `after`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page {
+    pub items: Vec<Question>,
+    pub next: Option<u64>,
+}
+
+/// How the owner settled one of a conversation master's questions, for its next turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Refusal {
-    Code(&'static str),
-    Stale(Box<Question>),
+pub struct Note {
+    pub question: u64,
+    pub text: String,
 }
 
-/// One settled question an engine step takes: its id and the owner's answer, none when
-/// the owner dismissed it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Taken {
-    pub id: i64,
-    pub answer: Option<String>,
-}
-
-enum Settle<'a> {
+enum How<'a> {
     Answer(&'a str, AnsweredBy),
     Dismiss,
+    Terminal,
 }
 
-impl Source {
-    const ALL: [Self; 5] = [
-        Self::Master,
-        Self::Mapping,
-        Self::Research,
-        Self::Landing,
-        Self::Terminal,
+impl Asker {
+    /// The stored asker name. Input: the asker. Output: `master:<id>`,
+    /// `master:session:<session>`, `agent:<id>` or `terminal:<id>`.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Master(id) => format!("master:{id}"),
+            Self::Session(session) => format!("master:session:{}", session.as_str()),
+            Self::Agent(id) => format!("agent:{id}"),
+            Self::Terminal(id) => format!("terminal:{id}"),
+        }
+    }
+
+    fn source(&self) -> Option<&'static str> {
+        match self {
+            Self::Master(id) if *id > 0 => Some("master"),
+            Self::Session(_) => Some("session"),
+            Self::Agent(id) if *id > 0 => Some("agent"),
+            Self::Terminal(id) if *id > 0 => Some("terminal"),
+            Self::Master(_) | Self::Agent(_) | Self::Terminal(_) => None,
+        }
+    }
+}
+
+impl EngineSource {
+    /// The stored asker name, or none when a research kind or change set is empty, longer
+    /// than `NAME_BYTES_MAX` or not made of ASCII letters, digits, `-`, `_` and `.`.
+    pub fn name(&self) -> Option<String> {
+        let named = |name: &str| {
+            !name.is_empty()
+                && name.len() <= NAME_BYTES_MAX
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        };
+        match self {
+            Self::Mapping => Some("engine:mapping".into()),
+            Self::Planning => Some("engine:planning".into()),
+            Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
+            Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
+            Self::Research(_) | Self::Landing(_) => None,
+        }
+    }
+}
+
+impl QuestionStatus {
+    const ALL: [Self; 4] = [
+        Self::Pending,
+        Self::Answered,
+        Self::Dismissed,
+        Self::AnsweredInTerminal,
     ];
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::Master => "master",
-            Self::Mapping => "mapping",
-            Self::Research => "research",
-            Self::Landing => "landing",
-            Self::Terminal => "terminal",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|source| source.name() == value)
-    }
-
-    /// Names who asked, as the owner reads it. Input: the source. Output: the words.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Master => "the master",
-            Self::Mapping => "project mapping",
-            Self::Research => "research",
-            Self::Landing => "landing",
-            Self::Terminal => "the master, asked in terminal",
-        }
-    }
-}
-
-impl Step {
-    fn source(self) -> Source {
-        match self {
-            Self::Mapping => Source::Mapping,
-            Self::Research => Source::Research,
-            Self::Landing => Source::Landing,
-        }
-    }
-}
-
-impl State {
     fn name(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Answered => "answered",
             Self::Dismissed => "dismissed",
+            Self::AnsweredInTerminal => "answered_in_terminal",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Self::Pending, Self::Answered, Self::Dismissed]
-            .into_iter()
-            .find(|state| state.name() == value)
+        Self::ALL.into_iter().find(|status| status.name() == value)
     }
 }
 
@@ -229,54 +261,92 @@ impl AnsweredBy {
     fn name(self) -> &'static str {
         match self {
             Self::Owner => "owner",
-            Self::Master => "master",
-            Self::Terminal => "terminal",
+            Self::Chat => "chat",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Self::Owner, Self::Master, Self::Terminal]
+        [Self::Owner, Self::Chat]
             .into_iter()
             .find(|by| by.name() == value)
     }
 }
 
 impl Ask {
-    /// Checks every bound of a question: plain text, no control characters but line breaks
-    /// and tabs, single-line distinct options. Input: the ask. Output: the ask with each
-    /// text trimmed, or none when any part is empty, too long or not plain.
-    pub fn checked(&self) -> Option<Ask> {
+    /// Checks every bound of a question, never truncating: no hidden characters, plain
+    /// text, distinct single-line options, and a recommendation that is one of the options
+    /// or short text when there are none. Input: the ask. Output: the ask with each text
+    /// trimmed, or `questions_text_invalid` for hidden characters and `questions_ask_invalid`
+    /// for anything else out of bounds.
+    pub fn checked(&self) -> Result<Ask, EngineError> {
+        let invalid = || failure("questions_ask_invalid");
+        let given = [
+            Some(&self.question),
+            self.recommended.as_ref(),
+            self.context.as_ref(),
+        ];
+        if given
+            .into_iter()
+            .flatten()
+            .chain(&self.options)
+            .any(|text| hidden_text(text))
+        {
+            return Err(failure("questions_text_invalid"));
+        }
         if self.options.len() > OPTIONS_MAX {
-            return None;
+            return Err(invalid());
         }
         let options = self
             .options
             .iter()
             .map(|option| plain(option, OPTION_BYTES_MAX, false))
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(invalid)?;
         let mut distinct = options.clone();
         distinct.sort_unstable();
         distinct.dedup();
         if distinct.len() != options.len() {
-            return None;
+            return Err(invalid());
         }
-        let optional = |text: &Option<String>, max: usize| match text {
-            None => Some(None),
-            Some(text) => plain(text, max, true).map(Some),
+        let recommended = match &self.recommended {
+            None => None,
+            Some(text) => {
+                let text = plain(text, RECOMMENDED_BYTES_MAX, false).ok_or_else(invalid)?;
+                if !options.is_empty() && !options.contains(&text) {
+                    return Err(invalid());
+                }
+                Some(text)
+            }
         };
-        Some(Ask {
-            question: plain(&self.question, QUESTION_BYTES_MAX, true)?,
+        let context = match &self.context {
+            None => None,
+            Some(text) => Some(plain(text, CONTEXT_BYTES_MAX, true).ok_or_else(invalid)?),
+        };
+        Ok(Ask {
+            question: plain(&self.question, QUESTION_BYTES_MAX, true).ok_or_else(invalid)?,
             options,
-            recommended: optional(&self.recommended, RECOMMENDED_BYTES_MAX)?,
-            context: optional(&self.context, CONTEXT_BYTES_MAX)?,
+            recommended,
+            context,
         })
     }
 }
 
-/// Checks an answer: plain text of at most `ANSWER_BYTES_MAX` bytes. Input: the text.
-/// Output: the trimmed answer, or none.
-pub fn answer_checked(text: &str) -> Option<String> {
-    plain(text, ANSWER_BYTES_MAX, true)
+/// Names who asked, as the owner reads it. Input: the stored asker name. Output: the words.
+pub fn asker_label(asker: &str) -> String {
+    let (kind, rest) = asker.split_once(':').unwrap_or((asker, ""));
+    match (kind, rest) {
+        ("master", _) => "the master".into(),
+        ("agent", id) => format!("agent {id}"),
+        ("terminal", id) => format!("the terminal of agent {id}"),
+        ("engine", "mapping") => "project mapping".into(),
+        ("engine", "planning") => "roadmap planning".into(),
+        ("engine", rest) => match rest.split_once(':') {
+            Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
+            Some(("landing", set)) => format!("landing change set {set}"),
+            _ => asker.into(),
+        },
+        _ => asker.into(),
+    }
 }
 
 /// Opens the engine database in its root, waiting up to five seconds behind another
@@ -291,512 +361,606 @@ pub fn open(root: &Path) -> Result<Connection, EngineError> {
     Ok(db)
 }
 
-/// Logs a question a project's master asked through its ask tool, notifies the owner and
-/// rewrites the project's questions page. Its answer or dismissal reaches the master once.
-/// Inputs: the engine connection, the project, the master's team agent id, the ask and
-/// the time. Output: the question id, or `question_invalid` or `questions_full`.
+/// Logs a question a master or sub-agent asked through its ask tool, or a box a screen
+/// watch saw on an agent's terminal, notifies the owner and rewrites the project's
+/// questions page. A sub-agent's question is also told to the project's master, when its
+/// conversation has room. Inputs: the engine connection, the project, the asker and the
+/// ask. Output: the question id, or `questions_ask_invalid`, `questions_text_invalid`,
+/// `questions_asker_full`, `questions_full` or `questions_project_missing`.
 pub fn ask(
-    connection: &Connection,
+    db: &Connection,
     project: &ProjectId,
-    master: i64,
+    asker: &Asker,
     ask: &Ask,
-    now: i64,
-) -> Result<Result<i64, &'static str>, EngineError> {
-    let tx = immediate(connection)?;
-    let id = insert(&tx, project, Source::Master, Some(master), ask, now)?;
-    if id.is_ok() {
-        tx.commit().map_err(unavailable)?;
+) -> Result<u64, EngineError> {
+    let source = asker
+        .source()
+        .ok_or_else(|| failure("questions_ask_invalid"))?;
+    let tx = immediate(db)?;
+    let id = insert(&tx, project, &asker.name(), source, ask, false)?;
+    if let Asker::Agent(agent) = asker {
+        let quoted = bound_text(&flat(&ask.question), QUOTED_BYTES_MAX);
+        let text = format!(
+            "Agent {agent} asked the owner question {id} (\"{quoted}\"). The owner's answer comes to you; pass it on to agent {agent}."
+        );
+        let relayed = append_message(
+            &tx,
+            project,
+            MessageAuthor::Engine,
+            &text,
+            MessageState::Pending,
+            now_ms(),
+        )?;
+        if relayed.is_err() {
+            eprintln!("questions_master_untold project={}", project.as_str());
+        }
     }
+    tx.commit().map_err(unavailable)?;
+    page::refresh(db, project);
     Ok(id)
 }
 
-/// Logs a question an engine step raises, notifies the owner and rewrites the project's
-/// questions page, inside the step's own transaction. The step reads the outcome once
-/// through `take`. Inputs: the step's transaction, the project, the step, the ask and the
-/// time. Output: the question id, or `question_invalid` or `questions_full`.
+/// Logs a question an engine step raises, as `ask` does. A question the same step already
+/// has pending with the same text is not logged twice: its id is returned. Inputs: the engine
+/// connection, the project, the step and the ask. Output: as `ask`.
 pub fn raise(
-    tx: &Transaction<'_>,
+    db: &Connection,
     project: &ProjectId,
-    step: Step,
+    source: &EngineSource,
     ask: &Ask,
-    now: i64,
-) -> Result<Result<i64, &'static str>, EngineError> {
-    insert(tx, project, step.source(), None, ask, now)
-}
-
-/// Logs a question box the engine saw on a master's own terminal, shown as asked in
-/// terminal. It is never delivered: the owner answers on that screen. Inputs: the engine
-/// connection, the project, the master's team agent id, the question line and the time.
-/// Output: the question id, or `question_invalid` or `questions_full`.
-pub fn asked_in_terminal(
-    connection: &Connection,
-    project: &ProjectId,
-    master: i64,
-    text: &str,
-    now: i64,
-) -> Result<Result<i64, &'static str>, EngineError> {
-    let Some(question) = plain(text, TERMINAL_BYTES_MAX, false) else {
-        return Ok(Err("question_invalid"));
-    };
-    let ask = Ask {
-        question,
-        options: Vec::new(),
-        recommended: None,
-        context: None,
-    };
-    let tx = immediate(connection)?;
-    let id = insert(&tx, project, Source::Terminal, Some(master), &ask, now)?;
-    if id.is_ok() {
-        tx.commit().map_err(unavailable)?;
-    }
+) -> Result<u64, EngineError> {
+    let asker = source
+        .name()
+        .ok_or_else(|| failure("questions_ask_invalid"))?;
+    let tx = immediate(db)?;
+    let id = insert(&tx, project, &asker, "engine", ask, true)?;
+    tx.commit().map_err(unavailable)?;
+    page::refresh(db, project);
     Ok(id)
 }
 
-/// Marks a question asked in terminal as answered there, with no answer text and no
-/// delivery. Inputs: the engine connection, the question id and the time. Output: Ok,
-/// `question_missing`, `question_not_terminal`, or the settled question when it already was.
-pub fn answered_in_terminal(
-    connection: &Connection,
-    id: i64,
-    now: i64,
-) -> Result<Result<(), Refusal>, EngineError> {
-    let tx = immediate(connection)?;
-    ensure(&tx)?;
-    let project: Option<String> = tx
+/// Records the owner's answer from a Questions view, naming the version the owner read. A
+/// team master's or sub-agent's question gets it once as an owner message to the project's
+/// master, which the team delivery types once; an engine step's gets it once as an engine
+/// message when the conversation has room; a conversation master's waits as a note for its
+/// next turn. Inputs: the engine connection, the question id, the version and the answer.
+/// Output: Settled, Stale when it was settled or changed since, or `questions_not_found`,
+/// `questions_option_invalid`, `questions_answer_invalid`, `questions_text_invalid`,
+/// `questions_in_terminal`, or `questions_delivery_full` while the master's conversation is
+/// full.
+pub fn answer(
+    db: &Connection,
+    id: u64,
+    version: u64,
+    answer: &Answer,
+) -> Result<Settlement, EngineError> {
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    if question.status != QuestionStatus::Pending {
+        return Ok(Settlement::Stale);
+    }
+    if is_terminal(&question.asker) {
+        return Err(failure("questions_in_terminal"));
+    }
+    let text = match answer {
+        Answer::Option(index) => question
+            .options
+            .get(usize::from(*index))
+            .cloned()
+            .ok_or_else(|| failure("questions_option_invalid"))?,
+        Answer::Text(text) => answer_text(text)?,
+    };
+    let project = question.project.clone();
+    let how = How::Answer(&text, AnsweredBy::Owner);
+    let settled = settle(&tx, question, how, &owner(), version)?;
+    finish(db, tx, &project, settled)
+}
+
+/// Dismisses a question the owner will not answer, naming the version the owner read; the
+/// asker is told once, as `answer` tells it. Inputs: the engine connection, the question id
+/// and the version. Output: Settled, Stale, or `questions_not_found` or
+/// `questions_delivery_full`.
+pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, EngineError> {
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    let project = question.project.clone();
+    let settled = settle(&tx, question, How::Dismiss, &owner(), version)?;
+    finish(db, tx, &project, settled)
+}
+
+/// Records an answer the owner gave in a team master's chat. The master names the owner's
+/// message and may record only a question it asked itself; the answer is that message's
+/// text, never the master's own words, and the message must be an owner message of the
+/// question's project sent after the question was asked. Nothing is delivered back, since
+/// the master read it. Inputs: the engine connection, the master's project, its team agent
+/// id, the question id, the version the master read and the owner message id. Output:
+/// Settled, Stale, or `questions_not_found` (also for a question it did not ask),
+/// `questions_owner_turn_invalid`, `questions_answer_invalid` or `questions_text_invalid`.
+pub fn record_from_chat(
+    db: &Connection,
+    project: &ProjectId,
+    master: i64,
+    id: u64,
+    version: u64,
+    owner_turn: i64,
+) -> Result<Settlement, EngineError> {
+    let agent = AgentId::team(master).map_err(|_| failure("questions_not_found"))?;
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    if &question.project != project || question.asker != Asker::Master(master).name() {
+        return Err(failure("questions_not_found"));
+    }
+    if question.status != QuestionStatus::Pending {
+        return Ok(Settlement::Stale);
+    }
+    let turn: Option<String> = tx
         .query_row(
-            "SELECT project FROM owner_questions WHERE id=?1",
-            [id],
+            "SELECT m.text FROM team_messages m, owner_questions q
+             WHERE m.id=?1 AND m.project=?2 AND m.author='owner' AND q.id=?3 AND m.id>q.turn_floor",
+            params![owner_turn, project.as_str(), column(question.id)],
             |row| row.get(0),
         )
         .optional()
         .map_err(unavailable)?;
-    let Some(project) = project else {
-        return Ok(Err(Refusal::Code("question_missing")));
-    };
-    let project = ProjectId::new(project).map_err(unavailable)?;
-    let Some(question) = load(&tx, &project, id)? else {
-        return Ok(Err(Refusal::Code("question_missing")));
-    };
-    if question.source != Source::Terminal {
-        return Ok(Err(Refusal::Code("question_not_terminal")));
-    }
-    let owner = Writer::Owner {
-        force_after_conflict: false,
-    };
-    let version = question.version;
-    let outcome = settle(
-        &tx,
-        question,
-        Settle::Answer("", AnsweredBy::Terminal),
-        &owner,
-        version,
-        now,
-    )?;
-    finish(tx, outcome)
+    let turn = turn.ok_or_else(|| failure("questions_owner_turn_invalid"))?;
+    let text = answer_text(&turn)?;
+    let how = How::Answer(&text, AnsweredBy::Chat);
+    let settled = settle(&tx, question, how, &Writer::Agent(agent), version)?;
+    finish(db, tx, project, settled)
 }
 
-/// Lists the questions asked in terminal by one master that still wait, oldest first, so
-/// a restarted watch adopts a box still on screen instead of logging it twice. Inputs:
-/// the engine connection, the project and the master's team agent id. Output: each
-/// question's id and line, at most `OPEN_PER_PROJECT_MAX`.
-pub fn terminal_pending(
-    connection: &Connection,
+/// Marks a box asked in an agent's terminal as answered there, once its screen watch saw
+/// it leave after owner input; nothing is delivered, since the harness has the answer.
+/// Inputs: the engine connection and the question id. Output: Settled, Stale when it was
+/// already settled, or `questions_not_found` or `questions_not_terminal`.
+pub fn terminal_settled(db: &Connection, id: u64) -> Result<Settlement, EngineError> {
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    if !is_terminal(&question.asker) {
+        return Err(failure("questions_not_terminal"));
+    }
+    let project = question.project.clone();
+    let version = question.version;
+    let settled = settle(&tx, question, How::Terminal, &owner(), version)?;
+    finish(db, tx, &project, settled)
+}
+
+/// Reads how the owner settled a conversation master's questions that its turns were not
+/// yet given, oldest first. Pass their ids to `notes_delivered` once the turn that carries
+/// them is accepted. Inputs: the engine connection, the project and the session. Output: at
+/// most `NOTES_MAX` notes.
+pub fn session_notes(
+    db: &Connection,
     project: &ProjectId,
-    master: i64,
-) -> Result<Vec<(i64, String)>, EngineError> {
-    let tx = connection.unchecked_transaction().map_err(unavailable)?;
+    session: &SessionId,
+) -> Result<Vec<Note>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(unavailable)?;
     ensure(&tx)?;
-    let mut statement = tx
-        .prepare_cached(
-            "SELECT id,question FROM owner_questions
-             WHERE project=?1 AND source='terminal' AND agent=?2 AND state='pending'
-             ORDER BY id LIMIT ?3",
+    let settled = select(
+        &tx,
+        &format!(
+            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND asker=?2
+             AND status IN ('answered','dismissed') AND noted_ms IS NULL ORDER BY id LIMIT ?3"
+        ),
+        params![
+            project.as_str(),
+            Asker::Session(session.clone()).name(),
+            NOTES_MAX as i64
+        ],
+    )?;
+    assert!(settled.len() <= NOTES_MAX);
+    Ok(settled
+        .iter()
+        .map(|question| Note {
+            question: question.id,
+            text: told(question, question.answer.as_deref(), "your"),
+        })
+        .collect())
+}
+
+/// Marks a conversation master's notes as given, so no later turn repeats them. Inputs:
+/// the engine connection, the project, the session and at most `NOTES_MAX` question ids
+/// from `session_notes`. Output: Ok, also for an id already marked, or
+/// `questions_notes_invalid` for more ids.
+pub fn notes_delivered(
+    db: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    ids: &[u64],
+) -> Result<(), EngineError> {
+    if ids.len() > NOTES_MAX {
+        return Err(failure("questions_notes_invalid"));
+    }
+    let tx = immediate(db)?;
+    ensure(&tx)?;
+    let asker = Asker::Session(session.clone()).name();
+    let now = now_ms();
+    for id in ids {
+        tx.execute(
+            "UPDATE owner_questions SET noted_ms=?4 WHERE id=?1 AND project=?2 AND asker=?3
+             AND status!='pending' AND noted_ms IS NULL",
+            params![column(*id), project.as_str(), asker, now],
         )
         .map_err(unavailable)?;
-    statement
-        .query_map(
-            params![project.as_str(), master, OPEN_PER_PROJECT_MAX],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(unavailable)?
-        .collect::<Result<Vec<(i64, String)>, _>>()
-        .map_err(unavailable)
+    }
+    tx.commit().map_err(unavailable)
 }
 
-/// Records the owner's answer from a Questions view. A question the master asked gets the
-/// answer as one owner message, which the team delivery types into the master once.
-/// Inputs: the engine connection, the project, the question id, the version the owner
-/// read, the answer and the time. Output: Ok, `question_invalid`, `question_missing`,
-/// `question_in_terminal` for a box the owner answers on the master's screen,
-/// `question_delivery_full` while the master's conversation is full, or the current question
-/// when it was settled or changed since the owner read it.
-pub fn answer(
-    connection: &Connection,
-    project: &ProjectId,
-    id: i64,
-    version: u64,
-    text: &str,
-    now: i64,
-) -> Result<Result<(), Refusal>, EngineError> {
-    let Some(text) = answer_checked(text) else {
-        return Ok(Err(Refusal::Code("question_invalid")));
-    };
-    let owner = Writer::Owner {
-        force_after_conflict: false,
-    };
-    resolve(
-        connection,
-        project,
-        id,
-        Settle::Answer(&text, AnsweredBy::Owner),
-        &owner,
-        version,
-        now,
+/// Reads the questions of one project that wait for the owner, oldest first. Inputs: the
+/// engine connection and the project. Output: at most `PENDING_PER_PROJECT_MAX` questions.
+pub fn pending(db: &Connection, project: &ProjectId) -> Result<Vec<Question>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(unavailable)?;
+    ensure(&tx)?;
+    select(
+        &tx,
+        &format!(
+            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending'
+             ORDER BY id LIMIT ?2"
+        ),
+        params![project.as_str(), PENDING_PER_PROJECT_MAX],
     )
 }
 
-/// Dismisses a question the owner will not answer. A question the master asked tells the
-/// master once that no answer comes. Inputs: the engine connection, the project, the
-/// question id, the version the owner read and the time. Output: as `answer`.
-pub fn dismiss(
-    connection: &Connection,
-    project: &ProjectId,
-    id: i64,
-    version: u64,
-    now: i64,
-) -> Result<Result<(), Refusal>, EngineError> {
-    let owner = Writer::Owner {
-        force_after_conflict: false,
+/// Reads one page of a project's questions: the pending ones oldest first, then the settled
+/// ones newest first, at most `LISTED_MAX` and `LISTED_BYTES_MAX` bytes of JSON. Pass `next`
+/// back as `after` for the rest; it names the last question shown and its part of the list.
+/// Inputs: the engine connection, the project and the `next` of the page before. Output:
+/// the page.
+pub fn page(db: &Connection, project: &ProjectId, after: Option<u64>) -> Result<Page, EngineError> {
+    let tx = db.unchecked_transaction().map_err(unavailable)?;
+    ensure(&tx)?;
+    let (settled_part, from) = match after {
+        None => (false, 0),
+        Some(cursor) => (cursor & 1 == 1, column(cursor >> 1)),
     };
-    resolve(
-        connection,
-        project,
-        id,
-        Settle::Dismiss,
-        &owner,
-        version,
-        now,
-    )
+    let limit = LISTED_MAX + 1;
+    let mut rows = Vec::new();
+    if !settled_part {
+        rows = select(
+            &tx,
+            &format!(
+                "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending' AND id>?2
+                 ORDER BY id LIMIT ?3"
+            ),
+            params![project.as_str(), from, limit as i64],
+        )?;
+    }
+    if rows.len() < limit {
+        let below = if settled_part { from } else { i64::MAX };
+        rows.extend(select(
+            &tx,
+            &format!(
+                "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status!='pending' AND id<?2
+                 ORDER BY id DESC LIMIT ?3"
+            ),
+            params![project.as_str(), below, limit as i64],
+        )?);
+    }
+    let mut items = Vec::new();
+    let mut bytes = 0;
+    let mut more = false;
+    for question in rows {
+        let size = serde_json::to_vec(&question).map_err(unavailable)?.len();
+        assert!(size <= 2 * STORED_BYTES_MAX + 1024);
+        if items.len() == LISTED_MAX || bytes + size > LISTED_BYTES_MAX {
+            more = true;
+            break;
+        }
+        bytes += size;
+        items.push(question);
+    }
+    assert!(items.len() <= LISTED_MAX && bytes <= LISTED_BYTES_MAX);
+    let next = items.last().filter(|_| more).map(|last| {
+        let settled = u64::from(last.status != QuestionStatus::Pending);
+        (last.id << 1) | settled
+    });
+    Ok(Page { items, next })
 }
 
-/// Records an answer the owner gave the master in chat, which the master reports through
-/// its ask tool; it is shown as recorded by the master and is never delivered back to it.
-/// The master saw the question pending, so it names version 0. Inputs: the engine
-/// connection, the project, the master's team agent id, the question id, the answer and
-/// the time. Output: as `answer`.
-pub fn record(
-    connection: &Connection,
-    project: &ProjectId,
-    master: i64,
-    id: i64,
-    text: &str,
-    now: i64,
-) -> Result<Result<(), Refusal>, EngineError> {
-    let (Some(text), Ok(agent)) = (answer_checked(text), AgentId::team(master)) else {
-        return Ok(Err(Refusal::Code("question_invalid")));
-    };
-    resolve(
-        connection,
-        project,
-        id,
-        Settle::Answer(&text, AnsweredBy::Master),
-        &Writer::Agent(agent),
-        0,
-        now,
-    )
-}
-
-/// Takes, once, every settled question one engine step raised in a project and has not
-/// taken yet, oldest first, inside the step's transaction so the step acts on each
-/// outcome exactly once. Inputs: the step's transaction, the project and the step.
-/// Output: each question's id and answer, none for a dismissed one.
-pub fn take(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-    step: Step,
-) -> Result<Vec<Taken>, EngineError> {
-    ensure(tx)?;
-    let taken = {
+/// Counts the questions waiting for the owner in each project that has any, for the app
+/// badge. Input: the engine connection. Output: each project and its count, at most
+/// `COUNTED_PROJECTS_MAX`.
+pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(unavailable)?;
+    ensure(&tx)?;
+    let rows: Vec<(String, i64)> = {
         let mut statement = tx
             .prepare_cached(
-                "SELECT id,answer FROM owner_questions
-                 WHERE project=?1 AND source=?2 AND state!='pending' AND handed=0
-                 ORDER BY id LIMIT ?3",
+                "SELECT project, COUNT(*) FROM owner_questions WHERE status='pending'
+                 GROUP BY project ORDER BY project LIMIT ?1",
             )
             .map_err(unavailable)?;
         statement
-            .query_map(
-                params![project.as_str(), step.source().name(), OPEN_PER_PROJECT_MAX],
-                |row| {
-                    Ok(Taken {
-                        id: row.get(0)?,
-                        answer: row.get(1)?,
-                    })
-                },
-            )
+            .query_map([COUNTED_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(unavailable)?
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<_, _>>()
             .map_err(unavailable)?
     };
-    for item in &taken {
-        let changed = tx
-            .execute(
-                "UPDATE owner_questions SET handed=1 WHERE id=?1 AND handed=0",
-                [item.id],
-            )
-            .map_err(unavailable)?;
-        assert_eq!(changed, 1);
-    }
-    if !taken.is_empty() {
-        prune(tx, project)?;
-    }
-    Ok(taken)
+    rows.into_iter()
+        .map(|(project, count)| {
+            let count = u32::try_from(count).map_err(unavailable)?;
+            assert!(i64::from(count) <= PENDING_PER_PROJECT_MAX);
+            Ok((ProjectId::new(project).map_err(unavailable)?, count))
+        })
+        .collect()
 }
 
-/// Lists one project's questions newest first: only pending ones, or all, those older than
-/// `before` when given, at most `LISTED_MAX` and `LISTED_BYTES_MAX` bytes of JSON. Inputs:
-/// the engine connection, the project, the filter and the paging id. Output: the questions.
-pub fn list(
-    connection: &Connection,
-    project: &ProjectId,
-    pending_only: bool,
-    before: Option<i64>,
-) -> Result<Vec<Question>, EngineError> {
-    let tx = connection.unchecked_transaction().map_err(unavailable)?;
-    ensure(&tx)?;
-    let questions = select(
-        &tx,
-        &format!(
-            "SELECT {COLUMNS} FROM owner_questions
-             WHERE project=?1 AND (?2=0 OR state='pending') AND (?3 IS NULL OR id<?3)
-             ORDER BY id DESC LIMIT ?4"
-        ),
-        params![project.as_str(), pending_only, before, LISTED_MAX as i64],
-    )?;
-    let mut listed = Vec::new();
-    let mut bytes = 0;
-    for question in questions {
-        bytes += serde_json::to_vec(&question).map_err(unavailable)?.len();
-        if bytes > LISTED_BYTES_MAX {
-            break;
-        }
-        listed.push(question);
-    }
-    assert!(listed.len() <= LISTED_MAX);
-    Ok(listed)
-}
-
+/// Logs one checked question inside the caller's transaction and notifies the owner.
+/// Inputs: the transaction, the project, the stored asker name and source, the ask, and
+/// whether a pending question of the same asker and text is returned instead. Output: the
+/// question id, or the refusals `ask` names.
 fn insert(
     tx: &Transaction<'_>,
     project: &ProjectId,
-    source: Source,
-    agent: Option<i64>,
+    asker: &str,
+    source: &str,
     ask: &Ask,
-    now: i64,
-) -> Result<Result<i64, &'static str>, EngineError> {
+    once: bool,
+) -> Result<u64, EngineError> {
     ensure(tx)?;
-    let Some(ask) = ask.checked() else {
-        return Ok(Err("question_invalid"));
-    };
-    let open: i64 = tx
+    let known: bool = tx
         .query_row(
-            "SELECT COUNT(*) FROM owner_questions WHERE project=?1 AND (state='pending' OR handed=0)",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
             [project.as_str()],
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    if open >= OPEN_PER_PROJECT_MAX {
-        return Ok(Err("questions_full"));
+    if !known {
+        return Err(failure("questions_project_missing"));
     }
-    let options = serde_json::to_string(&ask.options).map_err(unavailable)?;
+    let ask = ask.checked()?;
+    if once {
+        let same: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM owner_questions WHERE project=?1 AND asker=?2 AND status='pending' AND question=?3",
+                params![project.as_str(), asker, ask.question],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?;
+        if let Some(same) = same {
+            return u64::try_from(same).map_err(unavailable);
+        }
+    }
+    let mine: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM owner_questions WHERE project=?1 AND asker=?2 AND status='pending'",
+            params![project.as_str(), asker],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if mine >= PENDING_PER_ASKER_MAX {
+        return Err(failure("questions_asker_full"));
+    }
+    if pending_count(tx, project)? >= PENDING_PER_PROJECT_MAX {
+        return Err(failure("questions_full"));
+    }
+    let floor: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(id),0) FROM team_messages WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    let now = now_ms();
     tx.execute(
-        "INSERT INTO owner_questions(project,source,agent,question,options,recommended,context,state,handed,asked_ms)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',0,?8)",
+        "INSERT INTO owner_questions(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9)",
         params![
             project.as_str(),
-            source.name(),
-            agent,
+            asker,
+            source,
             ask.question,
-            options,
+            serde_json::to_string(&ask.options).map_err(unavailable)?,
             ask.recommended,
             ask.context,
+            floor,
             now
         ],
     )
     .map_err(unavailable)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
+    let first = ask.question.lines().next().unwrap_or_default();
     let notice = bound_text(
-        &format!(
-            "Question {id} from {}: {}",
-            source.label(),
-            flat(&ask.question)
-        ),
+        &format!("{}: {}", capital(&asker_label(asker)), flat(first)),
         events::ESCALATION_BYTES_MAX,
     );
-    events::notify(tx, project, NotificationKind::Escalation, &notice, now).map_err(unavailable)?;
-    page::write(tx, project)?;
-    Ok(Ok(id))
+    events::notify(tx, project, NotificationKind::Question, &notice, now).map_err(unavailable)?;
+    prune(tx, project)?;
+    u64::try_from(id).map_err(unavailable)
 }
 
-fn resolve(
-    connection: &Connection,
-    project: &ProjectId,
-    id: i64,
-    how: Settle<'_>,
-    writer: &Writer,
-    version: u64,
-    now: i64,
-) -> Result<Result<(), Refusal>, EngineError> {
-    let tx = immediate(connection)?;
-    ensure(&tx)?;
-    let Some(question) = load(&tx, project, id)? else {
-        return Ok(Err(Refusal::Code("question_missing")));
-    };
-    let on_screen = matches!(how, Settle::Answer(_, AnsweredBy::Owner));
-    if on_screen && question.source == Source::Terminal && question.state == State::Pending {
-        return Ok(Err(Refusal::Code("question_in_terminal")));
-    }
-    let outcome = settle(&tx, question, how, writer, version, now)?;
-    finish(tx, outcome)
-}
-
+/// Commits a settling transaction and rewrites the questions page, or rolls back a stale
+/// one. Inputs: the connection, the transaction, the project and how the settling ended.
+/// Output: the same settlement.
 fn finish(
+    db: &Connection,
     tx: Transaction<'_>,
-    outcome: Result<(), Refusal>,
-) -> Result<Result<(), Refusal>, EngineError> {
-    if outcome.is_ok() {
+    project: &ProjectId,
+    settled: Settlement,
+) -> Result<Settlement, EngineError> {
+    if settled == Settlement::Settled {
         tx.commit().map_err(unavailable)?;
+        page::refresh(db, project);
     }
-    Ok(outcome)
+    Ok(settled)
 }
 
-/// Settles one pending question once: the versioned write of its item refuses a writer
-/// that read another version, a master's question gets one owner message for the team
-/// delivery, and the page is rewritten. Inputs: the transaction, the question, how it is
-/// settled, the writer, the version it read and the time. Output: Ok, or the refusal.
+/// Settles one pending question once: the versioned write of its item refuses a writer that
+/// read another version, and the asker is told through at most one team message, both in
+/// the caller's transaction. Inputs: the transaction, the question, how it settles, the
+/// writer and the version it read. Output: Settled or Stale, or `questions_delivery_full`.
 fn settle(
     tx: &Transaction<'_>,
     question: Question,
-    how: Settle<'_>,
+    how: How<'_>,
     writer: &Writer,
     version: u64,
-    now: i64,
-) -> Result<Result<(), Refusal>, EngineError> {
-    if question.state != State::Pending {
-        return Ok(Err(Refusal::Stale(Box::new(question))));
+) -> Result<Settlement, EngineError> {
+    if question.status != QuestionStatus::Pending {
+        return Ok(Settlement::Stale);
     }
-    let project = question.project_id.clone();
+    let project = question.project.clone();
     match versioned::write_if(tx, &item(&project, question.id)?, version, writer) {
         Ok(written) => assert_eq!(written, 1),
-        Err(versioned::Refusal::Stale(_)) => return Ok(Err(Refusal::Stale(Box::new(question)))),
+        Err(versioned::Refusal::Stale(_)) => return Ok(Settlement::Stale),
         Err(versioned::Refusal::Failed(problem)) => return Err(problem),
     }
-    let (state, answer, by) = match how {
-        Settle::Answer(text, by) => (
-            State::Answered,
-            Some(text).filter(|text| !text.is_empty()),
-            Some(by),
-        ),
-        Settle::Dismiss => (State::Dismissed, None, None),
+    let (status, answer, by) = match how {
+        How::Answer(text, by) => (QuestionStatus::Answered, Some(text), Some(by)),
+        How::Dismiss => (QuestionStatus::Dismissed, None, None),
+        How::Terminal => (QuestionStatus::AnsweredInTerminal, None, None),
     };
-    let told = matches!(by, Some(AnsweredBy::Master));
-    let (handed, message) = match question.source {
-        Source::Master if !told => {
-            let quoted = bound_text(&flat(&question.question), QUOTED_BYTES_MAX);
-            let text = match &answer {
-                Some(answer) => format!(
-                    "The owner answered your question {} (\"{quoted}\"):\n{answer}",
-                    question.id
-                ),
-                None => format!(
-                    "The owner dismissed your question {} (\"{quoted}\") without an answer. Do not wait for it.",
-                    question.id
-                ),
-            };
-            let appended = append_message(
-                tx,
-                &project,
-                MessageAuthor::Owner,
-                &text,
-                MessageState::Pending,
-                now,
-            )
-            .map_err(unavailable)?;
-            match appended {
-                Ok(message) => (true, Some(message)),
-                Err(_) => return Ok(Err(Refusal::Code("question_delivery_full"))),
-            }
-        }
-        Source::Master | Source::Terminal => (true, None),
-        Source::Mapping | Source::Research | Source::Landing => (false, None),
+    let message = if by == Some(AnsweredBy::Chat) {
+        None
+    } else {
+        deliver(tx, &question, answer)?
     };
     let changed = tx
         .execute(
-            "UPDATE owner_questions SET state=?2, answer=?3, answered_by=?4, handed=?5, message=?6, resolved_ms=?7
-             WHERE id=?1 AND state='pending'",
+            "UPDATE owner_questions SET status=?2, answer=?3, answered_by=?4, message=?5, settled_ms=?6
+             WHERE id=?1 AND status='pending'",
             params![
-                question.id,
-                state.name(),
+                column(question.id),
+                status.name(),
                 answer,
                 by.map(AnsweredBy::name),
-                handed,
                 message,
-                now
+                now_ms()
             ],
         )
         .map_err(unavailable)?;
     assert_eq!(changed, 1);
     prune(tx, &project)?;
-    page::write(tx, &project)?;
-    Ok(Ok(()))
+    Ok(Settlement::Settled)
 }
 
-/// Drops the oldest settled questions of a project beyond `KEPT_PER_PROJECT_MAX`, with
-/// their versioned items. One an engine step has not taken yet is never dropped.
+/// Queues the one team message that tells an asker how the owner settled its question: an
+/// owner message to the project's master for a team master's or sub-agent's question,
+/// refused while the conversation is full since the asker waits for it, and an engine
+/// message for an engine step's, dropped while it is full since nothing waits for it. A
+/// terminal box or a conversation master's question gets none. Inputs: the transaction,
+/// the question and the answer, none when dismissed. Output: the message id, if any, or
+/// `questions_delivery_full`.
+fn deliver(
+    tx: &Transaction<'_>,
+    question: &Question,
+    answer: Option<&str>,
+) -> Result<Option<i64>, EngineError> {
+    let (kind, rest) = question.asker.split_once(':').unwrap_or_default();
+    let (author, whose, required) = match (kind, rest) {
+        ("master", rest) if !rest.starts_with("session:") => {
+            (MessageAuthor::Owner, "your".to_owned(), true)
+        }
+        ("agent", agent) => (MessageAuthor::Owner, format!("agent {agent}'s"), true),
+        ("engine", _) => (
+            MessageAuthor::Engine,
+            format!("the {}", asker_label(&question.asker)),
+            false,
+        ),
+        _ => return Ok(None),
+    };
+    let text = told(question, answer, &whose);
+    let appended = append_message(
+        tx,
+        &question.project,
+        author,
+        &text,
+        MessageState::Pending,
+        now_ms(),
+    )?;
+    match appended {
+        Ok(message) => Ok(Some(message)),
+        Err(_) if required => Err(failure("questions_delivery_full")),
+        Err(_) => {
+            eprintln!(
+                "questions_engine_note_dropped project={}",
+                question.project.as_str()
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Words how the owner settled a question for the one who waits on it. Inputs: the
+/// question, the answer, none when dismissed, and whose question it was, such as `your`.
+/// Output: the text.
+fn told(question: &Question, answer: Option<&str>, whose: &str) -> String {
+    let quoted = bound_text(&flat(&question.question), QUOTED_BYTES_MAX);
+    let id = question.id;
+    let tail = match question.asker.split_once(':') {
+        Some(("agent", agent)) => format!("\nPass this on to agent {agent}."),
+        _ => String::new(),
+    };
+    match answer {
+        Some(answer) => {
+            format!("The owner answered {whose} question {id} (\"{quoted}\"):\n{answer}{tail}")
+        }
+        None => {
+            format!(
+                "The owner dismissed {whose} question {id} (\"{quoted}\"). No answer comes.{tail}"
+            )
+        }
+    }
+}
+
+/// Drops the oldest settled questions of a project beyond `KEPT_PER_PROJECT_MAX` kept
+/// questions, with their versioned items; a pending question is never dropped.
 fn prune(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    let keep = KEPT_PER_PROJECT_MAX - pending_count(tx, project)?;
+    assert!(keep >= KEPT_PER_PROJECT_MAX - PENDING_PER_PROJECT_MAX);
     let dropped: Vec<i64> = {
         let mut statement = tx
             .prepare_cached(
-                "SELECT id FROM owner_questions WHERE project=?1 AND state!='pending' AND handed=1
+                "SELECT id FROM owner_questions WHERE project=?1 AND status!='pending'
                  ORDER BY id DESC LIMIT -1 OFFSET ?2",
             )
             .map_err(unavailable)?;
         statement
-            .query_map(params![project.as_str(), KEPT_PER_PROJECT_MAX], |row| {
-                row.get(0)
-            })
+            .query_map(params![project.as_str(), keep], |row| row.get(0))
             .map_err(unavailable)?
             .collect::<Result<_, _>>()
             .map_err(unavailable)?
     };
     for id in dropped {
+        let id = u64::try_from(id).map_err(unavailable)?;
         versioned::forget(tx, &item(project, id)?)?;
-        tx.execute("DELETE FROM owner_questions WHERE id=?1", [id])
+        tx.execute("DELETE FROM owner_questions WHERE id=?1", [column(id)])
             .map_err(unavailable)?;
     }
     Ok(())
 }
 
-/// Reads one question of a project with its current version. A pending question always
-/// holds version 0: only settling it writes its item.
-fn load(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-    id: i64,
-) -> Result<Option<Question>, EngineError> {
-    let mut found = select(
-        tx,
-        &format!("SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND id=?2"),
-        params![project.as_str(), id],
-    )?;
-    assert!(found.len() <= 1);
-    Ok(found.pop())
+fn pending_count(tx: &Transaction<'_>, project: &ProjectId) -> Result<i64, EngineError> {
+    tx.query_row(
+        "SELECT COUNT(*) FROM owner_questions WHERE project=?1 AND status='pending'",
+        [project.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
-/// Reads the questions a query selects, oldest columns first as `COLUMNS` names them, each
-/// with its versioned-write version. Inputs: the transaction, the query and its parameters.
-/// Output: the questions, or `questions_unavailable` for a row this module never writes.
+/// Reads one question by id with its current version. Inputs: the transaction and the id.
+/// Output: the question, or `questions_not_found`.
+fn found(tx: &Transaction<'_>, id: u64) -> Result<Question, EngineError> {
+    ensure(tx)?;
+    let Ok(id) = i64::try_from(id) else {
+        return Err(failure("questions_not_found"));
+    };
+    let mut rows = select(
+        tx,
+        &format!("SELECT {COLUMNS} FROM owner_questions WHERE id=?1"),
+        [id],
+    )?;
+    assert!(rows.len() <= 1);
+    rows.pop().ok_or_else(|| failure("questions_not_found"))
+}
+
+/// Reads the questions a query selects, its columns in `COLUMNS` order, each with its
+/// versioned-write version. A pending question always holds version 0: only settling it
+/// writes its item. Inputs: the transaction, the query and its parameters. Output: the
+/// questions, or `questions_unavailable` for a row this module never writes.
 fn select(
     tx: &Transaction<'_>,
     query: &str,
@@ -806,7 +970,6 @@ fn select(
         i64,
         String,
         String,
-        Option<i64>,
         String,
         String,
         Option<String>,
@@ -834,7 +997,6 @@ fn select(
                     row.get(9)?,
                     row.get(10)?,
                     row.get(11)?,
-                    row.get(12)?,
                 ))
             })
             .map_err(unavailable)?
@@ -842,36 +1004,51 @@ fn select(
             .map_err(unavailable)?
     };
     let mut questions = Vec::with_capacity(rows.len());
-    for row in rows {
-        let (id, project, source, agent, question, options, recommended, context, state) = (
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8,
-        );
-        let (answer, answered_by, asked_ms, resolved_ms) = (row.9, row.10, row.11, row.12);
-        let project_id = ProjectId::new(project).map_err(unavailable)?;
-        let state = State::parse(&state).ok_or_else(|| unavailable(()))?;
-        let version = versioned::current(tx, &item(&project_id, id)?)?.version;
+    for (
+        id,
+        project,
+        asker,
+        question,
+        options,
+        recommended,
+        context,
+        status,
+        answer,
+        by,
+        created,
+        settled,
+    ) in rows
+    {
+        let id = u64::try_from(id).map_err(unavailable)?;
+        let project = ProjectId::new(project).map_err(unavailable)?;
+        let status = QuestionStatus::parse(&status).ok_or_else(|| unavailable(()))?;
+        let version = versioned::current(tx, &item(&project, id)?)?.version;
         assert!(
-            (state == State::Pending) == (version == 0),
+            (status == QuestionStatus::Pending) == (version == 0),
             "a pending question always holds version 0"
         );
+        let answered_by = match by {
+            None => None,
+            Some(by) => Some(AnsweredBy::parse(&by).ok_or_else(|| unavailable(()))?),
+        };
+        let settled_ms = match settled {
+            None => None,
+            Some(ms) => Some(u64::try_from(ms).map_err(unavailable)?),
+        };
         questions.push(Question {
             id,
-            project_id,
-            source: Source::parse(&source).ok_or_else(|| unavailable(()))?,
-            agent,
+            project,
+            asker,
             question,
             options: serde_json::from_str(&options).map_err(unavailable)?,
             recommended,
             context,
-            state,
-            answer,
-            answered_by: match answered_by {
-                None => None,
-                Some(by) => Some(AnsweredBy::parse(&by).ok_or_else(|| unavailable(()))?),
-            },
-            asked_ms,
-            resolved_ms,
+            status,
             version,
+            answer,
+            answered_by,
+            created_ms: u64::try_from(created).map_err(unavailable)?,
+            settled_ms,
         });
     }
     Ok(questions)
@@ -879,16 +1056,36 @@ fn select(
 
 /// Names the versioned item of one owner question. Inputs: the project and question id.
 /// Output: `question:<project>:<id>`.
-fn item(project: &ProjectId, id: i64) -> Result<Item, EngineError> {
+fn item(project: &ProjectId, id: u64) -> Result<Item, EngineError> {
     Item::new(&format!("question:{}:{id}", project.as_str()))
+}
+
+/// Checks an answer the owner gave, never truncating it. Input: the text. Output: the
+/// trimmed answer, or `questions_text_invalid` for hidden characters and
+/// `questions_answer_invalid` when it is blank or longer than `ANSWER_BYTES_MAX`.
+fn answer_text(text: &str) -> Result<String, EngineError> {
+    if hidden_text(text) {
+        return Err(failure("questions_text_invalid"));
+    }
+    plain(text, ANSWER_BYTES_MAX, true).ok_or_else(|| failure("questions_answer_invalid"))
+}
+
+fn owner() -> Writer {
+    Writer::Owner {
+        force_after_conflict: false,
+    }
+}
+
+fn is_terminal(asker: &str) -> bool {
+    asker.starts_with("terminal:")
 }
 
 fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute_batch(SCHEMA).map_err(unavailable)
 }
 
-fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
-    Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(unavailable)
+fn immediate(db: &Connection) -> Result<Transaction<'_>, EngineError> {
+    Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)
 }
 
 /// Checks one plain text: trimmed, not empty, at most `max` bytes, no control characters
@@ -899,9 +1096,24 @@ fn plain(text: &str, max: usize, lines: bool) -> Option<String> {
     (!text.is_empty() && text.len() <= max && text.chars().all(allowed)).then(|| text.to_owned())
 }
 
-/// Joins a text's words with single spaces, for one-line notices and quotes.
+/// Joins a text's words with single spaces, for one-line quotes.
 fn flat(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Starts a label with a capital letter for the start of a notice.
+fn capital(label: &str) -> String {
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Converts an id the engine wrote back into its SQLite column; an id past `i64::MAX`
+/// names no row.
+fn column(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn unavailable<E>(_: E) -> EngineError {

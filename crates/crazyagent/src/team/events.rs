@@ -214,24 +214,32 @@ pub enum RuleLevel {
     Agent,
 }
 
-/// Why the owner gets an app notification: the master escalated an owner-only decision, or
-/// auto-wake stopped at its hourly cap.
+/// Why the owner gets an app notification: the master escalated an owner-only decision,
+/// auto-wake stopped at its hourly cap, the team queue was full, or someone asked the owner
+/// a question that now waits in the Questions view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     Escalation,
     WakePaused,
     QueueFull,
+    Question,
 }
 
 impl NotificationKind {
-    const ALL: [Self; 3] = [Self::Escalation, Self::WakePaused, Self::QueueFull];
+    const ALL: [Self; 4] = [
+        Self::Escalation,
+        Self::WakePaused,
+        Self::QueueFull,
+        Self::Question,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::Escalation => "escalation",
             Self::WakePaused => "wake_paused",
             Self::QueueFull => "queue_full",
+            Self::Question => "question",
         }
     }
 
