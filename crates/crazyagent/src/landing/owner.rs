@@ -234,7 +234,12 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
-    shared(&record.repository)?.run(&["update-ref", "-d", &pending_ref(&record.id)])?;
+    flow::set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &pending_ref(&record.id),
+        None,
+    )?;
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
 }
@@ -367,8 +372,8 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let (agent, head) = flow::agent(&record)?;
-    if head.commit(&agent)? != record.head || !flow::holds_only(&agent, &record.head)? {
+    let agent = flow::agent(db, &record)?;
+    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
         return Err(failure("changes_agent_busy"));
     }
     let git_dir = repository.join(".git");
@@ -391,12 +396,12 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let stats = diff::stats(&owner, &record.base, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
-    owner.run(&["update-ref", &pending_ref(id), &merged])?;
+    flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });
     store::save(db, &record)?;
-    flow::reset_agent(&agent, &head, &merged)?;
+    flow::reset_agent(&agent, &merged)?;
     record.intent = None;
     store::save(db, &record)
 }
@@ -476,11 +481,18 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             }
         }
         Some(Intent::Reset { target }) => {
-            let (agent, head) = flow::agent(record)?;
-            let current = head.commit(&agent)?;
-            let reset = flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
-            if reset {
-                flow::reset_agent(&agent, &head, &target)?;
+            let agent = match flow::agent(db, record) {
+                Err(refused) if refused.0 == "changes_workspace_invalid" => None,
+                opened => Some(opened?),
+            };
+            let mut reset = false;
+            if let Some(agent) = &agent
+                && let Ok(current) = agent.head()
+                && (flow::holds_only(&agent.repo, &target)?
+                    || flow::holds_only(&agent.repo, &current)?)
+            {
+                flow::reset_agent(agent, &target)?;
+                reset = true;
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };

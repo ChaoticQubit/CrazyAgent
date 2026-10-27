@@ -22,8 +22,9 @@ thread_local! {
 
 /// The settings every engine git call carries on top of the research runner's
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
-/// case-folding path checks on, no signing and no untracked or split index caches.
-const ENGINE_SETTINGS: [&str; 16] = [
+/// case-folding path checks on, no signing, no untracked or split index caches and no
+/// reflog created for a ref update.
+const ENGINE_SETTINGS: [&str; 18] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -40,6 +41,8 @@ const ENGINE_SETTINGS: [&str; 16] = [
     "core.untrackedCache=false",
     "-c",
     "core.splitIndex=false",
+    "-c",
+    "core.logAllRefUpdates=false",
 ];
 
 pub(super) fn failure(code: &str) -> EngineError {

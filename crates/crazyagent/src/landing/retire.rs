@@ -1,5 +1,6 @@
-use super::flow::{check_places, hold, holds_only, shared};
-use super::git::{Repo, failure};
+use super::AgentKind;
+use super::flow::{check_places, hold, holds_only, open_agent, shared};
+use super::git::failure;
 use super::store;
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
@@ -44,13 +45,22 @@ pub(super) fn blocker(
     if check_places(repository, worktree, git_dir).is_err() {
         return Ok(Some("cleanup_worktree_invalid"));
     }
-    let Ok(head) = super::flow::agent_head(worktree, git_dir) else {
-        return Ok(Some("cleanup_worktree_invalid"));
+    let agent = match open_agent(db, AgentKind::Sub, repository, worktree, git_dir) {
+        Err(refused) if refused.0 == "changes_workspace_invalid" => {
+            return Ok(Some("cleanup_worktree_invalid"));
+        }
+        opened => opened?,
     };
-    let repo = Repo::open(git_dir, Some(worktree))?;
-    match (head.commit(&repo).ok(), store::base_of(db, text)?) {
+    let head = match agent.head() {
+        Ok(head) => Some(head),
+        Err(refused) if refused.0 == "changes_workspace_invalid" => {
+            return Ok(Some("cleanup_worktree_invalid"));
+        }
+        Err(_) => None,
+    };
+    match (head, store::base_of(db, text)?) {
         (Some(head), Some(base)) if head == base => {
-            Ok((!holds_only(&repo, &head)?).then_some("cleanup_worktree_dirty"))
+            Ok((!holds_only(&agent.repo, &head)?).then_some("cleanup_worktree_dirty"))
         }
         _ => Ok(Some("cleanup_commits_unlanded")),
     }
