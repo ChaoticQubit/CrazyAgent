@@ -127,6 +127,8 @@ fn team() -> TeamStatus {
         project_id: project(),
         keep_warm: false,
         paused: false,
+        live_master: None,
+        live_problem: None,
         min_agents: 1,
         max_agents: 4,
         harnesses: vec![

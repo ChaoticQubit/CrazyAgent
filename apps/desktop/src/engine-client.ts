@@ -719,6 +719,8 @@ export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
   paused: boolean;
+  live_master?: boolean | null;
+  live_problem?: string | null;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];

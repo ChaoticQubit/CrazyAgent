@@ -810,14 +810,44 @@ fn master_view(width: u16, height: u16) -> Shell {
     Shell::with(ctx, screen)
 }
 
-fn live_master_change(request: &Request) -> bool {
+fn live_master_change(request: &Request, turned: bool) -> bool {
     matches!(
         request,
         Request::Setup(crate::project_setup::SetupQuery::TeamChange {
-            action: crate::team::TeamAction::LiveMaster { project_id, on: true },
+            action: crate::team::TeamAction::LiveMaster { project_id, on },
             ..
-        }) if *project_id == project()
+        }) if *project_id == project() && *on == turned
     )
+}
+
+fn switch_read(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Setup(crate::project_setup::SetupQuery::Team { project: asked }) if *asked == project()
+    )
+}
+
+fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
+    let status = crate::team::TeamStatus {
+        project_id: project(),
+        keep_warm: false,
+        paused: false,
+        live_master: on,
+        live_problem: problem.map(str::to_owned),
+        min_agents: 0,
+        max_agents: 1,
+        harnesses: Vec::new(),
+        agents: Vec::new(),
+        tasks: Vec::new(),
+        messages: Vec::new(),
+        plan: Vec::new(),
+    };
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::Team { project: project() },
+            result: Ok(crate::project_setup::SetupView::Team(Box::new(status))),
+        },
+    ))))
 }
 
 #[test]
@@ -825,16 +855,32 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     let mut shell = master_view(80, 24);
     let sent = requests(&mut shell);
     assert_eq!(sent.len(), 2, "{sent:?}");
-    assert!(live_master_change(&sent[0]), "{sent:?}");
+    assert!(switch_read(&sent[0]), "{sent:?}");
     assert!(matches!(&sent[1], Request::TeamGraph { project: asked } if *asked == project()));
+    shell.arrive(switch(None, None));
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        live_master_change(&sent[0], true),
+        "a switch never set turns on at the first open: {sent:?}"
+    );
+    shell.arrive(switch(None, None));
+    assert!(requests(&mut shell).is_empty(), "it turns on once");
     let rows = render(&mut shell);
     assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!("┌─ Master {}┐", "─".repeat(65))
+        format!(
+            "{:<58}s Stop live master",
+            "Live master on. It starts when you open this tab."
+        )
     );
     assert_eq!(
         chars(&rows[3], 2, 78),
+        format!("┌─ Master {}┐", "─".repeat(65))
+    );
+    assert_eq!(
+        chars(&rows[4], 2, 78),
         format!(
             "│{:<74}│",
             "Starting the master's terminal. It opens once the master signs in and"
@@ -850,7 +896,7 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     assert!(matches!(&sent[0], Request::TerminalAttach { agent } if agent.as_str() == "team-1"));
     assert!(matches!(
         &sent[1],
-        Request::TerminalResize { agent, cols: 74, rows: 18 } if agent.as_str() == "team-1"
+        Request::TerminalResize { agent, cols: 74, rows: 17 } if agent.as_str() == "team-1"
     ));
 
     shell.refresh();
@@ -859,15 +905,20 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
         result: Ok(graph()),
     });
     let sent = requests(&mut shell);
-    assert_eq!(sent.len(), 1, "only the graph is read again: {sent:?}");
-    assert!(matches!(&sent[0], Request::TeamGraph { .. }));
+    assert_eq!(
+        sent.len(),
+        2,
+        "only the switch and the graph are read again: {sent:?}"
+    );
+    assert!(switch_read(&sent[0]), "{sent:?}");
+    assert!(matches!(&sent[1], Request::TeamGraph { .. }));
 
     shell.arrive(Arrival::Terminal {
         agent: terminal("team-1"),
         frame: TerminalFrame::Attached {
             agent_id: terminal("team-1"),
             cols: 74,
-            rows: 18,
+            rows: 17,
         },
     });
     shell.arrive(Arrival::Terminal {
@@ -877,12 +928,8 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
         },
     });
     let rows = render(&mut shell);
-    assert_eq!(chars(&rows[3], 3, 77), format!("{:<74}", "> what next?"));
-    assert!(
-        rows[23].contains("Ctrl-] Earlier conversation"),
-        "{}",
-        rows[23]
-    );
+    assert_eq!(chars(&rows[4], 3, 77), format!("{:<74}", "> what next?"));
+    assert!(rows[23].contains("Ctrl-] Leave terminal"), "{}", rows[23]);
     assert!(rows[23].contains("Ctrl-J New line"), "{}", rows[23]);
 
     for (key, bytes) in [
@@ -898,16 +945,101 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     }
 
     shell.key(LEADER);
-    let sent = requests(&mut shell);
     assert!(
-        matches!(sent.as_slice(), [Request::TerminalDetach { agent }] if agent.as_str() == "team-1"),
-        "{sent:?}"
+        requests(&mut shell).is_empty(),
+        "Ctrl-] leaves the terminal open"
+    );
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("s Stop live master"), "{}", rows[23]);
+    assert!(
+        rows[23].contains("Esc Earlier conversation"),
+        "{}",
+        rows[23]
     );
     shell.key(Key::Char('z'));
     assert!(
         requests(&mut shell)
             .iter()
             .all(|sent| input(sent).is_none())
+    );
+    shell.key(Key::Esc);
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [Request::TerminalDetach { agent }] if agent.as_str() == "team-1"),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn the_master_view_header_stops_and_starts_the_live_master_and_says_why_it_stopped() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a switch already on is not turned on again"
+    );
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(LEADER);
+    shell.key(Key::Char('s'));
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(matches!(&sent[0], Request::TerminalDetach { agent } if agent.as_str() == "team-1"));
+    assert!(live_master_change(&sent[1], false), "{sent:?}");
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!("{:<57}s Start live master", "Live master stopped.")
+    );
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "The live master is stopped. Its terminal opens again once you start it."
+        )
+    );
+    assert_eq!(
+        chars(&rows[5], 2, 78),
+        format!("│{:<74}│", "Press s to start it.")
+    );
+    assert!(rows[23].contains("s Start live master"), "{}", rows[23]);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a stopped master's terminal is not opened"
+    );
+
+    let mut guarded = master_view(80, 24);
+    requests(&mut guarded);
+    let why = "The live master could not start: no signed-in account.";
+    guarded.arrive(switch(Some(false), Some(why)));
+    assert!(
+        requests(&mut guarded).is_empty(),
+        "a switch turned off is not turned on by opening the view"
+    );
+    let rows = render(&mut guarded);
+    assert_eq!(chars(&rows[4], 2, 78), format!("│{why:<74}│"));
+    assert_eq!(
+        chars(&rows[5], 2, 78),
+        format!("│{:<74}│", "Press s to start it.")
+    );
+    guarded.key(Key::Char('s'));
+    let sent = requests(&mut guarded);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(live_master_change(&sent[0], true), "{sent:?}");
+    let rows = render(&mut guarded);
+    assert!(rows[2].contains("Live master on."), "{}", rows[2]);
+    assert!(
+        rows[4].contains("Starting the master's terminal."),
+        "{}",
+        rows[4]
     );
 }
 
@@ -946,11 +1078,11 @@ fn the_master_view_follows_the_master_to_its_new_terminal_and_says_when_it_canno
     )));
     let rows = render(&mut refused);
     assert_eq!(
-        chars(&rows[3], 2, 78),
+        chars(&rows[4], 2, 78),
         format!("│{:<74}│", "The master terminal could not start.")
     );
     assert_eq!(
-        chars(&rows[4], 2, 78),
+        chars(&rows[5], 2, 78),
         format!(
             "│{:<74}│",
             "This master harness has no terminal app. Its conversation stays on the"
@@ -977,6 +1109,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         project_id: project(),
         keep_warm: false,
         paused: false,
+        live_master: None,
+        live_problem: None,
         min_agents: 1,
         max_agents: 5,
         harnesses: vec![harness(AgentRole::Master, 1), harness(AgentRole::Sub, 4)],

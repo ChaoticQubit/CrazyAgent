@@ -178,6 +178,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 
 .pj-master-live { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; min-width: 0; }
 .pj-master-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.pj-master-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pj-master-live > .tg-terminal { flex: 1; min-height: 0; }
 .pj-master-live .tg-terminal-screen { min-height: 160px; }
 .pj-master-live > .pj-convo { flex: 1; height: auto; min-height: 0; }

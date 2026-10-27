@@ -107,6 +107,53 @@ test("Earlier conversation opens the old engine-driven conversation read-only in
   assert.equal(seen.back.conversation, false);
 });
 
+test("the live master header offers Stop live master and says the master starts when the tab opens", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountView("running")');
+    const running = await evaluate("Fixture.shown()");
+    const stopped = await evaluate('Fixture.click("Stop live master")');
+    return { running, stopped, switched: await evaluate("Fixture.switchedTo()") };
+  });
+  assert.ok(seen.running.buttons.includes("Stop live master"), seen.running.buttons.join(", "));
+  assert.ok(!seen.running.buttons.includes("Start live master"), seen.running.buttons.join(", "));
+  assert.match(seen.running.text, /Live master starts when you open this tab\./);
+  assert.equal(seen.stopped, true);
+  assert.deepEqual(seen.switched, [false]);
+});
+
+test("a stopped live master shows why it stopped and offers Start live master", async () => {
+  const why = "The live master could not start: no signed-in account.";
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("stopped", ${JSON.stringify(why)})`);
+    const guarded = await evaluate("Fixture.shown()");
+    const started = await evaluate('Fixture.click("Start live master")');
+    const switched = await evaluate("Fixture.switchedTo()");
+    await evaluate('Fixture.mountView("stopped")');
+    return { guarded, started, switched, owner: await evaluate("Fixture.shown()") };
+  });
+  assert.equal(seen.guarded.terminal, false);
+  assert.ok(seen.guarded.text.includes(why), seen.guarded.text);
+  assert.ok(seen.guarded.buttons.includes("Start live master"), seen.guarded.buttons.join(", "));
+  assert.ok(!seen.guarded.buttons.includes("Stop live master"), seen.guarded.buttons.join(", "));
+  assert.doesNotMatch(seen.guarded.text, /starts when you open this tab/);
+  assert.ok(seen.guarded.buttons.includes("Earlier conversation"), "the earlier conversation stays reachable");
+  assert.equal(seen.started, true);
+  assert.deepEqual(seen.switched, [true]);
+  assert.match(seen.owner.text, /The live master is stopped\. Its terminal opens again once you start it\./);
+});
+
+test("the live master switch is read from the team status, and a switch never set reads as null", async () => {
+  const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
+  const status = (patch) => ({ kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], ...patch } });
+  assert.equal(liveSwitch(undefined, "alpha"), undefined, "not read yet");
+  assert.deepEqual(liveSwitch(status({}), "alpha"), { on: null, problem: null }, "an engine without the field reads as never set");
+  assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null });
+  assert.deepEqual(liveSwitch(status({ live_master: true, live_problem: null }), "alpha"), { on: true, problem: null });
+  assert.deepEqual(liveSwitch(status({ live_master: false, live_problem: "No account." }), "alpha"), { on: false, problem: "No account." });
+  assert.deepEqual(liveSwitch({ kind: "error", code: "engine_unavailable" }, "alpha"), { on: null, problem: null });
+  assert.equal(liveSwitch(status({ live_master: true }), "beta"), undefined, "another project's read is not this switch");
+});
+
 test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountArea("rcli")');

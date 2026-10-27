@@ -12,6 +12,7 @@ import { terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel
 let root = null;
 let terminal = null;
 export const typed = [];
+const switched = [];
 
 function page() {
   root?.unmount();
@@ -19,6 +20,7 @@ function page() {
   terminal?.dispose();
   terminal = null;
   typed.length = 0;
+  switched.length = 0;
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
     const style = document.createElement("style");
@@ -53,15 +55,22 @@ export function mountArea(master) {
 }
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
- * running before the terminal opens, starting, or refused with an engine code. */
+ * running before the terminal opens, starting, refused with an engine code, or stopped with
+ * the engine's reason when the code is given. */
 export function mountView(state, code = "") {
   const panel = page();
   const live = state === "running" ? { kind: "running", node }
     : state === "waiting" ? { kind: "running", node: null }
     : state === "refused" ? { kind: "refused", code, copy: "The engine refused." }
+    : state === "stopped" ? { kind: "stopped", problem: code || null }
     : { kind: state };
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex"), harness: "codex", live, onRetry: () => {} })));
+  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex"), harness: "codex", live, onSwitch: (on) => switched.push(on) })));
+}
+
+/** The switch changes the view asked for, in order. */
+export function switchedTo() {
+  return [...switched];
 }
 
 /** Clicks the button with this exact text and lets React render. */
