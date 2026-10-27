@@ -1378,6 +1378,95 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
     );
 }
 
+/// Only the events that go into a wake are read in full and named: an event past the wake's
+/// limit, and every queued event while the hourly cap holds, is never named, so an agent whose
+/// kept name cannot be read stops neither the wake before it nor the pause.
+#[test]
+fn only_the_events_in_a_wake_are_named_and_none_while_the_hourly_cap_holds() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let bob = fixture.agent(PROJECT, "sub", "codex", "working");
+    for step in 1..=EVENTS_PER_WAKE_MAX {
+        record(
+            connection,
+            &project(),
+            ada,
+            None,
+            EventKind::Finished,
+            &format!("Step {step} done."),
+            i64::try_from(step).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    }
+    record(
+        connection,
+        &project(),
+        bob,
+        None,
+        EventKind::Question,
+        "Go?",
+        100,
+    )
+    .unwrap()
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,X'00',NULL)",
+            params![bob, PROJECT],
+        )
+        .unwrap();
+    assert!(
+        label(connection, bob).is_err(),
+        "bob's kept name cannot be read"
+    );
+
+    let tx = immediate(connection).unwrap();
+    let wake = due(&tx, &project(), 200)
+        .unwrap()
+        .expect("ada's events wake the master");
+    assert_eq!(wake.events.len(), EVENTS_PER_WAKE_MAX);
+    assert!(!wake.asks, "bob's question waits for the next wake");
+    assert!(
+        wake.text
+            .ends_with(&format!("finished: Step {EVENTS_PER_WAKE_MAX} done."))
+    );
+    woke(&tx, &wake, false, 200).unwrap();
+    tx.commit().unwrap();
+
+    let rule = WakeRule {
+        hourly_cap: 1,
+        ..WakeRule::default()
+    };
+    set_rule(
+        connection,
+        &RuleTarget::Project {
+            project_id: project(),
+        },
+        Some(&rule),
+    )
+    .unwrap()
+    .unwrap();
+    for at in [300, 301] {
+        let tx = immediate(connection).unwrap();
+        assert!(
+            due(&tx, &project(), at).unwrap().is_none(),
+            "the cap holds bob's question"
+        );
+        tx.commit().unwrap();
+    }
+    assert_eq!(queued_kinds(connection), [(bob, EventKind::Question)]);
+    let told = notifications(connection, Some(&project()), 10).unwrap();
+    assert_eq!(told.len(), 1, "the owner hears of the pause once");
+    assert_eq!(told[0].kind, NotificationKind::WakePaused);
+    assert!(
+        told[0]
+            .text
+            .contains("project team-events paused after 1 wakes")
+    );
+}
+
 #[test]
 fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
     let fixture = Fixture::new();

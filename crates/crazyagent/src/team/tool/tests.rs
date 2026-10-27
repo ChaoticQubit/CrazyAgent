@@ -438,6 +438,83 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
 }
 
 #[test]
+fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let id = "5".repeat(32);
+    let stale = "6".repeat(32);
+    let old = std::time::SystemTime::now() - REPLY_STALE - std::time::Duration::from_secs(60);
+    let outside = |name: &str| {
+        let folder = base.join(name);
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(
+            folder.join(format!("{id}{CALL_SUFFIX}")),
+            b"{\"tool\":\"status\"}\n",
+        )
+        .unwrap();
+        let reply = folder.join(format!("{stale}{REPLY_SUFFIX}"));
+        std::fs::write(&reply, b"{}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&reply)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        folder
+    };
+    let untouched = |folder: &Path| {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                format!("{id}{CALL_SUFFIX}"),
+                format!("{stale}{REPLY_SUFFIX}")
+            ]
+        );
+    };
+    let tmp = base.join("agent").join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mailbox = tmp.join(MAILBOX_FOLDER);
+
+    let swapped = outside("swapped-mailbox");
+    symlink(&swapped, &mailbox).unwrap();
+    assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
+    assert!(answer_call(&mailbox, &id, "Taken.", false).is_err());
+    untouched(&swapped);
+
+    std::fs::remove_file(&mailbox).unwrap();
+    std::fs::remove_dir(&tmp).unwrap();
+    let held = base.join("swapped-tmp");
+    std::fs::create_dir(&held).unwrap();
+    let inner = outside(format!("swapped-tmp/{MAILBOX_FOLDER}").as_str());
+    symlink(&held, &tmp).unwrap();
+    assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
+    assert!(answer_call(&mailbox, &id, "Taken.", false).is_err());
+    untouched(&inner);
+
+    std::fs::remove_file(&tmp).unwrap();
+    std::fs::create_dir(&tmp).unwrap();
+    std::fs::rename(&inner, &mailbox).unwrap();
+    assert_eq!(
+        take_calls(&mailbox, CALLS_PER_TICK_MAX),
+        vec![(id.clone(), Some(Call::Status))]
+    );
+    assert!(
+        !mailbox.join(format!("{stale}{REPLY_SUFFIX}")).exists(),
+        "the real mailbox's stale answer is removed"
+    );
+    answer_call(&mailbox, &id, "Taken.", false).unwrap();
+    assert_eq!(
+        read_reply(&mailbox.join(format!("{id}{REPLY_SUFFIX}"))),
+        Some(("Taken.".into(), false))
+    );
+}
+
+#[test]
 fn the_engine_never_takes_a_call_its_server_is_still_writing() {
     let directory = tempfile::tempdir().unwrap();
     let mailbox = directory

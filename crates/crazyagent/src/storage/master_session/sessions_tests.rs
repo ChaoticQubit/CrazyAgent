@@ -786,7 +786,10 @@ fn git(folder: &Path, args: &[&str]) -> String {
                 "user.email=session@test.invalid",
             ])
             .args(args)
-            .current_dir(folder),
+            .current_dir(folder)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
     )
     .unwrap();
     assert!(

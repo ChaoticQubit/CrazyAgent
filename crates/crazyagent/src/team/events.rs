@@ -1233,8 +1233,9 @@ const CLOSE_BRACKETS: [char; 16] = [
 
 /// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
 /// and tortoise shell ones among them, into parentheses, so agent text can never show a
-/// `[owner]` or `[team]` tag to the master. Takes the text. Returns it with them replaced.
-fn plain_brackets(text: &str) -> String {
+/// `[owner]` or `[team]` tag to the master; sub-agent results use it too. Takes the text.
+/// Returns it with them replaced.
+pub(super) fn plain_brackets(text: &str) -> String {
     text.chars()
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
@@ -1584,8 +1585,9 @@ fn pause(
 /// Picks the events that wake the master next, oldest first, under each agent's wake rule:
 /// an event whose kind is off is muted; at the project's hourly cap, or an agent's own cap,
 /// those events wait and the owner is notified once per pause. At most `EVENTS_PER_WAKE_MAX`
-/// events and `WAKE_BYTES_MAX` bytes go in one wake. Takes the transaction, the project and
-/// the time. Returns the wake, or none when nothing may wake the master now.
+/// events and `WAKE_BYTES_MAX` bytes go in one wake, and only those are read in full and
+/// named. Takes the transaction, the project and the time. Returns the wake, or none when
+/// nothing may wake the master now.
 pub fn due(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -1597,15 +1599,23 @@ pub fn due(
         params![project.as_str(), since],
     )
     .map_err(error)?;
-    let queued: Vec<TeamEvent> = {
+    let queued: Vec<(i64, i64, EventKind)> = {
         let mut statement = tx
-            .prepare(&format!(
-                "SELECT {EVENT_COLUMNS} FROM team_events WHERE project=?1 AND state='queued' ORDER BY id LIMIT ?2"
-            ))
+            .prepare(
+                "SELECT id,agent,kind FROM team_events WHERE project=?1 AND state='queued' ORDER BY id LIMIT ?2",
+            )
             .map_err(error)?;
         statement
             .query_map(params![project.as_str(), EVENTS_QUEUED_MAX], |row| {
-                event_row(tx, row)
+                let kind: String = row.get(2)?;
+                let kind = EventKind::parse(&kind).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        2,
+                        "kind".into(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                Ok((row.get(0)?, row.get(1)?, kind))
             })
             .map_err(error)?
             .collect::<Result<_, _>>()
@@ -1616,16 +1626,16 @@ pub fn due(
     }
     let mut rules: BTreeMap<i64, (WakeRule, RuleLevel)> = BTreeMap::new();
     let mut wanted = Vec::new();
-    for event in queued {
-        if let Entry::Vacant(slot) = rules.entry(event.agent) {
-            slot.insert(rule(tx, Some(project), Some(event.agent))?);
+    for (id, agent, kind) in queued {
+        if let Entry::Vacant(slot) = rules.entry(agent) {
+            slot.insert(rule(tx, Some(project), Some(agent))?);
         }
-        if rules[&event.agent].0.wakes(event.kind) {
-            wanted.push(event);
+        if rules[&agent].0.wakes(kind) {
+            wanted.push((id, agent));
         } else {
             tx.execute(
                 "UPDATE team_events SET state='muted' WHERE id=?1 AND state='queued'",
-                [event.id],
+                [id],
             )
             .map_err(error)?;
         }
@@ -1663,14 +1673,23 @@ pub fn due(
             capped.insert(*agent);
         }
     }
+    let mut full = tx
+        .prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM team_events WHERE id=?1"
+        ))
+        .map_err(error)?;
     let mut events = Vec::new();
     let mut text = String::new();
     let mut asks = false;
-    for event in wanted.iter().filter(|event| !capped.contains(&event.agent)) {
-        let next = line(event);
-        if events.len() >= EVENTS_PER_WAKE_MAX
-            || (!text.is_empty() && text.len() + 1 + next.len() > WAKE_BYTES_MAX)
-        {
+    for (id, _) in wanted.iter().filter(|(_, agent)| !capped.contains(agent)) {
+        if events.len() >= EVENTS_PER_WAKE_MAX {
+            break;
+        }
+        let event = full
+            .query_row([id], |row| event_row(tx, row))
+            .map_err(error)?;
+        let next = line(&event);
+        if !text.is_empty() && text.len() + 1 + next.len() > WAKE_BYTES_MAX {
             break;
         }
         if !text.is_empty() {

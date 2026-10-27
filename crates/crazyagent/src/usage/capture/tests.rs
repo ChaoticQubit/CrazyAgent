@@ -781,3 +781,60 @@ fn transcript_limits_stay_within_their_window_below_the_owner_and_a_fresh_poll()
     assert_eq!(advisory.five_hour.unwrap().used_percent, 90.0);
     assert_eq!(advisory.source, Some(LimitSource::Transcript));
 }
+
+fn listed(db: &Connection, sql: &str) -> Vec<String> {
+    let mut statement = db.prepare(sql).unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
+    let (_root, db) = store();
+    let homes = tempfile::tempdir().unwrap();
+    let gone = homes.path().join("run");
+    let kept = homes.path().join("run-2");
+    for home in [&gone, &kept] {
+        append(
+            &home.join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-r.jsonl"),
+            &codex_count(400, 100, 20),
+        );
+        register_run(&db, home, &unattributed("codex"), NOW).unwrap();
+    }
+    let counted = scan_runs(&db, |_, _| None, NOW + 1).unwrap();
+    assert_eq!(counted.input, 600);
+    assert_eq!(
+        listed(&db, "SELECT path FROM usage_files ORDER BY path").len(),
+        2
+    );
+    let tokens = listed(&db, "SELECT session FROM usage_tokens ORDER BY session");
+    std::fs::remove_dir_all(&gone).unwrap();
+
+    let later = NOW + RUN_SCAN_MS + 1;
+    assert!(scan_runs(&db, |_, _| None, later).unwrap().is_empty());
+    assert_eq!(
+        listed(&db, "SELECT home FROM usage_runs"),
+        vec![kept.to_string_lossy().into_owned()],
+        "a finished run whose home is gone is forgotten; one whose home stays is kept"
+    );
+    let files = listed(&db, "SELECT path FROM usage_files");
+    assert_eq!(files.len(), 1);
+    assert!(
+        files[0].starts_with(&format!("{}/", kept.to_string_lossy())),
+        "only the gone home's records are forgotten, not a sibling's sharing its name: {files:?}"
+    );
+    assert_eq!(
+        listed(&db, "SELECT session FROM usage_tokens ORDER BY session"),
+        tokens,
+        "counted tokens stay"
+    );
+
+    register_run(&db, &kept, &unattributed("codex"), later).unwrap();
+    assert!(
+        scan_runs(&db, |_, _| None, later + 1).unwrap().is_empty(),
+        "a kept home registered again never counts its records twice"
+    );
+}

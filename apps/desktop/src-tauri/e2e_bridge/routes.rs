@@ -1391,7 +1391,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_skill_import_scan" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.skill_import_scan().await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.skill_import_scan().await }.await;
             routed(result)
         }
         "desktop_import_skill" => {

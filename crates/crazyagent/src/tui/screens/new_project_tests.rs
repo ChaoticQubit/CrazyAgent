@@ -1,6 +1,6 @@
 use super::new_project::*;
 use crate::config::{EffectiveConfig, resolve_config_bytes};
-use crate::project_setup::{Platform, ResearchKind, TeamPlan, catalog};
+use crate::project_setup::{Platform, ResearchKind, TEAM_AGENTS_MAX, TeamPlan, catalog};
 use crate::protocol::CredentialRef;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeSet;
@@ -224,7 +224,10 @@ fn team_defaults_come_from_the_engine_and_owner_edits_survive_a_reload() {
         "RCLI never leads the default team"
     );
     assert!(fallback.sub_harnesses.is_empty());
-    assert_eq!((fallback.min_agents, fallback.max_agents), (1, 1));
+    assert_eq!(
+        (fallback.min_agents, fallback.max_agents),
+        (1, TEAM_AGENTS_MAX)
+    );
 }
 
 #[test]

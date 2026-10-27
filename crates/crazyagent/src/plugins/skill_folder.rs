@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const FILES_MAX: usize = 200;
 pub const BYTES_MAX: u64 = 8 * 1024 * 1024;
@@ -58,6 +58,15 @@ pub struct SkillMeta {
     pub bytes: u64,
     pub skipped: Vec<String>,
     pub skipped_total: usize,
+}
+
+/// One file a copy under the same rules would make: its path inside the skill folder, the
+/// file it is read from (a link's target inside the folder) and its size when checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedFile {
+    pub relative: PathBuf,
+    pub from: PathBuf,
+    pub bytes: u64,
 }
 
 /// Says whether a file or folder name looks private: a dotfile such as `.env`, a key or
@@ -143,6 +152,7 @@ struct Tally {
     entries: usize,
     skipped: Vec<String>,
     skipped_total: usize,
+    planned: Vec<PlannedFile>,
 }
 
 #[cfg(unix)]
@@ -183,6 +193,49 @@ pub fn copy_with(
     destination: &Path,
     rules: &Rules,
 ) -> Result<SkillMeta, &'static str> {
+    let (meta, planned) = walk(source, Some(destination), rules)?;
+    assert!(planned.is_empty());
+    Ok(meta)
+}
+
+/// Checks a skill folder in place under the given rules, reaching the verdict `copy_with`
+/// would, and writes nothing. Inputs: the source folder and the rules. Output: the skill's
+/// name, description, size and paths left out with each file a copy would make, or the
+/// rejection code a copy would give.
+#[cfg(unix)]
+pub fn check_with(
+    source: &Path,
+    rules: &Rules,
+) -> Result<(SkillMeta, Vec<PlannedFile>), &'static str> {
+    walk(source, None, rules)
+}
+
+/// Reads one file a check planned without following a link, refusing it when it is no
+/// longer a regular file of the checked size. Input: the planned file. Output: its bytes,
+/// or a plain rejection code.
+#[cfg(unix)]
+pub fn read_planned(file: &PlannedFile) -> Result<Vec<u8>, &'static str> {
+    let (input, metadata) = open(&file.from)?;
+    if metadata.len() != file.bytes {
+        return Err("skill_unreadable");
+    }
+    let mut bytes = Vec::new();
+    input
+        .take(file.bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "skill_unreadable")?;
+    if bytes.len() as u64 != file.bytes {
+        return Err("skill_unreadable");
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn walk(
+    source: &Path,
+    destination: Option<&Path>,
+    rules: &Rules,
+) -> Result<(SkillMeta, Vec<PlannedFile>), &'static str> {
     if !source.is_absolute() || source.as_os_str().len() > SOURCE_BYTES_MAX {
         return Err("skill_folder_not_found");
     }
@@ -193,26 +246,41 @@ pub fn copy_with(
     {
         return Err("skill_not_a_folder");
     }
-    if fs::symlink_metadata(destination).is_ok() {
-        return Err("skill_store_unavailable");
+    if let Some(destination) = destination {
+        if fs::symlink_metadata(destination).is_ok() {
+            return Err("skill_store_unavailable");
+        }
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(destination)
+            .map_err(|_| "skill_store_unavailable")?;
     }
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(destination)
-        .map_err(|_| "skill_store_unavailable")?;
     let mut tally = Tally {
         files: 0,
         bytes: 0,
         entries: 0,
         skipped: Vec::new(),
         skipped_total: 0,
+        planned: Vec::new(),
     };
     let result = copy_tree(&root, &root, destination, 0, rules, &mut tally).and_then(|()| {
-        let path = destination.join("SKILL.md");
-        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-            return Err("skill_missing_skill_md");
-        }
-        let text = fs::read_to_string(&path).map_err(|_| "skill_frontmatter_missing")?;
+        let text = match destination {
+            Some(destination) => {
+                let path = destination.join("SKILL.md");
+                if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+                    return Err("skill_missing_skill_md");
+                }
+                fs::read_to_string(&path).map_err(|_| "skill_frontmatter_missing")?
+            }
+            None => {
+                let file = tally
+                    .planned
+                    .iter()
+                    .find(|file| file.relative == Path::new("SKILL.md"))
+                    .ok_or("skill_missing_skill_md")?;
+                String::from_utf8(read_planned(file)?).map_err(|_| "skill_frontmatter_missing")?
+            }
+        };
         let (name, description) = frontmatter(&text)?;
         let mut skipped = tally.skipped.clone();
         skipped.sort();
@@ -225,12 +293,21 @@ pub fn copy_with(
             skipped_total: tally.skipped_total,
         })
     });
-    if result.is_err() {
+    if result.is_err()
+        && let Some(destination) = destination
+    {
         let _ = fs::remove_dir_all(destination);
     }
     assert!(tally.files <= FILES_MAX && tally.bytes <= rules.bytes_max);
     assert!(rules.skip_private || tally.skipped_total == 0);
-    result
+    match destination {
+        Some(_) => assert!(tally.planned.is_empty()),
+        None => assert!(
+            tally.planned.len() == tally.files
+                && tally.planned.iter().map(|file| file.bytes).sum::<u64>() == tally.bytes
+        ),
+    }
+    result.map(|meta| (meta, tally.planned))
 }
 
 /// Refuses to copy a skill folder where its owner-only 0700 and 0600 copies cannot be
@@ -251,11 +328,29 @@ pub fn copy_with(
     Err("skill_store_unavailable")
 }
 
+/// Refuses to check a skill folder where its owner-only copies cannot be made, as
+/// `copy_with` refuses. Takes the source and rules, both unused. Returns
+/// `skill_store_unavailable`.
+#[cfg(not(unix))]
+pub fn check_with(
+    _source: &Path,
+    _rules: &Rules,
+) -> Result<(SkillMeta, Vec<PlannedFile>), &'static str> {
+    Err("skill_store_unavailable")
+}
+
+/// Refuses to read a planned file where no check can plan one. Takes the planned file,
+/// unused. Returns `skill_store_unavailable`.
+#[cfg(not(unix))]
+pub fn read_planned(_file: &PlannedFile) -> Result<Vec<u8>, &'static str> {
+    Err("skill_store_unavailable")
+}
+
 #[cfg(unix)]
 fn copy_tree(
     root: &Path,
     from: &Path,
-    to: &Path,
+    to: Option<&Path>,
     depth: usize,
     rules: &Rules,
     tally: &mut Tally,
@@ -276,19 +371,21 @@ fn copy_tree(
             tally.skip(relative);
             continue;
         }
-        let target = to.join(&name);
+        let target = to.map(|to| to.join(&name));
         let kind = fs::symlink_metadata(&path).map_err(|_| "skill_unreadable")?;
         if kind.is_dir() {
             if depth + 1 > DEPTH_MAX {
                 return Err("skill_too_deep");
             }
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&target)
-                .map_err(|_| "skill_store_unavailable")?;
-            copy_tree(root, &path, &target, depth + 1, rules, tally)?;
+            if let Some(target) = &target {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(target)
+                    .map_err(|_| "skill_store_unavailable")?;
+            }
+            copy_tree(root, &path, target.as_deref(), depth + 1, rules, tally)?;
         } else if kind.is_file() {
-            copy_file(&path, &target, rules, tally)?;
+            copy_file(&path, target.as_deref(), relative, rules, tally)?;
         } else if kind.file_type().is_symlink() {
             let resolved = fs::canonicalize(&path).map_err(|_| "skill_link_outside")?;
             if !resolved.starts_with(root) {
@@ -304,7 +401,7 @@ fn copy_tree(
                 tally.skip(relative);
                 continue;
             }
-            copy_file(&resolved, &target, rules, tally)?;
+            copy_file(&resolved, target.as_deref(), relative, rules, tally)?;
         } else {
             return Err("skill_file_unsupported");
         }
@@ -313,7 +410,7 @@ fn copy_tree(
 }
 
 #[cfg(unix)]
-fn copy_file(from: &Path, to: &Path, rules: &Rules, tally: &mut Tally) -> Result<(), &'static str> {
+fn open(from: &Path) -> Result<(fs::File, fs::Metadata), &'static str> {
     let input = fs::File::from(
         rustix::fs::open(
             from,
@@ -326,6 +423,18 @@ fn copy_file(from: &Path, to: &Path, rules: &Rules, tally: &mut Tally) -> Result
     if !metadata.is_file() {
         return Err("skill_file_unsupported");
     }
+    Ok((input, metadata))
+}
+
+#[cfg(unix)]
+fn copy_file(
+    from: &Path,
+    to: Option<&Path>,
+    relative: &Path,
+    rules: &Rules,
+    tally: &mut Tally,
+) -> Result<(), &'static str> {
+    let (input, metadata) = open(from)?;
     if tally.files == FILES_MAX {
         return Err("skill_too_many_files");
     }
@@ -334,6 +443,15 @@ fn copy_file(from: &Path, to: &Path, rules: &Rules, tally: &mut Tally) -> Result
     if metadata.len() > room {
         return Err(rules.too_large);
     }
+    let Some(to) = to else {
+        tally.planned.push(PlannedFile {
+            relative: relative.to_path_buf(),
+            from: from.to_path_buf(),
+            bytes: metadata.len(),
+        });
+        tally.bytes += metadata.len();
+        return Ok(());
+    };
     let mode = if metadata.permissions().mode() & 0o100 != 0 {
         0o700
     } else {
@@ -654,5 +772,88 @@ mod tests {
             copy_with(&crowded, &root.path().join("store/c"), &IMPORTED).unwrap_err(),
             "skill_too_many_files"
         );
+    }
+
+    #[test]
+    fn a_check_in_place_reaches_the_copys_verdict_and_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("store")).unwrap();
+        let source = skill(root.path(), GOOD);
+        fs::write(source.join(".env"), "TOKEN=dummy").unwrap();
+        fs::write(source.join("notes.md"), "inside").unwrap();
+        symlink("notes.md", source.join("alias.md")).unwrap();
+        fs::create_dir(source.join(".git")).unwrap();
+        fs::write(source.join(".git/HEAD"), "ref").unwrap();
+        let heavy = skill(&root.path().join("h"), GOOD);
+        fs::write(
+            heavy.join("big.bin"),
+            vec![0u8; IMPORT_BYTES_MAX as usize + 1],
+        )
+        .unwrap();
+        let escaping = skill(&root.path().join("x"), GOOD);
+        fs::write(root.path().join("outside.md"), "secret").unwrap();
+        symlink(root.path().join("outside.md"), escaping.join("leak.md")).unwrap();
+        let empty = root.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        let unnamed = skill(&root.path().join("e"), "---\ndescription: d\n---\n");
+        let refusals = [
+            (&heavy, "skill_import_too_large"),
+            (&escaping, "skill_link_outside"),
+            (&empty, "skill_missing_skill_md"),
+            (&unnamed, "skill_name_invalid"),
+        ];
+        let before = snapshot(root.path());
+
+        let (meta, planned) = check_with(&source, &IMPORTED).unwrap();
+        for (folder, code) in refusals {
+            assert_eq!(
+                check_with(folder, &IMPORTED).unwrap_err(),
+                code,
+                "{folder:?}"
+            );
+        }
+        assert_eq!(snapshot(root.path()), before, "a check writes nothing");
+
+        let destination = root.path().join("store/release-notes");
+        assert_eq!(copy_with(&source, &destination, &IMPORTED).unwrap(), meta);
+        let mut checked: Vec<(String, Vec<u8>)> = planned
+            .iter()
+            .map(|file| {
+                (
+                    file.relative.display().to_string(),
+                    read_planned(file).unwrap(),
+                )
+            })
+            .collect();
+        checked.sort();
+        let copied: Vec<(String, Vec<u8>)> = snapshot(&destination)
+            .into_iter()
+            .filter(|(path, _)| destination.join(path).is_file())
+            .collect();
+        assert_eq!(checked, copied);
+        for (folder, code) in refusals {
+            assert_eq!(
+                copy_with(folder, &root.path().join("store/refused"), &IMPORTED).unwrap_err(),
+                code,
+                "{folder:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_planned_file_that_changed_since_the_check_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let source = skill(root.path(), GOOD);
+        let (_, planned) = check_with(&source, &IMPORTED).unwrap();
+        let skill_md = planned
+            .iter()
+            .find(|file| file.relative == Path::new("SKILL.md"))
+            .unwrap();
+        assert_eq!(read_planned(skill_md).unwrap(), GOOD.as_bytes());
+        fs::write(source.join("SKILL.md"), format!("{GOOD}More.\n")).unwrap();
+        assert_eq!(read_planned(skill_md).unwrap_err(), "skill_unreadable");
+        fs::remove_file(source.join("SKILL.md")).unwrap();
+        symlink("scripts/run.sh", source.join("SKILL.md")).unwrap();
+        assert_eq!(read_planned(skill_md).unwrap_err(), "skill_unreadable");
     }
 }

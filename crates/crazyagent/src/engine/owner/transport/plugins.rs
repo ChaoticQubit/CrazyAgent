@@ -10,7 +10,6 @@ const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
 const CHECK_FOLDER: &str = "mcp-checks";
-const IMPORT_FOLDER: &str = "skill-imports";
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
@@ -729,13 +728,10 @@ async fn handle(
                     None => break,
                 }
             }
-            let root = engine_root(authority)?;
-            let list = tokio::task::spawn_blocking(move || {
-                let scratch = crate::storage::plugins::store_folder(&root, &[IMPORT_FOLDER])?;
-                crate::skills::import::scan(&home, &added, &scratch)
-            })
-            .await
-            .map_err(|_| unknown())??;
+            let list =
+                tokio::task::spawn_blocking(move || crate::skills::import::scan(&home, &added))
+                    .await
+                    .map_err(|_| unknown())??;
             Reply::ImportScan { list }
         }
         Action::ImportSkill { folder, replace } => {

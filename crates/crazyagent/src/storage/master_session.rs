@@ -5944,7 +5944,7 @@ fallback_allowed = false
         );
         assert_eq!(case.result(close).await, OwnerResult::Applied);
         let (session, turns) = case.view().await;
-        assert_eq!(session.phase, MasterSessionPhase::Closed);
+        assert_eq!(session.phase, MasterSessionPhase::Parked);
         assert_eq!(session.current_turn, None);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].phase, MasterTurnPhase::Cancelled);

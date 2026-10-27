@@ -1,7 +1,8 @@
 #![cfg(unix)]
 
 use crazyagent_desktop::bridge::picker::{
-    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, Pick, chooser_command, read_reply, run_chooser,
+    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, PROJECT_FOLDER_SCRIPT, PROJECTS_HOME_SCRIPT,
+    Pick, chooser_command, read_reply, run_chooser,
 };
 use std::process::Command;
 use std::time::Duration;
@@ -82,6 +83,44 @@ fn the_chooser_scripts_are_fixed_text_that_only_ask_for_a_choice() {
     assert!(DOCUMENTS_SCRIPT.contains("with multiple selections allowed"));
 }
 
+#[test]
+fn each_folder_purpose_asks_for_its_own_folder_with_fixed_text() {
+    assert_eq!(FolderPurpose::Skill.script(), FOLDER_SCRIPT);
+    assert_eq!(FolderPurpose::Project.script(), PROJECT_FOLDER_SCRIPT);
+    assert_eq!(FolderPurpose::ProjectsHome.script(), PROJECTS_HOME_SCRIPT);
+    assert!(FOLDER_SCRIPT.contains("SKILL.md"));
+    for script in [PROJECT_FOLDER_SCRIPT, PROJECTS_HOME_SCRIPT] {
+        assert!(
+            !script.contains("skill") && !script.contains("SKILL.md"),
+            "adding a project never asks for a skill folder: {script}"
+        );
+    }
+    assert!(PROJECT_FOLDER_SCRIPT.contains("project folder to add"));
+    assert!(PROJECTS_HOME_SCRIPT.contains("holds your projects"));
+    for (index, purpose) in FolderPurpose::ALL.into_iter().enumerate() {
+        let script = purpose.script();
+        assert!(script.starts_with("POSIX path of (choose folder with prompt \""));
+        assert!(!script.contains("do shell script") && !script.contains("tell application"));
+        assert_eq!(script.matches('"').count(), 2, "one fixed prompt: {script}");
+        assert!(
+            FolderPurpose::ALL[..index]
+                .iter()
+                .all(|other| other.script() != script),
+            "each purpose has its own prompt"
+        );
+    }
+    let named = |text: &str| serde_json::from_str::<FolderPurpose>(text);
+    assert_eq!(named("\"skill\"").unwrap(), FolderPurpose::Skill);
+    assert_eq!(named("\"project\"").unwrap(), FolderPurpose::Project);
+    assert_eq!(
+        named("\"projects_home\"").unwrap(),
+        FolderPurpose::ProjectsHome
+    );
+    for unknown in ["\"documents\"", "\"Skill\"", "\"\"", "3", "null"] {
+        assert!(named(unknown).is_err(), "{unknown} names no chooser");
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_choosers_run_the_fixed_scripts_through_osascript() {
@@ -89,6 +128,10 @@ fn macos_choosers_run_the_fixed_scripts_through_osascript() {
         let command = chooser_command(script).unwrap();
         assert_eq!(command.get_program(), "/usr/bin/osascript");
         assert!(command.get_args().eq(["-e", script]));
+    }
+    for purpose in FolderPurpose::ALL {
+        let command = chooser_command(purpose.script()).unwrap();
+        assert!(command.get_args().eq(["-e", purpose.script()]));
     }
 }
 
@@ -116,6 +159,20 @@ fn linux_choosers_use_zenity_or_kdialog_from_a_fixed_folder() {
                 "installed {expected:?}, chooser {:?}",
                 got.map(|c| c.get_program().to_owned())
             ),
+        }
+    }
+    for purpose in FolderPurpose::ALL {
+        if let Ok(command) = chooser_command(purpose.script()) {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                args.iter()
+                    .any(|arg| arg == "--directory" || arg == "--getexistingdirectory")
+            );
+            let skill = args.iter().any(|arg| arg.contains("SKILL.md"));
+            assert_eq!(skill, purpose == FolderPurpose::Skill, "{args:?}");
         }
     }
     let crlf = read_reply(true, b"/home/owner/skills/\r\n", b"").unwrap();

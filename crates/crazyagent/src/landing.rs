@@ -320,12 +320,7 @@ pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, 
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
-        diff::page(
-            &flow::shared(&record.repository)?,
-            &record.base,
-            &record.head,
-            page,
-        )
+        diff::page(&record.repository, &record.base, &record.head, page)
     }
     #[cfg(not(unix))]
     {

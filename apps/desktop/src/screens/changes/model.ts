@@ -67,6 +67,45 @@ export function outcomeNote(set: ChangeSet): string | null {
   return null;
 }
 
+/** What the owner is reviewing of one change set: its id, the head its diff pages are read
+ * at and that Accept and Discard send, whether that head moved on since the owner opened
+ * it, and whether every page of the moved head was shown since. */
+export interface Review {
+  id: string;
+  head: string;
+  moved: boolean;
+  seenAll: boolean;
+}
+
+/** Starts or carries the owner's review as the list rereads: a different change set starts
+ * a fresh review, a new head on the same one marks it moved and unseen, anything else keeps
+ * the review as it is. Inputs: the review so far, or null, and the change set shown now.
+ * Output: the review, the same object when nothing changed. */
+export function reviewOf(previous: Review | null, set: ChangeSet): Review {
+  if (previous === null || previous.id !== set.id) return { id: set.id, head: set.head, moved: false, seenAll: false };
+  if (previous.head !== set.head) return { id: set.id, head: set.head, moved: true, seenAll: false };
+  return previous;
+}
+
+/** Records that the last diff page read at `head` was shown. Inputs: the review and the
+ * head that page was read at. Output: the review, unchanged for a page of another head. */
+export function lastPageSeen(review: Review, head: string): Review {
+  return review.head === head && !review.seenAll ? { ...review, seenAll: true } : review;
+}
+
+/** Whether Accept and Discard may act on what the owner reviewed: not after the change set
+ * moved on until every page of its new head was shown. Input: the review. Output: true when
+ * they may act. */
+export function reviewed(review: Review): boolean {
+  return !review.moved || review.seenAll;
+}
+
+/** The note shown while a change set moved on since the owner opened it and its new head is
+ * not yet read to the last page. Input: the review. Output: the note, or null. */
+export function movedNote(review: Review): string | null {
+  return reviewed(review) ? null : "These changes moved on since you opened them. Review them again: Accept and Discard come back once you reach the last page.";
+}
+
 /** The actions a change set's state allows now. Inputs: the change set and now in
  * milliseconds. Output: which of Accept, Discard, Ask agent to update and Restore apply. */
 export function actions(set: ChangeSet, now: number): ChangeActions {
