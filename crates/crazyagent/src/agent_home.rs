@@ -17,6 +17,57 @@ pub const PROCESS_BYTES_MAX: usize =
 
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
+/// The CrazyAgent default process the owner can seed the Process page with: the owner's
+/// working rules for every master and sub-agent, without machine-only tools.
+pub const DEFAULT_PROCESS: &str = "# CrazyAgent default process
+
+## Priorities
+
+1. Security of the codebase, its users and their data comes first, then performance, then testing. A lower priority never wins a tradeoff against a higher one.
+2. Prefer quality, simplicity, robustness and long-term maintainability over speed of delivery.
+
+## Work and branches
+
+- Work only in the worktree CrazyAgent gave you and keep each change focused on your task. Preserve work you did not make.
+- CrazyAgent owns branches and refs. Never create, switch, rename, delete or push a branch, and never rewrite history.
+- Commit with conventional messages, such as `feat: ...`, `fix: ...`, `test: ...` or `refactor: ...`. Never add a Co-Authored-By trailer or an agent name.
+
+## Building
+
+- Write the minimum code that works. First ask whether it needs to exist, then reuse what the codebase, the standard library or an installed dependency already has. No speculative abstractions, configuration or scaffolding.
+- Fix a bug at its root cause: reproduce it first and check every caller of the code you change.
+- Validate untrusted input with ordinary errors at trust boundaries. Use runtime assertions for internal invariants that should be impossible.
+- Never install tools or dependencies, change global configuration or reach a new service without asking the master.
+- Never edit generated files or CHANGELOG.md.
+
+## Tests
+
+- Test first: write the test for the missing behavior, run it and watch it fail for the intended reason, write the minimum code, then run it again until it passes.
+- Real tests only: no mocks, stubs or fabricated replies. Use the real functions, files, processes and databases; temporary files and synthetic input are fine.
+- Never skip, disable or weaken a test or an assertion to get a green result. A missing prerequisite is a blocker you report.
+- Run the tests for your change, not the whole suite, unless you are asked to.
+
+## Review and reporting
+
+- Before you finish, review your own diff once for correctness, edge cases, security and these rules, and fix what you find.
+- Report honestly: say what you ran and what it printed. Never claim a check passed that you did not run.
+
+## Code style
+
+- No comments in code, except a short docstring directly above a declaration saying what it does, its inputs and its outputs.
+- Never use an em dash; use \"-\".
+- Match the naming and idiom of the surrounding code.
+
+## Secrets
+
+- Never put a secret, token or credential in source, commands, environment, logs, commit messages or reports, and never read credential files.
+
+## Questions and escalation
+
+- A sub-agent asks the master when a product or design decision is unclear, rather than guessing.
+- The master answers its sub-agents and escalates to the owner only for security, destructive or irreversible actions, spending, and product or scope decisions.
+";
+
 /// A plain failure code from reading, saving or handing out the owner's instructions.
 /// It never carries the text itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,6 +231,25 @@ pub fn prepare(
     write_whole(home, name, text.as_bytes())
 }
 
+/// Reads the owner's own global Claude Code instructions, `<home>/.claude/CLAUDE.md`, for
+/// a preview on the owner's explicit request; a link is followed because the owner's own
+/// file often is one. Input: the owner's home. Output: the text, `process_import_missing`
+/// when there is no file, or a plain code when it is not plain text or too large.
+pub fn import_global(home: &Path) -> Result<String, AgentHomeError> {
+    let path = home.join(".claude").join("CLAUDE.md");
+    match fs::metadata(&path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+            Err(failure("process_import_missing"))
+        }
+        Err(_) => Err(failure("process_text_unreadable")),
+        Ok(metadata) if !metadata.is_file() => Err(failure("process_text_unsafe")),
+        Ok(_) => {
+            let file = File::open(&path).map_err(|_| failure("process_text_unreadable"))?;
+            read_text(file)
+        }
+    }
+}
+
 fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     let metadata = fs::symlink_metadata(folder).map_err(|_| failure("process_folder_missing"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -216,6 +286,10 @@ fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {
     if !held.is_file() || !same_file(&named, &held) {
         return Err(failure("process_text_unsafe"));
     }
+    read_text(file)
+}
+
+fn read_text(file: File) -> Result<String, AgentHomeError> {
     let mut bytes = Vec::new();
     file.take(TEXT_BYTES_MAX as u64 + 1)
         .read_to_end(&mut bytes)
