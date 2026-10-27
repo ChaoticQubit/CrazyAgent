@@ -1,8 +1,8 @@
-use super::diff;
+use super::diff::{self, plain};
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
-use super::{AcceptOutcome, ChangeSetId, ChangeState};
+use super::{AcceptOutcome, ChangeSetId, ChangeState, MESSAGE_BYTES_MAX};
 use crate::engine::EngineError;
 use rusqlite::Connection;
 use std::path::Path;
@@ -36,7 +36,10 @@ pub(super) enum Step {
 /// the owner's global config in their home. Runs only `git config --get`, which
 /// executes nothing. Inputs: the owner repository and home. Output: name and email,
 /// or `changes_owner_identity_missing`.
-fn owner_identity(repository: &Path, home: &Path) -> Result<(String, String), EngineError> {
+pub(super) fn owner_identity(
+    repository: &Path,
+    home: &Path,
+) -> Result<(String, String), EngineError> {
     let read = |key: &str| -> Result<String, EngineError> {
         let missing = || failure("changes_owner_identity_missing");
         let output = crate::spawn_gate::output(
@@ -236,19 +239,33 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     reset_if_quiet(db, record, &head, landed)
 }
 
+/// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
+/// `MESSAGE_BYTES_MAX` bytes and plain text. Input: the text. Output: the message, else
+/// `changes_message_invalid`.
+fn edited(text: &str) -> Result<String, EngineError> {
+    let message = text.replace("\r\n", "\n");
+    let message = message.trim();
+    if message.is_empty() || message.len() > MESSAGE_BYTES_MAX || plain(message) != message {
+        return Err(failure("changes_message_invalid"));
+    }
+    Ok(message.to_owned())
+}
+
 /// Lands a change set as one squash commit on the owner's checked-out branch: refuses
 /// an unusable checkout or a configured filter or merge driver, merges with
 /// merge-tree, makes the commit with the owner's identity, records the intent, writes
 /// the index and files with a two-tree read-tree and moves the branch by compare and
-/// swap. Inputs: the store, the owner's home, the change set, the reviewed head and
-/// where a test stops it. Output: the landed commit and branch, or the conflicts.
+/// swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
+/// owner's edited message and where a test stops it. Output: the landed commit and branch, or the conflicts.
 pub(super) fn accept(
     db: &Connection,
     home: &Path,
     id: &ChangeSetId,
     expected_head: &str,
+    message: Option<&str>,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
+    let edited = message.map(edited).transpose()?;
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
@@ -287,13 +304,9 @@ pub(super) fn accept(
         });
     }
     let identity = owner_identity(&repository, home)?;
-    let subject = if record.prompt_line.is_empty() {
-        format!("Changes from {}", flow::subject(&record.agent.label))
-    } else {
-        record.prompt_line.clone()
-    };
+    let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
-    let commit = owner.commit_tree(&tree, &[&tip], &format!("{subject}\n"), identity)?;
+    let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),
         old: tip.clone(),
@@ -432,8 +445,14 @@ pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
                 let current = agent
                     .commit_of("HEAD")?
                     .ok_or_else(|| failure("changes_git_failed"))?;
-                if flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)? {
+                let reset =
+                    flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
+                if reset {
                     flow::reset_agent(&agent, &target)?;
+                }
+                if !record.is_open() {
+                    let start = if reset { &target } else { &record.head };
+                    store::set_base(db, &record.worktree, start)?;
                 }
                 record.intent = None;
                 store::save(db, &record)?;

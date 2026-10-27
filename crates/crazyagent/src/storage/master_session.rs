@@ -159,6 +159,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) cwd: PathBuf,
     pub(crate) worktree_lease: RequestId,
     pub(crate) lease: WorktreeLease,
+    pub(crate) agent_project: crate::agent_home::AgentProject,
 }
 
 impl PreparedMasterTurn {
@@ -2331,6 +2332,8 @@ fn bundle(
                 .map_err(|problem| EngineError(problem.0))?
         }
     };
+    let agent_project = crate::launch_context::agent_project(tx, &session.project_id)
+        .map_err(|problem| EngineError(problem.0))?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: turn_message(tx, &session, turn)?,
@@ -2343,6 +2346,7 @@ fn bundle(
         cwd: PathBuf::from(&record.lease.path),
         worktree_lease: record.worktree_lease,
         lease: record.lease,
+        agent_project,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -5753,10 +5757,12 @@ fallback_allowed = false
             crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),
+                role: None,
             },
             crate::team::Delegation {
                 harness: Some("claude-code".into()),
                 prompt: "Check the tests".into(),
+                role: None,
             },
         ];
         case.reply_with("I handed the README to a sub-agent.", delegations, 2)
@@ -5807,6 +5813,7 @@ fallback_allowed = false
             vec![crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),
+                role: None,
             }],
             1,
         )

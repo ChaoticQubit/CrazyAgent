@@ -4,6 +4,7 @@ use super::launch::{
     TOOLS_ON_PATH, codex_configuration, failure, harness_id, validate,
 };
 use crate::launch_context::Installed;
+use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -221,20 +222,27 @@ pub fn command(
         .as_deref()
         .ok_or_else(|| failure("launch_sandbox_required"))?;
     let mut argv = vec![SANDBOX_EXEC.to_owned(), "-f".to_owned(), text(profile)?];
+    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let mut env = vec![
         ("HOME".to_owned(), home.clone()),
         (
             "PATH".to_owned(),
             if request.tools {
-                TOOLS_ON_PATH
+                toolchains::agent_path(&homes, TOOLS_ON_PATH)
             } else {
-                TOOLS_OFF_PATH
-            }
-            .to_owned(),
+                TOOLS_OFF_PATH.to_owned()
+            },
         ),
         ("LANG".to_owned(), LOCALE.to_owned()),
         ("LC_ALL".to_owned(), LOCALE.to_owned()),
     ];
+    if let Some(identity) = &request.git_identity {
+        env.extend(
+            identity
+                .variables()
+                .map(|(name, value)| (name.to_owned(), value.to_owned())),
+        );
+    }
     let executable = text(&request.executable)?;
     let transcript = match harness_id(request) {
         "codex" => {
@@ -287,6 +295,12 @@ pub fn command(
             Transcript::Unavailable
         }
     };
+    for (name, value) in toolchains::agent_env(request.account.home(), &homes) {
+        env.push((name.to_owned(), text(Path::new(&value))?));
+    }
+    if let Some(tmp) = toolchains::existing_tmp(request.account.home()) {
+        env.push(("TMPDIR".to_owned(), text(&tmp)?));
+    }
     let env = agent_env(&env)?;
     let built = InteractiveCommand {
         argv,
@@ -363,7 +377,9 @@ fn claude(
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let mut settings = serde_json::json!({
+        "attribution": {"commit": "", "pr": ""},
         "disableAllHooks": true,
+        "includeCoAuthoredBy": false,
         "skipDangerousModePermissionPrompt": true,
     });
     if let Some(key_file) = key_file {

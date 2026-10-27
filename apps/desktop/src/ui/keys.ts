@@ -26,3 +26,19 @@ export function shortcutKey(event: ModifierEvent, mac: boolean = isMac()): boole
 export function keyLabel(text: string, mac: boolean = isMac()): string {
   return mac ? text : text.replace(/\bCmd\b/g, "Ctrl");
 }
+
+export interface ComposerKeyEvent extends ModifierEvent {
+  key: string;
+  shiftKey: boolean;
+  isComposing?: boolean;
+  keyCode?: number;
+}
+
+/** Whether a key press in a message composer sends the message: Enter, alone or with the
+ * app's shortcut key. Shift+Enter inserts a new line instead, and Enter never sends while an
+ * input method is composing, since that Enter picks the composed text; WebKit reports it with
+ * key code 229. Inputs: the native key event and whether this is macOS. Output: true to send. */
+export function sendsMessage(event: ComposerKeyEvent, mac: boolean = isMac()): boolean {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return false;
+  return (!event.metaKey && !event.ctrlKey && !event.altKey) || shortcutKey(event, mac);
+}

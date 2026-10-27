@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 mod api;
 mod clone;
-mod http;
+pub(crate) mod http;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/test_server.rs"]

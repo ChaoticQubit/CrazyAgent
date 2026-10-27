@@ -575,8 +575,8 @@ fn home_shows_a_kept_draft_instead_of_the_empty_state() {
 
 const UNCOUNTED: [(&str, &str); 2] = [
     (
-        "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
-        "@ Accounts   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   ⁂ Memory   ◉ Profile",
+        "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile",
+        "@ Accounts   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   § Process   ⁂ Memory   ◉ Profile",
     ),
     (
         "───────────────────━━━━━━━━━",
@@ -618,8 +618,8 @@ fn settings_frames_match_the_design() {
             ctx.say(Message::success("Saved.", ""));
         }
         let mut shell = shell_at(ctx, Place::Settings(SettingsSection::Profile));
-        let from = format!("{}{}", "─".repeat(89), "━".repeat(9));
-        let to = format!("{}{}{}", "─".repeat(75), "━".repeat(9), "─".repeat(14));
+        let from = format!("{}{}", "─".repeat(101), "━".repeat(9));
+        let to = format!("{}{}{}", "─".repeat(87), "━".repeat(9), "─".repeat(14));
         let swaps = [
             UNCOUNTED[0],
             (from.as_str(), to.as_str()),

@@ -617,6 +617,9 @@ pub enum SetupQuery {
     Context {
         project: ProjectId,
     },
+    ReadPaths {
+        project: ProjectId,
+    },
     Item {
         project: ProjectId,
         path: String,
@@ -657,6 +660,7 @@ pub enum SetupView {
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
+    ReadPaths(Vec<String>),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -703,6 +707,10 @@ pub enum SetupAction {
         project_id: ProjectId,
         job: i64,
     },
+    SetReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
 }
 
 impl SetupAction {
@@ -742,6 +750,16 @@ impl SetupAction {
             Self::DeleteContext { path, .. } => {
                 if path.len() > 512 || context_kind(path).is_none() {
                     return Err(failure("context_path_invalid"));
+                }
+                Ok(())
+            }
+            Self::SetReadPaths { paths, .. } => {
+                if paths.len() > crate::sandbox::extra_paths::EXTRA_PATHS_MAX
+                    || paths
+                        .iter()
+                        .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
+                {
+                    return Err(failure("read_paths_invalid"));
                 }
                 Ok(())
             }
@@ -1739,6 +1757,7 @@ pub(crate) fn execute(
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
+        SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2147,6 +2166,35 @@ const REMOVED_WITH_PROJECT: [&str; 10] = [
     "project_setups",
 ];
 
+/// Saves a project's extra read-only folders once each passes
+/// [`crate::sandbox::extra_paths::checked`]. Takes the transaction, project and typed paths.
+/// Returns Applied, or a plain rejection for an unknown project or a refused path.
+fn set_read_paths(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    paths: &[String],
+) -> Result<Outcome, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !exists {
+        return Ok(rejected("invalid_project"));
+    }
+    let Some(data_root) = tx.path().map(Path::new).and_then(Path::parent) else {
+        return Ok(rejected("read_path_refused"));
+    };
+    let checked = match crate::sandbox::extra_paths::checked_all(paths, data_root) {
+        Ok(checked) => checked,
+        Err(code) => return Ok(rejected(code)),
+    };
+    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    Ok(Outcome::Applied)
+}
+
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
@@ -2175,6 +2223,7 @@ fn remove(
         )
         .map_err(error)?;
     }
+    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

@@ -105,6 +105,16 @@ const COPY: Record<string, string> = {
   knowledge_version_conflict: "This memory changed. Reload it and try again.",
   knowledge_source_revoked: "The research this came from was deleted.",
   invalid_knowledge_text: "Write the memory as plain text, up to 4096 bytes, without hidden or direction-changing characters.",
+  read_path_not_absolute: "Type the full path of a folder, starting with /.",
+  read_path_missing: "That folder doesn't exist on this computer.",
+  read_path_not_folder: "That path is a file. Add a folder.",
+  read_path_holds_home: "Agents can't read your whole home folder. Add a folder inside it.",
+  read_path_credentials: "That folder holds or sits in a credential location, such as .ssh or .aws, so agents can never read it.",
+  read_path_engine_data: "That folder holds CrazyAgent's own data, so agents can never read it.",
+  read_path_refused: "That folder can't be shared with agents. Pick another folder.",
+  read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
+  read_paths_too_many: "A project can share at most 8 extra folders.",
+  read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -276,6 +286,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   research_memory: "saving research to memory",
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
+  project_read_paths: "saving extra folders agents can read",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",

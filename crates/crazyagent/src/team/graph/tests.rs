@@ -19,6 +19,8 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         created_ms: 1,
         heartbeat_ms: 1,
         stopped_ms: None,
+        persona: None,
+        handle: None,
     }
 }
 
@@ -71,7 +73,12 @@ fn status() -> TeamStatus {
         agents: vec![
             agent(1, AgentRole::Master, "codex", AgentStatus::Stopped),
             agent(2, AgentRole::Master, "codex", AgentStatus::Idle),
-            agent(3, AgentRole::Sub, "claude-code", AgentStatus::Working),
+            TeamAgent {
+                persona: Some("Ada".into()),
+                handle: Some("charts".into()),
+                label: "Ada (@charts)".into(),
+                ..agent(3, AgentRole::Sub, "claude-code", AgentStatus::Working)
+            },
             agent(4, AgentRole::Sub, "claude-code", AgentStatus::Stopped),
             agent(5, AgentRole::Sub, "claude-code", AgentStatus::Failed),
             agent(6, AgentRole::Sub, "gemini", AgentStatus::Idle),
@@ -127,9 +134,10 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
     assert_eq!(working.status, Some(AgentStatus::Working));
     assert_eq!(working.terminal, Some(AgentId::team(3).unwrap()));
     assert_eq!(
-        working.label, "Sub-agent 3",
+        working.label, "Ada (@charts)",
         "an agent node carries the engine's one name for the agent"
     );
+    assert_eq!(master.label, "Master");
     let stopped = &graph.nodes[4];
     assert_eq!(stopped.status, Some(AgentStatus::Stopped));
     assert_eq!(
@@ -137,6 +145,7 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
         "a stopped agent has no live terminal"
     );
     let failed = &graph.nodes[5];
+    assert_eq!(failed.label, "Sub-agent 5");
     assert_eq!(failed.status, Some(AgentStatus::Failed));
     assert_eq!(failed.terminal, None, "a failed agent has no live terminal");
     assert_eq!(

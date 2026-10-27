@@ -262,6 +262,7 @@ impl AgentSpec {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: self.sandbox_profile.clone(),
+            git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(self.run_time_secs),
                 stop_grace: STOP_GRACE,

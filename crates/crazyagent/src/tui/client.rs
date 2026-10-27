@@ -26,6 +26,7 @@ pub(super) mod app_setup;
 pub(super) mod changes;
 mod claude_code;
 pub(super) mod intake;
+pub(super) mod process;
 mod project_setup;
 pub(super) mod settings;
 mod shell;
@@ -55,6 +56,7 @@ enum Job {
     TeamGraph(Box<ProjectId>),
     Intake(Box<intake::IntakeJob>),
     Changes(Box<changes::ChangesQuery>),
+    Process(Box<process::ProcessQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -170,6 +172,7 @@ pub(super) enum OwnerEvent {
     },
     Intake(Box<intake::IntakeEvent>),
     Changes(Box<changes::ChangesEvent>),
+    Process(Box<process::ProcessEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -639,6 +642,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Changes(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Process(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.process(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => process::ProcessEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Process(Box::new(event)),
                                 })
                                 .is_err()
                             {

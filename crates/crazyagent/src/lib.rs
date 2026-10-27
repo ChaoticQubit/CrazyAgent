@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod adapters;
+pub mod agent_home;
 pub mod agents;
 pub mod assets;
 pub mod client_controller;
@@ -50,6 +51,7 @@ pub mod terminal;
 pub mod tui;
 /// `crazyagent update`: release channel, signed download, verification and executable swap.
 pub mod update;
+pub mod usage;
 pub mod verification;
 pub mod version;
 pub mod worker_dispatch;

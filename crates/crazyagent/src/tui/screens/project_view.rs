@@ -53,10 +53,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Overview => overview(screen, width, content, look),
         Tab::Conversation => conversation(screen, content, room, look),
         Tab::Agents => agents(screen, width, content, room, look),
-        Tab::Changes => {
-            let (lines, help) = screen.changes.rows(content, room, screen.now_ms, look);
-            (lines, None, help)
-        }
+        Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
         Tab::Context => {
             if screen.reading
                 && width < 100
@@ -214,6 +211,63 @@ pub(in crate::tui) fn project_screen(
             vec![("Enter", "Add file"), ("Esc", "Cancel")]
         };
         let cursor = (!adding.busy).then(|| {
+            (
+                (box_left + 4 + column - start) as u16,
+                (top + 1 + at) as u16,
+            )
+        });
+        return Screen {
+            rows,
+            cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if let Some(folders) = &screen.folders {
+        let field = 52;
+        let (_, (_, column)) = folders.input.wrap(16384);
+        let value: Vec<char> = folders.input.value().chars().collect();
+        let start = column.saturating_sub(field - 1);
+        let shown: String = value.iter().skip(start).take(field).collect();
+        let mut body: Vec<Row> = wrap_words(
+            "Folders agents may read, besides the toolchains found for this project. Separate them with a colon. They never read credential files inside them.",
+            56,
+        )
+        .into_iter()
+        .map(|line| Row::of(line, look.muted))
+        .collect();
+        body.push(Row::default());
+        let at = body.len();
+        body.push(
+            Row::of("[", look.accent)
+                .push(" ", Style::new())
+                .cat(Row::of(shown, look.fg).pad(field))
+                .push(" ", Style::new())
+                .push("]", look.accent),
+        );
+        body.push(Row::default());
+        body.extend(
+            folders
+                .error
+                .iter()
+                .flat_map(|error| wrap_words(error, 56))
+                .map(|line| Row::of(line, look.error)),
+        );
+        body.push(if folders.busy {
+            Row::of(format!("{SPINNER} Saving..."), look.running)
+        } else {
+            Row::of("[> Save folders ]", look.selection).push("   [ Cancel ]", look.fg)
+        });
+        let top = 4;
+        let box_left = width.saturating_sub(62) / 2;
+        rows = modal(&rows, width, 62, "Read-only folders", body, top, look);
+        help = if folders.busy {
+            vec![("Esc", "Close")]
+        } else {
+            vec![("Enter", "Save folders"), ("Esc", "Cancel")]
+        };
+        let cursor = (!folders.busy).then(|| {
             (
                 (box_left + 4 + column - start) as u16,
                 (top + 1 + at) as u16,
@@ -1619,6 +1673,18 @@ fn general_form(general: &GeneralEdit, content: usize, look: &Look) -> Drawn {
     (lines, cursor.filter(|_| !general.busy), help)
 }
 
+/// The Settings line for a project's extra read-only folders: how many, or loading.
+/// Takes the screen and look. Returns the row with its edit key.
+fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
+    let text = match screen.read_paths.as_deref() {
+        None => "Loading...".to_owned(),
+        Some([]) => "Toolchains only".to_owned(),
+        Some([one]) => one.clone(),
+        Some(many) => format!("{} extra read-only folders", many.len()),
+    };
+    Row::of(text, look.fg).push("   f Edit read-only folders", look.muted)
+}
+
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
     if let Some(general) = &screen.general {
         return general_form(general, content, look);
@@ -1648,6 +1714,12 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry("Pool", pool),
         entry("Team", team_line(screen, look)),
+        entry("Folders", folders_line(screen, look)),
+        entry(
+            "Process",
+            Row::of("Instructions for this project's agents", look.fg)
+                .push("   i Edit", look.muted),
+        ),
         Row::default(),
     ];
     let (plugins, mut help) = screen

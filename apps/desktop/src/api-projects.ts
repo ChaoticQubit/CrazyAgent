@@ -181,6 +181,9 @@ const copy: Record<string, string> = {
   team_message_invalid: "The message is empty or too long.",
   team_plan_step_missing: "That step is no longer in the master's plan.",
   team_plan_step_handed: "That step was handed off already.",
+  team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
+  team_handle_taken: "Another running agent of this project already has that name. Pick another.",
+  team_agent_unknown: "That agent is not running anymore.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
   team_state_not_canonical: "The engine cannot read the team safely right now.",
   team_state_not_private: "The engine cannot read the team safely right now.",
@@ -330,6 +333,12 @@ export function cancelTeamTask(id: string, task: number | null, generation: numb
   return call<IntentReceipt>("desktop_team_cancel", { id, task, generation });
 }
 
+/** Renames a live sub-agent's role handle, the `@name` it is addressed by.
+ * Inputs: the project id, the team agent id, the new handle and a generation. Output: the engine receipt. */
+export function renameTeamAgent(id: string, agent: number, handle: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
+}
+
 export const RESEARCH_LOG_LINES_MAX = 200;
 
 /** Reads the latest plain lines of one research agent's log.
@@ -385,6 +394,18 @@ export function reviewMemory(id: string, memory: string, version: number, decisi
  * suggested one first. Inputs: project id, memory id, its version and a generation. Output: the receipt. */
 export function promoteProjectMemory(id: string, memory: string, version: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
+}
+
+/** Reads the extra read-only folders this project's agents get beside its toolchains.
+ * Input: project id. Output: the folders in saved order. */
+export function loadReadPaths(id: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_read_paths", { id });
+}
+
+/** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
+ * Inputs: project id, the folders and a generation. Output: the receipt. */
+export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
 }
 
 /** Deletes one document or research report from the project folder.

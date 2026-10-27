@@ -777,6 +777,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Process => Flow::Open(Place::ProjectProcess {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
         };
         self.sync_master(ctx);
         self.pump(ctx);
@@ -846,6 +850,7 @@ impl Screen for ProjectPage {
             || self.screen.adding.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
+            || (self.changes_have_keys() && self.screen.changes.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {

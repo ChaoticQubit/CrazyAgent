@@ -13,18 +13,19 @@ const USER_AGENT: &str = "CrazyAgent";
 /// only into curl's config on stdin, so nothing secret reaches an argument or the
 /// environment; curl reads no `.curlrc`, follows no redirects and only uses the allowed
 /// schemes.
-pub(super) struct Request<'a> {
-    pub(super) url: url::Url,
-    pub(super) accept: &'a str,
-    pub(super) token: Option<&'a SecretString>,
-    pub(super) form: Option<Vec<(&'a str, &'a str)>>,
-    pub(super) allow_http: bool,
+pub(crate) struct Request<'a> {
+    pub(crate) url: url::Url,
+    pub(crate) accept: &'a str,
+    pub(crate) token: Option<&'a SecretString>,
+    pub(crate) form: Option<Vec<(&'a str, &'a str)>>,
+    pub(crate) headers: Vec<(&'a str, &'a str)>,
+    pub(crate) allow_http: bool,
 }
 
 /// What came back: the HTTP status and at most 4 MiB of body.
-pub(super) struct Reply {
-    pub(super) status: u16,
-    pub(super) body: Vec<u8>,
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
 }
 
 fn failure(code: &str) -> EngineError {
@@ -58,6 +59,12 @@ impl Request<'_> {
                 quoted(&format!("Authorization: Bearer {}", token.expose()))?
             ));
         }
+        for (name, value) in &self.headers {
+            config.push_str(&format!(
+                "header = {}\n",
+                quoted(&format!("{name}: {value}"))?
+            ));
+        }
         if let Some(form) = &self.form {
             let body = url::form_urlencoded::Serializer::new(String::new())
                 .extend_pairs(form.iter())
@@ -69,7 +76,7 @@ impl Request<'_> {
 
     /// Builds the curl command without running it. Output: the command, whose arguments
     /// and environment hold no URL, header or secret, and the config bytes for its stdin.
-    pub(super) fn command(&self) -> Result<(Command, Vec<u8>), EngineError> {
+    pub(crate) fn command(&self) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
             && self.allow_http
@@ -99,7 +106,7 @@ impl Request<'_> {
 
     /// Sends the request and waits at most 30 s. Output: the reply, or
     /// `github_unreachable` when curl could not finish the exchange.
-    pub(super) fn send(&self) -> Result<Reply, EngineError> {
+    pub(crate) fn send(&self) -> Result<Reply, EngineError> {
         let (mut command, mut config) = self.command()?;
         let spawned = crate::spawn_gate::spawn(&mut command);
         let mut child = match spawned {

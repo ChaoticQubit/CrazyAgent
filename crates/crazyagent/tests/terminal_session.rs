@@ -96,6 +96,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
         model: None,
         tools: true,
         sandbox_profile: Some(profile),
+        git_identity: None,
         limits: LaunchLimits::default(),
     };
     let agent = AgentId::new("stand-in-1").unwrap();
@@ -185,6 +186,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
         model: None,
         tools: true,
         sandbox_profile: Some(profile),
+        git_identity: None,
         limits: LaunchLimits::default(),
     };
     let agent = AgentId::new("stand-in-2").unwrap();

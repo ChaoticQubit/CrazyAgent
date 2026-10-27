@@ -7,19 +7,23 @@ import { MemorySettings } from "./memory";
 import { PackSettings } from "./pack";
 import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
+import { ProcessSettings } from "../process";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
 import { UpdatesSettings } from "./updates";
+import { UsageSettings } from "./usage";
 
 const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Accounts", icon: "key-round" },
   { id: "pools", label: "Pools", icon: "layers" },
   { id: "harnesses", label: "Harnesses", icon: "terminal" },
   { id: "plugins", label: "Plugins and skills", icon: "puzzle" },
+  { id: "process", label: "Process", icon: "list-checks" },
   { id: "pack", label: "Pack", icon: "boxes" },
   { id: "home", label: "Projects folder", icon: "folder" },
   { id: "github", label: "GitHub", icon: "git-branch" },
   { id: "memory", label: "Memory", icon: "brain" },
+  { id: "usage", label: "Usage", icon: "trending-up" },
   { id: "profile", label: "Profile", icon: "user-round" },
   { id: "updates", label: "Updates", icon: "refresh-cw" },
 ];
@@ -36,10 +40,12 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
         : tab === "pools" ? <Pools creating={action === "new"} />
         : tab === "harnesses" ? <Harnesses />
         : tab === "plugins" ? <PluginsAndSkills skill={skill} />
+        : tab === "process" ? <ProcessSettings />
         : tab === "pack" ? <PackSettings />
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
         : tab === "memory" ? <MemorySettings />
+        : tab === "usage" ? <UsageSettings />
         : tab === "updates" ? <UpdatesSettings />
         : <ProfileSettings />}
     </div>

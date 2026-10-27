@@ -4,6 +4,7 @@ mod keychain_support;
 
 use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
+use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError,
     SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
@@ -431,13 +432,15 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
         .filter(|(name, _)| *name != "__CF_USER_TEXT_ENCODING")
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let expected: BTreeMap<String, String> = [
+    let homes = ToolHomes::owner().unwrap();
+    let path = toolchains::agent_path(
+        &homes,
+        "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+    );
+    let mut expected: BTreeMap<String, String> = [
         ("HOME", case.home.to_str().unwrap()),
         ("TMPDIR", case.tmp.to_str().unwrap()),
-        (
-            "PATH",
-            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
-        ),
+        ("PATH", path.as_str()),
         ("LANG", "C"),
         ("LC_ALL", "C"),
         ("ANTHROPIC_API_KEY", "crazyagent-local"),
@@ -448,6 +451,11 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .chain(AGENT_TLS_ENV)
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
+    expected.extend(
+        toolchains::agent_env(&case.home, &homes)
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
+    );
     assert_eq!(seen, expected);
     assert!(
         seen.iter()
