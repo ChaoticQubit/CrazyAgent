@@ -119,9 +119,9 @@ function Launching() {
 
 /** The routed screen inside the shell. Each project page and onboarding review is keyed by its
  * project id, so a switch to another project starts a fresh page and never keeps the last
- * project's master ticket, name, settings or late reads. Inputs: the route and the session.
- * Output: the screen element. */
-export function Screen({ route, session }: { route: Route; session: Session }) {
+ * project's master ticket, name, settings or late reads. Inputs: the route, the session and
+ * each project's unseen team notification count for Home. Output: the screen element. */
+export function Screen({ route, session, alerts }: { route: Route; session: Session; alerts?: Map<string, number> }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
     case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
@@ -129,7 +129,7 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
-    default: return <Home />;
+    default: return <Home alerts={alerts} />;
   }
 }
 
@@ -165,7 +165,7 @@ export function AppView({ session, route, alerts }: { session: Session; route: R
       </span>}>
         {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}
-      <Screen route={route} session={session} />
+      <Screen route={route} session={session} alerts={alerts} />
       <GoToLayer projects={projects ?? []} />
     </AppShell>
   </SessionContext.Provider>;

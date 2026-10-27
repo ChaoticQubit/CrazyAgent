@@ -333,6 +333,15 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   assert.equal(new Set(needs.all.map((row) => row.key)).size, 4);
   assert.deepEqual(needsYou(accounts, projects, new Map(), { kind: "not_ready" }).all.map((row) => row.text), ["Claude 1 isn't signed in."]);
   assert.equal(needsYou({ kind: "loading" }).total, 0);
+  const alerts = new Map([["p 2", 2], ["p1", 1], ["gone", 4], ["quiet", 0]]);
+  const told = needsYou(accounts, projects, new Map(), ok([]), alerts);
+  assert.deepEqual(told.all.map((row) => [row.project, row.text, row.action, row.href]), [
+    ["Harbor Notes", "1 new team notification.", "Open conversation", "#/projects/p1/conversation"],
+    ["Quayside", "2 new team notifications.", "Open conversation", "#/projects/p%202/conversation"],
+    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=a1"],
+  ]);
+  assert.equal(told.total, 3);
+  assert.equal(new Set(told.all.map((row) => row.key)).size, 3);
 
   const markup = renderToStaticMarkup(createElement(HomeView, {
     projects: ok(projects), accounts, pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
@@ -344,6 +353,12 @@ test("Needs you lists accounts to sign in, research waiting for a pool and memor
   assert.match(markup, /<strong>Harbor Notes<\/strong> 2 suggested memories to review\./);
   assert.doesNotMatch(markup, /1 suggested memory to review/);
   assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">Show all \(4\)<\/button>/);
+  const alerted = renderToStaticMarkup(createElement(HomeView, {
+    projects: ok(projects), accounts, pools: ok([]), harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {}, activity, suggestions, alerts,
+  }));
+  assert.match(alerted, /<strong>Harbor Notes<\/strong> 1 new team notification\./);
+  assert.match(alerted, /<a class="btn small" href="#\/projects\/p%202\/conversation">Open conversation<\/a>/);
+  assert.match(alerted, /Show all \(6\)/);
 });
 
 test("each project gets its own page, so a switch never keeps the last project's ticket or name", async () => {
