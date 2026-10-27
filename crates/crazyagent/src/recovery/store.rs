@@ -229,8 +229,9 @@ pub(super) fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), En
 }
 
 /// Settles every `stopped` run: dropped when its agent runs again, as an agent the team
-/// runtime took over in its live pane does, else recorded `interrupted` with the session
-/// record file its pane names and whether its project's team is paused now. Keeps the
+/// runtime took over in its live pane does, unless it is a sub-agent's run holding a task,
+/// which its agent resumes in that pane; every kept run is recorded `interrupted` with the
+/// session record file its pane names and whether its project's team is paused now. Keeps the
 /// newest `RUNS_PER_PROJECT_MAX` resumed runs of each project; a run still open or failed
 /// is kept until it resumes, since it holds its task or message back.
 /// Input: the engine database with the team tables. Output: done.
@@ -260,7 +261,8 @@ pub(super) fn settle(db: &Connection) -> Result<(), EngineError> {
         .collect();
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     tx.execute(
-        "DELETE FROM recovery_runs WHERE state='stopped' AND agent IN (
+        "DELETE FROM recovery_runs WHERE state='stopped'
+             AND (kind='master' OR task IS NULL) AND agent IN (
              SELECT id FROM team_agents WHERE status IN ('starting','idle','working'))",
         [],
     )
@@ -482,7 +484,7 @@ fn column(item: HeldItem) -> (&'static str, i64) {
 }
 
 /// Tells whether a run holds the item: one in an open or failed resume state, or a
-/// `stopped` one whose agent does not run again, as `settle` keeps it.
+/// `stopped` one `settle` keeps: a sub-agent's, or one whose agent does not run again.
 /// Inputs: the store and the item. Output: the answer, or `recovery_unavailable`.
 pub(super) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError> {
     initialize(db)?;
@@ -491,9 +493,9 @@ pub(super) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError
         &format!(
             "SELECT EXISTS(SELECT 1 FROM recovery_runs r WHERE r.{column}=?1 AND (
                  r.state IN ('interrupted','resuming','failed')
-                 OR (r.state='stopped' AND NOT EXISTS(
+                 OR (r.state='stopped' AND (r.kind='sub' OR NOT EXISTS(
                      SELECT 1 FROM team_agents a WHERE a.id=r.agent
-                     AND a.status IN ('starting','idle','working')))))"
+                     AND a.status IN ('starting','idle','working'))))))"
         ),
         [id],
         |row| row.get(0),

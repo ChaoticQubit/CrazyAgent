@@ -336,6 +336,7 @@ fn resume_note_lists_unknown_outcomes() {
 
 #[cfg(target_os = "macos")]
 mod failed {
+    use super::super::RETRY_ONCE;
     use super::{PROJECT, RECORD_MISSING, conversation, private_folder, temporary};
     use crate::config::{
         AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
@@ -360,9 +361,10 @@ mod failed {
     const WAIT: Duration = Duration::from_secs(30);
 
     /// A Codex stand-in that resumes the rollout it is named by `resume <id>`, logs each
-    /// launch and every typed line, and in a fresh session hangs in a task that started a
-    /// command it never finishes, as a turn cut short does; any other turn, and every turn of
-    /// a resumed session, even one whose note quotes that task, ends with "Done.".
+    /// launch and every typed line, and in a fresh session hangs once in a task that started
+    /// a command it never finishes, as a turn cut short does, still reading what is typed, as
+    /// Codex does after Escape stops a turn; any other turn, and every turn of a resumed
+    /// session, even one whose note quotes that task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
@@ -388,10 +390,11 @@ printf '\033[?2004hCodex stand-in ready\n'
 e=$(printf '\033')
 open=0
 hang=0
+hung=""
 while IFS= read -r line; do
   case "$line" in *"$e[200~"*) open=1 ;; esac
   printf '%s\n' "$line" >> "$CODEX_HOME/typed"
-  case "$line" in *"hang here"*) [ -z "$resumed" ] && hang=1 ;; esac
+  case "$line" in *"hang here"*) [ -z "$resumed" ] && [ -z "$hung" ] && hang=1 ;; esac
   case "$line" in
     *"$e[201~"*) open=0 ;;
     *) [ "$open" = 1 ] && continue ;;
@@ -399,7 +402,9 @@ while IFS= read -r line; do
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   if [ "$hang" = 1 ]; then
     printf '{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-1","arguments":"{\\"command\\":[\\"touch\\",\\"page.md\\"]}"}}\n' >> "$f"
-    exec /bin/sleep 600
+    hang=0
+    hung=1
+    continue
   fi
   /bin/sleep 0.3
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
@@ -727,7 +732,7 @@ done
         });
         assert_eq!(fixture.runs()[0].reason.as_deref(), Some(RECORD_MISSING));
         assert!(fixture.noted(&format!(
-            "An agent cut short when CrazyAgent stopped could not resume: {RECORD_MISSING}."
+            "An agent cut short when CrazyAgent stopped could not resume: {RECORD_MISSING}. {RETRY_ONCE}."
         )));
         fixture.idle(&mut team);
         assert_eq!(fixture.task(task), ("queued".into(), None, 1), "held");
@@ -891,11 +896,12 @@ done
         host.close(&[]).unwrap();
     }
 
-    /// A sub-agent whose pane the next engine takes over runs again, so no run holds the
-    /// task its record shows it had: the first tick settles that delivery done and fails the
-    /// task as already handed over, never typing it again, and nothing resumes.
+    /// A sub-agent whose pane the next engine takes over keeps the run of the task it was
+    /// cut short in: the run resumes in that pane, where the note with the task quoted is
+    /// typed into the session the agent never left, the task finishes on that turn with its
+    /// delivery closed done, and the agent is never started again nor handed the task fresh.
     #[test]
-    fn a_task_whose_agent_is_taken_over_in_its_pane_settles_as_delivered() {
+    fn a_task_whose_agent_is_taken_over_in_its_pane_resumes_in_that_pane() {
         let fixture = Team::new();
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
@@ -909,25 +915,35 @@ done
             [None],
             "open until the panes are taken over"
         );
-        fixture.until(&mut team, "the taken-over agent's task settles", |f| {
-            f.task(task).0 == "failed"
+        fixture.until(&mut team, "the taken-over agent finishes its task", |f| {
+            f.runs()
+                .first()
+                .is_some_and(|run| run.state == RunState::Resumed)
+                && f.task(task).0 == "done"
         });
-        assert_eq!(
-            fixture.error(task).as_deref(),
-            Some(crate::team::runtime::delivery::DELIVERED_TASK)
-        );
+        assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
+        assert_eq!(fixture.error(task), None);
         assert_eq!(fixture.dispatched(task), [Some("done".to_owned())]);
-        fixture.idle(&mut team);
-        assert!(fixture.runs().is_empty(), "{:#?}", fixture.runs());
-        assert_eq!(fixture.launches(sub).len(), 1, "no resume, no fresh start");
+        let runs = fixture.runs();
+        assert_eq!(runs.len(), 1, "{runs:#?}");
+        assert_eq!(runs[0].agent, sub);
         assert_eq!(
-            fixture
-                .home_file(sub, "typed")
-                .lines()
-                .filter(|line| line.contains("hang here"))
-                .count(),
+            fixture.launches(sub).len(),
             1,
-            "never typed again"
+            "resumed in its pane, not started again"
+        );
+        let typed = fixture.home_file(sub, "typed");
+        assert!(
+            typed.contains("The task, in case your session does not show it:"),
+            "{typed}"
+        );
+        assert_eq!(
+            typed
+                .lines()
+                .filter(|line| line.contains("hang here: write the page"))
+                .count(),
+            2,
+            "typed once and quoted once in the note: {typed}"
         );
         assert_eq!(fixture.subs(), 1);
         team.shutdown().unwrap();

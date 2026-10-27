@@ -298,12 +298,15 @@ fn agent_running_at_stop_without_a_live_pane_is_recorded_interrupted() {
     team.shutdown().unwrap();
 }
 
+/// A sub-agent the next engine takes over in its live pane while it was in a task keeps
+/// the run of that task, recorded interrupted for its resume in that pane, and its pane
+/// runs on.
 #[test]
-fn adoptable_live_pane_is_not_interrupted() {
+fn an_adoptable_live_pane_keeps_the_run_of_the_task_its_agent_had() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let sub = fixture.agent(AgentRole::Sub, AgentStatus::Idle, 0);
-    fixture.running(sub, "Write the page");
+    let task = fixture.running(sub, "Write the page");
     fixture.pane(&host, sub);
 
     let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
@@ -312,9 +315,14 @@ fn adoptable_live_pane_is_not_interrupted() {
         vec![AgentId::team(sub).unwrap()],
         "the engine took the live pane over"
     );
-    assert!(scan(&fixture.base).unwrap().is_empty());
-    assert!(list(&fixture.base, &fixture.project()).unwrap().is_empty());
-    assert_eq!(fixture.runs(), 0, "no run waits for a later scan either");
+    let found = scan(&fixture.base).unwrap();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].agent, sub);
+    assert_eq!(found[0].last_turn.task, Some(task));
+    assert_eq!(found[0].state, RunState::Interrupted);
+    assert_eq!(list(&fixture.base, &fixture.project()).unwrap(), found);
+    assert_eq!(fixture.runs(), 1);
+    assert_ne!(fixture.status(sub), "stopped", "its pane runs on");
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }

@@ -3356,3 +3356,166 @@ fn a_held_message_waits_for_its_resume_and_a_retried_resume_that_fails_again_let
     assert_eq!(message_state(&fixture, message), "failed");
     assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
 }
+
+/// A per-turn agent stopped in a turn on its task leaves a run that holds the task. A start
+/// that reads the task in the session record of that running turn keeps it held for the
+/// run's resume, queued with its intent open, and the run waits to resume it; a start that
+/// finds the turn ran without the task releases it from its run, closes its intent failed
+/// and lets it wait to be handed out as usual.
+#[test]
+fn a_per_turn_agent_s_held_task_stays_held_when_its_session_shows_it_and_is_released_when_not() {
+    let fixture = Fixture::new(2);
+    let reached = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let missed = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let shown = "Write the changelog";
+    let tasks = [(reached, shown), (missed, "Tag the release")].map(|(sub, prompt)| {
+        let task = running_task(&fixture, sub, prompt);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET task=?2 WHERE id=?1",
+                params![sub, task],
+            )
+            .unwrap();
+        assert!(
+            delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap()
+        );
+        task
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    for sub in [reached, missed] {
+        let file = fixture.base.join(format!("session-{sub}.jsonl"));
+        let typed = serde_json::json!({
+            "type": "user",
+            "message": {"content": format!("You are a sub-agent of the project \"Panes\".\nYour task: {shown}")}
+        });
+        std::fs::write(&file, format!("{typed}\n{TURN_DONE}\n")).unwrap();
+        let record = PaneRecord::new(
+            &Transcript::ClaudeSession { file },
+            &fixture.base,
+            SystemTime::now(),
+            4242,
+            None,
+        )
+        .unwrap();
+        crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+    }
+
+    drop(fixture.runtime());
+    let task = |id: i64| -> (String, Option<String>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    let held = |id: i64| {
+        crate::recovery::holds(&fixture.connection, crate::recovery::HeldItem::Task(id)).unwrap()
+    };
+    assert_eq!(
+        task(tasks[0]),
+        ("queued".to_owned(), None),
+        "the run keeps the task its turn reached"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[0])),
+        [None]
+    );
+    assert!(held(tasks[0]));
+    assert_eq!(
+        task(tasks[1]),
+        ("queued".to_owned(), None),
+        "a task its turn never got waits as usual"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[1])),
+        [Some("failed".to_owned())]
+    );
+    assert!(!held(tasks[1]));
+
+    let runs = crate::recovery::scan(&fixture.base).unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| (run.agent, run.last_turn.task))
+            .collect::<Vec<_>>(),
+        [(reached, Some(tasks[0]))],
+        "only the run whose turn reached its task waits to resume it"
+    );
+    assert!(held(tasks[0]));
+    assert!(!held(tasks[1]));
+}
+
+/// Engine input to the live master records its delivery intent only right before it types,
+/// so a team message that waits, here on the owner's unsent draft, leaves no intent open
+/// and nothing typed; once the draft is gone it is typed once and its intent closes done.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_waiting_for_the_live_master_has_no_open_intent_until_it_is_typed() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RECORDING_CODEX);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_live_masters SET typed_ms=?2, draft=1 WHERE agent=?1",
+            params![master, now_ms()],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner',?2,'pending',1)",
+            params![PROJECT, INTERRUPTED],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    let key = format!("team-message/{message}");
+
+    idle_ticks(&mut team);
+    assert_eq!(message_state(&fixture, message), "pending");
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        Vec::<Option<String>>::new(),
+        "a message that waits records no intent"
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    assert_eq!(typed_count(&fixture, INTERRUPTED), 0);
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_live_masters SET typed_ms=NULL, draft=0 WHERE agent=?1",
+            [master],
+        )
+        .unwrap();
+    fixture.until(&mut team, "the message is typed into the master", |f| {
+        typed_count(f, INTERRUPTED) == 1
+    });
+    fixture.until(&mut team, "the master's turn on it is counted", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        typed_count(&fixture, INTERRUPTED),
+        1,
+        "the message reached the master once"
+    );
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("done".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}

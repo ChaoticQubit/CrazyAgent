@@ -741,8 +741,9 @@ impl TeamRuntime {
 
     /// Settles the runs the last engine stop cut short once, on the first tick after the
     /// runtime adopted the panes it could, and on each later tick until that succeeds: first
-    /// the deliveries whose run is dropped because its agent runs again in its pane, as
-    /// deliveries no run holds, then the runs. Until then the tick does nothing else, so no
+    /// the deliveries whose run is dropped because its master runs again in its pane, as
+    /// deliveries no run holds, then the runs; a sub-agent that runs again in its pane keeps
+    /// the run of its task and resumes it there. Until then the tick does nothing else, so no
     /// report, owner restart or dispatch changes which agents run again, and no task or
     /// message such a run holds starts fresh or reaches an agent twice.
     /// Returns `recovery_unavailable` while the store cannot be written.

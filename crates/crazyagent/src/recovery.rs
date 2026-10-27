@@ -126,8 +126,9 @@ pub fn scan(runtime: &Path) -> Result<Vec<Interrupted>, EngineError> {
 }
 
 /// Settles the runs the last engine stop cut short: a run whose agent the starting team
-/// runtime took over again in its live pane is dropped, every other one is recorded
-/// interrupted once, with whether its team is paused now; a paused team stays paused.
+/// runtime took over again in its live pane is dropped, unless a sub-agent's run holds a
+/// task it resumes there; every other one is recorded interrupted once, with whether its
+/// team is paused now; a paused team stays paused.
 /// Input: the team runtime's connection, after it adopted the panes it can and before it
 /// runs anything else. Output: done, or `recovery_unavailable`.
 pub(crate) fn settle(db: &Connection) -> Result<(), EngineError> {
@@ -200,7 +201,8 @@ pub(crate) enum HeldItem {
 }
 
 /// Tells whether a run still holds an item back for its resume: a run waiting, resuming or
-/// failed, or one just noted whose agent does not run again, which `settle` keeps.
+/// failed, or one just noted that `settle` keeps: a sub-agent's, or one whose agent does
+/// not run again.
 /// Inputs: the team runtime's connection and the item. Output: the answer.
 pub(crate) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError> {
     store::holds(db, item)
