@@ -87,6 +87,10 @@ test("reset countdowns, read times and agent names are plain words", () => {
   assert.equal(usage.agentLabel("team-7"), "Agent 7");
   assert.equal(usage.agentLabel("research-scout"), "Research scout");
   assert.equal(usage.agentLabel("owner"), "owner");
+  assert.equal(usage.agentLabel("onboarding"), "Onboarding");
+  assert.equal(usage.agentLabel("master"), "Master");
+  assert.equal(usage.agentLabel("master-project-harbor"), "Master, project-harbor");
+  assert.equal(usage.agentLabel("master-project-harbor", (key) => key === "project-harbor" ? "Harbor Notes" : key), "Master, Harbor Notes");
 });
 
 test("a manual reset must be a real future local time", () => {
@@ -149,6 +153,16 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.doesNotMatch(words, /project-harbor|pool-main|acct-claude|team-7/);
   assert.match(markup, /aria-label="Range"/);
   assert.match(words, /Check limits now/);
+});
+
+test("runs tied to no project or account show as Unattributed and the master as its project's row", () => {
+  const words = text(render({ report: { kind: "ok", value: report({
+    projects: [row("project-harbor"), row("")], accounts: [row("")], agents: [row("master-project-harbor"), row("onboarding")],
+  }) } }));
+  assert.match(words, /By project Name Tokens In Out Cache read Runs Last used Harbor Notes .* Unattributed 5\.5K/);
+  assert.match(words, /By account Name Tokens In Out Cache read Runs Last used Unattributed 5\.5K/);
+  assert.match(words, /Master, Harbor Notes 5\.5K/);
+  assert.match(words, /Onboarding 5\.5K/);
 });
 
 test("a manual reset, a failed check and a passed reset show on the account's card", () => {

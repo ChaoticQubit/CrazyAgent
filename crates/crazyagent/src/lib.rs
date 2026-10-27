@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod adapters;
+pub mod agent_home;
 pub mod agents;
 pub mod assets;
 pub mod client_controller;
@@ -34,6 +35,7 @@ pub mod rcli_host;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod scheduling;
 pub mod service;
 pub mod setup;
 pub mod skills;

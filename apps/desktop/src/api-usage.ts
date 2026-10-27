@@ -30,6 +30,16 @@ export interface LinesRow {
   committed_removed: number;
 }
 
+export interface AgentLinesRow {
+  agent: string;
+  change_sets: number;
+  added: number;
+  removed: number;
+  commits: number;
+  committed_added: number;
+  committed_removed: number;
+}
+
 export interface LimitWindow {
   used_percent: number;
   resets_at_ms: number | null;
@@ -60,6 +70,7 @@ export interface UsageReport {
   agents: UsageRow[];
   days: DayTokens[];
   lines: LinesRow[];
+  agent_lines: AgentLinesRow[];
   limits: AccountLimits[];
 }
 
@@ -105,10 +116,11 @@ export function usageNotReady<T>(result: Result<T>): boolean {
   return result.kind === "not_ready" || (result.kind === "error" && result.code === "usage_unavailable");
 }
 
-/** Reads the usage page's numbers. Inputs: the range start in milliseconds, null for all
- * time, and the viewer's offset east of UTC in minutes. Output: the report. */
-export function loadUsage(sinceMs: number | null, offsetMinutes: number): Promise<Result<UsageReport>> {
-  return call<UsageReport>("desktop_usage_report", { sinceMs, offsetMinutes });
+/** Reads the usage page's numbers for every project, or for one project when its id is
+ * given. Inputs: the range start in milliseconds, null for all time, the viewer's offset east
+ * of UTC in minutes and the project id. Output: the report. */
+export function loadUsage(sinceMs: number | null, offsetMinutes: number, projectId: string | null = null): Promise<Result<UsageReport>> {
+  return call<UsageReport>("desktop_usage_report", { projectId, sinceMs, offsetMinutes });
 }
 
 /** Asks the engine to read every signed-in account's limits now. */

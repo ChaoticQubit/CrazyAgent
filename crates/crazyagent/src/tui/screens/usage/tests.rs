@@ -80,6 +80,7 @@ fn report() -> UsageReport {
             committed_added: 80,
             committed_removed: 55,
         }],
+        agent_lines: Vec::new(),
         limits: vec![limits(Some("usage_rate_limited"))],
     }
 }
@@ -194,6 +195,32 @@ fn the_summary_shows_totals_limits_with_countdowns_and_named_groups() {
         assert!(all.contains(wanted), "{wanted:?} in\n{all}");
     }
     assert!(!all.contains("project-harbor") && !all.contains("pool-main"));
+}
+
+#[test]
+fn runs_tied_to_no_project_or_account_read_as_unattributed() {
+    let ctx = ctx(100, 40);
+    let report = UsageReport {
+        projects: vec![usage_row("project-harbor"), usage_row("")],
+        accounts: vec![usage_row("")],
+        ..report()
+    };
+    let all = text(&summary(
+        &report,
+        UsageRange::Week,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ))
+    .join("\n");
+    for wanted in [
+        "By project\n  Harbor Notes    5.5K tokens  2 runs\n  Unattributed    5.5K tokens  2 runs",
+        "By account\n  Unattributed    5.5K tokens  2 runs",
+    ] {
+        assert!(all.contains(wanted), "{wanted:?} in\n{all}");
+    }
 }
 
 #[test]

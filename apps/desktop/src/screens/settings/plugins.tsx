@@ -1,12 +1,13 @@
 import { createRef, useRef, useState, type RefObject } from "react";
 import {
-  addMcpServer, addSkill, approveMcpServer, checkMcpServer, listMcpServers, listSkills, pickFolder, removeMcpSecret, removeMcpServer, removeSkill,
-  setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, switchPlugin, type McpServerSpec, type McpServerView, type PluginScope, type Result,
-  type SkillDetail, type SkillView,
+  addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret, removeMcpServer,
+  removeSkill, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type ImportCandidate, type ImportedSkill,
+  type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillDetail, type SkillView,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
-  Button, ConfirmDialog, Dialog, EmptyState, LoadError, Menu, NotReady, Notice, Panel, SecretField, Segmented, Skeleton, StatusBadge, Switch, TextArea, TextField,
+  Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, Menu, NotReady, Notice, Panel, SecretField, Segmented, Skeleton, StatusBadge, Switch, TextArea,
+  TextField,
   type MenuItem,
 } from "../../ui";
 import { navigate } from "../../ui/router";
@@ -127,11 +128,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
 
 /** The skills list as a pure view of the engine read. Inputs: the read, the project id when
  * shown in a project, the last failure and the actions. */
-export function SkillsView({ skills, projectId, failure, onAdd, onOpen, onToggle, onRemove, onRetry }: {
+export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen, onToggle, onRemove, onRetry }: {
   skills: Loaded<SkillView[]>;
   projectId?: string;
   failure: string;
   onAdd: () => void;
+  onImport?: () => void;
   onOpen: (skill: SkillView) => void;
   onToggle: (skill: SkillView, on: boolean) => void;
   onRemove: (skill: SkillView) => void;
@@ -140,7 +142,10 @@ export function SkillsView({ skills, projectId, failure, onAdd, onOpen, onToggle
   if (skills.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (skills.kind === "not_ready") return <NotReady what="Skills" compact />;
   if (skills.kind === "error") return <LoadError message="Couldn't load skills." onRetry={onRetry} />;
-  const add = <Button icon="folder-plus" onClick={onAdd}>Add skill</Button>;
+  const add = <span className="row">
+    {onImport && <Button icon="folder-input" onClick={onImport}>Import my skills</Button>}
+    <Button icon="folder-plus" onClick={onAdd}>Add skill</Button>
+  </span>;
   return <div className="stack-small">
     <div className="row between">
       <p className="secondary">A skill is a folder with a SKILL.md file. Global skills are available to every project; you can switch them off per project.</p>
@@ -224,7 +229,7 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
 }) {
   const session = useAppSession();
   const openLink = useLinkOpener(session.showToast);
-  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId]);
+  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId], "skill-detail");
   const [failure, setFailure] = useState("");
   const toggle = async (skill: SkillView, on: boolean) => {
     setFailure("");
@@ -237,6 +242,109 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
     <SkillDetailView detail={detail} projectId={projectId} failure={failure} onRetry={reload} onOpenLink={openLink}
       onToggle={(skill, on) => void toggle(skill, on)} />
+  </Dialog>;
+}
+
+const IMPORT_FROM: Record<ImportFrom, string> = { claude: "Claude Code", codex: "Codex" };
+
+/** Says whether a found skill can be ticked: new, or added with different files.
+ * Input: its state. Output: true for "new" and "differs". */
+export function importable(state: ImportState): boolean {
+  return state.kind === "new" || state.kind === "differs";
+}
+
+/** The badge word for a found skill. Input: its state. Output: "" for a new skill,
+ * "Already added", "Differs" or "Can't import". */
+export function importWord(state: ImportState): string {
+  if (state.kind === "added") return "Already added";
+  if (state.kind === "differs") return "Differs";
+  if (state.kind === "unusable") return "Can't import";
+  return "";
+}
+
+/** One ticked skill's import outcome as the dialog shows it. */
+export interface ImportOutcome {
+  name: string;
+  result: Result<ImportedSkill>;
+}
+
+/** The sentence for one import outcome. Input: the outcome. Output: what was imported and
+ * which files were left out, or why it was not imported. */
+export function importSentence({ name, result }: ImportOutcome): string {
+  if (result.kind === "not_ready") return `Couldn't import ${name}: ${NOT_READY}`;
+  if (result.kind !== "ok") return `Couldn't import ${name}: ${result.message}`;
+  const { skipped, skipped_total } = result.value;
+  if (skipped_total === 0) return `Imported ${name}.`;
+  const rest = skipped_total - skipped.length;
+  return `Imported ${name}. Left out ${skipped.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}.`;
+}
+
+/** The found skills as a pure view of the scan: a tick box for each one that can be imported,
+ * its source and state, then the last import's outcomes. Inputs: the scan, the ticked
+ * folders, the outcomes and the actions. */
+export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
+  list: Loaded<ImportList>;
+  ticked: ReadonlySet<string>;
+  outcomes: ImportOutcome[];
+  onTick: (found: ImportCandidate, on: boolean) => void;
+  onRetry: () => void;
+}) {
+  if (list.kind === "loading") return <Skeleton shape="row" count={4} />;
+  if (list.kind === "not_ready") return <NotReady what="Importing skills" compact />;
+  if (list.kind === "error") return <LoadError message={list.message} onRetry={onRetry} />;
+  const { found, more } = list.value;
+  return <div className="stack-small">
+    <p className="secondary">From ~/.claude/skills and ~/.codex/skills. Ticked skills are copied into CrazyAgent and turned on for every project. Dotfiles and files that look like keys or passwords are left out, and your folders don't change.</p>
+    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{importSentence(outcome)}</Notice>)}
+    {found.length === 0 ? <EmptyState icon="folder-input" title="No skills found in those folders" compact /> : <Panel padded={false}><div className="rows">
+      {found.map((item) => {
+        const word = importWord(item.state);
+        const why = item.state.kind === "unusable" ? plainError(item.state.code)
+          : item.state.kind === "differs" ? "Importing replaces the added copy and keeps its project switches." : "";
+        return <div className="item-row" key={item.folder}>
+          <Checkbox checked={ticked.has(item.folder)} disabled={!importable(item.state)} onChecked={(on) => onTick(item, on)}
+            label={<span className="stack-small"><span className="title">{item.name}</span>{item.line && <span className="secondary">{item.line}</span>}
+              <span className="mono muted small">{IMPORT_FROM[item.from]}: {homePath(item.folder)}</span>{why && <span className="secondary">{why}</span>}</span>} />
+          {word && <StatusBadge word={word} tone={item.state.kind === "unusable" ? "danger" : item.state.kind === "differs" ? "warn" : "neutral"} />}
+        </div>;
+      })}
+      {more > 0 && <div className="item-row"><span className="secondary">And {more} more not shown</span></div>}
+    </div></Panel>}
+  </div>;
+}
+
+/** The Import my skills pop-up. It reads the owner's skills folders only once it opens, and
+ * imports the ticked skills one at a time. Inputs: close and a callback after any import. */
+export function ImportSkillsDialog({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
+  const session = useAppSession();
+  const [list, reload] = useLoad(() => skillImportScan(), []);
+  const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set());
+  const [outcomes, setOutcomes] = useState<ImportOutcome[]>([]);
+  const [pending, setPending] = useState(false);
+  const picks = list.kind === "ok" ? list.value.found.filter((item) => ticked.has(item.folder) && importable(item.state)) : [];
+  const tick = (item: ImportCandidate, on: boolean) => {
+    const next = new Set(ticked);
+    if (on) next.add(item.folder); else next.delete(item.folder);
+    setTicked(next);
+  };
+  const run = async () => {
+    setPending(true);
+    const done: ImportOutcome[] = [];
+    for (const item of picks) {
+      const replace = item.state.kind === "differs" ? item.state.id : null;
+      done.push({ name: item.name, result: session.noteResult(await importSkill(item.folder, replace)) });
+    }
+    setPending(false);
+    setOutcomes(done);
+    setTicked(new Set());
+    const imported = done.filter((outcome) => outcome.result.kind === "ok").length;
+    if (imported > 0) { session.showToast(imported === 1 ? "Imported 1 skill." : `Imported ${imported} skills.`); onChanged(); }
+    reload();
+  };
+  return <Dialog open title="Import my skills" onClose={onClose} wide
+    footer={<><Button onClick={onClose}>Close</Button><Button variant="primary" disabled={picks.length === 0} pending={pending} pendingLabel="Importing..."
+      onClick={() => void run()}>{picks.length > 0 ? `Import ${picks.length}` : "Import"}</Button></>}>
+    <ImportSkillsView list={list} ticked={ticked} outcomes={outcomes} onTick={tick} onRetry={reload} />
   </Dialog>;
 }
 
@@ -506,14 +614,15 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
   const [section, setSection] = useState<"skills" | "servers">("skills");
-  const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId]);
-  const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId]);
+  const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
+  const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();
   const [secrets, setSecrets] = useState<McpServerView>();
   const [removing, setRemoving] = useState<Removing>();
   const [opened, setOpened] = useState<string>();
+  const [importing, setImporting] = useState(false);
   const shown = projectId ? opened : skill;
   const open = (id: string) => projectId ? setOpened(id) : navigate({ name: "settings", tab: "plugins", skill: id });
   const closeDetail = () => projectId ? setOpened(undefined) : navigate({ name: "settings", tab: "plugins" }, true);
@@ -559,7 +668,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
       options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }]} />
     {section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
-        onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
+        onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}
         onToggle={toggleServer} onSecrets={setSecrets} onRemove={(server) => setRemoving({ kind: "server", server })}
         onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec), () => "Server approved.", reloadServers)}
@@ -571,6 +680,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     <AddServerDialog open={adding?.kind === "server"} scope={scope} onClose={() => setAdding(undefined)}
       onAdded={(server) => { setAdding(undefined); session.showToast(`Added ${server.name}. Review it, then approve it.`); reloadServers(); }} />
     {shown && <SkillDetailDialog id={shown} projectId={projectId} onClose={closeDetail} onChanged={reloadSkills} />}
+    {importing && <ImportSkillsDialog onClose={() => setImporting(false)} onChanged={reloadSkills} />}
     {secrets && <SecretsDialog server={secrets} onClose={() => setSecrets(undefined)} onChanged={(server) => { setSecrets(server); reloadServers(); }} />}
     <ConfirmDialog open={Boolean(removing)} title={removing?.kind === "server" ? "Remove this MCP server?" : "Remove this skill?"} confirmLabel="Remove"
       onCancel={() => setRemoving(undefined)} onConfirm={confirmRemove}>

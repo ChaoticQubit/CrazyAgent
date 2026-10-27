@@ -107,6 +107,7 @@ pub enum Request {
     },
     Intake(Box<super::client::intake::IntakeJob>),
     Changes(Box<super::client::changes::ChangesQuery>),
+    Process(Box<super::client::process::ProcessQuery>),
     Reconnect,
 }
 
@@ -147,6 +148,7 @@ impl std::fmt::Debug for Request {
             Self::TerminalDetach { .. } => "TerminalDetach",
             Self::Intake(_) => "Intake",
             Self::Changes(_) => "Changes",
+            Self::Process(_) => "Process",
             Self::Reconnect => "Reconnect",
         })
     }

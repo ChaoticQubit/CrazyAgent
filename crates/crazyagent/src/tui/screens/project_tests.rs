@@ -1202,6 +1202,57 @@ fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
 }
 
 #[test]
+fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_team() {
+    let project = ProjectId::new("tidepool").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.team = crate::tui::ctx::Load::Ready(Box::new(crate::team::TeamGraph {
+        project_id: project,
+        nodes: vec![crate::team::GraphNode {
+            id: "team-1".into(),
+            kind: crate::team::NodeKind::Agent,
+            parent: Some("group-codex".into()),
+            label: "Ada (@onboarding-fix)".into(),
+            harness: "codex".into(),
+            status: Some(crate::team::AgentStatus::Working),
+            status_label: None,
+            account: None,
+            agents: None,
+            terminal: Some(crate::terminal::AgentId::new("team-1").unwrap()),
+        }],
+        edges: Vec::new(),
+    }));
+    screen.open(Tab::Conversation);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 140, 24, &look);
+    assert!(screen.typing, "the Conversation tab opens on its input");
+    assert!(drawn.rows.iter().all(|row| row.width() == 140));
+    let panel = 2 + 136 - 32;
+    let column = |needle: &str| {
+        drawn.rows.iter().find_map(|row| {
+            let text = row.text();
+            text.find(needle).map(|at| text[..at].chars().count())
+        })
+    };
+    assert_eq!(column("Team"), Some(panel), "{}", text(&drawn.rows));
+    assert_eq!(column("\u{25b8} Ada (@onboarding-fix)"), Some(panel));
+    assert_eq!(column("  Codex, Working"), Some(panel));
+    assert!(
+        !drawn.help.contains(&("t", "Team")),
+        "t types while the input has the keys"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "t");
+
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 140, 24, &look);
+    assert!(drawn.help.contains(&("t", "Team")), "{:?}", drawn.help);
+    assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Team);
+
+    let narrow = text(&project_screen(&mut screen, 90, 24, &look).rows);
+    assert!(!narrow.contains("Ada (@onboarding-fix)"), "{narrow}");
+}
+
+#[test]
 fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
     let project = ProjectId::new("tidepool").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);

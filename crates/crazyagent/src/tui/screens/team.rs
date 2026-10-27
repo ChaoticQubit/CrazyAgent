@@ -1004,7 +1004,7 @@ fn plain(text: &str) -> String {
 /// The one-line title of a task: its first non-blank line, cleaned by
 /// `plain`, with whitespace runs read as one space. Input: the task text.
 /// Output: the title, or "Untitled task" for blank text.
-fn title(text: &str) -> String {
+pub(in crate::tui) fn title(text: &str) -> String {
     plain(text)
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))

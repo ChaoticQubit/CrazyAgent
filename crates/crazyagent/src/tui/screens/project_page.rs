@@ -19,14 +19,14 @@ use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
-use crate::tui::ctx::{Ctx, Link};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
     Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
     Submission as MasterSubmission,
 };
-use crate::tui::seam::{Arrival, PoolChange, Request};
+use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -35,6 +35,8 @@ use std::path::PathBuf;
 
 const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
+const TEAM_READ_MS: i64 = 3_000;
+const TEAM_WAIT_MS: i64 = 15_000;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -183,6 +185,8 @@ pub(in crate::tui) struct ProjectPage {
     retried: bool,
     renewed: bool,
     live_shown: bool,
+    team_asked: Option<(i64, bool)>,
+    covered: bool,
 }
 
 impl ProjectPage {
@@ -207,6 +211,8 @@ impl ProjectPage {
             retried: false,
             renewed: false,
             live_shown: false,
+            team_asked: None,
+            covered: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -232,6 +238,25 @@ impl ProjectPage {
             id: self.screen.project.clone(),
             name: self.screen.name.clone(),
         }))
+    }
+
+    /// Reads the team graph for the panel beside the master, while this page is on top on
+    /// the Conversation tab: at most one read out at a time, at most one every
+    /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
+    fn ask_team(&mut self, ctx: &mut Ctx) {
+        if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
+            return;
+        }
+        let now = now_ms();
+        if let Some((at, waiting)) = self.team_asked
+            && now - at < if waiting { TEAM_WAIT_MS } else { TEAM_READ_MS }
+        {
+            return;
+        }
+        self.team_asked = Some((now, true));
+        ctx.request(Request::TeamGraph {
+            project: self.screen.project.clone(),
+        });
     }
 
     fn select_master(&mut self, ctx: &Ctx) {
@@ -802,6 +827,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Process => Flow::Open(Place::ProjectProcess {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
         };
         self.sync_master(ctx);
         self.pump(ctx);
@@ -902,7 +931,10 @@ impl Screen for ProjectPage {
                 None => ProjectReply::Ignored,
             },
         };
-        self.reply(reply, ctx)
+        let flow = self.reply(reply, ctx);
+        self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
+        self.ask_team(ctx);
+        flow
     }
 
     fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
@@ -917,6 +949,17 @@ impl Screen for ProjectPage {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
+            Arrival::TeamGraph { project, result } if *project == self.screen.project => {
+                self.team_asked = self.team_asked.map(|(at, _)| (at, false));
+                self.screen.team = match result {
+                    Ok(graph) => Load::Ready(graph.clone()),
+                    Err(code) if code == NOT_READY => Load::NotReady,
+                    Err(_) if self.screen.team.ready().is_some() => self.screen.team.clone(),
+                    Err(code) => Load::Failed(code.clone()),
+                };
+                self.redraw(ctx);
+                return Flow::Handled;
+            }
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Setup(event) => self.setup_arrived(event, ctx),
                 OwnerEvent::Master(event) => self.master_arrived(event, ctx),
@@ -932,6 +975,7 @@ impl Screen for ProjectPage {
             }
             Arrival::Disconnected(_) => {
                 self.sent.clear();
+                self.team_asked = None;
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
                 self.screen.changes.forget_reads();
@@ -947,13 +991,20 @@ impl Screen for ProjectPage {
         self.sync_master(ctx);
         self.pump(ctx);
         self.say_problem(ctx);
+        self.ask_team(ctx);
         self.redraw(ctx);
-        self.live_master().unwrap_or(Flow::Handled)
+        let Some(flow) = self.live_master() else {
+            return Flow::Handled;
+        };
+        self.covered = true;
+        flow
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Pools);
         ctx.request(Request::PoolProjects);
+        self.covered = false;
+        self.ask_team(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);

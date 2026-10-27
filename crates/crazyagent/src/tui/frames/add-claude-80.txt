@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  …  /  Claude  /  Sign in with your Claude subscription   
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+──━━━━━━━━──────────────────────────────────────────────────────────────────────
   Sign in with your Claude subscription                                         
                                                                                 
   Your browser opened the Claude sign-in page.                                  

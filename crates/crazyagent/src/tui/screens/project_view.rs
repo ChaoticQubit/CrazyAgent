@@ -7,6 +7,7 @@ use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, ProjectScreen, REVIEW_ROWS, Speaker, Tab,
     Transcript, memory_source, research_kind,
 };
+use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
 use super::project_time::{clock, duration};
 use crate::project_setup::{
@@ -924,7 +925,34 @@ fn master_status(status: &MasterStatus, look: &Look) -> Row {
     }
 }
 
+/// The Conversation tab: the master conversation, with the team panel beside it once the
+/// content is at least `TEAM_FROM` cells wide. Takes the screen, the content width, the body
+/// height and the look. Returns the rows, the input cursor and the help keys.
 fn conversation(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
+    if content < TEAM_FROM {
+        return master_view(screen, content, room, look);
+    }
+    let main = content - TEAM_SIDE - TEAM_GAP;
+    let (lines, cursor, mut help) = master_view(screen, main, room, look);
+    let side = activity_lines(&screen.team, room, look);
+    let joined = (0..lines.len().max(side.len()))
+        .map(|index| {
+            lines
+                .get(index)
+                .cloned()
+                .unwrap_or_default()
+                .pad(main)
+                .push(" ".repeat(TEAM_GAP), Style::new())
+                .cat(side.get(index).cloned().unwrap_or_default().pad(TEAM_SIDE))
+        })
+        .collect();
+    if !screen.typing {
+        help.insert(help.len().saturating_sub(2), ("t", "Team"));
+    }
+    (joined, cursor, help)
+}
+
+fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
     let assigned = screen.pool.as_ref().is_some_and(|pool| pool.assigned);
     let master = screen
         .transcript
@@ -1755,6 +1783,11 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Pool", pool),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
+        entry(
+            "Process",
+            Row::of("Instructions for this project's agents", look.fg)
+                .push("   i Edit", look.muted),
+        ),
         Row::default(),
     ];
     let (plugins, mut help) = screen

@@ -1,10 +1,14 @@
+use super::account_choice::ChoiceEditor;
 use super::{draw_page, step};
 use crate::config::{POOL_MEMBERS_MAX, plain_problem};
 use crate::pools::{MemberStatus, PoolSummary};
 use crate::protocol::CredentialRef;
+use crate::scheduling::Schedule;
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
 use crate::tui::keys::Key;
+use crate::tui::screens::settings_accounts::settings_event;
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
 use crate::tui::seam::{Arrival, PoolChange, Request};
 use crate::tui::text::{cells, join, list_row, restyle, row, styled, thumb, with_bar, wrap};
@@ -28,6 +32,8 @@ pub struct Pools {
     rows: usize,
     confirm: Option<Confirm>,
     deleting: Option<bool>,
+    schedule: Option<Schedule>,
+    choice: Option<ChoiceEditor>,
 }
 
 struct Confirm {
@@ -53,7 +59,53 @@ impl Pools {
             rows: ROWS_START,
             confirm: None,
             deleting: None,
+            schedule: None,
+            choice: None,
         }
+    }
+
+    fn chosen_pool<'a>(&self, ctx: &'a Ctx) -> Option<&'a PoolSummary> {
+        let editor = self.choice.as_ref()?;
+        ctx.store
+            .pools
+            .ready()?
+            .iter()
+            .find(|pool| pool.id == editor.pool)
+    }
+
+    fn choice_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let (Some(schedule), Some(pool)) = (self.schedule.clone(), self.chosen_pool(ctx).cloned())
+        else {
+            self.choice = None;
+            return Flow::Handled;
+        };
+        let Some(editor) = self.choice.as_mut() else {
+            return Flow::Ignored;
+        };
+        if !editor.key(key, &schedule, &pool, ctx) {
+            self.choice = None;
+        }
+        Flow::Handled
+    }
+
+    fn open_choice(&mut self, ctx: &mut Ctx) {
+        let Some(pool) = ctx
+            .store
+            .pools
+            .ready()
+            .and_then(|pools| pools.get(self.selected))
+        else {
+            return;
+        };
+        if self.schedule.is_none() {
+            ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
+            ctx.say(Message::error(
+                "Account choice is still loading.",
+                "Try again in a moment.",
+            ));
+            return;
+        }
+        self.choice = Some(ChoiceEditor::new(pool.id.clone()));
     }
 
     fn page(&self) -> usize {
@@ -189,6 +241,7 @@ impl Screen for Pools {
             _ => vec![
                 hint("a", "New pool"),
                 hint("Enter", "Edit"),
+                hint("o", "Account choice"),
                 hint("d", "Delete"),
                 sections_hint(ctx.glyphs),
                 hint("Esc", "Home"),
@@ -200,9 +253,16 @@ impl Screen for Pools {
         if self.confirm.is_some() {
             return self.confirm_key(key, ctx);
         }
+        if self.choice.is_some() {
+            return self.choice_key(key, ctx);
+        }
         let count = ctx.store.pools.ready().map_or(0, Vec::len);
         match key {
             Key::Char('a') => Flow::Open(Place::NewPool),
+            Key::Char('o') if count > 0 => {
+                self.open_choice(ctx);
+                Flow::Handled
+            }
             Key::Char('d') if count > 0 && self.deleting.is_none() => {
                 self.ask_delete(ctx);
                 Flow::Handled
@@ -259,6 +319,25 @@ impl Screen for Pools {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        match settings_event(arrival) {
+            Some(SettingsEvent::Schedule(Ok(schedule))) => self.schedule = Some(schedule.clone()),
+            Some(SettingsEvent::Schedule(Err(code))) if self.choice.is_some() => {
+                ctx.say(Message::error(
+                    plain_problem(code).unwrap_or("Could not read the account choice."),
+                    "",
+                ));
+            }
+            Some(SettingsEvent::ScheduleSet(result)) => {
+                if let Err(code) = result {
+                    ctx.say(Message::error(
+                        plain_problem(code).unwrap_or("Could not save the account choice."),
+                        "",
+                    ));
+                }
+                ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
+            }
+            _ => {}
+        }
         match arrival {
             Arrival::Pools(Ok(pools)) => self.follow(pools.len()),
             Arrival::PoolEdited(result) if self.deleting.is_some() => {
@@ -282,6 +361,11 @@ impl Screen for Pools {
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if let (Some(editor), Some(schedule), Some(pool)) =
+            (&self.choice, &self.schedule, self.chosen_pool(ctx))
+        {
+            return Some(editor.modal(schedule, pool, ctx));
+        }
         let confirm = self.confirm.as_ref()?;
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         let mut body = vec![
@@ -331,6 +415,7 @@ impl Screen for Pools {
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Pools);
         ctx.request(Request::Projects);
+        ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
@@ -582,5 +667,150 @@ mod tests {
         );
         assert!(matches!(ctx.next_request(), Some(Request::Pools)));
         assert!(screen.deleting.is_none());
+    }
+
+    fn settings(event: SettingsEvent) -> Arrival {
+        Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Settings(
+            Box::new(event),
+        )))
+    }
+
+    fn change(ctx: &mut Ctx) -> crate::scheduling::ScheduleChange {
+        match ctx.next_request() {
+            Some(Request::Settings(job)) => match *job {
+                SettingsJob::SetSchedule { change, generation } => {
+                    assert!(generation > 0);
+                    change
+                }
+                other => panic!("unexpected settings job {other:?}"),
+            },
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_choice_sets_the_app_and_pool_strategy_and_each_members_rank_reserve_and_pin() {
+        use crate::scheduling::{AccountPlan, Pin, ScheduleChange, Strategy};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.key(&Key::Char('o'), &mut ctx);
+        assert!(
+            screen.modal(&ctx).is_none(),
+            "no editor before the schedule arrives"
+        );
+        assert!(matches!(
+            ctx.next_request(),
+            Some(Request::Settings(job)) if matches!(*job, SettingsJob::Schedule)
+        ));
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let (modal, _) = screen.modal(&ctx).expect("the editor shows");
+        assert_eq!(modal.title, "Account choice: main");
+        let shown = body(&modal);
+        assert!(shown.contains("> Every pool"), "{shown}");
+        assert!(shown.contains("Default (Use it or lose it)"), "{shown}");
+        assert!(shown.contains("ChatGPT member-1"), "{shown}");
+        assert!(shown.contains("No rank, used to 100%"), "{shown}");
+        screen.key(&Key::Right, &mut ctx);
+        assert_eq!(
+            change(&mut ctx),
+            ScheduleChange::AppStrategy {
+                strategy: Strategy::ManualRank
+            }
+        );
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Left, &mut ctx);
+        assert_eq!(
+            change(&mut ctx),
+            ScheduleChange::PoolStrategy {
+                pool: CredentialRef::new("pool-main").unwrap(),
+                strategy: Some(Strategy::Balanced),
+            }
+        );
+        screen.key(&Key::Down, &mut ctx);
+        let member = CredentialRef::new("member-1").unwrap();
+        for (key, plan) in [
+            (
+                Key::Right,
+                AccountPlan {
+                    rank: Some(1),
+                    ..AccountPlan::default()
+                },
+            ),
+            (
+                Key::Char('>'),
+                AccountPlan {
+                    reserve_percent: 5,
+                    ..AccountPlan::default()
+                },
+            ),
+            (
+                Key::Char('p'),
+                AccountPlan {
+                    pin: Some(Pin::UseLast),
+                    ..AccountPlan::default()
+                },
+            ),
+        ] {
+            screen.key(&key, &mut ctx);
+            assert_eq!(
+                change(&mut ctx),
+                ScheduleChange::Account {
+                    connection: member.clone(),
+                    plan
+                }
+            );
+        }
+        screen.key(&Key::Char('<'), &mut ctx);
+        assert_eq!(ctx.queued(), 0, "a reserve already at 0 sends nothing");
+        screen.arrive(
+            &settings(SettingsEvent::ScheduleSet(Err(
+                "account_reserve_invalid".into()
+            ))),
+            &mut ctx,
+        );
+        assert!(ctx.message().is_some());
+        assert!(matches!(
+            ctx.next_request(),
+            Some(Request::Settings(job)) if matches!(*job, SettingsJob::Schedule)
+        ));
+        screen.key(&Key::Esc, &mut ctx);
+        assert!(screen.modal(&ctx).is_none());
+    }
+
+    #[test]
+    fn account_choice_steps_stay_in_range() {
+        use super::super::account_choice::{cycle, next_pin, plan_line, rank_step, reserve_step};
+        use crate::scheduling::{AccountPlan, Pin, Strategy};
+        assert_eq!(rank_step(None, false), None);
+        assert_eq!(rank_step(Some(1), false), None);
+        assert_eq!(rank_step(Some(999), true), Some(999));
+        assert_eq!(reserve_step(95, true), 99);
+        assert_eq!(reserve_step(99, true), 99);
+        assert_eq!(reserve_step(3, false), 0);
+        assert_eq!(next_pin(Some(Pin::NeverUse)), None);
+        assert_eq!(
+            cycle(Some(Strategy::Balanced), true, false),
+            Some(Strategy::UseItOrLoseIt)
+        );
+        assert_eq!(cycle(Some(Strategy::Balanced), true, true), None);
+        assert_eq!(
+            plan_line(&AccountPlan {
+                rank: Some(2),
+                reserve_percent: 10,
+                pin: Some(Pin::UseLast)
+            }),
+            "Rank 2, keeps 10% of its week, used last"
+        );
+        assert_eq!(
+            plan_line(&AccountPlan {
+                pin: Some(Pin::NeverUse),
+                ..AccountPlan::default()
+            }),
+            "Never used"
+        );
     }
 }

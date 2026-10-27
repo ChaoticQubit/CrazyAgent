@@ -14,6 +14,7 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const WEEK_MINUTES: u64 = 7 * 24 * 60;
 const NAME_BYTES_MAX: usize = 128;
+const AGENT_BYTES_MAX: usize = NAME_BYTES_MAX + 64;
 const WALK_DEPTH_MAX: usize = 3;
 const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
 
@@ -89,6 +90,17 @@ impl Tokens {
     pub fn is_empty(self) -> bool {
         self == Tokens::default()
     }
+
+    /// The tokens a harness reported for a turn, with an unreported count as zero.
+    /// Input: the reported usage. Output: the count.
+    pub fn reported(usage: &crate::adapters::events::TokenUsage) -> Tokens {
+        Tokens {
+            input: usage.input_tokens.unwrap_or(0),
+            output: usage.output_tokens.unwrap_or(0),
+            cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+            cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
+        }
+    }
 }
 
 /// The kind of run a transcript belongs to.
@@ -133,9 +145,9 @@ impl Format {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attribution {
     pub kind: RunKind,
-    pub project: ProjectId,
+    pub project: Option<ProjectId>,
     pub pool: Option<CredentialRef>,
-    pub account: CredentialRef,
+    pub account: Option<CredentialRef>,
     pub agent: String,
     pub harness: String,
 }
@@ -444,44 +456,107 @@ pub fn scan_home(
             )
             .map_err(storage)?;
         }
-        if growth.is_empty() {
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,\
-                input,output,cache_read,cache_write)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-             ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session) DO UPDATE SET
-                input=input+excluded.input,output=output+excluded.output,
-                cache_read=cache_read+excluded.cache_read,cache_write=cache_write+excluded.cache_write",
-            params![
-                hour_ms,
-                attribution.kind.name(),
-                attribution.project.as_str(),
-                attribution.pool.as_ref().map_or("", |pool| pool.as_str()),
-                attribution.account.as_str(),
-                attribution.agent,
-                attribution.harness,
-                session_name(&path),
-                clamp(growth.input),
-                clamp(growth.output),
-                clamp(growth.cache_read),
-                clamp(growth.cache_write),
-            ],
-        )
-        .map_err(storage)?;
+        add_tokens(&tx, hour_ms, attribution, &session_name(&path), growth)?;
         added = added.plus(growth);
     }
-    if let Some(observation) = limits {
-        record_observation(
-            &tx,
-            &attribution.account,
-            &observation,
-            LimitSource::Transcript,
-            now_ms,
-        )?;
+    if let (Some(observation), Some(account)) = (limits, &attribution.account) {
+        record_observation(&tx, account, &observation, LimitSource::Transcript, now_ms)?;
     }
     tx.commit().map_err(storage)?;
+    Ok(added)
+}
+
+fn text(value: Option<&str>) -> &str {
+    value.unwrap_or("")
+}
+
+fn add_tokens(
+    tx: &Connection,
+    hour_ms: i64,
+    attribution: &Attribution,
+    session: &str,
+    growth: Tokens,
+) -> Result<(), EngineError> {
+    if growth.is_empty() {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,\
+            input,output,cache_read,cache_write)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+         ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session) DO UPDATE SET
+            input=input+excluded.input,output=output+excluded.output,
+            cache_read=cache_read+excluded.cache_read,cache_write=cache_write+excluded.cache_write",
+        params![
+            hour_ms,
+            attribution.kind.name(),
+            text(attribution.project.as_ref().map(ProjectId::as_str)),
+            text(attribution.pool.as_ref().map(CredentialRef::as_str)),
+            text(attribution.account.as_ref().map(CredentialRef::as_str)),
+            attribution.agent,
+            attribution.harness,
+            session,
+            clamp(growth.input),
+            clamp(growth.output),
+            clamp(growth.cache_read),
+            clamp(growth.cache_write),
+        ],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Counts the usage a harness reported for one turn, such as a piped Claude Code agent that
+/// keeps no records of its own, into the hour of `now_ms`. Inputs: the store, the
+/// attribution, the tokens, the session name and the time. Output: done, or
+/// `usage_attribution_invalid` / `usage_unavailable`.
+pub fn count_reported(
+    db: &Connection,
+    attribution: &Attribution,
+    tokens: Tokens,
+    session: &str,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    checked_attribution(attribution)?;
+    if session.is_empty() || session.len() > NAME_BYTES_MAX {
+        return Err(failure("usage_attribution_invalid"));
+    }
+    add_tokens(
+        db,
+        now_ms - now_ms.rem_euclid(HOUR_MS),
+        attribution,
+        session,
+        tokens,
+    )
+}
+
+/// Counts one finished turn whose home is about to be removed, such as an engine-driven
+/// master turn: the usage the harness reported for the turn when it reported any, else
+/// what the home's records hold; then forgets the home's records so nothing stays behind.
+/// Inputs: the store, the home, its format, the attribution, the reported usage, the turn's
+/// session name and the time. Output: the tokens added, or `usage_unavailable`.
+pub fn count_turn(
+    db: &Connection,
+    home: &Path,
+    format: Format,
+    attribution: &Attribution,
+    reported: Tokens,
+    session: &str,
+    now_ms: i64,
+) -> Result<Tokens, EngineError> {
+    let added = if reported.is_empty() {
+        checked_attribution(attribution)?;
+        scan_home(db, home, format, attribution, now_ms)?
+    } else {
+        count_reported(db, attribution, reported, session, now_ms)?;
+        reported
+    };
+    let prefix = format!("{}/", home.to_string_lossy());
+    db.execute(
+        "DELETE FROM usage_files WHERE substr(path,1,length(?1))=?1",
+        params![prefix],
+    )
+    .map_err(storage)?;
     Ok(added)
 }
 
@@ -508,8 +583,8 @@ pub fn register_run(
         params![
             home.to_string_lossy(),
             attribution.kind.name(),
-            attribution.project.as_str(),
-            attribution.account.as_str(),
+            text(attribution.project.as_ref().map(ProjectId::as_str)),
+            text(attribution.account.as_ref().map(CredentialRef::as_str)),
             attribution.agent,
             attribution.harness,
             now_ms,
@@ -559,16 +634,17 @@ pub fn scan_runs(
             "agent" => RunKind::Agent,
             _ => RunKind::Research,
         };
-        let (Some(format), Ok(project), Ok(account)) = (
-            Format::of(&harness),
-            ProjectId::new(project),
-            CredentialRef::new(account),
-        ) else {
+        let Some(format) = Format::of(&harness) else {
             continue;
         };
+        let project = ProjectId::new(project).ok();
+        let account = CredentialRef::new(account).ok();
         let attribution = Attribution {
             kind,
-            pool: pool(project.as_str(), &account),
+            pool: match (&project, &account) {
+                (Some(project), Some(account)) => pool(project.as_str(), account),
+                _ => None,
+            },
             project,
             account,
             agent,
@@ -587,7 +663,7 @@ pub fn scan_runs(
 
 fn checked_attribution(attribution: &Attribution) -> Result<(), EngineError> {
     if attribution.agent.is_empty()
-        || attribution.agent.len() > NAME_BYTES_MAX
+        || attribution.agent.len() > AGENT_BYTES_MAX
         || attribution.harness.is_empty()
         || attribution.harness.len() > NAME_BYTES_MAX
     {

@@ -22,6 +22,7 @@ pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
+pub use transport::process::PROCESS_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
@@ -152,6 +153,9 @@ pub enum OwnerMutation {
     },
     Team {
         action: crate::team::TeamAction,
+    },
+    AccountSchedule {
+        change: crate::scheduling::ScheduleChange,
     },
     UpdateProjectSetup {
         project_id: ProjectId,
@@ -322,6 +326,12 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::Team {
                     action: action.clone(),
+                }
+            }
+            Self::AccountSchedule { change } => {
+                change.validate()?;
+                Command::AccountSchedule {
+                    change: change.clone(),
                 }
             }
             Self::UpdateProjectSetup {
@@ -613,6 +623,7 @@ pub enum OwnerRead {
     PoolSummaries {
         offset: u8,
     },
+    AccountSchedule,
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -680,7 +691,8 @@ impl OwnerRead {
             | Self::Onboarding { .. }
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
-            | Self::PoolSummaries { .. } => return Ok(None),
+            | Self::PoolSummaries { .. }
+            | Self::AccountSchedule => return Ok(None),
             Self::Memories { search, limit, .. } => {
                 crate::memory::library::validate_page(search.as_deref(), *limit)?;
                 return Ok(None);
@@ -1062,6 +1074,9 @@ pub enum OwnerData {
     PoolSummaries {
         pools: Vec<crate::pools::PoolSummary>,
         next_offset: Option<u8>,
+    },
+    AccountSchedule {
+        schedule: crate::scheduling::Schedule,
     },
     Page {
         items: Vec<OwnerSummary>,
