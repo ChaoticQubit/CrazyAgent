@@ -84,7 +84,7 @@ pub fn show_all(root: &Path, project: &ProjectId, on: bool) -> Result<Written, E
 pub fn follow(db: &Connection, root: &Path) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     let mut statement = db
-        .prepare_cached("SELECT project FROM ide_workspaces ORDER BY project LIMIT ?1")
+        .prepare("SELECT project FROM ide_workspaces ORDER BY project LIMIT ?1")
         .map_err(unavailable)?;
     let followed: Vec<String> = statement
         .query_map([PROJECTS_FOLLOWED_MAX], |row| row.get(0))
@@ -181,7 +181,7 @@ fn sections(
     if !folder.is_absolute() {
         return Err(failure("ide_project_folder_invalid"));
     }
-    let mut statement = db.prepare_cached(AGENTS).map_err(unavailable)?;
+    let mut statement = db.prepare(AGENTS).map_err(unavailable)?;
     let rows = statement
         .query_map(params![project.as_str(), AGENTS_LISTED_MAX as i64], |row| {
             Ok((

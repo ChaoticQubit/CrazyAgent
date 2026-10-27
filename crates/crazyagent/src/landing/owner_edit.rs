@@ -119,7 +119,7 @@ pub(super) fn mark(
     let worktree = worktree.to_str().ok_or_else(invalid)?;
     db.execute_batch(SCHEMA).map_err(storage)?;
     let mut statement = db
-        .prepare_cached(
+        .prepare(
             "SELECT EXISTS(SELECT 1 FROM landing_owner_edits
              WHERE worktree=?1 AND change_set=?2 AND path=?3)",
         )

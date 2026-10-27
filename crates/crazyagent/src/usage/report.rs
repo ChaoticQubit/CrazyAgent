@@ -173,13 +173,14 @@ fn flag_unreported(
         .map_err(storage)?;
     let counted = rows.len();
     for (key, harness, last_ms) in marks {
+        let room = rows.len() < counted + ROWS_MAX;
         match rows.iter_mut().find(|row| row.key == key) {
             Some(row) => {
                 row.not_reported_by
                     .get_or_insert_with(|| harness_name(&harness));
                 row.last_ms = row.last_ms.max(last_ms);
             }
-            None if rows.len() < counted + ROWS_MAX => rows.push(UsageRow {
+            None if room => rows.push(UsageRow {
                 key,
                 tokens: Tokens::default(),
                 runs: 0,
