@@ -852,9 +852,10 @@ impl ProjectSandbox {
 
     /// Paths inside the project folder no agent may write although the folder is writable:
     /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
-    /// and the git config with its lock file. Every platform boundary keeps these read-only,
-    /// except that Windows guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
-    pub fn protected_paths(&self) -> [PathBuf; 5] {
+    /// the git config with its lock file, and `.git/modules`, where git keeps submodule
+    /// repositories. Every platform boundary keeps these read-only, except that Windows
+    /// guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
+    pub fn protected_paths(&self) -> [PathBuf; 6] {
         let git = self.project_root.join(".git");
         [
             self.project_root.join("context"),
@@ -862,6 +863,7 @@ impl ProjectSandbox {
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
+            git.join("modules"),
         ]
     }
 
@@ -969,9 +971,11 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         text.push_str(&self.git_link_denies());
+        text.push_str(&self.submodule_denies());
+        text.push_str(&self.nested_git_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
@@ -1061,6 +1065,97 @@ impl ProjectSandbox {
         );
         assert!(text.matches("(regex #\"^/").count() == 5);
         text
+    }
+
+    /// The Seatbelt rule that keeps the submodule store out of agent hands. Git keeps a
+    /// submodule's own repository, with the config and hooks a later git would run, under
+    /// `.git/modules`; no agent may write there, in the common git folder or a worktree
+    /// admin folder, so none can plant a submodule whose metadata the engine or the owner
+    /// then enters. The `.gitmodules` file and gitlinks stay writable tracked content: the
+    /// engine's own git ignores them with `--ignore-submodules` and never recurses. The
+    /// name matches in any letter case, since the project disk may be case insensitive.
+    /// Input: the policy. Output: the rule text.
+    fn submodule_denies(&self) -> String {
+        let pattern = seatbelt_pattern(&self.project_root);
+        let dot_git = "\\.[gG][iI][tT]";
+        let modules = "[mM][oO][dD][uU][lL][eE][sS]";
+        let text = format!(
+            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/worktrees/[^/]+)?/{modules}(/.*)?$\"))\n"
+        );
+        assert_eq!(text.matches("(regex #\"^/").count(), 1);
+        text
+    }
+
+    /// The Seatbelt rule that keeps an agent from planting a nested git repository inside a
+    /// writable working tree, which the owner's own unsandboxed git (its terminal or the
+    /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
+    /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
+    /// below a writable working tree, except that tree's own top-level `.git` and the
+    /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
+    /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
+    /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
+    /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
+    /// included, in every non-working-tree writable root (the admin folder, object store,
+    /// home, temp and scratch), so no agent can create a repository anywhere to rename from
+    /// (SM1-R). Input: the policy. Output: the rule text.
+    fn nested_git_denies(&self) -> String {
+        let dot_git = "\\.[gG][iI][tT]";
+        let (working, other) = self.git_deny_roots();
+        let mut nested = String::new();
+        for root in &working {
+            nested.push_str(&format!(
+                "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
+        }
+        for root in &other {
+            nested.push_str(&format!(
+                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
+        }
+        let pattern = seatbelt_pattern(&self.project_root);
+        let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
+        let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        for worktree in &self.worktrees {
+            exempt.push_str(&format!(
+                "\n    (require-not (literal \"{}\"))",
+                worktree.join(".git").display()
+            ));
+        }
+        let text =
+            format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
+        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
+        assert!(text.ends_with(")\n"));
+        text
+    }
+
+    /// Splits the agent's writable roots into the working-tree roots, where the root's own
+    /// top-level `.git` is a legitimate repository link the engine adds, and every other
+    /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
+    /// tree, and a `.git` at any depth (top level included) in an admin folder, object
+    /// store, home, temp or scratch root, is denied so no agent can create a repository to
+    /// rename whole into a worktree.
+    fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
+        let mut working: Vec<&Path> = Vec::new();
+        let mut other: Vec<&Path> = Vec::new();
+        match &self.checkout {
+            Some(checkout) => {
+                working.push(checkout.worktree.as_path());
+                other.push(checkout.admin.as_path());
+                other.push(checkout.objects.as_path());
+            }
+            None => working.push(self.project_root.as_path()),
+        }
+        other.push(self.agent_home.as_path());
+        other.push(self.agent_tmp.as_path());
+        if let Some(scratch) = &self.scratch {
+            other.push(scratch.as_path());
+        }
+        for worktree in &self.worktrees {
+            working.push(worktree.as_path());
+        }
+        (working, other)
     }
 
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
