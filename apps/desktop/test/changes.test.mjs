@@ -100,6 +100,7 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_owner_identity_missing" }), "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
+  assert.equal(client.changesRefusal({ code: "changes_workspace_invalid" }), "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.");
   assert.equal(client.changesRefusal({ code: "made_up_code" }), "Something went wrong. Try again. (made_up_code)");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/changes.rs", import.meta.url), "utf8");
   const codes = engine.slice(engine.indexOf("pub const CHANGES_CODES"), engine.indexOf("];", engine.indexOf("pub const CHANGES_CODES")));

@@ -68,6 +68,7 @@ const REFUSALS: Record<string, string> = {
   changes_owner_identity_missing: "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.",
   changes_owner_unavailable: "Your project folder couldn't be read. Check that it is still there, then try again.",
   changes_too_large: "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.",
+  changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
 };
 
 /** The refusal codes of the changes protocol that have their own sentence. */
