@@ -402,6 +402,13 @@ export function loadReadPaths(id: string): Promise<Result<string[]>> {
   return call<string[]>("desktop_project_read_paths", { id });
 }
 
+/** Lists this project's files for `@` tags: tracked and untracked, not ignored paths
+ * relative to its folder that contain the query, at most 200. Inputs: project id and query.
+ * Output: the paths in git's order. */
+export function loadProjectFiles(id: string, query: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_files", { id, query });
+}
+
 /** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
  * Inputs: project id, the folders and a generation. Output: the receipt. */
 export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {

@@ -406,6 +406,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.project_read_paths(&id).await }.await;
             routed(result)
         }
+        "desktop_project_files" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                query: String,
+            }
+            let Args { id, query } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.project_files(&id, &query).await }.await;
+            routed(result)
+        }
         "desktop_set_project_read_paths" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

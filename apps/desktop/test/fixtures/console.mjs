@@ -7,6 +7,7 @@ import { agentMentions } from "../../src/screens/project/console-model.ts";
 let root = null;
 export const sent = [];
 export const routes = [];
+export const queries = [];
 export let stops = 0;
 
 const graphNode = (id, label) => ({ id, kind: "agent", parent: "g", label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: null });
@@ -20,12 +21,14 @@ export function mount() {
   root?.unmount();
   sent.length = 0;
   routes.length = 0;
+  queries.length = 0;
   stops = 0;
   document.body.innerHTML = '<div id="root" style="height:480px;width:720px"></div>';
   root = createRoot(document.getElementById("root"));
   flushSync(() => root.render(createElement(Console, {
     projectId: "p-1", lines, agents: agentMentions([graphNode("team-1", "Ada (@onboarding-fix)"), graphNode("team-2", "Grace")]), files: null,
     onSend: (text) => sent.push(text), onStop: () => { stops += 1; }, onNavigate: (route) => routes.push(route),
+    onTagQuery: (query) => queries.push(query),
   })));
   return document.querySelector(".cs textarea").id;
 }
@@ -45,6 +48,7 @@ export function state() {
     sent: [...sent],
     routes: [...routes],
     stops,
+    queries: [...queries],
     lines: [...document.querySelectorAll(".cs-line")].map((line) => line.textContent),
     options: [...document.querySelectorAll(".cs-menu [role=option]")].map((option) => option.textContent),
     selected: document.querySelector(".cs-menu [aria-selected=true]")?.textContent ?? null,

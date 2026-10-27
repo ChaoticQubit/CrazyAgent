@@ -4,6 +4,8 @@
   --cs-rule: rgba(238, 234, 226, 0.14);
   --cs-tag-bg: rgba(255, 106, 69, 0.16);
   --cs-error: #ff8a73;
+  --cs-code: #f2c66d;
+  --cs-box: rgba(238, 234, 226, 0.06);
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -57,6 +59,84 @@
 
 .cs-error {
   color: var(--cs-error);
+}
+
+.cs .markdown {
+  gap: 8px;
+  max-width: none;
+  line-height: var(--cs-line);
+}
+
+.cs .markdown-heading {
+  margin-top: 4px;
+}
+
+.cs .markdown :is(h2, h3, h4, h5, h6, h7) {
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 700;
+}
+
+.cs .markdown ul {
+  padding-left: 2ch;
+  gap: 0;
+  list-style-type: "- ";
+}
+
+.cs .markdown ol {
+  padding-left: 3ch;
+  gap: 0;
+}
+
+.cs .markdown em {
+  font-synthesis: style;
+}
+
+.cs .markdown code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--cs-code);
+  font: inherit;
+}
+
+.cs .markdown pre {
+  padding: 8px 10px;
+  border: 1px solid var(--cs-rule);
+  border-radius: 4px;
+  background: var(--cs-box);
+}
+
+.cs .markdown pre code {
+  color: var(--terminal-fg);
+}
+
+.cs .markdown a {
+  color: var(--terminal-cursor);
+}
+
+.cs .markdown blockquote {
+  padding: 0 0 0 1ch;
+  border-left: 2px solid var(--cs-rule);
+  color: var(--cs-dim);
+}
+
+.cs .markdown hr {
+  border-top: 1px dashed var(--cs-rule);
+}
+
+.cs .markdown table {
+  font-size: inherit;
+}
+
+.cs .markdown :is(th, td) {
+  border-color: var(--cs-rule);
+  padding: 2px 8px;
+}
+
+.cs .markdown th {
+  background: none;
+  font-weight: 700;
 }
 
 .cs-tag {

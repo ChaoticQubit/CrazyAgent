@@ -27,6 +27,7 @@
     "allow-desktop-delete-project-context",
     "allow-desktop-project-read-paths",
     "allow-desktop-set-project-read-paths",
+    "allow-desktop-project-files",
     "allow-desktop-team-status",
     "allow-desktop-team-message",
     "allow-desktop-team-delegate",
