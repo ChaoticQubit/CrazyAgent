@@ -2104,6 +2104,80 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     host.close(&[]).unwrap();
 }
 
+/// A session whose kept rollout the harness reader refuses at a resume, here because a
+/// tools-on master rewrote its first line to name another working folder, is not resumed
+/// again: that start ends without turning the live switch off, and the next start begins a
+/// fresh conversation with the note that the earlier one could not be read.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_resume_the_reader_refuses_starts_fresh_with_the_lost_note() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the first session's master is briefed and kept",
+        |f| {
+            live_turns(&f.connection) == (1, false)
+                && kept_conversation(&f.connection, "s-one").is_some()
+        },
+    );
+    let master = masters(&fixture.connection)[0];
+    let (first, record) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    switch_session(&fixture.connection, "s-two");
+    fixture.until(&mut team, "the second session's master is briefed", |f| {
+        live_turns(&f.connection) == (2, false)
+            && kept_conversation(&f.connection, "s-two").is_some()
+    });
+
+    let text = std::fs::read_to_string(&record).unwrap();
+    let (_, rest) = text.split_once('\n').unwrap();
+    std::fs::write(
+        &record,
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{first}\",\"cwd\":\"/elsewhere\"}}}}\n{rest}"
+        ),
+    )
+    .unwrap();
+    switch_session(&fixture.connection, "s-one");
+    fixture.until(
+        &mut team,
+        "the refused resume starts fresh with the lost note",
+        |f| {
+            noted(f, crate::master_sessions::LOST_NOTE) == 1
+                && live_turns(&f.connection) == (3, false)
+                && kept_conversation(&f.connection, "s-one").is_some_and(|(id, _)| {
+                    id != first && crate::harnesses::interactive::resumable(&id)
+                })
+        },
+    );
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert!(
+        !fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("The live master was turned off")),
+        "a refused resume does not turn the live master off"
+    );
+    let launched = launches(&fixture, master);
+    assert_eq!(
+        launched.len(),
+        3,
+        "the refused resume never started the harness"
+    );
+    assert!(
+        launched.iter().all(|line| !line.contains("resume")),
+        "{launched:?}"
+    );
+    assert_eq!(masters(&fixture.connection), [master]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 fn live_turns(connection: &Connection) -> (i64, bool) {
     connection
         .query_row(
