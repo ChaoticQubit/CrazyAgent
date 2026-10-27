@@ -586,6 +586,11 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    ProjectFiles {
+        project_id: ProjectId,
+        query: String,
+        limit: u16,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -713,6 +718,10 @@ impl OwnerRead {
             }
             Self::FolderSize { path } => {
                 crate::projects_home::path_text(path, "folder_size_path_invalid")?;
+                return Ok(None);
+            }
+            Self::ProjectFiles { query, limit, .. } => {
+                crate::project_files::validate(query, *limit)?;
                 return Ok(None);
             }
             Self::ResearchLog { job, .. } => {
@@ -1034,6 +1043,10 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    ProjectFiles {
+        project_id: ProjectId,
+        paths: Vec<String>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,
