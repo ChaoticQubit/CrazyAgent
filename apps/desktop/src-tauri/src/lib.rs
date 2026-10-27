@@ -1218,6 +1218,15 @@ async fn desktop_retry_intent(
 }
 
 #[tauri::command]
+async fn desktop_drop_intent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ConnectionStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.drop_intent()
+}
+
+#[tauri::command]
 async fn desktop_prepare_managed_account(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2028,6 +2037,7 @@ pub fn run() {
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,
+            desktop_drop_intent,
             desktop_prepare_managed_account,
             desktop_prepare_configured_account,
             desktop_account_auth_capabilities,

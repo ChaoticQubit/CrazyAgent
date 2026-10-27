@@ -208,6 +208,37 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
 }
 
 #[test]
+fn an_update_a_master_cannot_take_says_why_in_plain_words() {
+    for (code, sentence) in [
+        (
+            "changes_master_tools_off",
+            "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
+        ),
+        (
+            "changes_master_closed",
+            "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.",
+        ),
+        (
+            "changes_master_not_started",
+            "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends.",
+        ),
+    ] {
+        let mut conflict = set('1', ChangeState::Conflict);
+        conflict.agent.kind = AgentKind::Master;
+        let mut view = listed(vec![conflict]);
+        assert!(view.key(key(KeyCode::Char('u')), NOW));
+        let query = reply(&mut view, Err(code.into()));
+        assert_eq!(query, ChangesQuery::Update { id: id('1') });
+        assert!(
+            crate::engine::owner::CHANGES_CODES.contains(&code),
+            "{code}"
+        );
+        assert!(text(&view).contains(sentence), "{code}: {}", text(&view));
+        assert_eq!(refusal(code), sentence);
+    }
+}
+
+#[test]
 fn a_conflicting_accept_names_the_files_and_offers_ask_agent_to_update() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     view.key(key(KeyCode::Char('a')), NOW);

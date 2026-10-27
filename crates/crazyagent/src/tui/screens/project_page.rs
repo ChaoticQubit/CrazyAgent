@@ -406,6 +406,7 @@ impl ProjectPage {
             }
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
+            MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
         };
         let problem = master_problem(code);
         if self.waiting.is_some() {

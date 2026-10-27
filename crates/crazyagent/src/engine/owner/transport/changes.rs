@@ -20,6 +20,9 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_git_busy",
     "changes_git_failed",
     "changes_git_unsupported",
+    "changes_master_closed",
+    "changes_master_not_started",
+    "changes_master_tools_off",
     "changes_message_invalid",
     "changes_not_found",
     "changes_outcome_unknown",
@@ -294,9 +297,13 @@ async fn handle(
     }
     action.validate()?;
     let root = engine_root(authority)?;
-    tokio::task::spawn_blocking(move || {
+    let updated = match &action {
+        Action::Update { id } => Some((id.clone(), root.clone())),
+        _ => None,
+    };
+    let reply = tokio::task::spawn_blocking(move || {
         let db = landing::open(&root)?;
-        Ok(match action {
+        Ok::<_, EngineError>(match action {
             Action::List { project } => {
                 let mut change_sets = landing::list(&db, &project)?;
                 change_sets.truncate(LIST_MAX);
@@ -325,14 +332,23 @@ async fn handle(
                 Reply::Done
             }
             Action::Update { id } => {
-                landing::update(&db, &id)?;
-                crate::landing_turns::start_resolve(&db, &id)?;
+                crate::landing_turns::update(&db, &id)?;
                 Reply::Done
             }
         })
     })
     .await
-    .map_err(|_| failure("changes_unavailable"))?
+    .map_err(|_| failure("changes_unavailable"))??;
+    if let Some((id, root)) = updated {
+        let runtime = super::OwnerRuntimeHandle {
+            engine: engine.clone(),
+            authority: authority.clone(),
+        };
+        runtime
+            .resolve_after_update(packet, admission, root, &id)
+            .await?;
+    }
+    Ok(reply)
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,

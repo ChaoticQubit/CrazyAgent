@@ -5,6 +5,7 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
     TeamAgent {
         id,
         role,
+        label: role.agent_label(id),
         harness: harness.into(),
         tools: true,
         account: Some(format!("acct-{id}")),
@@ -99,10 +100,11 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
             "group:claude-code",
             "group:codex",
             "team-3",
+            "team-4",
             "team-5",
             "team-6"
         ],
-        "the stopped sub-agent is left out and the live master is the master node"
+        "a recently stopped sub-agent stays listed and the live master is the master node"
     );
 
     let master = &graph.nodes[0];
@@ -124,11 +126,21 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
     assert_eq!(working.parent.as_deref(), Some("group:claude-code"));
     assert_eq!(working.status, Some(AgentStatus::Working));
     assert_eq!(working.terminal, Some(AgentId::team(3).unwrap()));
-    let failed = &graph.nodes[4];
+    assert_eq!(
+        working.label, "Sub-agent 3",
+        "an agent node carries the engine's one name for the agent"
+    );
+    let stopped = &graph.nodes[4];
+    assert_eq!(stopped.status, Some(AgentStatus::Stopped));
+    assert_eq!(
+        stopped.terminal, None,
+        "a stopped agent has no live terminal"
+    );
+    let failed = &graph.nodes[5];
     assert_eq!(failed.status, Some(AgentStatus::Failed));
     assert_eq!(failed.terminal, None, "a failed agent has no live terminal");
     assert_eq!(
-        graph.nodes[5].parent.as_deref(),
+        graph.nodes[6].parent.as_deref(),
         Some("master"),
         "an agent whose harness left the plan hangs off the master"
     );
@@ -150,7 +162,7 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
     assert_eq!(
         edges,
         [
-            (10, "group:claude-code", EdgeState::Done, Some("Result 10")),
+            (10, "team-4", EdgeState::Done, Some("Result 10")),
             (11, "team-3", EdgeState::Running, None),
             (12, "group:codex", EdgeState::Sent, None),
             (13, "team-5", EdgeState::Failed, Some("Problem 13")),
@@ -169,4 +181,60 @@ fn a_team_with_no_agents_yet_is_the_master_and_its_groups() {
     assert_eq!(graph.nodes[0].status, None);
     assert_eq!(graph.nodes[0].terminal, None);
     assert!(graph.edges.is_empty());
+}
+
+#[test]
+fn stopped_sub_agents_of_the_latest_round_stay_in_the_graph_with_their_tasks() {
+    let mut owner = status();
+    owner.harnesses = vec![
+        harness("codex", AgentRole::Master, 0, 1),
+        harness("codex", AgentRole::Sub, 0, 4),
+    ];
+    let kept = i64::try_from(crate::terminal::PANES_PER_PROJECT_MAX).unwrap();
+    owner.agents = (1..=kept + 2)
+        .map(|id| agent(id, AgentRole::Sub, "codex", AgentStatus::Stopped))
+        .collect();
+    owner.tasks = vec![
+        task(1, "codex", TaskStatus::Done, Some(1)),
+        task(2, "codex", TaskStatus::Done, Some(3)),
+        task(3, "codex", TaskStatus::Done, Some(kept + 2)),
+        task(4, "codex", TaskStatus::Done, Some(3)),
+    ];
+    let graph = graph(&owner);
+    let agents: Vec<&GraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Agent)
+        .collect();
+    assert_eq!(
+        agents.len(),
+        crate::terminal::PANES_PER_PROJECT_MAX,
+        "the newest stopped sub-agents stay listed, the oldest leave"
+    );
+    assert_eq!(agents[0].id, "team-3");
+    assert_eq!(
+        agents.last().unwrap().label,
+        format!("Sub-agent {}", kept + 2)
+    );
+    for node in &agents {
+        assert_eq!(node.status, Some(AgentStatus::Stopped));
+        assert_eq!(node.status_label.as_deref(), Some("Stopped"));
+        assert_eq!(node.parent.as_deref(), Some("group:codex"));
+        assert_eq!(node.terminal, None, "a stopped agent has no live terminal");
+    }
+    let targets: Vec<(i64, String)> = graph
+        .edges
+        .iter()
+        .map(|edge| (edge.task_id, edge.to.clone()))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            (1, "group:codex".to_owned()),
+            (2, "team-3".to_owned()),
+            (3, format!("team-{}", kept + 2)),
+            (4, "team-3".to_owned()),
+        ],
+        "a listed stopped agent's tasks point at it"
+    );
 }

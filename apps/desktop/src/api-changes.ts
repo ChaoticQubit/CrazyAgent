@@ -71,6 +71,9 @@ const REFUSALS: Record<string, string> = {
   changes_owner_unavailable: "Your project folder couldn't be read. Check that it is still there, then try again.",
   changes_too_large: "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.",
   changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
+  changes_master_tools_off: "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
+  changes_master_closed: "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.",
+  changes_master_not_started: "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends.",
 };
 
 /** The refusal codes of the changes protocol that have their own sentence. */

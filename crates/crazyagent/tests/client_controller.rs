@@ -775,7 +775,12 @@ async fn controller_reconcile_barrier_retains_then_real_receipt_settles() {
         .unwrap()
         .clone();
     let barrier = controller.reconcile_pending().await.unwrap();
-    let barrier_retained = controller.pending() == Some(&submitted);
+    let barrier_retained = controller.pending().is_some_and(|pending| {
+        pending.request() == submitted.request()
+            && pending.hash() == submitted.hash()
+            && pending.unrecorded()
+            && !submitted.unrecorded()
+    });
     let (observer, _) = OwnerClient::discover(
         root.path(),
         OwnerClientKind::Desktop,
