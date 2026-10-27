@@ -247,3 +247,161 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
         "agent_home_invalid"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn what_an_agent_received_is_read_back_from_its_own_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    assert_eq!(
+        received(&root.join("never-launched"), Harness::Claude).unwrap(),
+        None
+    );
+    let claude = home(&root, "claude");
+    assert_eq!(
+        received(&claude, Harness::Claude).unwrap(),
+        Some(Received::default())
+    );
+
+    prepare(&claude, Harness::Claude, &project, "# given\n").unwrap();
+    record_skills(&claude, &["tdd", "release-notes"]).unwrap();
+    assert_eq!(
+        received(&claude, Harness::Claude).unwrap(),
+        Some(Received {
+            text: "# given\n".into(),
+            skills: vec!["tdd".into(), "release-notes".into()],
+        })
+    );
+    assert_eq!(
+        received(&claude, Harness::Codex).unwrap().unwrap().text,
+        "",
+        "each harness reads only its own file"
+    );
+    assert_eq!(
+        fs::metadata(claude.join(SKILLS_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    record_skills(&claude, &[]).unwrap();
+    assert!(
+        received(&claude, Harness::Claude)
+            .unwrap()
+            .unwrap()
+            .skills
+            .is_empty(),
+        "a launch without skills clears the last list"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_received_view_refuses_links_and_entries_the_launch_did_not_write() {
+    let (_directory, root) = folder();
+    let secret = root.join("owner-secret");
+    fs::write(&secret, "OWNER-SECRET-91").unwrap();
+    let claude = home(&root, "claude");
+    let file = claude.join("CLAUDE.md");
+    let refused = |home: &Path| received(home, Harness::Claude).unwrap_err().0;
+
+    std::os::unix::fs::symlink(&secret, &file).unwrap();
+    assert_eq!(refused(&claude), "agent_instructions_unsafe");
+    fs::remove_file(&file).unwrap();
+    fs::hard_link(&secret, &file).unwrap();
+    assert_eq!(
+        refused(&claude),
+        "agent_instructions_unsafe",
+        "a hard link to another file is not the launch's file"
+    );
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    assert_eq!(refused(&claude), "agent_instructions_unsafe");
+    fs::remove_dir(&file).unwrap();
+
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&file))
+        .unwrap();
+    assert!(made.success());
+    let (sender, outcome) = std::sync::mpsc::channel();
+    let home = claude.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(received(&home, Harness::Claude).map_err(|problem| problem.0));
+    });
+    assert_eq!(
+        outcome
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a pipe in the home blocked the read"),
+        Err("agent_instructions_unsafe".into())
+    );
+    fs::remove_file(&file).unwrap();
+
+    std::os::unix::fs::symlink(&secret, claude.join(SKILLS_FILE)).unwrap();
+    assert_eq!(refused(&claude), "agent_instructions_unsafe");
+    fs::remove_file(claude.join(SKILLS_FILE)).unwrap();
+
+    let linked = root.join("linked-home");
+    std::os::unix::fs::symlink(&claude, &linked).unwrap();
+    assert_eq!(refused(&linked), "agent_instructions_unsafe");
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "OWNER-SECRET-91");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_received_view_holds_its_bounds() {
+    let (_directory, root) = folder();
+    let codex = home(&root, "codex");
+    fs::write(codex.join("AGENTS.md"), "x".repeat(PROCESS_BYTES_MAX)).unwrap();
+    assert_eq!(
+        received(&codex, Harness::Codex)
+            .unwrap()
+            .unwrap()
+            .text
+            .len(),
+        PROCESS_BYTES_MAX
+    );
+    fs::write(codex.join("AGENTS.md"), "x".repeat(PROCESS_BYTES_MAX + 1)).unwrap();
+    assert_eq!(
+        received(&codex, Harness::Codex).unwrap_err().0,
+        "agent_instructions_too_large"
+    );
+    fs::write(codex.join("AGENTS.md"), b"bad \xff byte").unwrap();
+    assert_eq!(
+        received(&codex, Harness::Codex).unwrap_err().0,
+        "agent_instructions_invalid"
+    );
+    fs::write(codex.join("AGENTS.md"), "fine\n").unwrap();
+
+    let names: Vec<String> = (0..SKILLS_RECORD_MAX)
+        .map(|index| format!("skill-{index}"))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    record_skills(&codex, &names).unwrap();
+    assert_eq!(
+        received(&codex, Harness::Codex)
+            .unwrap()
+            .unwrap()
+            .skills
+            .len(),
+        SKILLS_RECORD_MAX
+    );
+    fs::write(
+        codex.join(SKILLS_FILE),
+        format!("{}\nextra\n", names.join("\n")),
+    )
+    .unwrap();
+    assert_eq!(
+        received(&codex, Harness::Codex).unwrap_err().0,
+        "agent_instructions_too_large"
+    );
+    for planted in ["Upper\n", "with space\n", "-dash\n", "\n"] {
+        fs::write(codex.join(SKILLS_FILE), planted).unwrap();
+        assert_eq!(
+            received(&codex, Harness::Codex).unwrap_err().0,
+            "agent_instructions_invalid",
+            "{planted:?}"
+        );
+    }
+}
