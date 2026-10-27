@@ -478,7 +478,7 @@ struct Authority {
     reproof: tokio::sync::Mutex<()>,
     #[cfg(unix)]
     ide_servers: crate::ide::server::Servers,
-    ide: crate::ide::bridge::Grants,
+    ide: Arc<crate::ide::bridge::Grants>,
 }
 
 impl Authority {
@@ -1233,11 +1233,14 @@ impl OwnerServer {
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
+            let ide = Arc::new(crate::ide::bridge::Grants::default());
             let ide_servers = crate::ide::server::Servers::new(
                 root.path
                     .parent()
                     .ok_or_else(|| failure("owner_root_unavailable"))?,
                 crate::ide::server::IDLE_LIMIT,
+                Arc::clone(&ide),
+                root.path.join(SOCKET),
             );
             let authority = Arc::new(Authority {
                 root,
@@ -1254,7 +1257,7 @@ impl OwnerServer {
                 reproof: tokio::sync::Mutex::new(()),
                 #[cfg(unix)]
                 ide_servers,
-                ide: crate::ide::bridge::Grants::default(),
+                ide,
             });
             Ok::<_, EngineError>((listener, authority))
         })();

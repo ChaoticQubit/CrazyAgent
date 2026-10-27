@@ -3,7 +3,11 @@ use std::path::Path;
 
 /// The variable that hands the IDE server's extension host the path of its engine
 /// capability file. Only the path travels in the environment, never the capability.
-pub const CAPABILITY_VARIABLE: &str = "CRAZYAGENT_IDE_CAPABILITY_FILE";
+pub const CAPABILITY_VARIABLE: &str = super::bridge::CAPABILITY_ENV;
+
+/// The variable that hands the IDE server's extension host the owner socket path its
+/// engine bridge connects to; without it the built-in extension starts none of its features.
+pub const SOCKET_VARIABLE: &str = super::bridge::SOCKET_ENV;
 
 /// Every variable the IDE server may inherit from the engine, besides the `LC_` locale
 /// variables: what an owner shell needs, and nothing a provider, pool or engine secret or
@@ -19,7 +23,7 @@ const LOCALES_MAX: usize = 16;
 const VALUE_BYTES_MAX: usize = 16 * 1024;
 
 /// The most variables the IDE server's environment holds.
-pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 2 + super::git::CONFIG_ENV.len();
+pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 3 + super::git::CONFIG_ENV.len();
 
 /// Tells whether the IDE server may inherit a variable of this name: one of [`ALLOWED`], or
 /// `LC_` followed by capital letters. Input: the name. Output: the answer.
@@ -37,14 +41,16 @@ pub fn allowed(name: &OsStr) -> bool {
 
 /// Builds the IDE server's whole environment from the engine's own: only the variables
 /// [`allowed`] passes, each value at most 16 KiB, at most 16 locale variables, then
-/// [`CAPABILITY_VARIABLE`] naming the capability file and the AI lock's
-/// [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file, then the IDE git
-/// configuration [`super::git::CONFIG_ENV`]; none is ever taken from the engine's own
-/// variables. The server starts from a cleared environment holding exactly this. Inputs: the engine's variables, such as `std::env::vars_os()`, the
-/// capability file path and the locked-keys file path. Output: the variables in order.
+/// [`CAPABILITY_VARIABLE`] naming the capability file, [`SOCKET_VARIABLE`] naming the owner
+/// socket and the AI lock's [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file,
+/// then the IDE git configuration [`super::git::CONFIG_ENV`]; none is ever taken from the
+/// engine's own variables. The server starts from a cleared environment holding exactly
+/// this. Inputs: the engine's variables, such as `std::env::vars_os()`, the capability file
+/// path, the owner socket path and the locked-keys file path. Output: the variables in order.
 pub fn server_env(
     source: impl IntoIterator<Item = (OsString, OsString)>,
     capability: &Path,
+    socket: &Path,
     locked: &Path,
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -69,6 +75,10 @@ pub fn server_env(
         capability.as_os_str().to_owned(),
     ));
     env.push((
+        OsString::from(SOCKET_VARIABLE),
+        socket.as_os_str().to_owned(),
+    ));
+    env.push((
         OsString::from(super::settings::LOCKED_VARIABLE),
         locked.as_os_str().to_owned(),
     ));
@@ -81,6 +91,7 @@ pub fn server_env(
     assert!(env.iter().all(|(name, _)| {
         allowed(name)
             || name == CAPABILITY_VARIABLE
+            || name == SOCKET_VARIABLE
             || name == super::settings::LOCKED_VARIABLE
             || super::git::CONFIG_ENV
                 .iter()

@@ -144,6 +144,11 @@ pub(super) const COMMENT_BYTES_MAX: usize = 2048;
 const NAME_BYTES_MAX: usize = 128;
 const VERSION_BYTES_MAX: usize = 64;
 const CAPABILITY: &str = "capability";
+/// The IDE server's profile file in its extensions folder: the extensions it loads. At start
+/// the server deletes every extension folder this file does not list.
+const PROFILE: &str = "extensions.json";
+const PROFILE_BYTES_MAX: u64 = 1024 * 1024;
+const PROFILE_ENTRIES_MAX: usize = 256;
 
 /// The path of a capability file: `<engine root>/ide/<project>/capability`.
 pub type CapabilityPath = PathBuf;
@@ -391,7 +396,11 @@ impl Grants {
     /// Issues a new capability for a project, replacing the project's earlier one: a fresh
     /// 32-byte token written as 64 hex digits to a new 0600 file in a 0700 project folder.
     /// Inputs: the engine root and the project. Output: the file path, or the refusal.
-    fn issue(&self, root: &Path, project: &ProjectId) -> Result<CapabilityPath, EngineError> {
+    pub(crate) fn issue(
+        &self,
+        root: &Path,
+        project: &ProjectId,
+    ) -> Result<CapabilityPath, EngineError> {
         if project.as_str() == "." {
             return Err(failure("ide_project_invalid"));
         }
@@ -644,7 +653,8 @@ pub fn launch_env(
 }
 
 /// Installs the built-in extension into an IDE server's extensions folder as one folder,
-/// leaving an identical install untouched and replacing any other one whole.
+/// leaving an identical install untouched and replacing any other one whole, then lists it
+/// in the folder's profile file ([`register_extension`]) so the server loads it.
 /// Input: the extensions folder. Output: the extension's folder.
 pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
     let folder = extensions.join(EXTENSION);
@@ -652,6 +662,7 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
         .iter()
         .all(|(name, bytes)| std::fs::read(folder.join(name)).is_ok_and(|found| found == *bytes));
     if installed {
+        register_extension(extensions, &folder)?;
         return Ok(folder);
     }
     let failed = |_| failure("ide_extension_install_failed");
@@ -686,7 +697,66 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
     if moved {
         std::fs::remove_dir_all(&aside).map_err(failed)?;
     }
+    register_extension(extensions, &folder)?;
     Ok(folder)
+}
+
+/// Lists the built-in extension in an IDE server's profile file, which the server loads its
+/// extensions from and without which it deletes the built-in's folder at start. Every other
+/// entry is kept, any earlier entry for the built-in is replaced, and a changed list
+/// replaces the file whole through a new file. Inputs: the extensions folder and the
+/// built-in's folder in it. Output: Ok, or `ide_extension_install_failed`.
+fn register_extension(extensions: &Path, folder: &Path) -> Result<(), EngineError> {
+    let failed = || failure("ide_extension_install_failed");
+    assert_eq!(folder.parent(), Some(extensions));
+    let (id, version) = EXTENSION
+        .rsplit_once('-')
+        .expect("the built-in extension folder is its id, a hyphen and its version");
+    let location = folder.to_str().ok_or_else(failed)?;
+    let profile = extensions.join(PROFILE);
+    let earlier: Vec<serde_json::Value> = match std::fs::symlink_metadata(&profile) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Ok(found) if found.is_file() && found.len() <= PROFILE_BYTES_MAX => {
+            let text = std::fs::read(&profile).map_err(|_| failed())?;
+            serde_json::from_slice(&text).map_err(|_| failed())?
+        }
+        _ => return Err(failed()),
+    };
+    if earlier.len() > PROFILE_ENTRIES_MAX {
+        return Err(failed());
+    }
+    let built_in = |entry: &serde_json::Value| {
+        entry
+            .pointer("/identifier/id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|known| known.eq_ignore_ascii_case(id))
+    };
+    let mut entries: Vec<serde_json::Value> = earlier
+        .iter()
+        .filter(|entry| !built_in(entry))
+        .cloned()
+        .collect();
+    entries.push(serde_json::json!({
+        "identifier": { "id": id },
+        "version": version,
+        "location": { "$mid": 1, "path": location, "scheme": "file" },
+        "relativeLocation": EXTENSION,
+    }));
+    assert_eq!(entries.iter().filter(|entry| built_in(entry)).count(), 1);
+    assert!(entries.len() <= PROFILE_ENTRIES_MAX + 1);
+    if entries == earlier {
+        return Ok(());
+    }
+    let text = serde_json::to_vec(&entries).map_err(|_| failed())?;
+    let mut suffix = [0; 8];
+    getrandom::fill(&mut suffix).map_err(|_| failure("ide_entropy_unavailable"))?;
+    let staging = extensions.join(format!(".{PROFILE}-{}", hex(&suffix)));
+    let written = std::fs::write(&staging, text).and_then(|()| std::fs::rename(&staging, &profile));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(failed());
+    }
+    Ok(())
 }
 
 /// Serves one IDE capability connection after its handshake: admits the token, reads one

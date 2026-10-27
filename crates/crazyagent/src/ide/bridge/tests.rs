@@ -794,7 +794,74 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
         std::fs::read(folder.join(EXTENSION_FILES[1].0)).unwrap(),
         EXTENSION_FILES[1].1
     );
-    assert_eq!(std::fs::read_dir(extensions.path()).unwrap().count(), 1);
+    let mut left: Vec<String> = std::fs::read_dir(extensions.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, vec![EXTENSION.to_owned(), PROFILE.to_owned()]);
+}
+
+/// The IDE server loads only the extensions its profile file lists and deletes every other
+/// folder at start, so the built-in is listed beside the approved ones the server's own
+/// installs wrote, once, and an unchanged list is left alone.
+#[test]
+fn the_built_in_extension_is_listed_in_the_server_profile() {
+    let extensions = tempfile::tempdir().unwrap();
+    let profile = extensions.path().join(PROFILE);
+    let approved = json!({
+        "identifier": { "id": "golang.go", "uuid": "d6f6cfea-4b6f-41f4-b571-6ad2ab7918da" },
+        "version": "0.47.1",
+        "location": { "$mid": 1, "path": "/elsewhere/golang.go-0.47.1", "scheme": "file" },
+        "relativeLocation": "golang.go-0.47.1",
+        "metadata": { "installedTimestamp": 1_761_000_000_000_u64, "source": "vsix" }
+    });
+    let older = json!({
+        "identifier": { "id": "CrazyAgent.CrazyAgent-IDE" },
+        "version": "0.0.9",
+        "location": { "$mid": 1, "path": "/elsewhere/crazyagent.crazyagent-ide-0.0.9", "scheme": "file" },
+        "relativeLocation": "crazyagent.crazyagent-ide-0.0.9"
+    });
+    std::fs::write(
+        &profile,
+        serde_json::to_vec(&json!([older, approved])).unwrap(),
+    )
+    .unwrap();
+    let folder = install_extension(extensions.path()).unwrap();
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+    assert_eq!(
+        listed,
+        vec![
+            approved,
+            json!({
+                "identifier": { "id": "crazyagent.crazyagent-ide" },
+                "version": "0.1.0",
+                "location": { "$mid": 1, "path": folder.to_str().unwrap(), "scheme": "file" },
+                "relativeLocation": EXTENSION
+            })
+        ]
+    );
+    let before = std::fs::symlink_metadata(&profile).unwrap().ino();
+    install_extension(extensions.path()).unwrap();
+    assert_eq!(std::fs::symlink_metadata(&profile).unwrap().ino(), before);
+    std::fs::write(&profile, b"not json").unwrap();
+    assert_eq!(
+        install_extension(extensions.path()).unwrap_err().0,
+        "ide_extension_install_failed"
+    );
+    std::fs::remove_file(&profile).unwrap();
+    std::os::unix::fs::symlink(extensions.path().join(EXTENSION), &profile).unwrap();
+    assert_eq!(
+        install_extension(extensions.path()).unwrap_err().0,
+        "ide_extension_install_failed"
+    );
+    std::fs::remove_file(&profile).unwrap();
+    install_extension(extensions.path()).unwrap();
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["identifier"]["id"], "crazyagent.crazyagent-ide");
 }
 
 /// An Accept slower than the handshake timeout, here because another writer holds the
