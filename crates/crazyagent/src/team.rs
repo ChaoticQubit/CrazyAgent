@@ -802,10 +802,14 @@ fn plan_harnesses(plan: &TeamPlan) -> Vec<String> {
 }
 
 /// Tells a master leading an empty team plan which harnesses it can use and that only the
-/// team maximum limits them. Takes the plan and the harnesses with an eligible account now.
-/// Returns plain lines, each ending in a newline.
+/// team maximum limits them, or that a maximum of one agent leaves no room for sub-agents.
+/// Takes the plan and the harnesses with an eligible account now. Returns plain lines, each
+/// ending in a newline.
 pub fn any_harness_text(plan: &TeamPlan, available: &[&str]) -> String {
     assert!(plan.sub_harnesses.is_empty());
+    if plan.max_agents <= 1 {
+        return "The team maximum is 1 agent, you, so CrazyAgent refuses every task you hand over. Do the work yourself, or tell the owner to raise the team maximum in the project's Team settings.\n".to_owned();
+    }
     let mut text = if available.is_empty() {
         "The team plan names no harness, so any harness that can run sub-agents may take your tasks, but no harness has an account in the project's pool yet. Tasks you hand over wait until the owner adds one.\n".to_owned()
     } else {
@@ -837,8 +841,9 @@ fn active_tasks(
     .map_err(error)
 }
 
-/// Picks the slot for a task under an empty team plan (DEC-096 addendum 3). A named harness
-/// must run team agents and, while any harness has an eligible account, be one of those.
+/// Picks the slot for a task under an empty team plan (DEC-096 addendum 3); a team maximum
+/// of one agent leaves no room. A named harness must run team agents and, while any harness
+/// has an eligible account, be one of those.
 /// Without a name the least loaded of those wins, the master's harness on a tie. With no
 /// eligible account anywhere the task parks on the named harness, or the master's.
 /// Takes the transaction, live access, the setup and the named harness. Returns the slot,
@@ -851,6 +856,9 @@ fn any_slot(
 ) -> Result<Result<HarnessSlot, &'static str>, EngineError> {
     let plan = &stored.team;
     assert!(plan.sub_harnesses.is_empty());
+    if plan.max_agents <= 1 {
+        return Ok(Err("team_has_no_sub_agents"));
+    }
     let available = available_harnesses(access, &stored.project_id);
     if let Some(harness) = harness {
         let Some(chosen) = slot(plan, harness) else {
@@ -1740,6 +1748,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     let slots = if plan.sub_harnesses.is_empty() {
         let subs_max = plan.max_agents.saturating_sub(1);
         runnable_harnesses()
+            .filter(|_| subs_max > 0)
             .map(|harness| HarnessSlot {
                 harness: harness.to_owned(),
                 agents: subs_max,
