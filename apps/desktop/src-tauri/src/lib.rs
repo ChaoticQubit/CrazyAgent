@@ -39,6 +39,7 @@ use crazyagent::protocol::ProjectSpec;
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
+use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -1264,6 +1265,15 @@ async fn desktop_retry_intent(
 }
 
 #[tauri::command]
+async fn desktop_drop_intent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ConnectionStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.drop_intent()
+}
+
+#[tauri::command]
 async fn desktop_prepare_managed_account(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1686,6 +1696,43 @@ async fn desktop_restart_agent(
 }
 
 #[tauri::command]
+async fn desktop_usage_report(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    since_ms: Option<i64>,
+    offset_minutes: i32,
+) -> Result<UsageReport, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.usage_report(since_ms, offset_minutes)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_refresh(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.usage_refresh()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_set_reset(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    account: String,
+    window_kind: String,
+    at_ms: Option<i64>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .usage_set_reset(account, window_kind, at_ms)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_changes(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2075,6 +2122,7 @@ pub fn run() {
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,
+            desktop_drop_intent,
             desktop_prepare_managed_account,
             desktop_prepare_configured_account,
             desktop_account_auth_capabilities,
@@ -2125,6 +2173,9 @@ pub fn run() {
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,
+            desktop_usage_report,
+            desktop_usage_refresh,
+            desktop_usage_set_reset,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,

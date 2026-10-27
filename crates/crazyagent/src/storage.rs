@@ -25,7 +25,8 @@ mod migrations;
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    close_master_for_removal, native_sign_in, validate_configured_initial_conversation_receipt,
+    close_master_for_removal, master_resolve_ready, native_sign_in,
+    validate_configured_initial_conversation_receipt,
 };
 mod native_auth;
 #[cfg(all(test, unix))]

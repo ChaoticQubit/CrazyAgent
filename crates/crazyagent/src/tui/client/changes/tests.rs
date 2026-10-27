@@ -83,17 +83,7 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
         "HEAD",
     ]);
     let project = ProjectId::new("project-1").unwrap();
-    let workspace = Workspace {
-        project: project.clone(),
-        agent: ChangeAgent {
-            kind: AgentKind::Sub,
-            id: "agent-1".into(),
-            label: "Agent 1".into(),
-        },
-        repository: repo.clone(),
-        worktree: worktree.clone(),
-        git_dir: repo.join(".git/worktrees/agent-1"),
-    };
+    let git_dir = repo.join(".git/worktrees/agent-1");
     let turn = |prompt: &str| TurnEnd {
         outcome: TurnOutcome::Succeeded,
         turn: "turn-1".into(),
@@ -112,6 +102,36 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
     let (_, access) = native.attach().await;
     assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
     let db = crate::landing::open(root.path()).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (?1,'sub','codex',1,'stopped',1,1)",
+        [project.as_str()],
+    )
+    .unwrap();
+    let member = db.last_insert_rowid();
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+         VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            member,
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            git_dir.to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let workspace = Workspace {
+        project: project.clone(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: member.to_string(),
+            label: "Agent 1".into(),
+        },
+        repository: repo.clone(),
+        worktree: worktree.clone(),
+        git_dir,
+    };
 
     std::fs::write(worktree.join("README"), "one\ntwo\nthree\nfour\n").unwrap();
     let first = crate::landing::record_turn_end(&db, &workspace, &turn("Add the fourth line"))
@@ -191,7 +211,11 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
         .expect("a second edit makes a change set");
     std::fs::write(repo.join("README"), "eins\ntwo\nthree\nfour\n").unwrap();
     owner(&["commit", "-q", "-am", "Say one in German"]);
-    let event = native.changes(ChangesQuery::List { project }).await;
+    let event = native
+        .changes(ChangesQuery::List {
+            project: project.clone(),
+        })
+        .await;
     let Ok(ChangesView::List(sets)) = event.result else {
         panic!("change set list required: {:?}", event.result);
     };
@@ -215,6 +239,16 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
             .unwrap()
             .contains("<<<<<<<")
     );
+    let (prompt, status): (String, String) = db
+        .query_row(
+            "SELECT t.prompt,t.status FROM team_tasks t JOIN team_task_pins p ON p.task=t.id
+             WHERE p.project=?1 AND p.agent=?2",
+            rusqlite::params![project.as_str(), member],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued");
+    assert!(prompt.contains("- README\n"), "{prompt}");
 
     service.shutdown().await.unwrap();
 }

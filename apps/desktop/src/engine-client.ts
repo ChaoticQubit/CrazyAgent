@@ -657,6 +657,7 @@ export interface TeamHarness {
 export interface TeamAgent {
   id: number;
   role: TeamRole;
+  label: string;
   harness: string;
   tools: boolean;
   account: string | null;
@@ -757,6 +758,7 @@ export interface TeamEventsView {
   waiting: { agent: number; text: string }[];
   notifications: TeamNotification[];
   paused: boolean;
+  questions: { agent: number; count: number }[];
   wake: {
     app: WakeRule | null;
     project: WakeRule | null;
@@ -1077,7 +1079,8 @@ export type GraphEdgeState = "sent" | "running" | "done" | "failed";
 
 /** One node of a project's team graph, as the engine's TeamGraph read returns it. `parent`
  * links an agent to its harness group and a group to the master; `terminal` is the name the
- * terminal commands take, for the master and agents that have one. */
+ * terminal commands take, for the master and agents that have one. `questions` counts the
+ * questions an agent waits on, once the engine reports them. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1089,6 +1092,7 @@ export interface GraphNode {
   account: string | null;
   agents: number | null;
   terminal: string | null;
+  questions?: number | null;
 }
 
 /** One task edge from the master to the agent running it, or to its harness group before
@@ -1546,6 +1550,15 @@ export interface MasterTurn {
   cause?: string | null;
   tasks?: MasterTask[];
   changes?: string | null;
+  engine_request?: MasterEngineRequest | null;
+}
+
+/** What the engine asked the master in a turn Ask agent to update started: the change set,
+ * the plain line shown in the chat and the text the master receives. */
+export interface MasterEngineRequest {
+  change_set: string;
+  line: string;
+  text: string;
 }
 
 /** One task a master turn handed to the project's team, with the engine's note once it ended. */

@@ -667,6 +667,43 @@ impl ResearchRunner {
         })
     }
 
+    /// Registers a job agent's home with the usage store, so its tokens count against the
+    /// project and account; a run on an endpoint account, or a store that cannot be
+    /// written, goes uncounted and the run still starts. Inputs: the home, the project,
+    /// the account and the run name.
+    fn register_usage(
+        &self,
+        home: &Path,
+        project: &ProjectId,
+        account: &ResearchAccount,
+        name: &str,
+    ) {
+        let (ResearchAccount::ManagedCodex { connection, .. }
+        | ResearchAccount::ManagedClaude { connection, .. }) = account
+        else {
+            return;
+        };
+        let attribution = crate::usage::capture::Attribution {
+            kind: crate::usage::capture::RunKind::Research,
+            project: project.clone(),
+            pool: None,
+            account: connection.id.clone(),
+            agent: format!("research-{name}"),
+            harness: connection.harness.as_str().to_owned(),
+        };
+        let registered = self
+            .database
+            .parent()
+            .ok_or_else(|| crate::engine::EngineError("usage_unavailable".into()))
+            .and_then(crate::usage::open)
+            .and_then(|db| {
+                crate::usage::capture::register_run(&db, home, &attribution, crate::team::now_ms())
+            });
+        if let Err(problem) = registered {
+            eprintln!("research usage not counted: {}", problem.0);
+        }
+    }
+
     /// Runs a claimed job's agent once its account is taken: the managed credential copy
     /// in the agent's home, the project context, the sandboxed worktree and the harness.
     /// Inputs: the job store, the job, its account, where it runs and the held lease, none
@@ -681,15 +718,16 @@ impl ResearchRunner {
     ) -> Result<(Ending, u32, PathBuf), RunError> {
         let JobPlace {
             root,
+            project,
             context,
             name,
             worktree,
             agent,
-            ..
         } = place;
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
+        self.register_usage(&home, &project, account, &name);
         let harness = account.harness();
         let executable = match harness {
             ResearchHarness::Codex => self
@@ -1445,6 +1483,9 @@ fn codex_arguments(
         })
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
+    if !tools {
+        command.args(["-c", "web_search=\"disabled\""]);
+    }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
             let url = endpoint_url(base_url)?;

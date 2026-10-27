@@ -13,7 +13,7 @@ const SHIPPED = { question: true, finished: true, failed: true, change_set_ready
 const note = (id, project, seen = null) => ({ id, project_id: project, kind: "escalation", text: `note ${id}`, created_ms: id, seen_ms: seen });
 const event = (id, kind, state, text) => ({ id, agent: 7, label: "claude-7", task: 3, kind, text, state, created_ms: id, delivered_ms: null });
 const agent = (id, role) => ({
-  id, role, harness: "claude", tools: true, account: null, worktree: null, status: "working", status_label: "Working", task: null, turns: 0,
+  id, role, label: role === "master" ? "Master" : `Sub-agent ${id}`, harness: "claude", tools: true, account: null, worktree: null, status: "working", status_label: "Working", task: null, turns: 0,
   problem: null, process_group: null, created_ms: 0, heartbeat_ms: 0, stopped_ms: null,
 });
 
@@ -55,18 +55,18 @@ test("the Agents tab shows the paused notice, waiting agents, events and the pro
     agents: [agent(1, "master"), agent(7, "sub")],
     events: {
       recent: [event(9, "question", "queued", "Proceed?")], waiting: [{ agent: 7, text: "Proceed? | 1. Yes" }],
-      notifications: [note(2, "chores")], paused: true,
+      notifications: [note(2, "chores")], paused: true, questions: [{ agent: 7, count: 1 }],
       wake: { app: null, project: { ...SHIPPED, hourly_cap: 5 }, agents: [], effective: { ...SHIPPED, hourly_cap: 5 }, level: "project" },
     },
   };
   const markup = renderToStaticMarkup(createElement(panel.TeamEventsPanel, { projectId: "chores", status, reload: () => {} }));
   assert.match(markup, /Auto-wake of the master is paused/);
-  assert.match(markup, /claude-7<\/strong><span>Proceed\? \| 1\. Yes/);
+  assert.match(markup, /Sub-agent 7<\/strong><span>Proceed\? \| 1\. Yes/);
   assert.match(markup, /claude-7 asks: Proceed\?/);
   assert.match(markup, /Mark 1 as seen/);
   assert.match(markup, /Set here\. Reset to use the rule above it\./);
   assert.match(markup, /value="5"/);
-  assert.match(markup, /<option value="7">claude-7<\/option>/);
+  assert.match(markup, /<option value="7">Sub-agent 7<\/option>/);
   assert.doesNotMatch(markup, /<option value="1">/);
 });
 

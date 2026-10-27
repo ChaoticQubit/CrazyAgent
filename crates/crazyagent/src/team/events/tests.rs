@@ -905,7 +905,7 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
         .into_iter()
         .map(|id| {
             serde_json::json!({
-                "id": id, "role": "sub", "harness": "codex", "tools": true, "account": null, "worktree": null,
+                "id": id, "role": "sub", "label": format!("Sub-agent {id}"), "harness": "codex", "tools": true, "account": null, "worktree": null,
                 "status": "working", "status_label": "Working", "task": null, "turns": 0, "problem": null,
                 "process_group": null, "created_ms": 0, "heartbeat_ms": 0, "stopped_ms": null,
             })

@@ -21,6 +21,7 @@ mod plugins;
 mod project_setup;
 mod setup;
 mod team;
+mod usage;
 pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {
@@ -61,6 +62,9 @@ pub struct PendingMutation {
     identity: OwnerConnectionIdentity,
     generation: u64,
     uncertain: bool,
+    unrecorded: bool,
+    awaiting: bool,
+    unanswered: bool,
 }
 
 impl PendingMutation {
@@ -90,6 +94,13 @@ impl PendingMutation {
     /// Returns true after dispatch begins or its outcome is uncertain.
     pub fn uncertain(&self) -> bool {
         self.uncertain
+    }
+
+    /// Reports whether the engine's last answer for this intent was that it never recorded
+    /// it, while the engine had answered every send of it, so no copy can still land.
+    /// Output: true until the next send of it.
+    pub fn unrecorded(&self) -> bool {
+        self.unrecorded
     }
 }
 
@@ -336,6 +347,9 @@ impl OwnerController {
             identity: self.identity.clone(),
             generation,
             uncertain: false,
+            unrecorded: false,
+            awaiting: false,
+            unanswered: false,
         });
         Ok(self.pending.as_ref().unwrap())
     }
@@ -358,11 +372,26 @@ impl OwnerController {
             .ok_or_else(|| EngineError("controller_disconnected".into()))?;
         let first = !pending.uncertain;
         pending.uncertain = true;
+        pending.unrecorded = false;
+        pending.unanswered |= pending.awaiting;
+        pending.awaiting = true;
         let request = pending.request.clone();
         if let Some(view) = &mut self.view {
             view.fresh = false;
         }
-        let response = client.request(request).await?.response;
+        let reply = client.request(request).await;
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| EngineError("controller_no_pending_intent".into()))?;
+        pending.awaiting = false;
+        let response = match reply {
+            Ok(reply) => reply.response,
+            Err(error) => {
+                pending.unanswered = true;
+                return Err(error);
+            }
+        };
         self.settle_response(response, first)
     }
 
@@ -422,13 +451,20 @@ impl OwnerController {
                 return Err(EngineError("controller_mutation_response".into()));
             }
             OwnerResponse::Rejected { .. } if first_send => self.pending = None,
+            OwnerResponse::NotRecordedAtBarrier { .. }
+                if !pending.awaiting && !pending.unanswered =>
+            {
+                pending.uncertain = false;
+                pending.unrecorded = true;
+            }
             _ => {}
         }
         Ok(response)
     }
 
-    /// Drops a retained mutation that was never sent, so no copy of it can be recorded; one
-    /// the owner refused on its first and only send is already dropped by its reply.
+    /// Drops a retained mutation no copy of which can be recorded: it was never sent, or the
+    /// engine answered every send of it, then answered that it never recorded it. One the owner
+    /// refused on its first and only send is already dropped by its reply.
     /// Output: Ok once dropped, `controller_pending_uncertain` while any send of it may still
     /// be recorded, or no pending intent.
     pub fn discard_refused(&mut self) -> Result<(), EngineError> {

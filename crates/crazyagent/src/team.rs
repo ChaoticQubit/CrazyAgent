@@ -68,6 +68,16 @@ impl AgentRole {
             _ => None,
         }
     }
+
+    /// Names one team agent the same way in the team list and the team graph of every client.
+    /// Takes the role and the agent's id.
+    /// Returns "Master", or "Sub-agent" and the id.
+    pub fn agent_label(self, id: i64) -> String {
+        match self {
+            Self::Master => "Master".into(),
+            Self::Sub => format!("Sub-agent {id}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1319,6 +1329,7 @@ pub fn plan_steps(
 pub struct TeamAgent {
     pub id: i64,
     pub role: AgentRole,
+    pub label: String,
     pub harness: String,
     pub tools: bool,
     pub account: Option<String>,
@@ -1412,9 +1423,12 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
     let role: String = row.get(1)?;
     let status: String = row.get(6)?;
     let status = AgentStatus::parse(&status).ok_or_else(|| invalid_row("status"))?;
+    let id = row.get(0)?;
+    let role = AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?;
     Ok(TeamAgent {
-        id: row.get(0)?,
-        role: AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?,
+        id,
+        role,
+        label: role.agent_label(id),
         harness: row.get(2)?,
         tools: row.get(3)?,
         account: row.get(4)?,

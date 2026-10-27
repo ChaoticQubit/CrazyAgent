@@ -9,6 +9,7 @@ mod master_rcli;
 mod master_rcli_launch;
 #[cfg(all(test, unix))]
 mod master_rebind_tests;
+mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
 use crate::engine::{Engine, io_error, read_frame, verify_peer};
@@ -46,6 +47,7 @@ pub(crate) mod plugins;
 mod projects_home;
 mod setup;
 pub(crate) mod terminal;
+pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
@@ -1899,6 +1901,7 @@ enum Protocol {
     Plugins,
     Agents,
     Changes,
+    Usage,
     NativeAuth,
     Owner,
     #[cfg(test)]
@@ -1923,6 +1926,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("plugins", Protocol::Plugins),
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
+        ("usage", Protocol::Usage),
         ("native_auth", Protocol::NativeAuth),
     ];
     Ok(named
@@ -1982,6 +1986,13 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
+            Protocol::Usage => {
+                let served = usage::serve(stream, engine, authority, auth, &a, body);
+                return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
+                    .await
+                    .map_err(|_| failure("usage_outcome_unknown"))?
+                    .map(|()| None);
+            }
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2210,6 +2221,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
+        Protocol::Usage => usage::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,

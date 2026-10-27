@@ -10,12 +10,19 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
 pub const SETTINGS: &str = "version = 1\ntimeout_ms = 5000\nallowed_destinations = []\n";
+
+const RECORDED_BYTES_MAX: usize = 4 * 1024 * 1024;
+const RECORDED_IDLE: Duration = Duration::from_millis(500);
+
+/// The raw bytes of each request a [`recording_hanging_endpoint`] read, one entry per
+/// connection in the order they came.
+pub type Recorded = Arc<Mutex<Vec<Vec<u8>>>>;
 
 /// A real engine runtime folder: `engine.db` holding projects created through
 /// the owner client of a real engine, one engine-made folder per project in
@@ -241,6 +248,37 @@ pub fn counted_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Arc<Atom
             if stream.read(&mut buffer).is_ok_and(|read| read > 0) {
                 counted.fetch_add(1, Ordering::SeqCst);
             }
+            held.push(stream);
+        }
+    });
+    (port, handle, requests)
+}
+
+/// A [`hanging_endpoint`] that keeps what each connection sent until it went quiet for
+/// [`RECORDED_IDLE`], up to [`RECORDED_BYTES_MAX`] bytes, so a test can read what an
+/// agent asked its model for. Returns the port, the serving thread and the requests.
+pub fn recording_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Recorded) {
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let handle = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
+            let Ok(mut stream) = stream else { break };
+            let _ = stream.set_read_timeout(Some(RECORDED_IDLE));
+            let mut request = Vec::new();
+            let mut buffer = vec![0_u8; 64 * 1024];
+            while request.len() < RECORDED_BYTES_MAX {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request);
             held.push(stream);
         }
     });

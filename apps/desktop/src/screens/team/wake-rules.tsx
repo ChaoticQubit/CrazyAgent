@@ -98,7 +98,7 @@ export function TeamEventsPanel({ projectId, status, reload }: { projectId: stri
   const chosen = subs.find((item) => String(item.id) === agent);
   const label = (id: number) => {
     const found = status.agents.find((item) => item.id === id);
-    return found ? `${found.harness}-${found.id}` : `agent ${id}`;
+    return found ? found.label : `Agent ${id}`;
   };
   const own = chosen ? events.wake.agents.find((item) => item.agent === chosen.id)?.rule ?? null : null;
   const above: WakeRuleLevel = events.wake.project ? "project" : events.wake.app ? "app" : "shipped";
