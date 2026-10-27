@@ -101,7 +101,10 @@ impl OwnerRuntimeHandle {
                 OwnerResult::Rejected { code } if code.starts_with("changes_") => {
                     return Err(EngineError(code));
                 }
-                OwnerResult::Rejected { .. } => return Err(failure("changes_master_closed")),
+                OwnerResult::Rejected { code } => {
+                    eprintln!("master_resolve_rejected code={code}");
+                    return Err(failure("changes_master_closed"));
+                }
                 _ => return Err(failure("changes_outcome_unknown")),
             }
         }
