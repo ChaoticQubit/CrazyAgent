@@ -32,6 +32,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         account: None,
         agents: None,
         terminal: None,
+        questions: None,
     }
 }
 
@@ -1022,6 +1023,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
             .collect(),
         messages: Vec::new(),
         plan: Vec::new(),
+        events: Default::default(),
     };
     let mut shell = fresh(160, 40);
     shell.arrive(Arrival::TeamGraph {

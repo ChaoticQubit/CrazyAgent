@@ -2410,6 +2410,9 @@ fn owner_read(
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
         },
+        OwnerRead::TeamEvents => OwnerData::TeamEvents {
+            events: Box::new(crate::team::events::app(&tx)?),
+        },
         OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
             graph: Box::new(crate::team::graph(&crate::team::status(
                 &tx,

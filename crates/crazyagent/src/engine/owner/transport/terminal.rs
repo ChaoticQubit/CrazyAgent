@@ -6,15 +6,13 @@ use crate::terminal::{
     TerminalRequest, TerminalStream,
 };
 #[cfg(unix)]
-use crate::terminal::{HostError, prompt_keys};
+use crate::terminal::{HostError, type_prompt};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
 #[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
-#[cfg(unix)]
-const PASTE_SETTLE: Duration = Duration::from_millis(200);
 #[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
 
@@ -241,25 +239,6 @@ async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<b
     tokio::task::spawn_blocking(move || type_prompt(host.as_ref(), &agent, &text))
         .await
         .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
-}
-
-/// Types one owner prompt into an agent's app as one submission: a paste when the app turned
-/// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
-/// the text. Returns whether it was typed; blank or oversized text types nothing.
-#[cfg(unix)]
-fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
-    let bracketed = host.input_live(agent)?;
-    let Some(keys) = prompt_keys(text, bracketed) else {
-        return Ok(false);
-    };
-    for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        host.input(agent, chunk)?;
-    }
-    if bracketed {
-        std::thread::sleep(PASTE_SETTLE);
-    }
-    host.input(agent, b"\r")?;
-    Ok(true)
 }
 
 async fn open(
