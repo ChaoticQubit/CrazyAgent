@@ -19,7 +19,25 @@ export async function retryBusy<T>(call: () => Promise<T>, pause = 250): Promise
 
 export type SettledCall = { ok: true; value: unknown } | { ok: false; failure: unknown };
 
-const unconfirmedWatchers = new Set<() => void>();
+const unconfirmedWatchers = new Set<(settled: SettledCall) => void>();
+const PROFILE_UNCONFIRMED_CODES = new Set(["account_profile_outcome_unknown_read_same_request", "account_profile_recovery_required"]);
+
+function failureCode(failure: unknown): string | null {
+  return typeof failure === "object" && failure !== null && "code" in failure && typeof failure.code === "string" ? failure.code : null;
+}
+
+/** Whether a bridge reply leaves an account set-up for agents unconfirmed: the set-up or its
+ * read timed out, a change was refused until it is checked, or a read of it is still
+ * unanswered. Input: the settled call. Output: true when the app should read it again. */
+export function leavesProfileUnconfirmed(settled: SettledCall): boolean {
+  if (settled.ok) {
+    const value = settled.value;
+    return typeof value === "object" && value !== null && !Array.isArray(value) && "ticket" in value && "reply" in value &&
+      "pending" in value && value.pending === true;
+  }
+  const code = failureCode(settled.failure);
+  return code !== null && PROFILE_UNCONFIRMED_CODES.has(code);
+}
 
 /** Whether a bridge reply leaves an owner change unconfirmed: a reply the bridge still marks
  * pending, or a refusal because an earlier change is still pending.
@@ -29,13 +47,13 @@ export function leavesUnconfirmed(settled: SettledCall): boolean {
     const value = settled.value;
     return typeof value === "object" && value !== null && !Array.isArray(value) && "pending" in value && value.pending === true;
   }
-  const failure = settled.failure;
-  return typeof failure === "object" && failure !== null && "code" in failure && failure.code === "pending_intent";
+  return failureCode(settled.failure) === "pending_intent" || leavesProfileUnconfirmed(settled);
 }
 
 /** Subscribes to bridge replies that leave an owner change unconfirmed, so the app can name
- * the change and check it. Input: the listener. Output: a function that unsubscribes it. */
-export function watchUnconfirmed(listener: () => void): () => void {
+ * the change and check it. Input: the listener, which gets the reply. Output: a function
+ * that unsubscribes it. */
+export function watchUnconfirmed(listener: (settled: SettledCall) => void): () => void {
   unconfirmedWatchers.add(listener);
   return () => { unconfirmedWatchers.delete(listener); };
 }
@@ -44,7 +62,7 @@ export function watchUnconfirmed(listener: () => void): () => void {
  * Input: the settled call. Output: none. */
 export function reportReply(settled: SettledCall): void {
   if (!leavesUnconfirmed(settled)) return;
-  for (const listener of [...unconfirmedWatchers]) listener();
+  for (const listener of [...unconfirmedWatchers]) listener(settled);
 }
 
 /** Calls one native bridge command, retrying only the bridge's pre-action "busy" refusal, and

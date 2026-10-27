@@ -140,8 +140,15 @@ impl NativeBridge {
             .ok_or_else(|| failure("account_profile_operation_missing"))?
             .request
             .clone();
-        let result = self.controller()?.read_account_profile(request).await;
-        self.finish_account_profile(result)
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.controller()?.read_account_profile(request),
+        )
+        .await;
+        match result {
+            Ok(result) => self.finish_account_profile(result),
+            Err(_) => Err(failure("account_profile_outcome_unknown_read_same_request")),
+        }
     }
 
     pub(super) fn profile_pending(&self) -> bool {

@@ -94,7 +94,8 @@ const COPY: Record<string, string> = {
   rcli_private_key_writer_unavailable: "This engine can't set up accounts for agents. Start it with the CrazyAgent model runner.",
   native_profile_in_use: "An agent is using this account now. Try again after it stops.",
   account_profile_operations_full: "This engine can't set up more accounts for agents.",
-  account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents. Save the pool again to check.",
+  account_profile_outcome_unknown_read_same_request: "We couldn't confirm the account is ready for agents yet. The app checks again on its own, or use Check again at the top of the window.",
+  account_profile_recovery_required: "An account's set-up for agents isn't confirmed yet. Use Check again at the top of the window, then try again.",
   memory_note_blank: "Write something to remember.",
   memory_note_too_long: "Keep the memory under 2000 characters.",
   memory_note_invalid: "Remove hidden, direction-changing or control characters from the memory.",
@@ -484,6 +485,36 @@ export async function readyForAgents(id: string): Promise<Result<void>> {
     return { kind: "error", code: "account_profile_outcome_unknown_read_same_request", message: plainError("account_profile_outcome_unknown_read_same_request") };
   }
   return { kind: "ok", value: undefined };
+}
+
+/** Where an account set-up for agents that the bridge kept unconfirmed stands after it read
+ * the same request again: configured, never recorded (nothing was set up), still unanswered,
+ * no set-up kept, or the read failed. */
+export type ProfileCheck = "configured" | "not_recorded" | "pending" | "none" | "failed";
+
+/** Reads where a kept account set-up stands from one read of it. Input: the read.
+ * Output: the state. */
+export function profileCheck(read: Result<AccountProfileView>): ProfileCheck {
+  if (read.kind !== "ok") return read.kind === "error" && read.code === "account_profile_operation_missing" ? "none" : "failed";
+  if (read.value.pending) return "pending";
+  return read.value.reply.outcome === "not_recorded" ? "not_recorded" : "configured";
+}
+
+/** Reads the account set-up the bridge still keeps unconfirmed, the same request again, so
+ * no key is sent twice. Output: where it stands. */
+export async function checkAccountProfile(): Promise<ProfileCheck> {
+  return profileCheck(await call<AccountProfileView>("desktop_read_account_profile"));
+}
+
+/** The banner line while an account set-up for agents is unconfirmed. */
+export const PROFILE_UNCONFIRMED_LINE = "We couldn't confirm an account's set-up for agents. Account, pool and project changes wait until it's checked.";
+
+/** The toast once an unconfirmed account set-up settles. Input: the check. Output: the line,
+ * or null while it is unconfirmed or when nothing was kept. */
+export function profileSettledLine(check: ProfileCheck): string | null {
+  if (check === "configured") return "The account is set up for agents.";
+  if (check === "not_recorded") return "The account set-up for agents never reached the engine. Save the pool again to set it up.";
+  return null;
 }
 
 export interface PoolMember {

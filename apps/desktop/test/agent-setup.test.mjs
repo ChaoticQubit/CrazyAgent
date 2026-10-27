@@ -20,7 +20,7 @@ test("accounts that need no harness profile count as ready; other refusals read 
   assert.equal(api.profileNotNeeded("account_profile_harness_unsupported"), true);
   assert.equal(api.profileNotNeeded("account_profile_auth_unsupported"), true);
   assert.equal(api.profileNotNeeded("native_profile_in_use"), false);
-  for (const code of ["rcli_private_key_writer_unavailable", "native_profile_in_use", "account_profile_operations_full", "account_profile_outcome_unknown_read_same_request"]) {
+  for (const code of ["rcli_private_key_writer_unavailable", "native_profile_in_use", "account_profile_operations_full", "account_profile_outcome_unknown_read_same_request", "account_profile_recovery_required"]) {
     const message = api.plainError(code);
     assert.doesNotMatch(message, / \([a-z0-9_]+\)$/, code);
     assert.doesNotMatch(message, /_|rcli|profile/i, code);
@@ -33,6 +33,24 @@ test("the note after saving names the accounts that are not ready for agents yet
     "Router isn't ready for agents yet. An agent is using this account now. Try again after it stops.");
   assert.equal(setupNote([{ name: "A", message: "m." }, { name: "B", message: "n." }]), "A and B aren't ready for agents yet. m.");
   assert.equal(setupNote([{ name: "A", message: "m." }, { name: "B", message: "n." }, { name: "C", message: "o." }]), "A, B and C aren't ready for agents yet. m.");
+});
+
+test("a kept account set-up reads as configured, never recorded, pending, gone or failed, and only a settled one gets a toast", () => {
+  const view = (pending, outcome) => ({ kind: "ok", value: { ticket: "t", generation: "1", reply: { request_id: "r", database_instance: "d", engine_epoch: "e", outcome }, pending } });
+  const configured = { configured_only: { receipt: {}, historical_replay: false } };
+  assert.equal(api.profileCheck(view(false, configured)), "configured");
+  assert.equal(api.profileCheck(view(false, "not_recorded")), "not_recorded");
+  assert.equal(api.profileCheck(view(true, configured)), "pending");
+  assert.equal(api.profileCheck({ kind: "error", code: "account_profile_operation_missing", message: "" }), "none");
+  assert.equal(api.profileCheck({ kind: "error", code: "account_profile_outcome_unknown_read_same_request", message: "" }), "failed");
+  assert.equal(api.profileSettledLine("configured"), "The account is set up for agents.");
+  assert.match(api.profileSettledLine("not_recorded"), /Save the pool again/);
+  for (const check of ["pending", "none", "failed"]) assert.equal(api.profileSettledLine(check), null, check);
+  assert.doesNotMatch(api.PROFILE_UNCONFIRMED_LINE, /_|profile/i);
+});
+
+test("reading a kept account set-up outside the desktop shell never counts as settled", async () => {
+  assert.equal(await api.checkAccountProfile(), "failed");
 });
 
 test("setting an account up outside the desktop shell reports the engine as unreachable", async () => {
