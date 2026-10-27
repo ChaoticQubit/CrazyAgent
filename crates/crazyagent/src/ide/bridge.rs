@@ -275,10 +275,12 @@ pub(crate) struct Grants {
 
 /// One project's capability for one IDE server launch. Until `taken`, the token is the
 /// file's and admits only `ide.session`; after it, the token is the session's, the file
-/// is gone and every other call is admitted.
+/// is gone, every other call is admitted and `spent` keeps the file's token only to know
+/// a second try to take the session.
 struct Grant {
     project: ProjectId,
     token: [u8; 32],
+    spent: Option<[u8; 32]>,
     file: PathBuf,
     identity: (u64, u64),
     taken: bool,
@@ -313,6 +315,7 @@ impl Grants {
         live.push(Grant {
             project: project.clone(),
             token,
+            spent: None,
             file: file.clone(),
             identity,
             taken: false,
@@ -329,10 +332,15 @@ impl Grants {
     }
 
     /// Admits an IDE handshake: `CAI1`, slot zero and a token compared in constant time
-    /// with every live token. Input: the handshake packet. Output: the project its
-    /// capability names and whether its session was taken, or `ide_capability_refused`.
+    /// with every live token. A capability file's token used after its swap ends its grant,
+    /// as `second_session` does. Input: the handshake packet. Output: the project its
+    /// capability names and whether its session was taken, or `second_session`'s refusal.
     fn known(&self, packet: &[u8; 37]) -> Result<(ProjectId, bool), EngineError> {
-        self.find(packet, |grant| Ok((grant.project.clone(), grant.taken)))
+        let found = {
+            let live = self.live.lock().map_err(|_| failure("ide_unavailable"))?;
+            matching(&live, packet).map(|index| (live[index].project.clone(), live[index].taken))
+        };
+        found.ok_or_else(|| self.second_session(packet))
     }
 
     /// Admits an IDE handshake with a session token. Input: the handshake packet. Output:
@@ -347,26 +355,53 @@ impl Grants {
 
     /// Swaps the capability file's token for a fresh session token, then removes the file
     /// while it is still the file the engine wrote, so a process that reads it later gets
-    /// a dead token. Each grant has one session: a second try is refused. Input: the
-    /// handshake packet. Output: the session token, or `ide_capability_refused`,
-    /// `ide_session_taken`, `ide_entropy_unavailable` or the file's cleanup failure.
+    /// a dead token. Each grant has one session: a second try ends the grant through
+    /// `second_session`. Input: the handshake packet. Output: the session token, or
+    /// `second_session`'s refusal, `ide_entropy_unavailable` or the file's cleanup failure.
     fn session(&self, packet: &[u8; 37]) -> Result<[u8; 32], EngineError> {
         let mut token = [0; 32];
         getrandom::fill(&mut token).map_err(|_| failure("ide_entropy_unavailable"))?;
-        let (file, identity) = {
+        let swapped = {
             let mut live = self.live.lock().map_err(|_| failure("ide_unavailable"))?;
-            let index = matching(&live, packet).ok_or_else(|| failure("ide_capability_refused"))?;
-            let grant = &mut live[index];
-            if grant.taken {
-                return Err(failure("ide_session_taken"));
+            match matching(&live, packet) {
+                Some(index) if !live[index].taken => {
+                    let grant = &mut live[index];
+                    grant.spent = Some(grant.token);
+                    grant.token = token;
+                    grant.taken = true;
+                    assert!(live.iter().filter(|grant| grant.token == token).count() == 1);
+                    Some((live[index].file.clone(), live[index].identity))
+                }
+                _ => None,
             }
-            grant.token = token;
-            grant.taken = true;
-            assert!(live.iter().filter(|grant| grant.token == token).count() == 1);
-            (live[index].file.clone(), live[index].identity)
+        };
+        let Some((file, identity)) = swapped else {
+            return Err(self.second_session(packet));
         };
         remove_capability(&file, identity)?;
         Ok(token)
+    }
+
+    /// Ends the grant a handshake names when it tries to take a session the grant already
+    /// gave, with the file's spent token or with the session token itself: two holders of
+    /// one capability mean it leaked, so the grant is dropped, which kills the session token
+    /// and ends its subscriptions and terminals. Input: the packet. Output:
+    /// `ide_session_taken` once ended, `ide_capability_refused` when no grant matches, or
+    /// the file's cleanup failure.
+    fn second_session(&self, packet: &[u8; 37]) -> EngineError {
+        let grant = match self.live.lock() {
+            Ok(mut live) => matching(&live, packet)
+                .or_else(|| spent(&live, packet))
+                .map(|index| live.swap_remove(index)),
+            Err(_) => return failure("ide_unavailable"),
+        };
+        let Some(grant) = grant else {
+            return failure("ide_capability_refused");
+        };
+        assert!(grant.taken && grant.spent.is_some());
+        remove_capability(&grant.file, grant.identity)
+            .err()
+            .unwrap_or_else(|| failure("ide_session_taken"))
     }
 
     /// Subscribes a handshake's capability to its project's events, at most
@@ -439,13 +474,31 @@ impl Grants {
 /// constant time with every live token. Inputs: the grants and the packet. Output: the
 /// grant's index, or none.
 fn matching(live: &[Grant], packet: &[u8; 37]) -> Option<usize> {
+    holding(live, packet, |grant| Some(&grant.token))
+}
+
+/// Finds the grant whose capability file's spent token a handshake carries, compared in
+/// constant time with every spent token. Inputs: the grants and the packet. Output: the
+/// grant's index, or none.
+fn spent(live: &[Grant], packet: &[u8; 37]) -> Option<usize> {
+    holding(live, packet, |grant| grant.spent.as_ref())
+}
+
+/// Finds the grant one of whose tokens a handshake carries: `CAI1`, slot zero and every
+/// grant's token compared in constant time. Inputs: the grants, the packet and the token
+/// to compare. Output: the grant's index, or none.
+fn holding(
+    live: &[Grant],
+    packet: &[u8; 37],
+    token: impl Fn(&Grant) -> Option<&[u8; 32]>,
+) -> Option<usize> {
     assert!(live.len() <= GRANTS_MAX);
     if &packet[..4] != MAGIC || packet[4] != 0 {
         return None;
     }
     let mut found = None;
     for (index, grant) in live.iter().enumerate() {
-        if bool::from(grant.token.ct_eq(&packet[5..])) {
+        if token(grant).is_some_and(|held| bool::from(held.ct_eq(&packet[5..]))) {
             found = Some(index);
         }
     }
@@ -539,7 +592,8 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 /// Serves one IDE capability connection after its handshake: admits the token, reads one
 /// request for the capability's own project and answers it, swaps the capability file for
 /// the extension's session, or turns the connection into the project's event subscription
-/// or a Sandboxed terminal. The handshake deadline bounds
+/// or a Sandboxed terminal. An answer is sent only while the capability still admits the
+/// handshake, and a refusal is sent as it is. The handshake deadline bounds
 /// everything but the subscription and the terminal. Inputs: the stream, handshake packet,
 /// owner runtime and deadline.
 pub(crate) async fn serve(
@@ -587,9 +641,12 @@ pub(crate) async fn serve(
         }
     };
     if let Some(reply) = reply {
-        let reply = match runtime.ide_grants().admit(&packet) {
-            Ok(_) => reply,
-            Err(error) => refusal(&error),
+        let reply = match reply {
+            IdeReply::Rejected { .. } => reply,
+            reply => match runtime.ide_grants().admit(&packet) {
+                Ok(_) => reply,
+                Err(error) => refusal(&error),
+            },
         };
         let _ = write(&mut stream, &reply).await;
     }
@@ -598,9 +655,10 @@ pub(crate) async fn serve(
 
 /// Reads the one request frame, then admits the handshake, so a refusal never leaves
 /// unread bytes that could reset the connection before the client reads it. The capability
-/// file's token admits only `ide.session`, and a session token admits everything else.
-/// Inputs: the stream, packet and owner runtime. Output: the capability's project and the
-/// call, or `ide_capability_refused`, `ide_request_invalid`, `ide_project_refused`,
+/// file's token admits only `ide.session`, and a session token admits everything else; a
+/// session token asking for `ide.session` again ends its grant. Inputs: the stream, packet
+/// and owner runtime. Output: the capability's project and the call, or
+/// `ide_capability_refused`, `ide_request_invalid`, `ide_project_refused`,
 /// `ide_session_required` or `ide_session_taken`.
 async fn open(
     stream: &mut UnixStream,
@@ -619,7 +677,7 @@ async fn open(
     }
     let session = matches!(request.call, IdeCall::Session {});
     match (session, taken) {
-        (true, true) => Err(failure("ide_session_taken")),
+        (true, true) => Err(runtime.ide_grants().second_session(packet)),
         (true, false) | (false, true) => Ok((project, request.call)),
         (false, false) => Err(failure("ide_session_required")),
     }
