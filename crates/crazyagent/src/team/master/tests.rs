@@ -604,3 +604,107 @@ fn a_live_master_s_escalations_stop_at_the_hourly_cap() {
     assert_eq!(escalations, ESCALATIONS_PER_HOUR_MAX);
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
+
+#[test]
+fn a_live_master_asks_the_owner_and_records_a_chat_answer_through_its_team_tool() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let folder = PathBuf::from(&fixture.setup.folder);
+    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let ask =
+        json!({"question": "Ship on Friday?", "options": ["Yes", "No"], "recommended": "Yes"});
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(1, tool::ASK_TOOL, ask.clone())],
+    );
+    assert_eq!(text(&answers[0]), (NO_MASTER, true));
+
+    fixture.live(Some(MASTER));
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(1, tool::ASK_TOOL, ask),
+            tool_call(
+                2,
+                tool::ASK_TOOL,
+                json!({"question": "Ship on Friday?", "options": ["Yes", "Yes"]}),
+            ),
+        ],
+    );
+    let (said, error) = text(&answers[0]);
+    assert!(!error && said.starts_with("Question 1 is logged"), "{said}");
+    let (said, error) = text(&answers[1]);
+    assert!(error && said.starts_with("Not asked:"), "{said}");
+
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(
+                3,
+                tool::ASK_TOOL,
+                json!({"id": 1, "answer": "Yes, Friday."}),
+            ),
+            tool_call(4, tool::ASK_TOOL, json!({"id": 1, "answer": "No."})),
+            tool_call(5, tool::ASK_TOOL, json!({"id": 9, "answer": "No."})),
+        ],
+    );
+    assert_eq!(
+        text(&answers[0]),
+        ("Recorded the owner's answer to question 1.", false)
+    );
+    assert_eq!(
+        text(&answers[1]),
+        (
+            "Not recorded: question 1 is already answered or dismissed.",
+            true
+        )
+    );
+    assert_eq!(
+        text(&answers[2]),
+        ("Not recorded: this project has no question 9.", true)
+    );
+    let project = fixture.setup.project_id.clone();
+    let listed = crate::questions::list(&fixture.connection, &project, false, None).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (
+            listed[0].agent,
+            listed[0].answered_by,
+            listed[0].answer.as_deref(),
+            listed[0].options.clone()
+        ),
+        (
+            Some(MASTER),
+            Some(crate::questions::AnsweredBy::Master),
+            Some("Yes, Friday."),
+            vec!["Yes".to_owned(), "No".to_owned()]
+        )
+    );
+    let messages: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(messages, 0);
+    let page = std::fs::read_to_string(
+        folder
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join("questions.md"),
+    )
+    .unwrap();
+    assert!(
+        page.contains("Answered in chat, as the master recorded it"),
+        "{page}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}

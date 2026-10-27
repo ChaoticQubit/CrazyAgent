@@ -24,6 +24,7 @@ pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
 pub use transport::process::{AgentInstructions, PROCESS_CODES, ProcessText, SavedText};
+pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::RECOVERY_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;

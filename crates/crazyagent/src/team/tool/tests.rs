@@ -556,7 +556,7 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
 }
 
 #[test]
-fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_seven_tools() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
@@ -581,7 +581,8 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
             ANSWER_TOOL,
             STATUS_TOOL,
             CHANGES_TOOL,
-            ESCALATE_TOOL
+            ESCALATE_TOOL,
+            ASK_TOOL
         ]
     );
 }
@@ -624,4 +625,87 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     )
     .unwrap();
     assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
+}
+
+#[test]
+fn ask_owner_takes_a_bounded_question_or_only_a_chat_answer_and_the_engine_checks_it_again() {
+    let ask = |arguments: Value| live_call(ASK_TOOL, Some(&arguments)).unwrap();
+    let asked = Call::AskOwner {
+        question: "Ship V2 on Friday?".into(),
+        options: vec!["Yes".into(), "No, wait a week".into()],
+        recommended: Some("Yes: every slice is merged.".into()),
+        context: Some("One flaky test left.".into()),
+    };
+    assert_eq!(
+        ask(json!({
+            "question": " Ship V2 on Friday? ",
+            "options": ["Yes", " No, wait a week "],
+            "recommended": "Yes: every slice is merged.",
+            "context": "One flaky test left.",
+        })),
+        Ok(asked.clone())
+    );
+    assert_eq!(checked(asked.clone()), Ok(asked));
+    let bare = Call::AskOwner {
+        question: "Which name?".into(),
+        options: vec![],
+        recommended: None,
+        context: None,
+    };
+    assert_eq!(
+        ask(json!({"question": "Which name?", "options": null, "context": null})),
+        Ok(bare.clone())
+    );
+    assert_eq!(
+        checked(bare),
+        Ok(Call::AskOwner {
+            question: "Which name?".into(),
+            options: vec![],
+            recommended: None,
+            context: None,
+        })
+    );
+    let recorded = Call::RecordAnswer {
+        id: 7,
+        answer: "Friday works.".into(),
+    };
+    assert_eq!(
+        ask(json!({"id": 7, "answer": " Friday works. "})),
+        Ok(recorded.clone())
+    );
+    assert_eq!(checked(recorded.clone()), Ok(recorded));
+
+    for arguments in [
+        json!({}),
+        json!({"question": "  "}),
+        json!({"question": "x".repeat(crate::questions::QUESTION_BYTES_MAX + 1)}),
+        json!({"question": "Pick?", "options": ["a", "b", "c", "d", "e"]}),
+        json!({"question": "Pick?", "options": ["a", "a"]}),
+        json!({"question": "Pick?", "options": ["two\nlines"]}),
+        json!({"question": "Pick?", "options": [1]}),
+        json!({"question": "Pick?", "options": "a"}),
+        json!({"question": "Pick?", "recommended": 3}),
+        json!({"question": "Pick?", "answer": "yes"}),
+        json!({"question": "Pick?", "shell": "rm -rf /"}),
+        json!({"id": 7}),
+        json!({"id": 0, "answer": "yes"}),
+        json!({"id": "7", "answer": "yes"}),
+        json!({"id": 7, "answer": "yes", "question": "Pick?"}),
+        json!({"id": 7, "answer": "x".repeat(crate::questions::ANSWER_BYTES_MAX + 1)}),
+        json!({"id": 7, "answer": "bell \u{7}"}),
+    ] {
+        assert_eq!(ask(arguments.clone()), Err(ASK_INVALID), "{arguments}");
+    }
+    let planted = Call::AskOwner {
+        question: " untrimmed ".into(),
+        options: vec![],
+        recommended: None,
+        context: None,
+    };
+    assert!(checked(planted).is_err());
+    let planted = Call::RecordAnswer {
+        id: -1,
+        answer: "yes".into(),
+    };
+    assert_eq!(checked(planted), Err(ASK_INVALID));
 }
