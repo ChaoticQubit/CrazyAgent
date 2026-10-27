@@ -1574,6 +1574,62 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     bench.stop().await;
 }
 
+/// Makes the agent state folder `name` under `agents` with a file in it, as an
+/// earlier onboarding of a project with the same id left it.
+fn leftover_agent(agents: &Path, name: &str) {
+    fs::create_dir_all(agents.join(name).join("home")).unwrap();
+    fs::write(agents.join(name).join("stdout.log"), "earlier run\n").unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a_new_onboarding() {
+    let graphify = graphify();
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let port = rejecting_endpoint();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "closed-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let earlier = [
+        format!("onboard-g-{PROJECT}-1"),
+        format!("onboard-m-{PROJECT}-2"),
+    ];
+    for name in &earlier {
+        leftover_agent(&agents, name);
+    }
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move || Some(graphify.clone()),
+        OnboardingLimits {
+            graph_time: Duration::from_secs(240),
+            mapping_time: Duration::from_secs(240),
+        },
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(540)).await;
+    stop_service(service).await;
+    assert_eq!(view.graph, Step::Done, "{view:?}");
+    assert_eq!(
+        view.mapping,
+        failed("Agent stopped: The model closed-model does not exist"),
+        "{view:?}"
+    );
+    for name in &earlier {
+        assert_eq!(
+            fs::read_to_string(agents.join(name).join("stdout.log")).unwrap(),
+            "earlier run\n"
+        );
+    }
+    assert_eq!(agent_runs(&agents, "onboard-g-"), 2);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 2);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {

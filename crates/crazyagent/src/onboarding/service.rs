@@ -95,6 +95,7 @@ struct Claimed {
     repo: PathBuf,
     pool: CredentialRef,
     drafted: Drafted,
+    created_ms: i64,
     runs: i64,
     kind: Kind,
 }
@@ -242,7 +243,7 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     let now = now_ms();
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding o
+            "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
                 OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
                     AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2)
@@ -258,12 +259,13 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((project, repo, pool, drafted, runs, graph)) = row else {
+    let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
         return Ok(None);
     };
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
@@ -285,6 +287,7 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         repo: PathBuf::from(repo),
         pool: CredentialRef::new(pool).map_err(|problem| problem.0)?,
         drafted: serde_json::from_str(&drafted).map_err(|error| error.to_string())?,
+        created_ms,
         runs: runs + 1,
         kind,
     }))
@@ -336,14 +339,17 @@ fn store_draft(
     Ok(())
 }
 
-/// The agent state name of one step attempt, unique per row and attempt.
+/// The agent state name of one step attempt: the step, the project, when its
+/// onboarding row was made and the attempt, so no attempt reuses a folder an
+/// earlier onboarding of the same project id left. The project part is cut
+/// short only when the whole name would pass the bound. Returns the name.
 fn run_name(claimed: &Claimed) -> String {
-    let name = format!(
-        "onboard-{}-{}-{}",
-        claimed.kind.short(),
-        claimed.project,
-        claimed.runs
-    );
+    assert!(claimed.project.is_ascii() && !claimed.project.is_empty());
+    let head = format!("onboard-{}-", claimed.kind.short());
+    let tail = format!("-{}-{}", claimed.created_ms, claimed.runs);
+    let room = RUN_NAME_BYTES_MAX - head.len() - tail.len();
+    let project = &claimed.project[..claimed.project.len().min(room)];
+    let name = format!("{head}{project}{tail}");
     assert!(name.len() <= RUN_NAME_BYTES_MAX);
     name
 }
