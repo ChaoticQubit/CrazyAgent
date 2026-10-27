@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 pub mod direct;
 pub mod graph;
+pub mod master;
 pub mod names;
 pub mod runtime;
 pub mod tool;
@@ -353,6 +354,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    LiveMaster {
+        project_id: ProjectId,
+        on: bool,
+    },
     Pause {
         project_id: ProjectId,
     },
@@ -411,7 +416,10 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
+            Self::KeepWarm { .. }
+            | Self::LiveMaster { .. }
+            | Self::Pause { .. }
+            | Self::Resume { .. } => Ok(()),
         }
     }
 
@@ -424,6 +432,7 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
             | Self::HandOff { project_id, .. }
@@ -732,6 +741,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         )
         .map_err(error)?;
     names::initialize(connection)?;
+    master::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1178,6 +1188,16 @@ pub fn execute(
                 params![project.as_str(), on],
             )
             .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::LiveMaster { on, .. } => {
+            if *on
+                && crate::harnesses::interactive::support(&stored.team.master)
+                    != crate::harnesses::interactive::Support::Terminal
+            {
+                return Ok(rejected("team_master_no_terminal"));
+            }
+            master::set_live(tx, project, *on)?;
             Ok(Outcome::Applied)
         }
         TeamAction::Pause { .. } => {

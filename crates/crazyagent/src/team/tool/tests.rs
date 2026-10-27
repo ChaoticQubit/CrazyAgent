@@ -261,3 +261,187 @@ fn the_server_needs_an_absolute_drop_file() {
     );
     assert!(output.is_empty());
 }
+
+#[test]
+fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
+    let delegate = |arguments: Value| live_call(TOOL_NAME, Some(&arguments)).unwrap();
+    assert_eq!(
+        delegate(json!({"task": " Write page.md ", "harness": "Codex", "role": "@page-writer"})),
+        Ok(Call::Delegate {
+            task: "Write page.md".into(),
+            harness: Some("codex".into()),
+            role: Some("@page-writer".into()),
+        })
+    );
+    assert_eq!(
+        delegate(json!({"task": "Write page.md", "role": "page-writer"})),
+        Ok(Call::Delegate {
+            task: "Write page.md".into(),
+            harness: None,
+            role: Some("@page-writer".into()),
+        })
+    );
+    for role in [
+        "@",
+        "a",
+        "Page",
+        "page--writer",
+        "-page",
+        "page-",
+        "page writer",
+        &"r".repeat(41),
+    ] {
+        assert_eq!(
+            delegate(json!({"task": "Write page.md", "role": role})),
+            Err(ROLE_INVALID),
+            "{role}"
+        );
+    }
+    assert_eq!(delegate(json!({"task": "   "})), Err(LIVE_INVALID));
+    assert_eq!(
+        delegate(json!({"task": "x".repeat(TASK_PROMPT_BYTES_MAX + 1)})),
+        Err(LIVE_INVALID)
+    );
+    assert_eq!(
+        live_call(
+            MESSAGE_TOOL,
+            Some(&json!({"agent": " @page-writer ", "text": "Use the old header.\n"}))
+        )
+        .unwrap(),
+        Ok(Call::Message {
+            agent: "@page-writer".into(),
+            text: "Use the old header.".into(),
+        })
+    );
+    for arguments in [
+        json!({"agent": "@a", "text": "bell \u{7}"}),
+        json!({"agent": "", "text": "hi"}),
+        json!({"agent": "a".repeat(65), "text": "hi"}),
+        json!({"text": "hi"}),
+    ] {
+        assert_eq!(
+            live_call(ANSWER_TOOL, Some(&arguments)).unwrap(),
+            Err(TYPED_INVALID),
+            "{arguments}"
+        );
+    }
+    assert_eq!(live_call(STATUS_TOOL, None).unwrap(), Ok(Call::Status));
+    assert_eq!(
+        live_call(CHANGES_TOOL, Some(&json!({}))).unwrap(),
+        Ok(Call::Changes)
+    );
+    assert_eq!(live_call("shell", None), None);
+}
+
+#[test]
+fn the_engine_checks_again_every_call_read_from_a_mailbox() {
+    assert_eq!(checked(Call::Status), Ok(Call::Status));
+    let planted = Call::Delegate {
+        task: "Write page.md".into(),
+        harness: Some("Codex".into()),
+        role: None,
+    };
+    assert_eq!(checked(planted), Err(LIVE_INVALID));
+    let planted = Call::Message {
+        agent: "@a".into(),
+        text: "x".repeat(TASK_PROMPT_BYTES_MAX + 1),
+    };
+    assert_eq!(checked(planted), Err(TYPED_INVALID));
+    let planted = Call::Delegate {
+        task: "Write page.md".into(),
+        harness: None,
+        role: Some("Page".into()),
+    };
+    assert_eq!(checked(planted), Err(ROLE_INVALID));
+}
+
+#[test]
+fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let first = "0".repeat(32);
+    let second = "1".repeat(32);
+    std::fs::write(
+        mailbox.join(format!("{first}{CALL_SUFFIX}")),
+        b"{\"tool\":\"status\"}\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(mailbox.join(format!("{second}{CALL_SUFFIX}")), b"not json").unwrap();
+    let secret = directory.path().join("secret.json");
+    std::fs::write(&secret, b"{\"tool\":\"changes\"}").unwrap();
+    symlink(
+        &secret,
+        mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32))),
+    )
+    .unwrap();
+    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"status\"}").unwrap();
+    std::fs::write(
+        mailbox.join(format!("{}{CALL_SUFFIX}", "3".repeat(32))),
+        vec![b' '; CALL_BYTES_MAX as usize + 1],
+    )
+    .unwrap();
+
+    let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
+    assert_eq!(taken.len(), 3, "{taken:?}");
+    assert_eq!(taken[0], (first.clone(), Some(Call::Status)));
+    assert_eq!(taken[1], (second.clone(), None));
+    assert_eq!(taken[2], ("3".repeat(32), None));
+    assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
+    assert!(
+        std::fs::symlink_metadata(mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32)))).is_ok()
+    );
+    assert!(mailbox.join("notes.call").is_file());
+    assert_eq!(std::fs::read(&secret).unwrap(), b"{\"tool\":\"changes\"}");
+
+    answer_call(&mailbox, &first, "Two agents are working.", false).unwrap();
+    assert_eq!(
+        read_reply(&mailbox.join(format!("{first}{REPLY_SUFFIX}"))),
+        Some(("Two agents are working.".into(), false))
+    );
+    assert!(!mailbox.join(format!("{first}{PART_SUFFIX}")).exists());
+    let long = "é".repeat(REPLY_TEXT_MAX);
+    answer_call(&mailbox, &second, &long, true).unwrap();
+    let (text, error) = read_reply(&mailbox.join(format!("{second}{REPLY_SUFFIX}"))).unwrap();
+    assert!(error && text.len() <= REPLY_TEXT_MAX && text.chars().all(|c| c == 'é'));
+
+    let planted = "4".repeat(32);
+    symlink(&secret, mailbox.join(format!("{planted}{PART_SUFFIX}"))).unwrap();
+    assert!(answer_call(&mailbox, &planted, "never", false).is_err());
+    assert_eq!(std::fs::read(&secret).unwrap(), b"{\"tool\":\"changes\"}");
+}
+
+#[test]
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_five_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
+    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative")).is_err());
+    let linked = base.join("linked");
+    symlink(&base, &linked).unwrap();
+    assert!(serve_live(list.clone(), Vec::new(), &linked).is_err());
+    let mut output = Vec::new();
+    serve_live(list, &mut output, &base).unwrap();
+    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+    let names: Vec<&str> = answer["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            TOOL_NAME,
+            MESSAGE_TOOL,
+            ANSWER_TOOL,
+            STATUS_TOOL,
+            CHANGES_TOOL
+        ]
+    );
+}
