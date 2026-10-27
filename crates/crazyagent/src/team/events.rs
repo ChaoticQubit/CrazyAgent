@@ -372,11 +372,14 @@ pub struct AppEvents {
     pub projects: Vec<ProjectUnseen>,
 }
 
-/// How many of one project's owner notifications are unseen, for its sidebar count.
+/// How many of one project's owner notifications are unseen, for its sidebar count, and how
+/// many of those are question notifications, which the app counts as pending questions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectUnseen {
     pub project_id: ProjectId,
     pub unseen: i64,
+    #[serde(default)]
+    pub questions: i64,
 }
 
 /// The events typed into the master in one wake, oldest first, their text and whether one
@@ -1102,32 +1105,40 @@ fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, Engin
     Ok(read)
 }
 
-/// Counts the unseen notifications of each project that has any, by project id, so a
-/// project's count never depends on what fits in the app window. Takes the connection.
-/// Returns at most `UNSEEN_PROJECTS_MAX` projects, each with a count above zero.
+/// Counts the unseen notifications of each project that has any, and the question
+/// notifications among them, by project id, so a project's count never depends on what fits
+/// in the app window. Takes the connection. Returns at most `UNSEEN_PROJECTS_MAX` projects,
+/// each with a count above zero.
 fn unseen_by_project(connection: &Connection) -> Result<Vec<ProjectUnseen>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT project, COUNT(*) FROM team_notifications WHERE seen_ms IS NULL
-             GROUP BY project ORDER BY project LIMIT ?1",
+            "SELECT project, COUNT(*), SUM(kind = 'question') FROM team_notifications
+             WHERE seen_ms IS NULL GROUP BY project ORDER BY project LIMIT ?1",
         )
         .map_err(error)?;
-    let rows: Vec<(String, i64)> = statement
-        .query_map([UNSEEN_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+    let rows: Vec<(String, i64, i64)> = statement
+        .query_map([UNSEEN_PROJECTS_MAX], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
     let projects: Vec<ProjectUnseen> = rows
         .into_iter()
-        .filter_map(|(project, unseen)| {
+        .filter_map(|(project, unseen, questions)| {
             Some(ProjectUnseen {
                 project_id: ProjectId::new(project).ok()?,
                 unseen,
+                questions,
             })
         })
         .collect();
     assert!(projects.len() as i64 <= UNSEEN_PROJECTS_MAX);
-    assert!(projects.iter().all(|item| item.unseen > 0));
+    assert!(
+        projects
+            .iter()
+            .all(|item| item.unseen > 0 && (0..=item.unseen).contains(&item.questions))
+    );
     Ok(projects)
 }
 

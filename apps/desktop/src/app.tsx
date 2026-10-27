@@ -214,7 +214,7 @@ function useTeamAlerts(running: boolean, showToast: (message: string) => void): 
       if (result.kind === "ok") {
         const next = freshAlerts(last, result.value);
         last = next.last;
-        const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.notifications), pending);
+        const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.projects), pending);
         const total = [...flags.values()].reduce((sum, count) => sum + count, 0);
         setCounts(flags);
         if (next.fresh[0]) toast.current(displayText(next.fresh[0].text));

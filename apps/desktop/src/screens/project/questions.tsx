@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { ANSWER_BYTES_MAX, answerQuestion, askedInTerminal, askerLabel, dismissQuestion, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
+import { ANSWER_BYTES_MAX, answerQuestion, askedInTerminal, askerLabel, dismissNote, dismissQuestion, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
 import type { OwnerQuestion, QuestionChoice, QuestionPage } from "../../api-questions";
 import { Button, ConfirmDialog, TextArea } from "../../ui";
 import { displayText } from "../conversation";
@@ -96,13 +96,33 @@ export function mergedQuestions(first: QuestionPage, older: readonly OwnerQuesti
   return orderQuestions([...first.items, ...older.filter((item) => !seen.has(item.id))]);
 }
 
+/** The older pages the owner opened below the newest page, and where the next one starts. */
+export interface OlderPages {
+  items: OwnerQuestion[];
+  next: number | null;
+}
+
+/** One change to the older pages. */
+export type OlderEvent = { kind: "first"; next: number | null } | { kind: "older"; page: QuestionPage } | { kind: "settled" };
+
+/** The older pages after one event: a newest-page read sets where older pages start while
+ * none is open; an older-page read adds its questions; an answer or dismissal drops the older
+ * pages, which may now show a settled question as waiting, so they are read again from the
+ * newest page. Inputs: the older pages and the event. Output: the older pages. */
+export function olderAfter(older: OlderPages, event: OlderEvent): OlderPages {
+  switch (event.kind) {
+    case "first": return older.items.length === 0 ? { items: [], next: event.next } : older;
+    case "older": return { items: [...older.items, ...event.page.items], next: event.page.next };
+    case "settled": return { items: [], next: null };
+  }
+}
+
 /** Questions tab: every question the project's agents and engine steps asked the owner,
  * pending first, with Answer and Dismiss. Input: the project data. Output: the tab; the list
  * rereads every few seconds while it is open. */
 export function QuestionsTab({ data }: { data: ProjectData }) {
   const [first, setFirst] = useState<Result<QuestionPage>>();
-  const [older, setOlder] = useState<OwnerQuestion[]>([]);
-  const [next, setNext] = useState<number | null>(null);
+  const [older, setOlder] = useState<OlderPages>({ items: [], next: null });
   const [round, setRound] = useState(0);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
@@ -112,45 +132,45 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
     void loadQuestions(data.id, null).then((result) => {
       if (!current) return;
       setFirst(result);
-      if (result.kind === "ok" && older.length === 0) setNext(result.value.next);
+      if (result.kind === "ok") setOlder((shown) => olderAfter(shown, { kind: "first", next: result.value.next }));
     });
     const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
     return () => { current = false; clearInterval(timer); };
   }, [data.id, round]);
 
-  async function settle(result: Result<void>, kind: "answered" | "dismissed") {
+  async function settle(result: Result<void>, kind: "answered" | "dismissed", question: OwnerQuestion) {
     setBusy(false);
     setDismissing(null);
     if (result.kind === "ok") {
       setNote("");
-      data.notify(settledNote(kind));
+      data.notify(settledNote(kind, question.asker));
     } else setNote(notReady(result) ? "Questions aren't ready in this engine yet." : refusalOf(result));
+    setOlder((shown) => olderAfter(shown, { kind: "settled" }));
     setRound((value) => value + 1);
   }
 
   async function answer(question: OwnerQuestion, choice: QuestionChoice) {
     setBusy(true);
-    await settle(await answerQuestion(question.id, question.version, choice), "answered");
+    await settle(await answerQuestion(question.id, question.version, choice), "answered", question);
   }
 
   async function dismiss(question: OwnerQuestion) {
     setBusy(true);
-    await settle(await dismissQuestion(question.id, question.version), "dismissed");
+    await settle(await dismissQuestion(question.id, question.version), "dismissed", question);
   }
 
   async function showOlder() {
-    if (next === null) return;
+    if (older.next === null) return;
     setBusy(true);
-    const result = await loadQuestions(data.id, next);
+    const result = await loadQuestions(data.id, older.next);
     setBusy(false);
     if (result.kind !== "ok") return setNote(refusalOf(result));
-    setOlder((shown) => [...shown, ...result.value.items]);
-    setNext(result.value.next);
+    setOlder((shown) => olderAfter(shown, { kind: "older", page: result.value }));
   }
 
   if (first === undefined) return <p className="pj-muted pj-small" role="status">Loading questions...</p>;
   if (notReady(first)) return <NotReady what="questions from agents aren't in this engine yet." />;
-  const questions = first.kind === "ok" ? mergedQuestions(first.value, older) : [];
+  const questions = first.kind === "ok" ? mergedQuestions(first.value, older.items) : [];
   return <div className="pj-stack">
     {first.kind === "error" && <p className="pj-error" role="alert">Couldn't load questions. {refusalOf(first)}</p>}
     {note && <p className="pj-note warn" role="alert">{note}</p>}
@@ -161,10 +181,10 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
       {questions.map((question) => <QuestionCard key={`${question.id}:${question.version}`} question={question} now={data.now} busy={busy}
         onAnswer={(asked, choice) => void answer(asked, choice)} onDismiss={setDismissing} />)}
     </div>}
-    {next !== null && <span><Button disabled={busy} onClick={() => void showOlder()}>Show older questions</Button></span>}
+    {older.next !== null && <span><Button disabled={busy} onClick={() => void showOlder()}>Show older questions</Button></span>}
     <ConfirmDialog open={dismissing !== null} pending={busy} title="Dismiss this question?" confirmLabel="Dismiss" cancelLabel="Keep it"
       onCancel={() => setDismissing(null)} onConfirm={() => { if (dismissing) void dismiss(dismissing); }}>
-      The agent that asked is told you dismissed it, once. It can ask again if it still needs an answer.
+      {dismissing ? dismissNote(dismissing.asker) : ""}
     </ConfirmDialog>
   </div>;
 }

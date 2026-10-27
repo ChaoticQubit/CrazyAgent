@@ -916,6 +916,52 @@ fn an_escalation_is_an_unseen_notification_until_the_owner_sees_it() {
     );
 }
 
+/// A project's unseen question notifications are counted in full even when more of them
+/// wait than the app window lists, so the app can count each pending question once.
+#[test]
+fn each_project_reports_its_unseen_question_notifications_beyond_the_listed_window() {
+    let fixture = Fixture::new();
+    let asked = VIEW_NOTIFICATIONS_MAX + 5;
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    for at in 0..asked {
+        notify(
+            &tx,
+            &project(),
+            NotificationKind::Question,
+            "Which database?",
+            1 + at,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    for at in 0..2 {
+        escalate(
+            &fixture.connection,
+            &project(),
+            "Spend on a new provider?",
+            100 + at,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    let view = app(&fixture.connection).unwrap();
+    assert_eq!(
+        view.projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: asked + 2,
+            questions: asked,
+        }]
+    );
+    let listed = view
+        .notifications
+        .iter()
+        .filter(|item| item.kind == NotificationKind::Question)
+        .count() as i64;
+    assert!(listed < asked, "the window lists only {listed} of {asked}");
+}
+
 #[test]
 fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let fixture = Fixture::new();
@@ -948,6 +994,7 @@ fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let count = |id: &str, unseen: i64| ProjectUnseen {
         project_id: ProjectId::new(id).unwrap(),
         unseen,
+        questions: 0,
     };
     assert_eq!(
         view.projects,

@@ -55,6 +55,19 @@ const REFUSALS: Record<string, string> = {
   questions_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
   questions_in_terminal: "This question was asked in an agent's terminal. Answer it there.",
   questions_delivery_full: "The master's conversation is full right now. Try again after it reads its messages.",
+  owner_authentication_failed: "CrazyAgent couldn't confirm this app with the engine. Restart the app, then try again.",
+  owner_authority_unavailable: "The engine isn't ready for owner actions yet. Try again in a moment.",
+  owner_busy: "The engine is busy with other owner requests. Try again in a moment.",
+  owner_grant_stale_or_revoked: "This app's access to the engine changed. Reconnect, then try again.",
+  owner_request_failed: "The engine couldn't take this request. Try again.",
+  owner_root_replaced_or_unsafe: "The engine's data folder changed or isn't safe. Restart the engine, then try again.",
+  owner_root_unavailable: "The engine's data folder isn't available. Restart the engine, then try again.",
+  owner_socket_replaced: "The engine was restarted. Reconnect, then try again.",
+  owner_socket_unsafe: "The engine connection isn't safe to use. Restart the engine, then try again.",
+  peer_owner_mismatch: "The engine runs as another user. Start it as yourself, then try again.",
+  versioned_item_invalid: "CrazyAgent couldn't record a change to this question. Review it again.",
+  versioned_unavailable: "CrazyAgent couldn't record this right now. Try again in a moment.",
+  changes_unavailable: "The engine's records aren't available right now. Try again in a moment.",
 };
 
 /** The refusal codes of the questions protocol that have their own sentence. */
@@ -129,10 +142,28 @@ export function isRecommended(question: Pick<OwnerQuestion, "options" | "recomme
   return question.recommended !== null && question.options[index] === question.recommended;
 }
 
-/** The sentence the owner reads after an answer or a dismissal went through. Input: what
- * was done. Output: the sentence. */
-export function settledNote(kind: "answered" | "dismissed"): string {
+/** What the owner is told after settling a question, by who asked: an agent or the master
+ * hears once; an engine step's answer goes once to the project's master, if its conversation
+ * has room; nothing is sent to a terminal. Inputs: what the owner did and the asker. Output:
+ * the line. */
+export function settledNote(kind: "answered" | "dismissed", asker: string): string {
+  const [source] = asker.split(":");
+  if (source === "terminal" && kind === "dismissed") return "Dismissed. Nothing is sent to the agent's terminal.";
+  if (source === "engine") {
+    return kind === "answered"
+      ? "Answered. The project's master gets your answer once, if its conversation has room."
+      : "Dismissed. The project's master is told once, if its conversation has room.";
+  }
   return kind === "answered" ? "Answered. The agent that asked gets your answer once." : "Dismissed. The agent that asked is told once.";
+}
+
+/** What dismissing a question tells whoever asked, for the confirm dialog. Input: the asker.
+ * Output: the line. */
+export function dismissNote(asker: string): string {
+  const [source] = asker.split(":");
+  if (source === "terminal") return "Nothing is sent to the agent's terminal. If the question still waits there, answer it in the terminal.";
+  if (source === "engine") return "The CrazyAgent step that asked takes no action on its own. The project's master is told once, if its conversation has room.";
+  return "The agent that asked is told you dismissed it, once. It can ask again if it still needs an answer.";
 }
 
 /** Reads one page of a project's questions, pending first. Inputs: the project id and the
@@ -167,11 +198,12 @@ export function pendingByProject(counts: readonly QuestionCount[]): Map<string, 
 }
 
 /** The unseen question notifications of each project, which the pending count already
- * covers. Input: the owner notifications. Output: the map. */
-export function unseenQuestionAlerts(notifications: readonly { project_id: string; kind: string; seen_ms: number | null }[]): Map<string, number> {
+ * covers, from the engine's full per-project count rather than the capped notification list.
+ * Input: the engine's per-project unseen counts. Output: the map. */
+export function unseenQuestionAlerts(projects: readonly { project_id: string; questions?: number }[]): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const item of notifications) {
-    if (item.kind === "question" && item.seen_ms === null) counts.set(item.project_id, (counts.get(item.project_id) ?? 0) + 1);
+  for (const item of projects) {
+    if ((item.questions ?? 0) > 0) counts.set(item.project_id, item.questions ?? 0);
   }
   return counts;
 }

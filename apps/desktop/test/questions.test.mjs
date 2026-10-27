@@ -109,6 +109,31 @@ test("a settled question shows its status and answer, with no answer controls", 
   assert.deepEqual(client.statusBadge("dismissed"), { word: "Dismissed", tone: "neutral" });
 });
 
+test("a question settled from an older page never stays waiting: the older pages are dropped and read again", () => {
+  const empty = { items: [], next: null };
+  const opened = view.olderAfter(view.olderAfter(empty, { kind: "first", next: 9 }), { kind: "older", page: { items: [question({ id: 6 })], next: 3 } });
+  assert.deepEqual(opened.items.map((item) => item.id), [6]);
+  assert.equal(opened.next, 3);
+  assert.deepEqual(view.olderAfter(opened, { kind: "first", next: 9 }), opened, "a reread of the newest page keeps the older pages open");
+  const settled = view.olderAfter(opened, { kind: "settled" });
+  assert.deepEqual(settled, empty);
+  const reread = { items: [question({ id: 7 })], next: 9 };
+  assert.deepEqual(view.mergedQuestions(reread, settled.items).map((item) => item.id), [7], "the stale older copy of question 6 is gone");
+  assert.deepEqual(view.olderAfter(settled, { kind: "first", next: 9 }), { items: [], next: 9 }, "Show older questions comes back with the next read");
+});
+
+test("settling tells the owner what the asker hears: agents once, an engine step through the master, a terminal nothing", () => {
+  assert.equal(client.settledNote("answered", "agent:3"), "Answered. The agent that asked gets your answer once.");
+  assert.equal(client.settledNote("dismissed", "master:1"), "Dismissed. The agent that asked is told once.");
+  assert.equal(client.settledNote("answered", "engine:mapping"), "Answered. The project's master gets your answer once, if its conversation has room.");
+  assert.equal(client.settledNote("dismissed", "engine:research:market_research"), "Dismissed. The project's master is told once, if its conversation has room.");
+  assert.equal(client.settledNote("dismissed", "terminal:2"), "Dismissed. Nothing is sent to the agent's terminal.");
+  assert.match(client.dismissNote("agent:3"), /^The agent that asked is told you dismissed it, once\./);
+  assert.match(client.dismissNote("terminal:2"), /^Nothing is sent to the agent's terminal\./);
+  assert.match(client.dismissNote("engine:planning"), /^The CrazyAgent step that asked takes no action on its own\./);
+  for (const asker of ["terminal:2", "engine:mapping"]) assert.doesNotMatch(client.dismissNote(asker), /agent that asked is told/);
+});
+
 test("askers read as plain words", () => {
   assert.equal(client.askerLabel("master:s-1"), "Master");
   assert.equal(client.askerLabel("agent:team-3"), "Agent team-3");
@@ -134,7 +159,8 @@ test("a stale answer says the question changed, and every questions code reads a
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/questions.rs", import.meta.url), "utf8");
   const start = engine.indexOf("pub const QUESTIONS_CODES");
   assert.ok(start >= 0, "the engine lists its questions codes");
-  const own = [...engine.slice(start, engine.indexOf("];", start)).matchAll(/"(questions_[a-z_]+)"/g)].map((match) => match[1]);
+  const own = [...engine.slice(start, engine.indexOf("];", start)).matchAll(/"([a-z_]+)"/g)].map((match) => match[1]);
+  assert.ok(own.includes("owner_busy") && own.includes("versioned_unavailable"), "connection and versioning codes are read too");
   assert.ok(own.length >= 3, `engine questions codes: ${own.length}`);
   const transport = ["questions_request_bounds", "questions_reply_bounds", "questions_request_invalid"];
   const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_turn_invalid", "questions_page_unavailable"];
@@ -151,13 +177,13 @@ test("a stale answer says the question changed, and every questions code reads a
 test("a project's flag counts its pending questions once, with its other unseen notifications", () => {
   const unseen = new Map([["p-1", 3], ["p-2", 1]]);
   const questionAlerts = client.unseenQuestionAlerts([
-    { project_id: "p-1", kind: "question", seen_ms: null },
-    { project_id: "p-1", kind: "question", seen_ms: null },
-    { project_id: "p-1", kind: "question", seen_ms: NOW },
-    { project_id: "p-1", kind: "escalation", seen_ms: null },
-    { project_id: "p-2", kind: "wake_paused", seen_ms: null },
+    { project_id: "p-1", unseen: 3, questions: 2 },
+    { project_id: "p-2", unseen: 1, questions: 0 },
+    { project_id: "p-5", unseen: 1 },
   ]);
   assert.deepEqual([...questionAlerts], [["p-1", 2]]);
+  const beyondTheList = client.unseenQuestionAlerts([{ project_id: "p-6", unseen: 30, questions: 30 }]);
+  assert.deepEqual([...client.withPendingQuestions(new Map([["p-6", 30]]), beyondTheList, new Map([["p-6", 30]]))], [["p-6", 30]], "thirty pending questions count thirty, not more, however few notifications the list holds");
   const pending = client.pendingByProject([{ project_id: "p-1", pending: 2 }, { project_id: "p-3", pending: 4 }, { project_id: "p-4", pending: 0 }]);
   assert.deepEqual([...pending], [["p-1", 2], ["p-3", 4]]);
   const flags = client.withPendingQuestions(unseen, questionAlerts, pending);
