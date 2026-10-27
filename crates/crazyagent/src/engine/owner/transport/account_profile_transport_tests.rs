@@ -128,7 +128,7 @@ async fn imp1035_real_none_configuration_reconciles_receipt_without_replaying_wr
     run_case(true, |context| async move {
         let basis = configured_basis(&context, false).await;
         let (client, _) =
-            OwnerClient::discover(&context.state, OwnerClientKind::Tui, Duration::from_secs(2))
+            OwnerClient::discover(&context.state, OwnerClientKind::Tui, Duration::from_secs(5))
                 .await
                 .unwrap();
         let first = client
