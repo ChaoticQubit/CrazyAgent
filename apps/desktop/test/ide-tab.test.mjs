@@ -135,3 +135,14 @@ test("an open the tab gave up on is refused quietly instead of showing a problem
   assert.ok(open.indexOf("views.begin(&project)") >= 0 && open.indexOf("views.begin(&project)") < open.indexOf("ide_open(project"), "the ticket is taken before the engine call");
   assert.match(open, /ide::show\(&app, &window, &views, &project, workbench, bounds, ticket\)/);
 });
+
+test("the TUI focus poll reaches the engine only while a project's IDE webview is loaded", () => {
+  const lib = read("src-tauri/src/lib.rs");
+  const start = lib.indexOf("async fn desktop_ide_focus");
+  const focus = lib.slice(start, lib.indexOf("#[tauri::command]", start));
+  assert.ok(start >= 0, "the focus command exists");
+  assert.match(focus, /views: State<'_, ide::IdeViews>/);
+  assert.match(focus, /if !views\.any_loaded\(\) \{\s*return Ok\(None\);\s*\}/, "with no IDE loaded no reveal can mark a focus");
+  assert.ok(focus.indexOf("views.any_loaded()") < focus.indexOf("ide_focus()"), "the engine is not asked, and its bridge lock not taken, before the check");
+  assert.ok(focus.indexOf("main_window(&window)?") < focus.indexOf("views.any_loaded()"), "only the main window may ask");
+});

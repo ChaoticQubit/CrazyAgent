@@ -204,6 +204,13 @@ impl IdeViews {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether any project's IDE webview is loaded, shown or hidden. Only a loaded IDE's
+    /// extension listens for reveals, so without one the engine has no focus to hand over.
+    /// Output: true while one is loaded.
+    pub fn any_loaded(&self) -> bool {
+        !self.lock().loaded.is_empty()
+    }
+
     /// Starts one open of a project's IDE before the engine is asked, so a hide or close
     /// that comes first stops it from showing. Input: the project. Output: its ticket.
     pub fn begin(&self, project: &ProjectId) -> u64 {
@@ -606,5 +613,21 @@ mod tests {
         assert!(!link_admitted(&last, now + Duration::from_millis(999)));
         assert!(link_admitted(&last, now + LINK_GAP));
         assert!(!link_admitted(&last, now + LINK_GAP));
+    }
+
+    #[test]
+    fn an_ide_counts_as_loaded_from_its_first_show_until_it_closes() {
+        let views = IdeViews::default();
+        assert!(!views.any_loaded(), "no IDE webview yet");
+        views.lock().loaded.insert(
+            "alpha".to_owned(),
+            Loaded {
+                label: "ide-616c706861-1".to_owned(),
+                url: Url::parse("http://127.0.0.1:41000/").unwrap(),
+            },
+        );
+        assert!(views.any_loaded(), "a hidden IDE still listens for reveals");
+        views.lock().loaded.remove("alpha");
+        assert!(!views.any_loaded());
     }
 }

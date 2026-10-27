@@ -1947,8 +1947,12 @@ async fn desktop_usage_refresh(
 async fn desktop_ide_focus(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
 ) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
     main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(None);
+    }
     let call = lock(&state).await?.ide_focus()?;
     let focus = call.await?;
     if focus.is_some() {

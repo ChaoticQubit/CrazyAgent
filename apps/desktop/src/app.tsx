@@ -238,7 +238,8 @@ export function ideFocusRoute(focus: IdeFocus): Route {
 
 /** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
  * second it takes the waiting focus, if any, and opens that project's IDE tab; the engine
- * raises the window. Input: whether the engine runs. */
+ * raises the window. The desktop asks the engine only while an IDE webview is loaded, since
+ * only a loaded IDE can take a reveal. Input: whether the engine runs. */
 function useIdeFocus(running: boolean) {
   useEffect(() => {
     if (!running) return;
