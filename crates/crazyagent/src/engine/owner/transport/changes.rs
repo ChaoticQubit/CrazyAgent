@@ -221,7 +221,7 @@ impl OwnerClient {
 
 /// The engine root that holds `engine.db`: the parent of the owner runtime's per-start
 /// folder. Input: the authority. Output: the root, or `changes_unavailable`.
-fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
+pub(super) fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
     authority.root.verify()?;
     authority
         .root

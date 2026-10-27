@@ -179,3 +179,18 @@ fn invalid_shares_times_and_codes_are_refused_and_store_nothing() {
         "usage_unavailable"
     );
 }
+
+#[test]
+fn a_failed_poll_stores_only_a_code_shaped_failure() {
+    let code = |text: &str| crate::usage::service::failure_code(&EngineError(text.into()));
+    assert_eq!(code("usage_rate_limited"), "usage_rate_limited");
+    assert_eq!(code("native_profile_in_use2"), "native_profile_in_use2");
+    assert_eq!(
+        code("open /Users/mira/engine.db: denied"),
+        "usage_poll_failed"
+    );
+    assert_eq!(code("Usage Failed"), "usage_poll_failed");
+    assert_eq!(code(""), "usage_poll_failed");
+    assert_eq!(code(&"a".repeat(65)), "usage_poll_failed");
+    assert_eq!(code(&"a".repeat(64)), "a".repeat(64));
+}

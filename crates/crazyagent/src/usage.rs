@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
+pub mod capture;
+pub mod poll;
+pub mod report;
+pub mod service;
+
 pub const PLAN_BYTES_MAX: usize = 64;
 pub const FAILURE_BYTES_MAX: usize = 64;
 pub const RESET_MS_MAX: i64 = 32_503_680_000_000;
@@ -138,7 +143,8 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
 /// Adds the usage tables to a database when missing. Input: the connection.
 /// Output: done, or `usage_unavailable`.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(storage)
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    db.execute_batch(capture::SCHEMA).map_err(storage)
 }
 
 fn checked_window(window: Option<LimitWindow>) -> Result<Option<LimitWindow>, EngineError> {

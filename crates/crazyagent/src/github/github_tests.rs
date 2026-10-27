@@ -133,6 +133,7 @@ fn curl_command_keeps_url_headers_token_and_form_out_of_argv_and_env() {
         accept: "application/json",
         token: Some(&token),
         form: Some(vec![("client_id", "Ov23-public"), ("scope", SCOPES)]),
+        headers: Vec::new(),
         allow_http: false,
     };
     let (command, config) = request.command().unwrap();
@@ -163,6 +164,7 @@ fn curl_command_keeps_url_headers_token_and_form_out_of_argv_and_env() {
         accept: "application/json",
         token: None,
         form: None,
+        headers: Vec::new(),
         allow_http: true,
     };
     assert_eq!(plain.command().err().unwrap().0, "github_request_invalid");
