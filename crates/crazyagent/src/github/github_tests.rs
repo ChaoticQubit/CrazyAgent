@@ -369,6 +369,10 @@ fn a_device_token_github_grants_after_sign_out_is_never_saved() {
 
 const SIGN_OUT_RACE_ROUNDS: usize = 12;
 
+/// Stress check, not proof: rounds of a sign-out racing a pasted token must always leave a
+/// stored token with its saved sign-in, or neither. It holds on every interleaving of the
+/// locked sign-out; code without the lock fails it only when the timing lines up, since no
+/// pause point inside sign-out exists to force the losing order with real parts.
 #[test]
 fn a_token_pasted_during_sign_out_is_kept_with_its_record_or_removed_with_it() {
     let scratch = Scratch::new();

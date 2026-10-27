@@ -10,6 +10,7 @@ const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
 pub(super) const CHECK_FOLDER: &str = "mcp-checks";
+pub(super) const CHECK_PROFILES: &str = "profiles";
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
@@ -625,16 +626,26 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("plugin_store_unavailable"))
 }
 
+/// Names the sandbox profile file the checks of one server run under.
+/// Inputs: the engine's check folder and the server id. Output: the profile path.
+fn check_profile(checks: &Path, id: &str) -> PathBuf {
+    checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
+}
+
 /// Deletes a removed server's check folder, with whatever its checks wrote there while
-/// they held the server's secrets, on a blocking thread of its own, so a storage answer
-/// that comes after the owner's wait still clears it. Input: the folder. A failure other
-/// than a missing folder is logged.
-fn remove_check_folder(checked: PathBuf) {
+/// they held the server's secrets, and its check profile, on a blocking thread of its own,
+/// so a storage answer that comes after the owner's wait still clears them. Inputs: the
+/// engine's check folder and the server id. A failure other than a missing entry is logged.
+fn remove_check_folder(checks: PathBuf, id: String) {
     drop(tokio::task::spawn_blocking(move || {
-        if let Err(problem) = std::fs::remove_dir_all(checked)
-            && problem.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("plugin_check_folder_not_removed cause={problem}");
+        let removed = [
+            std::fs::remove_dir_all(checks.join(&id)),
+            std::fs::remove_file(check_profile(&checks, &id)),
+        ];
+        for problem in removed.into_iter().filter_map(Result::err) {
+            if problem.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("plugin_check_folder_not_removed cause={problem}");
+            }
         }
     }));
 }
@@ -794,7 +805,8 @@ async fn handle(
         }
         Action::RemoveServer { id } => {
             let root = engine_root(authority)?;
-            let checked = root.join(CHECK_FOLDER).join(&id);
+            let checks = root.join(CHECK_FOLDER);
+            let server = id.clone();
             let removed = engine
                 .settled_job(
                     move |reply| Job::Plugins(Command::RemoveServer { id }, reply),
@@ -802,7 +814,7 @@ async fn handle(
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
                                 crate::storage::plugins::remove_secrets(&root, references);
-                            remove_check_folder(checked);
+                            remove_check_folder(checks, server);
                             secrets
                         }
                         _ => Ok(()),
@@ -1018,7 +1030,7 @@ fn boundary_check(
         }
         folders.push(plain);
     }
-    let profiles = checks.join("profiles");
+    let profiles = checks.join(CHECK_PROFILES);
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -1028,7 +1040,7 @@ fn boundary_check(
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profiles.join(format!("{id}.sb"))))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
         .map_err(|error| refused(&error))?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);

@@ -500,6 +500,13 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
     std::fs::create_dir_all(&home).unwrap();
     let cached = format!("cached-by-the-checked-server-{}", std::process::id());
     std::fs::write(home.join("token-cache"), &cached).unwrap();
+    let profiles = busy
+        .engine_root()
+        .join(super::plugins::CHECK_FOLDER)
+        .join(super::plugins::CHECK_PROFILES);
+    std::fs::create_dir_all(&profiles).unwrap();
+    let profile = profiles.join(format!("{id}.sb"));
+    std::fs::write(&profile, "(version 1)\n").unwrap();
 
     let (swept, sweep) = busy.occupy_storage();
     let removed = busy.client.remove_mcp_server(id.clone()).await;
@@ -515,6 +522,10 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
         "what a check wrote while it held the server's secrets must not stay on disk"
     );
     assert_eq!(holders(&busy.engine_root(), cached.as_bytes()), 0);
+    assert!(
+        gone(&profile).await,
+        "the removed server's check profile must not stay behind"
+    );
     assert!(none_hold(&busy.engine_root(), value.as_bytes()).await);
     busy.stop().await;
 }
