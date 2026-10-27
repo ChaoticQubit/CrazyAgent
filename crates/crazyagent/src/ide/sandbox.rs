@@ -226,10 +226,11 @@ fn locks(held: &[(&Path, &Path)]) -> String {
 }
 
 /// The rule that keeps agents from setting the owner's IDE (DEC-098 addendum 9): the server
-/// reads no `.vscode` folder of an agent worktree and no `.code-workspace` file in one,
-/// under either agents root a project uses (`.crazyagent/worktrees` or `worktrees`), in any
-/// letter case. The engine's workspace file and Remote settings stay the only settings
-/// source for agent folders. Input: the project folder. Output: the rule text.
+/// reads no `.vscode` folder anywhere in an agent worktree and no `.code-workspace` file in
+/// one, under either agents root a project uses (`.crazyagent/worktrees` or `worktrees`), in
+/// any letter case. Seatbelt checks a followed link's own path as well as where it leads, so
+/// a link named so is refused too. The engine's workspace file and Remote settings stay the
+/// only settings source for agent folders. Input: the project folder. Output: the rule text.
 fn agent_config(root: &Path) -> String {
     let agents = format!(
         "^{}({})?/{}/[^/]+/",
@@ -240,7 +241,7 @@ fn agent_config(root: &Path) -> String {
     let folder = anycase("\\.vscode");
     let workspace = anycase("\\.code-workspace");
     format!(
-        "(deny file-read*\n  (regex #\"{agents}{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\"))\n"
+        "(deny file-read*\n  (regex #\"{agents}(.*/)?{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\"))\n"
     )
 }
 
