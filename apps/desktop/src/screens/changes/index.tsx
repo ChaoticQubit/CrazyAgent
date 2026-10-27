@@ -5,7 +5,8 @@ import type { ChangeDiff, ChangeSet } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, TextArea } from "../../ui";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, outcomeNote, restoreNote, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import type { Review } from "./model";
 import "./changes.css";
 
 const LIST_POLL_MS = 5000;
@@ -59,16 +60,28 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
   const [pages, setPages] = useState<number[]>([0]);
   const page = pages[pages.length - 1];
   const [diff, setDiff] = useState<Result<ChangeDiff>>();
+  const [review, setReview] = useState<Review>(() => reviewOf(null, set));
+  const carried = reviewOf(review, set);
+  if (carried !== review) {
+    setReview(carried);
+    setPages([0]);
+  }
   const allowed = actions(set, now);
-  const notes = [conflictNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
-  useEffect(() => { setPages([0]); }, [set.id]);
+  const settled = reviewed(carried);
+  const notes = [movedNote(carried), conflictNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
+  const head = carried.head;
   useEffect(() => {
     let current = true;
     setDiff(undefined);
-    void loadChangeDiff(set.id, page).then((result) => { if (current) setDiff(result); });
+    void loadChangeDiff(set.id, page).then((result) => {
+      if (!current) return;
+      setDiff(result);
+      if (result.kind === "ok" && result.value.next === null) setReview((shown) => lastPageSeen(shown, head));
+    });
     return () => { current = false; };
-  }, [set.id, set.head, page]);
+  }, [set.id, head, page]);
   const value = diff?.kind === "ok" ? diff.value : null;
+  const asked = { ...set, head };
   return <section className="pj-stack-s ch-detail" aria-label={`Changes from ${agentName(set)}`}>
     <div className="pj-row between">
       <h3>{agentName(set)}</h3>
@@ -77,9 +90,9 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
     <p className="pj-secondary pj-small">{sizeLine(set)}</p>
     {notes.map((note) => <p className="pj-note warn" key={note}>{note}</p>)}
     <div className="pj-row">
-      {allowed.accept && <button type="button" className="btn primary" disabled={busy} onClick={() => onAsk({ kind: "accept", set })}>Accept</button>}
+      {allowed.accept && <button type="button" className="btn primary" disabled={busy || !settled} onClick={() => onAsk({ kind: "accept", set: asked })}>Accept</button>}
       {allowed.update && <button type="button" className="btn" disabled={busy} onClick={() => onUpdate(set)}>Ask agent to update</button>}
-      {allowed.discard && <button type="button" className="btn danger-text" disabled={busy} onClick={() => onAsk({ kind: "discard", set })}>Discard</button>}
+      {allowed.discard && <button type="button" className="btn danger-text" disabled={busy || !settled} onClick={() => onAsk({ kind: "discard", set: asked })}>Discard</button>}
       {allowed.restore && <button type="button" className="btn" disabled={busy} onClick={() => onRestore(set)}>Restore</button>}
     </div>
     {diff === undefined && <p className="pj-muted pj-small" role="status">Loading changes...</p>}

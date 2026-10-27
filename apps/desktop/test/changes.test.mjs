@@ -158,3 +158,32 @@ test("a set merged but not yet handed to its agent says so and can be asked agai
   assert.deepEqual(model.stateBadge(set({ state: "pending", waiting: true })), { word: "Ready to review", tone: "info" });
   assert.equal(client.changesRefusal({ code: "team_agent_not_found" }), "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.");
 });
+
+test("a change set that moved on while open goes back to review: Accept and Discard wait for its last page and send the head reviewed", () => {
+  const opened = model.reviewOf(null, set());
+  assert.deepEqual(opened, { id: "cs-1", head: "b".repeat(40), moved: false, seenAll: false });
+  assert.equal(model.reviewed(opened), true);
+  assert.equal(model.movedNote(opened), null);
+  assert.equal(model.reviewOf(opened, set()), opened, "a reread with the same head keeps the review");
+
+  const moved = model.reviewOf(opened, set({ head: "c".repeat(40) }));
+  assert.deepEqual(moved, { id: "cs-1", head: "c".repeat(40), moved: true, seenAll: false });
+  assert.equal(model.reviewed(moved), false);
+  assert.match(model.movedNote(moved), /moved on since you opened them/);
+  assert.equal(model.lastPageSeen(moved, "b".repeat(40)), moved, "a page of the old head does not count");
+
+  const seen = model.lastPageSeen(moved, "c".repeat(40));
+  assert.equal(model.reviewed(seen), true);
+  assert.equal(model.movedNote(seen), null);
+  assert.equal(seen.head, "c".repeat(40));
+
+  const again = model.reviewOf(seen, set({ head: "d".repeat(40) }));
+  assert.equal(model.reviewed(again), false, "a second move needs a second read");
+  const other = model.reviewOf(again, set({ id: "cs-2", head: "e".repeat(40) }));
+  assert.deepEqual(other, { id: "cs-2", head: "e".repeat(40), moved: false, seenAll: false });
+
+  const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
+  assert.match(source, /disabled=\{busy \|\| !settled\} onClick=\{\(\) => onAsk\(\{ kind: "accept", set: asked \}\)\}/);
+  assert.match(source, /disabled=\{busy \|\| !settled\} onClick=\{\(\) => onAsk\(\{ kind: "discard", set: asked \}\)\}/);
+  assert.match(source, /const asked = \{ \.\.\.set, head \};/);
+});
