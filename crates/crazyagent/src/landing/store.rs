@@ -380,14 +380,19 @@ pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>,
 /// Reads one change set. Inputs: the store and the id. Output: the record, or
 /// `changes_not_found`.
 pub(super) fn load(db: &Connection, id: &ChangeSetId) -> Result<Record, EngineError> {
+    find(db, id)?.ok_or_else(|| failure("changes_not_found"))
+}
+
+/// Reads one change set when it exists. Inputs: the store and the id. Output: the
+/// record, or None when no change set has that id.
+pub(super) fn find(db: &Connection, id: &ChangeSetId) -> Result<Option<Record>, EngineError> {
     db.query_row(
         &format!("SELECT {COLUMNS} FROM landing_change_sets WHERE id=?1"),
         [id.as_str()],
         read,
     )
     .optional()
-    .map_err(storage)?
-    .ok_or_else(|| failure("changes_not_found"))
+    .map_err(storage)
 }
 
 /// Reads the open change set of one worktree. Inputs: the store and the worktree path.

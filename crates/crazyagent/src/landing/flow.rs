@@ -705,8 +705,9 @@ pub(super) fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(
     Ok(())
 }
 
-/// The task prompt for resolving the conflict markers an update left in a worktree.
-/// Inputs: the store and the change set. Output: the prompt.
+/// The task prompt for resolving the conflict markers an update left in a worktree,
+/// each conflicting file on one line with its control characters replaced, newlines
+/// included. Inputs: the store and the change set. Output: the prompt.
 pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, EngineError> {
     store::initialize(db)?;
     let record = store::load(db, id)?;
@@ -722,7 +723,7 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
         prompt.push_str("These files have conflict markers (<<<<<<<, ======= and >>>>>>>):\n");
         for file in record.conflicts.iter().take(CONFLICTS_SHOWN_MAX) {
             prompt.push_str("- ");
-            prompt.push_str(file);
+            prompt.push_str(&file.replace(char::is_control, "\u{fffd}"));
             prompt.push('\n');
         }
         if record.conflicts.len() > CONFLICTS_SHOWN_MAX {

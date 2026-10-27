@@ -312,6 +312,45 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, 
     }
 }
 
+/// Reads one change set by its id, however many change sets its project holds.
+/// Inputs: the store and the id. Output: its project and view, or None when no change
+/// set has that id.
+pub fn change_set(
+    db: &Connection,
+    id: &ChangeSetId,
+) -> Result<Option<(ProjectId, ChangeSetView)>, EngineError> {
+    #[cfg(unix)]
+    return Ok(store::find(db, id)?.map(|record| (record.project.clone(), record.view())));
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
+        Err(unavailable())
+    }
+}
+
+/// Reads the change set open in one agent worktree, the one its next turn end adds to,
+/// however many change sets its project holds. Inputs: the store and the worktree.
+/// Output: the view, or None when nothing is open there.
+pub fn open_change_set(
+    db: &Connection,
+    worktree: &Path,
+) -> Result<Option<ChangeSetView>, EngineError> {
+    #[cfg(unix)]
+    {
+        let Some(worktree) = worktree.to_str() else {
+            return Ok(None);
+        };
+        Ok(store::open_for(db, worktree)?
+            .as_ref()
+            .map(store::Record::view))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree);
+        Err(unavailable())
+    }
+}
+
 /// Reads one page of a change set's diff between its base and head, produced by the
 /// engine with no external diff or text conversion. Inputs: the store, the change set
 /// and the page. Output: the page.
