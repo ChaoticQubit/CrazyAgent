@@ -33,6 +33,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         restorable_until_ms: None,
         conflicts: Vec::new(),
         message: "Add a file".into(),
+        waiting: false,
     }
 }
 
@@ -258,7 +259,9 @@ fn a_conflicting_accept_names_the_files_and_offers_ask_agent_to_update() {
     assert!(view.key(key(KeyCode::Char('u')), NOW));
     let query = reply(&mut view, Ok(ChangesView::Updating));
     assert_eq!(query, ChangesQuery::Update { id: id('1') });
-    assert!(text(&view).contains("The agent is updating its changes onto your branch."));
+    assert!(text(&view).contains(
+        "Your branch is merged into the agent's copy. The list shows when the agent picks it up."
+    ));
 }
 
 #[test]
@@ -410,4 +413,33 @@ fn an_answer_acts_on_the_change_set_it_was_asked_for_even_after_the_list_reorder
     });
     assert!(!view.key(key(KeyCode::Char('y')), NOW));
     assert_eq!(view.next_query(NOW), None);
+}
+
+#[test]
+fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_discarded() {
+    let mut waiting = set('1', ChangeState::Updating);
+    waiting.waiting = true;
+    let mut view = listed(vec![waiting]);
+    let shown = text(&view);
+    for want in [
+        "Updated, waiting for the agent",
+        "Your branch is merged into the agent's copy, but the agent wasn't handed the work",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(!shown.contains("Agent is updating"), "{shown}");
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(help.contains(&("u", "Ask agent to update")) && help.contains(&("d", "Discard")));
+    assert!(!help.iter().any(|(key, _)| *key == "a"));
+    assert!(view.key(key(KeyCode::Char('u')), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Update { id: id('1') })
+    );
+    assert!(refusal("team_agent_not_found").contains("no longer on the team"));
+
+    let resolving = listed(vec![set('1', ChangeState::Updating)]);
+    let (_, _, help) = resolving.rows(100, 40, NOW, &Look::plain());
+    assert!(!help.iter().any(|(key, _)| ["a", "d", "u"].contains(key)));
+    assert!(text(&resolving).contains("Agent is updating"));
 }

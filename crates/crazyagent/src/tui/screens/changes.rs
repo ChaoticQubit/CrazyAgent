@@ -23,9 +23,12 @@ const CONFLICTS_SHOWN: usize = 5;
 const SHORT_COMMIT: usize = 7;
 const TAB_SPACES: &str = "    ";
 const AGENT_WIDTH: usize = 24;
-const STATE_WIDTH: usize = 26;
+const STATE_WIDTH: usize = 30;
 const NOT_READY_LINE: &str = "Landing changes isn't ready in this engine yet.";
 const MESSAGE_ROWS: usize = 6;
+const UPDATED_NOTICE: &str =
+    "Your branch is merged into the agent's copy. The list shows when the agent picks it up.";
+const WAITING_NOTE: &str = "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {
@@ -657,8 +660,8 @@ impl Actions {
         let open = matches!(set.state, ChangeState::Pending | ChangeState::Conflict);
         Self {
             accept: open,
-            discard: open,
-            update: set.state == ChangeState::Conflict,
+            discard: open || set.waiting,
+            update: set.state == ChangeState::Conflict || set.waiting,
             restore: set.state == ChangeState::Discarded && restorable(set, now_ms),
         }
     }
@@ -695,6 +698,7 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
         ChangeState::Conflict if !set.conflicts.is_empty() => {
             notes.push((conflict_line(&set.conflicts), look.warning))
         }
+        ChangeState::Updating if set.waiting => notes.push((WAITING_NOTE.to_owned(), look.warning)),
         ChangeState::Updating => notes.push((
             "The agent is resolving the conflicts with your branch. Review again when it finishes."
                 .to_owned(),
@@ -734,10 +738,11 @@ fn agent_name(set: &ChangeSetView) -> String {
     }
 }
 
-fn state_word(state: ChangeState) -> &'static str {
-    match state {
+fn state_word(set: &ChangeSetView) -> &'static str {
+    match set.state {
         ChangeState::Pending => "Ready to review",
         ChangeState::Conflict => "Conflicts with your branch",
+        ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
         ChangeState::Updating => "Agent is updating",
         ChangeState::Accepted => "Accepted",
         ChangeState::Discarded => "Discarded",
@@ -747,11 +752,12 @@ fn state_word(state: ChangeState) -> &'static str {
 fn state_row(set: &ChangeSetView, look: &Look) -> Row {
     let style = match set.state {
         ChangeState::Conflict => look.warning,
+        ChangeState::Updating if set.waiting => look.warning,
         ChangeState::Accepted => look.success,
         ChangeState::Discarded => look.muted,
         ChangeState::Pending | ChangeState::Updating => look.fg,
     };
-    Row::of(state_word(set.state), style)
+    Row::of(state_word(set), style)
 }
 
 fn plural(count: u32, one: &str, many: &str) -> String {
@@ -852,9 +858,7 @@ fn done(view: &ChangesView) -> Notice {
             Notice::plain("Discarded. You can restore these changes for 7 days.")
         }
         ChangesView::Restored => Notice::plain("Restored. The changes are ready to review again."),
-        ChangesView::Updating => {
-            Notice::plain("The agent is updating its changes onto your branch.")
-        }
+        ChangesView::Updating => Notice::plain(UPDATED_NOTICE),
         ChangesView::List(_) | ChangesView::Diff(_) => Notice::plain(""),
     }
 }
@@ -907,6 +911,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_master_not_started" => {
             "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends."
+        }
+        "team_agent_not_found" => {
+            "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead."
         }
         "changes_unavailable" => return format!("{NOT_READY} {NOT_READY_LINE}"),
         other => return plain_problem(other),

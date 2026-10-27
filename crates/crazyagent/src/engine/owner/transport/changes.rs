@@ -301,17 +301,20 @@ async fn handle(
         Action::Update { id } => Some((id.clone(), root.clone())),
         _ => None,
     };
-    let reply = tokio::task::spawn_blocking(move || {
+    let (reply, merged) = tokio::task::spawn_blocking(move || {
         let db = landing::open(&root)?;
         Ok::<_, EngineError>(match action {
             Action::List { project } => {
                 let mut change_sets = landing::list(&db, &project)?;
                 change_sets.truncate(LIST_MAX);
-                Reply::List { change_sets }
+                (Reply::List { change_sets }, false)
             }
-            Action::Diff { id, page } => Reply::Diff {
-                diff: landing::diff(&db, &id, page)?,
-            },
+            Action::Diff { id, page } => (
+                Reply::Diff {
+                    diff: landing::diff(&db, &id, page)?,
+                },
+                false,
+            ),
             Action::Accept {
                 id,
                 expected_head,
@@ -320,21 +323,20 @@ async fn handle(
                 let home = std::env::var_os("HOME")
                     .map(PathBuf::from)
                     .ok_or_else(|| failure("changes_owner_identity_missing"))?;
-                Reply::Accepted {
-                    outcome: landing::accept(&db, &home, &id, &expected_head, message.as_deref())?,
-                }
+                let outcome = landing::accept(&db, &home, &id, &expected_head, message.as_deref())?;
+                (Reply::Accepted { outcome }, false)
             }
-            Action::Discard { id, expected_head } => Reply::Discarded {
-                restorable_until_ms: landing::discard(&db, &id, &expected_head, now_ms()?)?,
-            },
+            Action::Discard { id, expected_head } => (
+                Reply::Discarded {
+                    restorable_until_ms: landing::discard(&db, &id, &expected_head, now_ms()?)?,
+                },
+                false,
+            ),
             Action::Restore { id } => {
                 landing::restore(&db, &id, now_ms()?)?;
-                Reply::Done
+                (Reply::Done, false)
             }
-            Action::Update { id } => {
-                crate::landing_turns::update(&db, &id)?;
-                Reply::Done
-            }
+            Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
         })
     })
     .await
@@ -344,9 +346,15 @@ async fn handle(
             engine: engine.clone(),
             authority: authority.clone(),
         };
-        runtime
+        match runtime
             .resolve_after_update(packet, admission, root, &id)
-            .await?;
+            .await
+        {
+            Err(problem) if merged => {
+                eprintln!("resolve_not_started_after_update cause={}", problem.0);
+            }
+            started => started?,
+        }
     }
     Ok(reply)
 }

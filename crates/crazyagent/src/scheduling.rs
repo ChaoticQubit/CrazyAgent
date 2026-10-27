@@ -2,7 +2,7 @@ use crate::config::ModelAccess;
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome};
 use crate::usage::{AccountLimits, LimitWindow};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -622,6 +622,155 @@ impl Choice {
             candidate.load,
             index,
         )
+    }
+}
+
+/// Where one account stands in its pool's ranking now: next in line, with its weekly
+/// reset and the weekly percent it may still use before its reserve, or held with why
+/// and until when, in ms since the epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Standing {
+    Next {
+        weekly_resets_ms: Option<i64>,
+        weekly_left_percent: Option<u8>,
+        use_last: bool,
+    },
+    Paused {
+        until_ms: i64,
+    },
+    NeverUse,
+    FiveHourCap {
+        until_ms: Option<i64>,
+    },
+    ReserveReached {
+        reserve_percent: u8,
+        until_ms: Option<i64>,
+    },
+}
+
+/// One pool account and where it stands now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RankedAccount {
+    pub connection: CredentialRef,
+    pub standing: Standing,
+}
+
+/// One pool's ranking: the strategy that orders it, the accounts work would try now in
+/// that order, then every held account in pool order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolRanking {
+    pub pool: CredentialRef,
+    pub strategy: Strategy,
+    pub accounts: Vec<RankedAccount>,
+}
+
+/// Ranks every pool's accounts with the same choice team, research and master work make
+/// (DEC-096 item 8): a paused account is held, the rest go through `Choice::order`. Live
+/// load and the account work already runs on only break ties, so they are left out.
+/// Takes the engine connection, model access and clock. Returns one ranking per pool.
+pub fn ranking(
+    connection: &Connection,
+    access: &ModelAccess,
+    now_ms: i64,
+) -> Result<Vec<PoolRanking>, EngineError> {
+    let pauses = table_exists(connection, "team_paused_accounts")?;
+    let mut pools = Vec::with_capacity(access.pools.len());
+    for pool in &access.pools {
+        let choice = Choice::read(connection, access, None, &[&pool.id], now_ms)?;
+        let mut held = Vec::new();
+        let mut candidates = Vec::new();
+        let mut places = Vec::new();
+        for (index, member) in pool.members.iter().enumerate() {
+            match paused_until(connection, pauses, member, now_ms)? {
+                Some(until_ms) => held.push((index, Standing::Paused { until_ms })),
+                None => {
+                    candidates.push(Candidate {
+                        connection: member.clone(),
+                        load: 0,
+                        current: false,
+                    });
+                    places.push(index);
+                }
+            }
+        }
+        let order = choice.order(&candidates);
+        let mut accounts: Vec<RankedAccount> = order
+            .ready
+            .iter()
+            .map(|&at| RankedAccount {
+                connection: candidates[at].connection.clone(),
+                standing: choice.next(&candidates[at]),
+            })
+            .collect();
+        held.extend(
+            order
+                .excluded
+                .iter()
+                .map(|&(at, why)| (places[at], choice.held(&candidates[at], why))),
+        );
+        held.sort_by_key(|(index, _)| *index);
+        accounts.extend(held.into_iter().map(|(index, standing)| RankedAccount {
+            connection: pool.members[index].clone(),
+            standing,
+        }));
+        assert_eq!(accounts.len(), pool.members.len());
+        pools.push(PoolRanking {
+            pool: pool.id.clone(),
+            strategy: choice.strategy,
+            accounts,
+        });
+    }
+    Ok(pools)
+}
+
+fn paused_until(
+    connection: &Connection,
+    pauses: bool,
+    member: &CredentialRef,
+    now_ms: i64,
+) -> Result<Option<i64>, EngineError> {
+    if !pauses {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT until_ms FROM team_paused_accounts WHERE connection=?1 AND until_ms>?2",
+            params![member.as_str(), now_ms],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)
+}
+
+impl Choice {
+    fn next(&self, candidate: &Candidate) -> Standing {
+        let plan = self.schedule.plan(&candidate.connection);
+        let (_, weekly) = self.windows(candidate);
+        Standing::Next {
+            weekly_resets_ms: weekly.and_then(|window| window.resets_at_ms),
+            weekly_left_percent: weekly.map(|window| {
+                let room = (f64::from(100 - plan.reserve_percent) - window.used_percent).max(0.0);
+                assert!(room <= 100.0);
+                room.floor() as u8
+            }),
+            use_last: plan.pin == Some(Pin::UseLast),
+        }
+    }
+
+    fn held(&self, candidate: &Candidate, why: Excluded) -> Standing {
+        match why {
+            Excluded::NeverUse => Standing::NeverUse,
+            Excluded::FiveHourCap { resets_ms } => Standing::FiveHourCap {
+                until_ms: resets_ms,
+            },
+            Excluded::WeeklyReserve { resets_ms } => Standing::ReserveReached {
+                reserve_percent: self.schedule.plan(&candidate.connection).reserve_percent,
+                until_ms: resets_ms,
+            },
+        }
     }
 }
 
