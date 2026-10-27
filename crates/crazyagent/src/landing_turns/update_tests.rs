@@ -13,6 +13,7 @@ struct Case {
     db: Connection,
     project: ProjectId,
     id: ChangeSetId,
+    workspace: Workspace,
 }
 
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
@@ -127,6 +128,7 @@ impl Case {
             db,
             project,
             id,
+            workspace,
         }
     }
 
@@ -230,4 +232,137 @@ fn a_merged_update_whose_agent_was_not_handed_the_work_waits_until_asked_again()
     .unwrap();
     assert_eq!(waiting.set().state, ChangeState::Discarded);
     assert!(!waiting.readme().contains("<<<<<<<"));
+}
+
+#[test]
+fn change_sets_the_listed_32_leave_out_are_still_found_by_their_id() {
+    let case = Case::new(true);
+    let updated = i64::try_from(case.set().updated_ms).unwrap();
+    let copy = |id: &str, kind: &str, agent: &str, state: &str, updated_ms: i64| {
+        case.db
+            .execute(
+                "INSERT INTO landing_change_sets SELECT ?2,project,?3,?4,label,repository,
+                 worktree||?2,git_dir,base,head,?5,last_outcome,turn,prompt_line,files,added,
+                 removed,conflicts,created_ms,?6,restorable_until_ms,pruned,landed,intent,
+                 message,waiting FROM landing_change_sets WHERE id=?1",
+                rusqlite::params![case.id.as_str(), id, kind, agent, state, updated_ms],
+            )
+            .unwrap();
+    };
+    for n in 1..=landing::LIST_MAX {
+        let newer = updated + i64::try_from(n).unwrap();
+        copy(
+            &format!("{n:032x}"),
+            "sub",
+            &(100 + n).to_string(),
+            "pending",
+            newer,
+        );
+    }
+    let master = ChangeSetId::new(format!("{:032x}", 1000)).unwrap();
+    let session = SessionId::new("session-1").unwrap();
+    copy(
+        master.as_str(),
+        "master",
+        session.as_str(),
+        "updating",
+        updated - 1,
+    );
+    let listed = landing::list(&case.db, &case.project).unwrap();
+    assert_eq!(listed.len(), landing::LIST_MAX);
+    assert!(
+        listed
+            .iter()
+            .all(|set| set.id != case.id && set.id != master),
+        "both sets are past the listed ones"
+    );
+
+    let quiet = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Change nothing".into(),
+    };
+    assert_eq!(
+        record(&case.db, &case.workspace, &quiet).unwrap(),
+        Landed::Waiting(case.id.clone()),
+        "a turn that added nothing is not announced as new edits"
+    );
+
+    assert_eq!(
+        master_of(&case.db, &master).unwrap(),
+        Some((case.project.clone(), session.clone()))
+    );
+    let (line, text) = master_resolve(&case.db, &case.project, &session, &master)
+        .unwrap()
+        .expect("the master's updating set is found");
+    assert!(line.contains("README"), "{line}");
+    assert!(text.contains("- README\n"), "{text}");
+    let elsewhere = ProjectId::new("project-2").unwrap();
+    assert_eq!(
+        master_resolve(&case.db, &elsewhere, &session, &master).unwrap(),
+        None,
+        "a set of another project is not that master's to resolve"
+    );
+
+    assert!(update(&case.db, &case.id).unwrap());
+    let set = case.set();
+    assert_eq!((set.state, set.waiting), (ChangeState::Updating, false));
+    assert_eq!(case.resolve_tasks().len(), 1);
+}
+
+#[test]
+fn conflicting_file_names_with_newlines_stay_one_resolve_prompt_line_each() {
+    let case = Case::new(true);
+    let home = case.repo.parent().unwrap().join("home");
+    let names: Vec<String> = (0..10)
+        .map(|n| format!("n{n}\n{}/{}/f", "x".repeat(240), "y".repeat(240)))
+        .collect();
+    let add = |root: &Path, text: &str| {
+        for name in &names {
+            let (folder, _) = name.rsplit_once('/').unwrap();
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+            std::fs::write(root.join(name), text).unwrap();
+        }
+    };
+    add(case.worktree.as_path(), "agent\n");
+    let end = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Add the files".into(),
+    };
+    assert_eq!(
+        landing::record_turn_end(&case.db, &case.workspace, &end).unwrap(),
+        Some(case.id.clone())
+    );
+    add(case.repo.as_path(), "owner\n");
+    git_in(&home, &case.repo, &["add", "-A"]);
+    git_in(
+        &home,
+        &case.repo,
+        &["commit", "-q", "-m", "Add the same files"],
+    );
+
+    assert!(update(&case.db, &case.id).unwrap());
+    let set = case.set();
+    assert_eq!((set.state, set.waiting), (ChangeState::Updating, false));
+    assert_eq!(set.conflicts.len(), names.len() + 1, "{:?}", set.conflicts);
+    let tasks = case.resolve_tasks();
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    let prompt = &tasks[0];
+    assert!(
+        prompt.len() <= crate::team::TASK_PROMPT_BYTES_MAX,
+        "{}",
+        prompt.len()
+    );
+    assert!(prompt.contains("- README\n"), "{prompt}");
+    let first = format!("- {}\n", names[0].replace('\n', "\u{fffd}"));
+    assert!(prompt.contains(&first), "{prompt}");
+    assert!(
+        prompt.contains("\n- and more; search the worktree for <<<<<<<\n"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.lines().any(|line| line.starts_with('x')),
+        "no file name runs onto a line of its own: {prompt}"
+    );
 }
