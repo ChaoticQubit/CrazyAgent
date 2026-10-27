@@ -41,6 +41,11 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
+  account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
+  account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
+  account_schedule_full: "Too many saved account choices. Clear some you no longer need, then try again.",
+  connection_not_found: "This account no longer exists. Refresh and try again.",
   approved_accounts_limit: "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
   allowed_destinations_limit: "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
   model_access_duplicate: "This already exists.",
@@ -501,6 +506,40 @@ export const POOL_MEMBER_MAX = 15;
 /** Reads every pool with its plain summary and member statuses. Output: the pools. */
 export function poolSummaries(): Promise<Result<PoolSummary[]>> {
   return call<PoolSummary[]>("desktop_pool_summaries");
+}
+
+export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
+export type AccountPin = "never_use" | "use_last";
+
+export interface AccountPlan {
+  rank: number | null;
+  reserve_percent: number;
+  pin: AccountPin | null;
+}
+
+export interface AccountSchedule {
+  strategy: AccountStrategy;
+  pools: { id: string; strategy: AccountStrategy }[];
+  projects: { id: string; strategy: AccountStrategy }[];
+  accounts: { connection: string; plan: AccountPlan }[];
+}
+
+export type ScheduleChange =
+  | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
+  | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
+  | { kind: "account"; connection: string; plan: AccountPlan };
+
+/** Reads how pools choose accounts: the app strategy, pool strategies, project overrides
+ * and each account's rank, reserve and pin. Output: the schedule. */
+export function accountSchedule(): Promise<Result<AccountSchedule>> {
+  return call<AccountSchedule>("desktop_account_schedule");
+}
+
+/** Saves one account choice change. Input: the change. Output: ok once the engine applied
+ * it, or a plain error. */
+export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
+  return change("desktop_set_account_schedule", { change: scheduleChange, generation: nextGeneration() });
 }
 
 function poolId(): string {

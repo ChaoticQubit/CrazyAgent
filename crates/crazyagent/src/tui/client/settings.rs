@@ -73,6 +73,11 @@ pub(in crate::tui) enum SettingsJob {
     },
     Plugin(PluginChange),
     AppSetup(AppSetupJob),
+    Schedule,
+    SetSchedule {
+        change: crate::scheduling::ScheduleChange,
+        generation: u64,
+    },
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -150,6 +155,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::SkillDetail { .. } => "SkillDetail",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
+            Self::Schedule => "Schedule",
+            Self::SetSchedule { .. } => "SetSchedule",
         })
     }
 }
@@ -249,6 +256,8 @@ pub(in crate::tui) enum SettingsEvent {
     SkillDetail(Result<crate::skills::SkillDetail, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
+    Schedule(Result<crate::scheduling::Schedule, String>),
+    ScheduleSet(Result<(), String>),
 }
 
 impl SettingsEvent {
@@ -278,6 +287,8 @@ impl SettingsEvent {
             SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
+            SettingsJob::Schedule => Self::Schedule(Err(problem)),
+            SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
         }
     }
 }
@@ -429,6 +440,23 @@ impl NativeOwner {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
+            SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {
+                Ok(controller) => controller
+                    .account_schedule()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::SetSchedule { change, generation } => {
+                SettingsEvent::ScheduleSet(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.set_account_schedule(change, generation).await,
+                        "account_schedule_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::AddMemory {
                 scope,
                 text,

@@ -36,6 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::scheduling::{Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
@@ -1379,6 +1380,29 @@ async fn desktop_pool_summaries(
 }
 
 #[tauri::command]
+async fn desktop_account_schedule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Schedule, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.account_schedule().await
+}
+
+#[tauri::command]
+async fn desktop_set_account_schedule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    change: ScheduleChange,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_account_schedule(change, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_account_catalog(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2190,6 +2214,8 @@ pub fn run() {
             desktop_owner_profile,
             desktop_save_owner_profile,
             desktop_pool_summaries,
+            desktop_account_schedule,
+            desktop_set_account_schedule,
             desktop_account_catalog,
             desktop_list_accounts,
             desktop_add_account,

@@ -258,29 +258,52 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
     let mut paused = BTreeSet::new();
     let busy_a = |c: &CredentialRef| usize::from(c.as_str() == "local-a");
     assert_eq!(
-        pick_account(&accounts, &|_| 0, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &|_| 0,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-a"
     );
     assert_eq!(
-        pick_account(&accounts, &busy_a, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &busy_a,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-b"
     );
     paused.insert(reference("local-b"));
     assert_eq!(
-        pick_account(&accounts, &busy_a, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &busy_a,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-a"
     );
     paused.insert(reference("local-a"));
-    assert!(pick_account(&accounts, &|_| 0, &paused).is_none());
+    assert!(
+        pick_account(
+            &accounts,
+            &|_| 0,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]

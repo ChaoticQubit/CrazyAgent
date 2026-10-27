@@ -106,6 +106,8 @@
     "allow-desktop-owner-profile",
     "allow-desktop-save-owner-profile",
     "allow-desktop-pool-summaries",
+    "allow-desktop-account-schedule",
+    "allow-desktop-set-account-schedule",
     "allow-desktop-account-catalog",
     "allow-desktop-list-accounts",
     "allow-desktop-add-account",
