@@ -1779,6 +1779,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.import_global_instructions()?; call.await }.await;
             routed(result)
         }
+        "desktop_agent_instructions" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                agent: Option<i64>,
+            }
+            let Args { project_id, agent } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.agent_instructions(project_id, agent)?; call.await }.await;
+            routed(result)
+        }
         "desktop_default_process" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.default_process()?; call.await }.await;
             routed(result)

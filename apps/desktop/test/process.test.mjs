@@ -149,7 +149,7 @@ test("the tags read the engine's one-line description when the catalog carries i
 test("every engine refusal a Process action can show has a plain sentence", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
   const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
-  const codes = [...listed.matchAll(/"(process_[a-z_]+)"/g)].map((match) => match[1]);
+  const codes = [...listed.matchAll(/"((?:process|agent_instructions)_[a-z_]+)"/g)].map((match) => match[1]);
   for (const code of client.PROCESS_REFUSALS) assert.ok(codes.includes(code), `${code} is not an engine code`);
   for (const code of ["process_text_too_large", "process_text_invalid", "process_text_unsafe", "process_project_folder_missing", "process_import_missing"]) {
     assert.ok(client.PROCESS_REFUSALS.includes(code), code);

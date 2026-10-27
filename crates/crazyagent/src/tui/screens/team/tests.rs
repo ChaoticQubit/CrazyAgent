@@ -1,6 +1,9 @@
+use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
@@ -885,6 +888,200 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
             "task {id} points at Sub-agent {agent}:\n{text}"
         );
     }
+}
+
+fn received(query: &ProcessQuery, result: Result<AgentInstructions, &str>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
+        query: query.clone(),
+        result: result
+            .map(|view| ProcessReply::Agent(Box::new(view)))
+            .map_err(str::to_owned),
+    }))))
+}
+
+fn asked(shell: &mut Shell) -> Vec<ProcessQuery> {
+    requests(shell)
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Process(query) => Some(*query),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
+    let mut team = graph();
+    team.nodes[5].id = "team-5".into();
+    team.edges[1].to = "team-5".into();
+    let mut shell = fresh(100, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('i'));
+    let codex = ProcessQuery::Agent {
+        project: project(),
+        agent: Some(5),
+    };
+    assert_eq!(asked(&mut shell), [codex.clone()]);
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("Instructions: codex-1"), "{screen}");
+    assert!(
+        screen.contains("Reading what this agent received"),
+        "{screen}"
+    );
+
+    shell.arrive(received(
+        &codex,
+        Ok(AgentInstructions {
+            agent: 5,
+            harness: "codex".into(),
+            launched: true,
+            text: "# Instructions from CrazyAgent\n\nUse tdd.\u{1b}[31m red\n".into(),
+            skills: vec!["tdd".into(), "code-review".into()],
+        }),
+    ));
+    let screen = render(&mut shell).join("\n");
+    for shown in [
+        "AGENTS.md",
+        "50 bytes",
+        "# Instructions from CrazyAgent",
+        "Use tdd. red",
+        "Skills",
+        "tdd",
+        "code-review",
+    ] {
+        assert!(screen.contains(shown), "{shown} missing in\n{screen}");
+    }
+    assert!(
+        !screen.contains('\u{1b}'),
+        "stored text never reaches the terminal as a command"
+    );
+    assert!(
+        screen
+            .lines()
+            .any(|row| row.contains("│>") && row.contains("▸ codex-1")),
+        "the tree keeps its cursor while the box is open\n{screen}"
+    );
+
+    shell.key(Key::Home);
+    shell.key(Key::Char('i'));
+    let master = ProcessQuery::Agent {
+        project: project(),
+        agent: None,
+    };
+    assert_eq!(
+        asked(&mut shell),
+        [master.clone()],
+        "the master card reads the newest master"
+    );
+    shell.arrive(received(&codex, Err("agent_instructions_unsafe")));
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("Reading what this agent received"),
+        "a reply for another card is ignored\n{screen}"
+    );
+    shell.arrive(received(&master, Err("agent_instructions_unsafe")));
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("link or not a plain file"), "{screen}");
+    assert!(!screen.contains("agent_instructions_unsafe"), "{screen}");
+
+    shell.key(Key::Char('i'));
+    assert_eq!(
+        asked(&mut shell),
+        [master.clone()],
+        "i reads the card again"
+    );
+    shell.arrive(received(
+        &master,
+        Ok(AgentInstructions {
+            agent: 1,
+            harness: "claude-code".into(),
+            launched: false,
+            text: String::new(),
+            skills: Vec::new(),
+        }),
+    ));
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("hasn't launched yet"), "{screen}");
+
+    shell.key(Key::Esc);
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        !screen.contains("Instructions: Master"),
+        "Esc closes the box\n{screen}"
+    );
+    assert!(
+        screen.contains("Tidepool  /  Team"),
+        "and stays on the team\n{screen}"
+    );
+}
+
+#[test]
+fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
+    let mut team = graph();
+    team.nodes[5].id = "team-5".into();
+    let mut shell = fresh(100, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('i'));
+    let codex = ProcessQuery::Agent {
+        project: project(),
+        agent: Some(5),
+    };
+    assert_eq!(asked(&mut shell), [codex.clone()]);
+    let text: String = (1..=80).map(|line| format!("RULE-{line:02}\n")).collect();
+    shell.arrive(received(
+        &codex,
+        Ok(AgentInstructions {
+            agent: 5,
+            harness: "codex".into(),
+            launched: true,
+            text,
+            skills: Vec::new(),
+        }),
+    ));
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("RULE-01") && !screen.contains("RULE-40"),
+        "{screen}"
+    );
+    for _ in 0..3 {
+        shell.key(Key::PageDown);
+    }
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("RULE-40") && !screen.contains("RULE-01"),
+        "{screen}"
+    );
+    for _ in 0..20 {
+        shell.key(Key::PageDown);
+    }
+    let screen = render(&mut shell).join("\n");
+    assert!(
+        screen.contains("No skills were installed at its last launch."),
+        "the end stays reachable and in view\n{screen}"
+    );
+    shell.key(Key::PageUp);
+    shell.key(Key::PageUp);
+
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let screen = render(&mut shell).join("\n");
+    assert!(screen.contains("Task"), "{screen}");
+    assert!(
+        !screen.contains("RULE-"),
+        "a task replaces the box\n{screen}"
+    );
 }
 
 fn master_view(width: u16, height: u16) -> Shell {

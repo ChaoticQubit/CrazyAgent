@@ -25,7 +25,8 @@ pub enum RecordSource {
 
 /// What the engine keeps about one agent's live pane, so a later engine can adopt it
 /// without starting the harness again: the session record, the working folder, when the
-/// harness started, the pane's first process and the key file the harness reads, if any.
+/// harness started, the pane's first process, the key file the harness reads, if any, and
+/// for a resumed conversation its record and the offset where this pane's turns begin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -35,6 +36,8 @@ pub struct PaneRecord {
     pub pid: u32,
     #[serde(default)]
     pub key: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed: Option<(PathBuf, u64)>,
 }
 
 impl PaneRecord {
@@ -64,6 +67,7 @@ impl PaneRecord {
             since_ms: u64::try_from(since_ms).ok()?,
             pid,
             key: key.map(Path::to_path_buf),
+            resumed: None,
         })
     }
 
@@ -87,7 +91,12 @@ impl PaneRecord {
             RecordSource::ClaudeSession { file } => file,
         };
         let key = record.key.as_deref().is_none_or(Path::is_absolute);
-        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 0 && key).then_some(record)
+        let resumed = record
+            .resumed
+            .as_ref()
+            .is_none_or(|(file, _)| file.is_absolute());
+        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 0 && key && resumed)
+            .then_some(record)
     }
 
     fn transcript(&self) -> Transcript {
@@ -155,8 +164,12 @@ impl TerminalSession {
         if !host.alive().map_err(host_failure)?.contains(&agent) {
             return Err(failure("launch_closed"));
         }
-        let mut reader =
-            TranscriptReader::adopted(record.transcript(), &record.cwd, record.since());
+        let mut reader = match &record.resumed {
+            Some((file, from)) => {
+                TranscriptReader::resumed(record.transcript(), &record.cwd, file, Some(*from))?
+            }
+            None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
+        };
         if replay(&mut reader, &limits)? == Some(true) {
             host.input(&agent, ESCAPE).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;

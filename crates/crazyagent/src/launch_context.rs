@@ -390,12 +390,19 @@ impl AgentContext {
                 .ok_or_else(|| failure("launch_harness_unsupported"))?;
             crate::agent_home::prepare(home, harness, &process.project, &process.text)
                 .map_err(|problem| LaunchError(problem.0))?;
-            installed
-                .removals
-                .push(home.join(harness.instruction_file()));
         }
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
         let skills = tools && !self.plugins.skills.is_empty();
+        let names: Vec<&str> = match skills {
+            true => self
+                .plugins
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect(),
+            false => Vec::new(),
+        };
+        crate::agent_home::record_skills(home, &names).map_err(|problem| LaunchError(problem.0))?;
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
