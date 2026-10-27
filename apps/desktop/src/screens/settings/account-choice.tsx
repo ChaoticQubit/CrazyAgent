@@ -146,7 +146,7 @@ export function AccountChoiceView({ schedule, pools, names, onChange, onRetry }:
 /** Settings, Pools: the account choice panel. Inputs: the pools and accounts the page read. */
 export function AccountChoice({ pools, accounts }: { pools: Loaded<PoolSummary[]>; accounts: Loaded<AccountView[]> }) {
   const session = useAppSession();
-  const [schedule, reload] = useLoad(accountSchedule);
+  const [schedule, reload] = useLoad(accountSchedule, [], "account-schedule");
   const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
   return <AccountChoiceView schedule={schedule} pools={pools} names={names} onRetry={reload} onChange={async (change) => {
     const result = session.noteResult(await setAccountSchedule(change));
@@ -179,7 +179,7 @@ export function ProjectAccountOrderView({ schedule, project, pool, onChange }: {
 /** Project Settings, Pool: the project's own account order. Inputs: the project and its pool. */
 export function ProjectAccountOrder({ project, pool }: { project: string; pool: string | null }) {
   const session = useAppSession();
-  const [schedule, reload] = useLoad(accountSchedule, [project]);
+  const [schedule, reload] = useLoad(accountSchedule, [project], "account-schedule");
   return <ProjectAccountOrderView schedule={schedule} project={project} pool={pool} onChange={async (change) => {
     const result = session.noteResult(await setAccountSchedule(change));
     if (result.kind === "ok") reload();

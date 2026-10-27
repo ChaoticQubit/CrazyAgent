@@ -334,8 +334,8 @@ export function UsageSettings() {
     const now = new Date();
     return loadUsage(rangeStart(range, now), offsetMinutes(now));
   }, [range, tick]);
-  const [accounts] = useLoad(listAccounts);
-  const [pools] = useLoad(poolSummaries);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [pools] = useLoad(poolSummaries, [], "pool-summaries");
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTick((old) => old + 1); }, TICK_MS);
     return () => clearInterval(timer);
