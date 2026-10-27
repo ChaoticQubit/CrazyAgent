@@ -107,11 +107,12 @@ test("an empty banner, or one where everything resumed, shows nothing and stops 
 test("refusals read as plain sentences and unknown codes keep their code", () => {
   assert.equal(api.recoveryMessage({ kind: "error", code: "recovery_not_failed", message: "" }), "That resume is no longer failed. The list is read again.");
   assert.equal(api.recoveryMessage({ kind: "error", code: "ledger_not_notice", message: "" }), "That start is still being checked; it settles on its own.");
+  assert.equal(api.recoveryMessage({ kind: "error", code: "owner_busy", message: "" }), "CrazyAgent is busy with other requests. Try again in a moment.");
   assert.equal(api.recoveryMessage({ kind: "not_ready" }), "Recovery isn't ready in this engine yet.");
   assert.match(api.recoveryMessage({ kind: "error", code: "recovery_mystery", message: "" }), /recovery_mystery/);
   const rust = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/recovery.rs", import.meta.url), "utf8");
   const codes = [...rust.slice(rust.indexOf("RECOVERY_CODES"), rust.indexOf("];", rust.indexOf("RECOVERY_CODES"))).matchAll(/"([a-z_]+)"/gu)].map((match) => match[1]);
-  for (const code of ["recovery_not_failed", "ledger_finished", "ledger_missing", "ledger_not_notice", "recovery_record_invalid"]) {
+  for (const code of ["recovery_not_failed", "ledger_finished", "ledger_missing", "ledger_not_notice", "recovery_record_invalid", "owner_busy"]) {
     assert.ok(codes.includes(code), `${code} is an engine code`);
   }
 });

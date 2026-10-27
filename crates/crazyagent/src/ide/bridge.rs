@@ -115,6 +115,10 @@ const GRANTS_MAX: usize = 64;
 const SUBSCRIBERS_MAX: usize = 4;
 const EVENTS_QUEUED: usize = 64;
 const WRITE_TIME: Duration = Duration::from_secs(10);
+/// How long a Changes read may run: under the IDE extension's 30 s request timer, so a read
+/// the extension gave up on never holds one of the `CONNECTIONS_MAX` connections into its
+/// next poll, and the extension reads the refusal instead of closing first.
+const READ_TIME: Duration = Duration::from_secs(28);
 const PATH_BYTES_MAX: usize = 4096;
 const TEXT_BYTES_MAX: usize = 16384;
 /// The most bytes one diff comment may hold, so with its file and line it fits one typed
@@ -556,9 +560,9 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 /// Serves one IDE capability connection after its handshake: admits the token, reads one
 /// request for the capability's own project and answers it, or turns the connection into
 /// the project's event subscription. The handshake deadline bounds the request and every
-/// call but the subscription and the Changes calls, which run git under the desktop's
-/// Changes bound. Accept, Discard or Restore past that bound is `changes_outcome_unknown`,
-/// and what one did is reported even when its capability was revoked while it ran.
+/// call but the subscription and the Changes calls, which run git under `bound`.
+/// Accept, Discard or Restore past it is `changes_outcome_unknown`, and what one did is
+/// reported even when its capability was revoked while it ran.
 /// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
     mut stream: UnixStream,
@@ -579,15 +583,7 @@ pub(crate) async fn serve(
                 call,
                 IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. }
             );
-            let reads = matches!(
-                call,
-                IdeCall::ChangeSets {} | IdeCall::ChangeDiff { .. } | IdeCall::BaseBlob { .. }
-            );
-            let bound = if writes || reads {
-                deadline.max(Instant::now() + CHANGES_TIMEOUT)
-            } else {
-                deadline
-            };
+            let bound = bound(&call, deadline);
             let answered = tokio::time::timeout_at(bound, answer(&runtime, &project, call)).await;
             let reply = match answered {
                 Ok(Ok(reply)) => reply,
@@ -606,6 +602,22 @@ pub(crate) async fn serve(
         let _ = write(&mut stream, &reply).await;
     }
     let _ = stream.shutdown().await;
+}
+
+/// When one IDE call must be answered by. Accept, Discard and Restore run under the
+/// desktop's Changes bound, so a slow commit still lands and reports what it did; the
+/// three Changes reads run under READ_TIME, since the extension polls them again; every
+/// other call keeps the handshake deadline. Inputs: the call and the handshake deadline.
+/// Output: the instant, never before the deadline.
+fn bound(call: &IdeCall, deadline: Instant) -> Instant {
+    let time = match call {
+        IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
+            CHANGES_TIMEOUT
+        }
+        IdeCall::ChangeSets {} | IdeCall::ChangeDiff { .. } | IdeCall::BaseBlob { .. } => READ_TIME,
+        _ => return deadline,
+    };
+    deadline.max(Instant::now() + time)
 }
 
 /// Reads the one request frame, then admits the handshake, so a refusal never leaves

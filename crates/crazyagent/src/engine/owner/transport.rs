@@ -2110,13 +2110,7 @@ async fn serve_admitted(
                     .map_err(|_| failure("usage_outcome_unknown"))?
                     .map(|()| None);
             }
-            Protocol::Recovery => {
-                let served = recovery::serve(stream, engine, authority, auth, &a, body);
-                return tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served)
-                    .await
-                    .map_err(|_| failure("recovery_outcome_unknown"))?
-                    .map(|()| None);
-            }
+            Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2267,6 +2261,10 @@ async fn serve_admitted(
             let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
         }
+        Deferred::Recovery(a) => {
+            let served = recovery::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2312,7 +2310,8 @@ struct Tasks {
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
 /// agent's process group or its host to end it, Changes requests, which run git on the
-/// owner's checkout, and IDE extension approvals, which download and check a VSIX. Each
+/// owner's checkout, IDE extension approvals, which download and check a VSIX, and
+/// Recovery requests, which wait for the action ledger under the owner barrier. Each
 /// carries the admission, and the projects home its validated request; the others read
 /// the request frame.
 enum Deferred {
@@ -2322,6 +2321,7 @@ enum Deferred {
     Agents(Admission),
     Changes(Admission),
     IdeExtensions(Admission),
+    Recovery(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply

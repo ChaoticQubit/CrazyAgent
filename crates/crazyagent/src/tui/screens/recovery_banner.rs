@@ -341,6 +341,7 @@ fn sentence(code: &str) -> String {
         "recovery_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. The list is read again.".into()
         }
+        "owner_busy" => "CrazyAgent is busy with other requests. Try again in a moment.".into(),
         other => plain_problem(other),
     }
 }
