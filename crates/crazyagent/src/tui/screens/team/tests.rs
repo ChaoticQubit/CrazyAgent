@@ -820,6 +820,36 @@ fn live_master_change(request: &Request, turned: bool) -> bool {
     )
 }
 
+fn turned(on: bool, result: Result<(), &str>) -> Arrival {
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::TeamChange {
+                action: crate::team::TeamAction::LiveMaster {
+                    project_id: project(),
+                    on,
+                },
+                generation: 1,
+            },
+            result: result
+                .map(|()| {
+                    crate::project_setup::SetupView::Changed(
+                        crate::engine::owner::OwnerResult::Applied,
+                    )
+                })
+                .map_err(str::to_owned),
+        },
+    ))))
+}
+
+fn failed_read(code: &str) -> Arrival {
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::Team { project: project() },
+            result: Err(code.into()),
+        },
+    ))))
+}
+
 fn switch_read(request: &Request) -> bool {
     matches!(
         request,
@@ -1040,6 +1070,50 @@ fn the_master_view_header_stops_and_starts_the_live_master_and_says_why_it_stopp
         rows[4].contains("Starting the master's terminal."),
         "{}",
         rows[4]
+    );
+
+    guarded.arrive(turned(true, Ok(())));
+    let sent = requests(&mut guarded);
+    assert!(
+        matches!(sent.as_slice(), [read] if switch_read(read)),
+        "an accepted change reads the switch again: {sent:?}"
+    );
+    let again =
+        "The live master was turned off: it could not start. Start it again from the master view.";
+    guarded.arrive(switch(Some(false), Some(again)));
+    let rows = render(&mut guarded);
+    assert!(
+        rows[2].contains("Live master stopped."),
+        "the engine stopping it right after the owner's start is shown: {}",
+        rows[2]
+    );
+    assert!(
+        rows[4].contains("The live master was turned off"),
+        "{}",
+        rows[4]
+    );
+    assert!(rows[23].contains("s Start live master"), "{}", rows[23]);
+}
+
+#[test]
+fn a_failed_switch_read_never_starts_the_live_master() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(failed_read("team_state_unavailable"));
+    assert!(
+        requests(&mut shell)
+            .iter()
+            .all(|sent| !live_master_change(sent, true)),
+        "a read that failed is not a switch never set"
+    );
+    shell.arrive(switch(Some(false), None));
+    shell.arrive(failed_read("engine_unavailable"));
+    assert!(requests(&mut shell).is_empty());
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("Live master stopped."),
+        "a failed read keeps the switch it had: {}",
+        rows[2]
     );
 }
 

@@ -95,13 +95,17 @@ pub(in crate::tui) fn menu(text: &str) -> Option<Vec<&'static Command>> {
     })
 }
 
-/// Reads a prompt about to be sent, with the desktop console's rule: its first word is a
-/// command when it is `/`, a letter, then letters, digits or hyphens; anything else, a path
-/// starting with `/` included, is a message.
+/// Reads a prompt about to be sent: it is a command only when the whole trimmed prompt is one
+/// word of `/`, a letter, then letters, digits or hyphens; anything else, a path or a
+/// message that starts with a `/` word included, is a message.
 /// Takes the whole prompt text.
 /// Returns None for a message, the action of a known command, or the unknown `/word`.
 pub(in crate::tui) fn command(text: &str) -> Option<Result<Action, String>> {
-    let word = text.split_whitespace().next()?.strip_prefix('/')?;
+    let text = text.trim();
+    if text.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let word = text.strip_prefix('/')?;
     let mut letters = word.chars();
     let named = letters
         .next()

@@ -41,14 +41,23 @@ const NO_TERMINAL = "team_master_no_terminal";
 const STOPPED = "The live master is stopped. Its terminal opens again once you start it.";
 
 /** The live master switch as the engine last told it. Inputs: the latest team status read
- * and the project shown. Output: undefined before a read of this project arrives; on null
- * when the switch was never set or the read failed, which opening the area turns on; else
- * the switch and why the master last could not start. */
+ * and the project shown. Output: undefined until a good read of this project arrives, since
+ * a failed read says nothing; on null when the switch was never set, which opening the area
+ * turns on; else the switch and why the master last could not start. */
 export function liveSwitch(team: Result<TeamStatus> | undefined, projectId: string): { on: boolean | null; problem: string | null } | undefined {
-  if (team === undefined) return undefined;
-  if (team.kind !== "ok") return { on: null, problem: null };
-  if (team.value.project_id !== projectId) return undefined;
+  if (team?.kind !== "ok" || team.value.project_id !== projectId) return undefined;
   return { on: team.value.live_master ?? null, problem: team.value.live_problem ?? null };
+}
+
+/** The owner's switch change while it is the switch the area shows: from the click until a
+ * team read made after the engine accepted it. `after` is Infinity while the change waits. */
+export type Want = { on: boolean; after: number };
+
+/** Whether a team read now decides the switch again. Inputs: the owner's change, if any, and
+ * when the latest team read arrived. Output: true once that read came after the engine
+ * accepted the change, so an engine stop right after the owner's start shows. */
+export function wantSettled(want: Want | null, readAt: number): boolean {
+  return want !== null && readAt > want.after;
 }
 
 /** The project's master area. A Codex or Claude Code master is its own app in a live
@@ -66,17 +75,17 @@ export function MasterArea({ data }: { data: ProjectData }) {
 
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const [live, setLive] = useState<Live>({ kind: "starting" });
-  const [want, setWant] = useState<boolean | null>(null);
+  const [want, setWant] = useState<Want | null>(null);
   const asked = useRef(false);
   const current = useRef(data.id);
   current.current = data.id;
   const engine = liveSwitch(data.team.result, data.id);
-  const on = want ?? engine?.on;
+  const on = want?.on ?? engine?.on;
 
   const turn = async (next: boolean) => {
     const id = data.id;
     asked.current = true;
-    setWant(next);
+    setWant({ on: next, after: Infinity });
     setLive(next ? { kind: "starting" } : { kind: "stopped", problem: null });
     const turned = await setLiveMaster(id, next);
     if (current.current !== id) return;
@@ -89,13 +98,13 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
       setWant(null);
       if (next) setLive(failed);
       else data.notify(`Couldn't stop the live master. ${failed.kind === "refused" ? failed.copy : "It isn't in this build."}`);
-    }
+    } else setWant({ on: next, after: Date.now() });
     data.reloadTeam();
   };
 
   useEffect(() => {
-    if (want !== null && engine?.on === want) setWant(null);
-  }, [engine?.on, want]);
+    if (wantSettled(want, data.team.at)) setWant(null);
+  }, [data.team.at, want]);
 
   useEffect(() => {
     if (on === null && !asked.current) void turn(true);
@@ -122,7 +131,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   }, [data.id, on === true]);
 
   const shown: Live = live.kind === "refused" || live.kind === "not_ready" ? live
-    : on === false ? { kind: "stopped", problem: want === false ? null : engine?.problem ?? null }
+    : on === false ? { kind: "stopped", problem: want?.on === false ? null : engine?.problem ?? null }
     : live;
   return <LiveMasterView data={data} harness={harness} live={shown} onSwitch={(next) => void turn(next)} />;
 }

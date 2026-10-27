@@ -1325,6 +1325,8 @@ impl ProjectScreen {
     }
 
     fn run(&mut self, found: Result<console::Action, String>) -> ProjectReply {
+        let typed = self.input.value().trim().to_owned();
+        self.history.push(&typed);
         self.input.set("");
         self.menu_cursor = 0;
         self.console_note.clear();

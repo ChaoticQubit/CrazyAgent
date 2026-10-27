@@ -78,14 +78,19 @@ fn a_lone_slash_word_opens_the_menu_filtered_by_the_typed_word() {
 }
 
 #[test]
-fn a_first_word_of_slash_and_letters_is_a_command_and_anything_else_is_a_message() {
+fn only_a_whole_prompt_of_one_slash_word_is_a_command_and_anything_else_is_a_message() {
     assert_eq!(command("/agents"), Some(Ok(Action::Agents)));
     assert_eq!(command("/master"), Some(Ok(Action::Master)));
     assert_eq!(command("  /stop \n"), Some(Ok(Action::Stop)));
     assert_eq!(command("/Clear"), Some(Ok(Action::Clear)));
-    assert_eq!(command("/stop now"), Some(Ok(Action::Stop)));
+    assert_eq!(
+        command("/stop now"),
+        None,
+        "a /word followed by text is a message"
+    );
     assert_eq!(command("/deploy"), Some(Err("/deploy".into())));
-    assert_eq!(command("/re-run it"), Some(Err("/re-run".into())));
+    assert_eq!(command("/re-run"), Some(Err("/re-run".into())));
+    assert_eq!(command("/tmp is full on the build box\nclean it"), None);
     assert_eq!(command("Plan the page"), None);
     assert_eq!(
         command("/etc/hosts has a bad entry, fix it"),

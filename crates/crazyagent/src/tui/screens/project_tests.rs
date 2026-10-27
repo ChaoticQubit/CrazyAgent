@@ -2190,6 +2190,30 @@ fn a_path_message_and_a_draft_ending_in_a_slash_word_are_sent_not_run() {
         ProjectReply::Send("/etc/hosts has a bad entry, fix it".into())
     );
     assert!(screen.console_note.is_empty(), "{:?}", screen.console_note);
+    type_text(&mut screen, "/tmp is full");
+    screen.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    type_text(&mut screen, "clean it");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("/tmp is full\nclean it".into()),
+        "a draft starting with a /word is a message"
+    );
+    type_text(&mut screen, "/stop now");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("/stop now".into())
+    );
+    type_text(&mut screen, "/deploy");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "");
+    screen.key(key(KeyCode::Up));
+    assert_eq!(
+        screen.input.value(),
+        "/deploy",
+        "a command's text stays in history"
+    );
+    screen.key(key(KeyCode::Esc));
+    screen.console_note.clear();
 
     for last in ["/help", "/st"] {
         type_text(&mut screen, "Steps:");

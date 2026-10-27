@@ -150,8 +150,16 @@ test("the live master switch is read from the team status, and a switch never se
   assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null });
   assert.deepEqual(liveSwitch(status({ live_master: true, live_problem: null }), "alpha"), { on: true, problem: null });
   assert.deepEqual(liveSwitch(status({ live_master: false, live_problem: "No account." }), "alpha"), { on: false, problem: "No account." });
-  assert.deepEqual(liveSwitch({ kind: "error", code: "engine_unavailable" }, "alpha"), { on: null, problem: null });
+  assert.equal(liveSwitch({ kind: "error", code: "engine_unavailable" }, "alpha"), undefined, "a failed read is not a switch never set, so it never starts the master");
+  assert.equal(liveSwitch({ kind: "not_ready" }, "alpha"), undefined);
   assert.equal(liveSwitch(status({ live_master: true }), "beta"), undefined, "another project's read is not this switch");
+});
+
+test("the owner's switch change holds until a team read after the engine accepted it, then the engine decides", () => {
+  assert.equal(live.wantSettled(null, 5_000), false);
+  assert.equal(live.wantSettled({ on: true, after: Infinity }, 5_000), false, "a change still waiting holds");
+  assert.equal(live.wantSettled({ on: true, after: 4_000 }, 3_999), false, "a read from before the acceptance holds");
+  assert.equal(live.wantSettled({ on: true, after: 4_000 }, 4_001), true, "the next read decides, even when the engine already turned it off");
 });
 
 test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {

@@ -1619,13 +1619,18 @@ fn masters(connection: &Connection) -> Vec<i64> {
 }
 
 fn turned_off(fixture: &Fixture, why: &str) -> bool {
+    let said = |text: &str| {
+        text.starts_with(&format!("The live master was turned off: {why}"))
+            && text.ends_with(". Start it again from the master view.")
+    };
+    let status = fixture.status();
     !super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap()
-        && fixture.status().messages.iter().any(|message| {
-            message.state == MessageState::Note
-                && message
-                    .text
-                    .starts_with(&format!("The live master was turned off: {why}"))
-        })
+        && status.live_master == Some(false)
+        && status.live_problem.as_deref().is_some_and(said)
+        && status
+            .messages
+            .iter()
+            .any(|message| message.state == MessageState::Note && said(&message.text))
 }
 
 fn idle_ticks(team: &mut TeamRuntime) {

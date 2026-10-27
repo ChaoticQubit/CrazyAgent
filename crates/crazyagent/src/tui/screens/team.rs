@@ -168,8 +168,9 @@ impl Team {
         }));
     }
 
-    /// Takes a team status read or a live switch change of this master view: keeps the
-    /// switch, turns a never set switch on once, and reads the switch again after a change.
+    /// Takes a team status read or a live switch change of this master view: a good read
+    /// replaces the switch and turns a never set one on once; a failed read changes nothing;
+    /// an accepted change is the switch until the next read, which is read at once.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -182,15 +183,12 @@ impl Team {
         }
         match query {
             SetupQuery::Team { project } if *project == self.project => {
-                let switch = match result {
-                    Ok(SetupView::Team(status)) => LiveSwitch {
-                        on: status.live_master,
-                        problem: status.live_problem.clone(),
-                    },
-                    _ => LiveSwitch {
-                        on: None,
-                        problem: None,
-                    },
+                let Ok(SetupView::Team(status)) = result else {
+                    return;
+                };
+                let switch = LiveSwitch {
+                    on: status.live_master,
+                    problem: status.live_problem.clone(),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -205,7 +203,14 @@ impl Team {
                 action: TeamAction::LiveMaster { project_id, on },
                 ..
             } if *project_id == self.project => match result {
-                Ok(_) => self.read_switch(ctx),
+                Ok(_) => {
+                    self.want = None;
+                    self.switch = Some(LiveSwitch {
+                        on: Some(*on),
+                        problem: None,
+                    });
+                    self.read_switch(ctx);
+                }
                 Err(code) => {
                     self.want = None;
                     if *on {
@@ -1181,10 +1186,6 @@ fn inside(area: Rect) -> Rect {
     )
 }
 
-/// The terminal size the pane gets at the current window size, within the
-/// engine's terminal size bounds.
-/// Input: the context and whether the master view fills the body. Output:
-/// (rows, columns).
 /// Splits the master view into its header row with the live master switch and the body.
 /// Takes the area inside the side margins. Returns the header and the body.
 fn master_split(area: Rect) -> (Rect, Rect) {
@@ -1195,6 +1196,10 @@ fn master_split(area: Rect) -> (Rect, Rect) {
     )
 }
 
+/// The terminal size the pane gets at the current window size, within the
+/// engine's terminal size bounds.
+/// Input: the context and whether the master view fills the body. Output:
+/// (rows, columns).
 fn pane_size(ctx: &Ctx, master: bool) -> (u16, u16) {
     let body = body_area(ctx);
     let inner = inside(if master {
