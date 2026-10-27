@@ -55,9 +55,14 @@ fn built_in() -> &'static str {
         .unwrap()
 }
 
+/// The Remote settings a fresh write holds: every locked key, the built-in extension's pin
+/// and this machine's IDE terminal profiles, which only that write-denied file carries.
 fn expected_machine() -> Value {
     let mut machine = expected_locks();
     machine["extensions.allowed"] = json!({ super::super::extensions::BUILT_IN: [built_in()] });
+    for (key, value) in super::super::terminal::machine_profiles().unwrap() {
+        machine[key.as_str()] = value;
+    }
     machine
 }
 
@@ -99,9 +104,26 @@ fn written_remote_settings_hold_every_locked_key() {
     assert_eq!(
         machine,
         expected_machine(),
-        "a fresh Remote settings file holds the locks and the pin list, nothing else"
+        "a fresh Remote settings file holds the locks, the pin list and the terminal profiles, nothing else"
     );
     assert_eq!(machine["chat.disableAIFeatures"], json!(true));
+    let os = if cfg!(target_os = "macos") {
+        "osx"
+    } else {
+        "linux"
+    };
+    assert_eq!(
+        machine[format!("terminal.integrated.defaultProfile.{os}").as_str()],
+        json!(super::super::terminal::SANDBOXED)
+    );
+    assert_eq!(
+        machine[format!("terminal.integrated.automationProfile.{os}").as_str()]["path"],
+        json!(
+            crate::sandbox::ide_shell::owner_shell()
+                .unwrap()
+                .to_string_lossy()
+        )
+    );
     assert_eq!(read(&written.locked), expected_locks());
     assert_eq!(Value::Object(locked()), expected_locks());
     for key in THEME_KEYS {

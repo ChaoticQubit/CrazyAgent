@@ -38,9 +38,10 @@ pub struct Written {
 
 /// Writes the lock before each server start: the Remote settings file
 /// `<server data>/data/Machine/settings.json`, which VSCodium reh-web reads above the owner's
-/// User settings, holding every [`locked`] key and the `extensions.allowed` pin list of the
-/// owner's approved extensions ([`super::extensions::allowed_setting`]) over the owner's own
-/// keys there, which are kept; and `<folder>/locked-settings.json` for the extension. Each file is written whole in
+/// User settings, holding every [`locked`] key, the `extensions.allowed` pin list of the
+/// owner's approved extensions ([`super::extensions::allowed_setting`]) and the IDE terminal
+/// profiles ([`super::terminal::machine_profiles`]) over the owner's own keys there, which
+/// are kept; and `<folder>/locked-settings.json` for the extension. Each file is written whole in
 /// the engine's private IDE folder and renamed into place, so the server never reads a
 /// partial file and a link to the old file changes nothing. A Remote settings file that is
 /// not a JSON object is kept aside as `settings.json.unreadable`; a link there is replaced,
@@ -77,6 +78,7 @@ pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, 
     };
     let locked = locked();
     settings.extend(locked.clone());
+    settings.extend(super::terminal::machine_profiles()?);
     settings.extend(super::extensions::allowed_setting(data));
     assert!(
         locked
