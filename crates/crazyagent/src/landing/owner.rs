@@ -205,7 +205,7 @@ fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result
             "diff",
             "--no-ext-diff",
             "--no-textconv",
-            "--ignore-submodules=dirty",
+            "--ignore-submodules=all",
             "--quiet",
             "--",
         ])?

@@ -271,7 +271,7 @@ pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError>
     if !repo.test(&[
         "diff-index",
         "--quiet",
-        "--ignore-submodules=dirty",
+        "--ignore-submodules=all",
         commit,
         "--",
     ])? {

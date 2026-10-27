@@ -909,10 +909,11 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
+        text.push_str(&self.nested_git_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
         }
@@ -1008,6 +1009,49 @@ impl ProjectSandbox {
             "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/worktrees/[^/]+)?/{modules}(/.*)?$\"))\n"
         );
         assert_eq!(text.matches("(regex #\"^/").count(), 1);
+        text
+    }
+
+    /// The Seatbelt rule that keeps an agent from planting a nested git repository inside a
+    /// writable working tree, which the owner's own unsandboxed git (its terminal or the
+    /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
+    /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
+    /// below a writable working tree, except that tree's own top-level `.git` and the
+    /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
+    /// at a tree's root, not below it, so the `.+/` guard never matches them. A `.git`
+    /// placed directly or by renaming onto that name is denied; renaming a whole folder
+    /// that already holds a `.git` in is a path-blind move Seatbelt cannot see and stays a
+    /// residual. Input: the policy. Output: the rule text.
+    fn nested_git_denies(&self) -> String {
+        let dot_git = "\\.[gG][iI][tT]";
+        let roots: Vec<&Path> = match &self.checkout {
+            Some(checkout) => std::iter::once(checkout.worktree.as_path())
+                .chain(self.worktrees.iter().map(PathBuf::as_path))
+                .collect(),
+            None => std::iter::once(self.project_root.as_path())
+                .chain(self.worktrees.iter().map(PathBuf::as_path))
+                .collect(),
+        };
+        let mut nested = String::new();
+        for root in &roots {
+            nested.push_str(&format!(
+                "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
+        }
+        let pattern = seatbelt_pattern(&self.project_root);
+        let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
+        let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        for worktree in &self.worktrees {
+            exempt.push_str(&format!(
+                "\n    (require-not (literal \"{}\"))",
+                worktree.join(".git").display()
+            ));
+        }
+        let text =
+            format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
+        assert!(text.matches("(regex #\"^/").count() == roots.len() + 1);
+        assert!(text.ends_with(")\n"));
         text
     }
 
