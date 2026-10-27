@@ -13,6 +13,7 @@ import {
 import { navigate } from "../../ui/router";
 import { MarkdownView } from "../project/markdown";
 import { useLinkOpener } from "../project/links";
+import { SkillTag } from "../skill-tag";
 import { homePath } from "./harnesses";
 
 const ARGS_MAX = 32;
@@ -156,7 +157,8 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
       {skills.value.map((skill, index) => {
         const on = pluginSwitch(skill, projectId);
         return <div className="item-row" key={skill.id}>
-          <div className="stack-small"><span className="title">{skill.name}</span><span className="secondary">{skill.description}</span>
+          <div className="stack-small"><span className="title"><SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]}
+            onOpen={() => onOpen(skill)} /></span><span className="secondary">{skill.description}</span>
             <span className="mono muted small">{homePath(skill.source)}</span></div>
           <span className="row">
             <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>

@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { listSkills } from "../../api";
 import { intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } from "../../api-intake";
+import type { SkillEntry } from "../../api-process";
 import type { PackEntry, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Skeleton, StatusBadge, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
+import { SkillTag, skillEntries } from "../skill-tag";
 import "../project/projects.css";
 import "../intake/intake.css";
 
@@ -55,10 +58,11 @@ function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; b
  * grouped like setup, a switch on each installed entry, Remove on each removable one and Install
  * on each that isn't installed. Inputs: the setup read, the change in flight, the last problem
  * and the handlers. */
-export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onInstallTools, onRetry }: {
+export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onRetry }: {
   status: Loaded<SetupStatus>;
   busy: string | null;
   problem: string;
+  skills: readonly SkillEntry[];
   onSwitch: (entry: PackEntry, on: boolean) => void;
   onAsk: (ask: PackAsk) => void;
   onInstallTools: () => void;
@@ -81,7 +85,7 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onIns
         const locked = running || busy !== null;
         return <li className="in-row" key={entry.id}>
           <span className="in-row-main">
-            <span className="pj-row"><Icon name={entryIcon(entry)} size={14} /><strong>{entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
+            <span className="pj-row"><Icon name={entryIcon(entry)} size={14} /><strong>{entry.kind === "skill" ? <SkillTag name={entry.id} label={entryName(entry)} skills={skills} /> : entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
               <StatusBadge word={state.word} tone={state.tone} /></span>
             <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}</span>
             {state.line && <span className="pj-small pj-error">{state.line}</span>}
@@ -104,6 +108,7 @@ export function PackSettingsView({ status, busy, problem, onSwitch, onAsk, onIns
 export function PackSettings() {
   const session = useAppSession();
   const [loaded, reload] = useLoad(loadSetupStatus);
+  const [listed] = useLoad(() => listSkills());
   const [fresh, setFresh] = useState<SetupStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [ask, setAsk] = useState<PackAsk | null>(null);
@@ -138,7 +143,7 @@ export function PackSettings() {
 
   const words = ask ? packConfirm(ask) : null;
   return <>
-    <PackSettingsView status={status} busy={busy} problem={problem} onRetry={reload} onAsk={setAsk}
+    <PackSettingsView status={status} busy={busy} problem={problem} skills={listed.kind === "ok" ? skillEntries(listed.value) : []} onRetry={reload} onAsk={setAsk}
       onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing tmux, uv and graphify.")}
       onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
     <ConfirmDialog open={ask?.kind === "remove"} title={words?.title ?? ""} confirmLabel={words?.confirm ?? "Remove"} pending={busy !== null}

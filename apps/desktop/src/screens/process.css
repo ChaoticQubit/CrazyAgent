@@ -1,4 +1,1 @@
 .process-text { margin: 0; max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; line-height: 18px; color: var(--text); }
-.skill-tag { display: inline-block; padding: 0 6px; border-radius: var(--radius-pill); border: 1px solid var(--accent-soft); background: var(--accent-soft); color: var(--accent-text); text-decoration: none; line-height: 16px; }
-.skill-tag:hover { border-color: var(--accent); }
-.skill-tag:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
