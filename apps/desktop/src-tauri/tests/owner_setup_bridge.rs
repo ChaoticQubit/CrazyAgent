@@ -126,6 +126,7 @@ fn owner_setup_commands_use_the_local_main_window_acl() {
         "desktop_save_owner_profile",
         "desktop_pool_summaries",
         "desktop_account_schedule",
+        "desktop_account_ranking",
         "desktop_set_account_schedule",
     ] {
         assert!(

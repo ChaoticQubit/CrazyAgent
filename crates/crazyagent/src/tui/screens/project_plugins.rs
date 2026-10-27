@@ -16,9 +16,9 @@ const PANEL_TEXT_LINES: usize = 2;
 
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
-/// to queue, whose reply comes back through `apply`; AddSkill, AddServer and
-/// Edit ask the host to open the add form or the server's edit page for this
-/// project.
+/// to queue, whose reply comes back through `apply`; AddSkill, AddServer,
+/// Edit and OpenSkill ask the host to open the add form, the server's edit
+/// page or the skill's page for this project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
@@ -27,6 +27,7 @@ pub(in crate::tui) enum PluginsReply {
     AddSkill,
     AddServer,
     Edit(Box<ServerView>),
+    OpenSkill { id: String, name: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +271,10 @@ impl ProjectPlugins {
             KeyCode::Char('d') => self.ask_remove(),
             KeyCode::Char('e') => self.edit(),
             KeyCode::Enter => match self.item() {
+                Some(Item::Skill(index)) => PluginsReply::OpenSkill {
+                    id: self.skills[index].id.clone(),
+                    name: self.skills[index].name.clone(),
+                },
                 Some(Item::Server(index))
                     if self.servers[index].status == ServerStatus::WaitingForApproval =>
                 {
@@ -475,7 +480,7 @@ impl ProjectPlugins {
         let first = window(picked, self.skills.len(), skill_rows);
         for (index, skill) in self.skills.iter().enumerate().skip(first).take(skill_rows) {
             let mut cells = vec![
-                Row::of(skill.name.clone(), look.fg),
+                Row::of(skill.name.clone(), look.accent),
                 state(skill.enabled, skill.on_here, None, look),
                 Row::of(place(&skill.scope), look.fg),
             ];
@@ -645,6 +650,9 @@ impl ProjectPlugins {
             return vec![("y", "Remove"), ("n", "Keep")];
         }
         let mut help = vec![("\u{2191}\u{2193}", "Move"), ("Space", "On or off here")];
+        if let Some(Item::Skill(_)) = self.item() {
+            help.push(("Enter", "Details"));
+        }
         if let Some(Item::Server(index)) = self.item()
             && self.servers[index].status == ServerStatus::WaitingForApproval
         {

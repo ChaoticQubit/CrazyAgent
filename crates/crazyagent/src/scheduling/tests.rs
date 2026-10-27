@@ -500,3 +500,130 @@ fn limits_come_from_the_usage_store_with_the_owners_manual_reset_applied() {
     );
     assert_eq!(ordered(&choice, &list), ["a", "b"]);
 }
+
+fn next(resets_ms: Option<i64>, left: Option<u8>, use_last: bool) -> Standing {
+    Standing::Next {
+        weekly_resets_ms: resets_ms,
+        weekly_left_percent: left,
+        use_last,
+    }
+}
+
+fn standings(pool: &PoolRanking) -> Vec<(&str, Standing)> {
+    pool.accounts
+        .iter()
+        .map(|account| (account.connection.as_str(), account.standing))
+        .collect()
+}
+
+#[test]
+fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b", "c", "d", "e", "f"]);
+    crate::team::initialize(&connection).unwrap();
+    limits(
+        &connection,
+        &[
+            ("a", 10.0, None, 40.0, Some(NOW_MS + 72 * HOUR_MS)),
+            ("b", 10.0, None, 30.0, Some(NOW_MS + 24 * HOUR_MS)),
+            ("c", 10.0, None, 85.0, Some(NOW_MS + 48 * HOUR_MS)),
+            (
+                "d",
+                100.0,
+                Some(NOW_MS + 2 * HOUR_MS),
+                5.0,
+                Some(NOW_MS + 6 * HOUR_MS),
+            ),
+        ],
+    );
+    for (id, reserve_percent, pin) in [
+        ("a", 0, Some(Pin::UseLast)),
+        ("b", 10, None),
+        ("c", 20, None),
+        ("e", 0, Some(Pin::NeverUse)),
+    ] {
+        plan(
+            &mut connection,
+            &access,
+            id,
+            AccountPlan {
+                rank: None,
+                reserve_percent,
+                pin,
+            },
+        );
+    }
+    connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('f',?1),('a',?2)",
+            params![NOW_MS + HOUR_MS, NOW_MS - 1],
+        )
+        .unwrap();
+    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(pools.len(), 1);
+    assert_eq!(pools[0].pool, reference("pool-a"));
+    assert_eq!(pools[0].strategy, Strategy::UseItOrLoseIt);
+    assert_eq!(
+        standings(&pools[0]),
+        [
+            ("b", next(Some(NOW_MS + 24 * HOUR_MS), Some(60), false)),
+            ("a", next(Some(NOW_MS + 72 * HOUR_MS), Some(60), true)),
+            (
+                "c",
+                Standing::ReserveReached {
+                    reserve_percent: 20,
+                    until_ms: Some(NOW_MS + 48 * HOUR_MS),
+                }
+            ),
+            (
+                "d",
+                Standing::FiveHourCap {
+                    until_ms: Some(NOW_MS + 2 * HOUR_MS),
+                }
+            ),
+            ("e", Standing::NeverUse),
+            (
+                "f",
+                Standing::Paused {
+                    until_ms: NOW_MS + HOUR_MS,
+                }
+            ),
+        ]
+    );
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::PoolStrategy {
+            pool: reference("pool-a"),
+            strategy: Some(Strategy::Balanced),
+        },
+    );
+    let balanced = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(balanced[0].strategy, Strategy::Balanced);
+    assert_eq!(
+        standings(&balanced[0])[..2],
+        [
+            ("b", next(Some(NOW_MS + 24 * HOUR_MS), Some(60), false)),
+            ("a", next(Some(NOW_MS + 72 * HOUR_MS), Some(60), true)),
+        ]
+    );
+}
+
+#[test]
+fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
+    let (_directory, connection) = database();
+    let access = access(&["a", "b"]);
+    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    assert_eq!(
+        standings(&pools[0]),
+        [
+            ("a", next(None, None, false)),
+            ("b", next(None, None, false))
+        ]
+    );
+    assert!(
+        ranking(&connection, &ModelAccess::default(), NOW_MS)
+            .unwrap()
+            .is_empty()
+    );
+}

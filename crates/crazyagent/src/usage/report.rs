@@ -81,12 +81,15 @@ fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
+/// Reads four `TOTAL()` token sums, which never overflow, saturating each into a count.
+/// Inputs: the row and its first sum's column. Output: the tokens.
 fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
+    let amount = |column: usize| row.get::<_, f64>(column).map(|total| total as u64);
     Ok(Tokens {
-        input: count(row.get(first)?),
-        output: count(row.get(first + 1)?),
-        cache_read: count(row.get(first + 2)?),
-        cache_write: count(row.get(first + 3)?),
+        input: amount(first)?,
+        output: amount(first + 1)?,
+        cache_read: amount(first + 2)?,
+        cache_write: amount(first + 3)?,
     })
 }
 
@@ -99,12 +102,12 @@ fn rows(
 ) -> Result<Vec<UsageRow>, EngineError> {
     let mut statement = db
         .prepare(&format!(
-            "SELECT {column},SUM(input),SUM(output),SUM(cache_read),SUM(cache_write),\
+            "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
                 COUNT(DISTINCT agent||'/'||session),MAX(hour_ms)
              FROM usage_tokens WHERE hour_ms>=?1 AND (?3 OR {column}<>'')
                 AND (?4 IS NULL OR project=?4)
              GROUP BY {column}
-             ORDER BY SUM(input)+SUM(output)+SUM(cache_read)+SUM(cache_write) DESC, {column}
+             ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) DESC, {column}
              LIMIT ?2"
         ))
         .map_err(storage)?;
@@ -234,8 +237,8 @@ pub fn report(
     let project = project.map(ProjectId::as_str);
     let (total, runs) = db
         .query_row(
-            "SELECT COALESCE(SUM(input),0),COALESCE(SUM(output),0),COALESCE(SUM(cache_read),0),\
-                COALESCE(SUM(cache_write),0),COUNT(DISTINCT agent||'/'||session)
+            "SELECT TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
+                COUNT(DISTINCT agent||'/'||session)
              FROM usage_tokens WHERE hour_ms>=?1 AND (?2 IS NULL OR project=?2)",
             params![since, project],
             |row| Ok((tokens(row, 0)?, count(row.get(4)?))),
@@ -245,8 +248,8 @@ pub fn report(
     let mut days: Vec<DayTokens> = {
         let mut statement = db
             .prepare(
-                "SELECT ((hour_ms+?2)/?3)*?3-?2 AS day,SUM(input),SUM(output),SUM(cache_read),\
-                    SUM(cache_write)
+                "SELECT ((hour_ms+?2)/?3)*?3-?2 AS day,TOTAL(input),TOTAL(output),\
+                    TOTAL(cache_read),TOTAL(cache_write)
                  FROM usage_tokens WHERE hour_ms>=?1 AND (?5 IS NULL OR project=?5)
                  GROUP BY day ORDER BY day DESC LIMIT ?4",
             )

@@ -185,3 +185,22 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-session { width: 100%; display: grid; gap: 2px; text-align: left; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
 .pj-session:hover:not(:disabled) { background: var(--surface-2); }
 .pj-session:disabled { cursor: default; opacity: 0.6; }
+
+.pj-master-live {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.pj-master-live > .tg-terminal {
+  flex: 1;
+  min-height: 60vh;
+}
+
+.pj-master-earlier {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

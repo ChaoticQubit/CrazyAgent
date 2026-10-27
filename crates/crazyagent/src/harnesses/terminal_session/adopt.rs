@@ -188,6 +188,8 @@ impl TerminalSession {
             events: 0,
             ready: true,
             turn: false,
+            live: false,
+            facts: VecDeque::new(),
             exited: false,
             stopped: false,
             record: Some(record.clone()),

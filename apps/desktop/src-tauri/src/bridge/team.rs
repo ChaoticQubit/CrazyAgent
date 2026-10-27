@@ -93,6 +93,20 @@ impl NativeBridge {
             .await
     }
 
+    /// Turns a project's live master on or off: on, the engine keeps the master harness's own
+    /// app running in a terminal the owner types into. Takes the project id, the switch and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_live_master(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::LiveMaster { project_id, on }, generation)
+            .await
+    }
+
     /// Pauses every agent of a project's team, or resumes it.
     /// Takes the project id, true to pause or false to resume, and the client generation.
     /// Returns the actual commit receipt.

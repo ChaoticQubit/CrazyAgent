@@ -182,6 +182,10 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    Master {
+        id: ProjectId,
+        name: String,
+    },
     ProjectProcess {
         id: ProjectId,
         name: String,
@@ -343,6 +347,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::ProjectProcess { id, name } => {
             Box::new(process::ProcessPage::new(process::Scope::Project {
                 id: id.clone(),

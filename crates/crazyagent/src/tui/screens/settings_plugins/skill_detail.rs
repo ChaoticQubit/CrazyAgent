@@ -1,13 +1,13 @@
-use super::{Plugins, plugin_plain, tilde};
+use super::{back_to, crumbs_of, draw_form, place_of, plugin_plain, tilde};
+use crate::protocol::ProjectId;
 use crate::skills::SkillDetail;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::project_markdown::{self, MdLine};
-use crate::tui::screens::settings::draw_page;
 use crate::tui::screens::settings_accounts::{send, settings_event};
-use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
+use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::Arrival;
 use crate::tui::text::{cut, join, styled, thumb, with_bar, wrap};
 use crate::tui::theme::{Role, Theme};
@@ -60,13 +60,14 @@ fn md_line(line: &MdLine, theme: &Theme) -> Line<'static> {
     }))
 }
 
-/// Settings, Plugins and skills, one skill read in full: its switch, description and
-/// folder, the rendered SKILL.md and the folder's files. Input: keys and the engine's
-/// skill detail. Output: the scrolled page; Space turns the skill on or off for every
-/// project and Esc goes back to the list.
+/// One skill read in full, from Settings or from one project's Settings tab: its switch,
+/// description and folder, the rendered SKILL.md and the folder's files. Input: keys and
+/// the engine's skill detail. Output: the scrolled page; Space turns the skill on or off
+/// for every project, or for the project it was opened from, and Esc goes back.
 pub struct SkillDetailPage {
     id: String,
     name: String,
+    project: Option<(ProjectId, String)>,
     load: Load<SkillDetail>,
     waiting: bool,
     changing: Option<String>,
@@ -81,12 +82,20 @@ impl SkillDetailPage {
         Self {
             id,
             name,
+            project: None,
             load: Load::Idle,
             waiting: false,
             changing: None,
             top: 0,
             window: 1,
         }
+    }
+
+    /// The same page opened from one project, showing and switching the skill there.
+    /// Inputs: the project id and name. Output: the screen.
+    pub fn for_project(mut self, project: ProjectId, name: String) -> Self {
+        self.project = Some((project, name));
+        self
     }
 
     /// The page with the skill already read.
@@ -110,6 +119,7 @@ impl SkillDetailPage {
             ctx,
             SettingsJob::SkillDetail {
                 id: self.id.clone(),
+                project: self.project.as_ref().map(|(project, _)| project.clone()),
             },
         );
     }
@@ -121,17 +131,45 @@ impl SkillDetailPage {
         if self.changing.is_some() {
             return;
         }
-        let enabled = !detail.skill.enabled;
-        self.changing = Some(format!(
-            "{} is {}.",
-            detail.skill.name,
-            if enabled { "on" } else { "off" }
-        ));
-        let id = detail.skill.id.clone();
-        send(
-            ctx,
-            SettingsJob::Plugin(PluginChange::SetSkill { id, enabled }),
-        );
+        let skill = &detail.skill;
+        let id = skill.id.clone();
+        let (change, done) = match (&self.project, skill.on_here) {
+            (Some(_), Some(_)) if !skill.enabled => {
+                ctx.say(Message::error(
+                    &format!(
+                        "{} is off in Settings for every project. Turn it on there first.",
+                        skill.name
+                    ),
+                    "",
+                ));
+                return;
+            }
+            (Some((project, _)), Some(on)) => (
+                PluginChange::Switch {
+                    project: project.clone(),
+                    id,
+                    on: !on,
+                },
+                format!(
+                    "{} is {} for this project.",
+                    skill.name,
+                    if on { "off" } else { "on" }
+                ),
+            ),
+            _ => (
+                PluginChange::SetSkill {
+                    id,
+                    enabled: !skill.enabled,
+                },
+                format!(
+                    "{} is {}.",
+                    skill.name,
+                    if skill.enabled { "off" } else { "on" }
+                ),
+            ),
+        };
+        self.changing = Some(done);
+        send(ctx, SettingsJob::Plugin(change));
     }
 
     /// The body lines of the page, before scrolling.
@@ -164,14 +202,17 @@ impl SkillDetailPage {
             }
         };
         let skill = &detail.skill;
+        let on = skill.enabled && skill.on_here.unwrap_or(true);
+        let state = match (on, self.project.is_some()) {
+            (true, true) => styled("On for this project", Role::Success, theme),
+            (true, false) => styled("On for every project", Role::Success, theme),
+            (false, true) => styled("Off for this project", Role::Muted, theme),
+            (false, false) => styled("Off", Role::Muted, theme),
+        };
         let mut lines = vec![join([
             styled(skill.name.clone(), Role::Accent, theme),
             Line::raw("  "),
-            if skill.enabled {
-                styled("On for every project", Role::Success, theme)
-            } else {
-                styled("Off", Role::Muted, theme)
-            },
+            state,
         ])];
         lines.extend(wrap(&skill.description, limit).into_iter().map(Line::raw));
         lines.push(styled(
@@ -218,17 +259,20 @@ impl SkillDetailPage {
 
 impl Screen for SkillDetailPage {
     fn crumbs(&self) -> Vec<String> {
-        vec![
-            "Settings".into(),
-            "Plugins and skills".into(),
-            self.name.clone(),
-        ]
+        crumbs_of(self.project.as_ref(), &self.name)
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
         vec![
             hint("\u{2191}\u{2193}", "Scroll"),
-            hint("Space", "On or off"),
+            hint(
+                "Space",
+                if self.project.is_some() {
+                    "On or off here"
+                } else {
+                    "On or off"
+                },
+            ),
             hint("Esc", "Back"),
         ]
     }
@@ -236,7 +280,7 @@ impl Screen for SkillDetailPage {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let page = isize::try_from(self.window.max(1)).unwrap_or(1);
         match key {
-            Key::Esc => return Flow::Replace(Box::new(Plugins::new())),
+            Key::Esc => return back_to(self.project.as_ref(), ctx),
             Key::Char(' ') => self.toggle(ctx),
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Up => self.scroll(-1),
@@ -291,7 +335,8 @@ impl Screen for SkillDetailPage {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = (area.width as usize).saturating_sub(4 + 1).max(8);
         let lines = self.lines(limit, ctx);
-        let window = (area.height as usize).saturating_sub(TAB_ROWS).max(1);
+        let tabs = if self.project.is_some() { 0 } else { TAB_ROWS };
+        let window = (area.height as usize).saturating_sub(tabs).max(1);
         self.window = window;
         self.top = self.top.min(lines.len().saturating_sub(window));
         let total = lines.len();
@@ -303,7 +348,7 @@ impl Screen for SkillDetailPage {
             shown
         };
         assert!(content.len() <= window);
-        draw_page(frame, area, SettingsSection::Plugins, content, None, ctx)
+        draw_form(frame, area, self.project.is_some(), content, None, ctx)
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
@@ -311,6 +356,6 @@ impl Screen for SkillDetailPage {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Settings(SettingsSection::Plugins))
+        Some(place_of(self.project.as_ref()))
     }
 }

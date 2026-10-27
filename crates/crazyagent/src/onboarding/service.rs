@@ -8,11 +8,13 @@ use crate::protocol::{CredentialRef, ProjectId};
 use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
+use crate::research::jobs::JobError;
 #[cfg(unix)]
 use crate::research::runner::ResearchLimits;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
+    RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
 };
+use crate::sandbox::SandboxError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -28,6 +30,10 @@ const HEARTBEAT_MS: i64 = 5_000;
 const DATABASE_WAIT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const ENGINE_TICK: Duration = Duration::from_secs(2);
+/// How long after its last check a mapping that waits out an account pause asks for
+/// its account again before the pause ends, so a pool member added or freed early
+/// takes effect while the claim still lets newer projects go first.
+const PAUSE_RECHECK_MS: i64 = 10_000;
 const RUN_NAME_BYTES_MAX: usize = 96;
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
@@ -95,6 +101,7 @@ struct Claimed {
     repo: PathBuf,
     pool: CredentialRef,
     drafted: Drafted,
+    created_ms: i64,
     runs: i64,
     kind: Kind,
 }
@@ -234,22 +241,28 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 
 /// Claims the oldest waiting step: a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
-/// setup and no account pause it waits on is still running. Marks it running
-/// under `claimer` and counts the attempt. Returns `None` when nothing waits.
+/// setup and no account pause it waits on is still running, or that pause was
+/// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
+/// and counts the attempt. Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let now = now_ms();
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting' FROM onboarding o
+            "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
                 OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
-                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2)
+                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
+                        OR updated_ms<=?3)
                     AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
                         AND json_extract(s.body,'$.revision')>?1)))
              ORDER BY created_ms,project LIMIT 1",
-            params![crate::project_setup::FIRST_REVISION as i64, now],
+            params![
+                crate::project_setup::FIRST_REVISION as i64,
+                now,
+                now - PAUSE_RECHECK_MS
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -258,12 +271,13 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((project, repo, pool, drafted, runs, graph)) = row else {
+    let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
         return Ok(None);
     };
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
@@ -285,6 +299,7 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         repo: PathBuf::from(repo),
         pool: CredentialRef::new(pool).map_err(|problem| problem.0)?,
         drafted: serde_json::from_str(&drafted).map_err(|error| error.to_string())?,
+        created_ms,
         runs: runs + 1,
         kind,
     }))
@@ -336,14 +351,17 @@ fn store_draft(
     Ok(())
 }
 
-/// The agent state name of one step attempt, unique per row and attempt.
+/// The agent state name of one step attempt: the step, the project, when its
+/// onboarding row was made and the attempt, so no attempt reuses a folder an
+/// earlier onboarding of the same project id left. The project part is cut
+/// short only when the whole name would pass the bound. Returns the name.
 fn run_name(claimed: &Claimed) -> String {
-    let name = format!(
-        "onboard-{}-{}-{}",
-        claimed.kind.short(),
-        claimed.project,
-        claimed.runs
-    );
+    assert!(claimed.project.is_ascii() && !claimed.project.is_empty());
+    let head = format!("onboard-{}-", claimed.kind.short());
+    let tail = format!("-{}-{}", claimed.created_ms, claimed.runs);
+    let room = RUN_NAME_BYTES_MAX - head.len() - tail.len();
+    let project = &claimed.project[..claimed.project.len().min(room)];
+    let name = format!("{head}{project}{tail}");
     assert!(name.len() <= RUN_NAME_BYTES_MAX);
     name
 }
@@ -405,8 +423,72 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         #[cfg(unix)]
         Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
-        Err(_) => Step::failed(GRAPH_NOT_STARTED),
+        Err(error) => not_started(Kind::Graph, &error),
     }
+}
+
+/// Fails a step that could not start with its plain sentence and a short cause
+/// code, and writes one diagnostic line naming the step and the cause to the
+/// engine's stderr log. Takes the step kind and the runner error. Returns the step.
+fn not_started(kind: Kind, error: &RunError) -> Step {
+    let cause = start_cause(error);
+    eprintln!("{}", start_diagnostic(kind, &cause));
+    let sentence = match kind {
+        Kind::Graph => GRAPH_NOT_STARTED,
+        Kind::Mapping => MAPPING_NOT_STARTED,
+    };
+    Step::failed(&format!("{sentence} ({cause})"))
+}
+
+/// The engine log line for a step that could not start. Takes the step kind and
+/// its cause code. Returns the line.
+fn start_diagnostic(kind: Kind, cause: &str) -> String {
+    format!("onboarding_{}_not_started cause={cause}", kind.prefix())
+}
+
+/// The short cause code of a runner error: which refusal or failure stopped the
+/// start, never the error text, which can name paths. Takes the error. Returns
+/// lowercase letters, digits and `_` only.
+fn start_cause(error: &RunError) -> String {
+    let cause = match error {
+        RunError::Invalid(reason) if reason == RUN_NAME_USED => "run_name_used".to_owned(),
+        RunError::Invalid(_) => "run_refused".to_owned(),
+        RunError::Jobs(JobError::Invalid(_)) => "job_refused".to_owned(),
+        RunError::Jobs(JobError::NotHeld) => "job_not_held".to_owned(),
+        RunError::Jobs(JobError::Storage(_)) => "job_storage".to_owned(),
+        RunError::Sandbox(SandboxError::Invalid(_)) => "sandbox_refused".to_owned(),
+        RunError::Sandbox(SandboxError::Unavailable(_)) => "sandbox_unavailable".to_owned(),
+        RunError::Sandbox(SandboxError::Io(error)) => io_cause("sandbox_io", error),
+        RunError::Context(_) => "context_refused".to_owned(),
+        RunError::Account(_) => "account_unavailable".to_owned(),
+        RunError::Busy => "account_busy".to_owned(),
+        RunError::Uncertain(_) => "cleanup_uncertain".to_owned(),
+        RunError::Io(error) => io_cause("io", error),
+    };
+    assert!(
+        cause
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    );
+    cause
+}
+
+/// `prefix` and the kind of an I/O error, such as `io_permission_denied`, without
+/// the error's own text. Takes the prefix and the error. Returns the code.
+fn io_cause(prefix: &str, error: &std::io::Error) -> String {
+    let kind: String = error
+        .kind()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{prefix}_{kind}")
 }
 
 /// Maps the project: collects the bounded evidence, saves the draft the
@@ -479,7 +561,7 @@ fn mapping_step(
             Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
             base,
         ),
-        Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
+        Err(error) => (not_started(Kind::Mapping, &error), base),
     }
 }
 
@@ -623,3 +705,5 @@ pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod claim_tests;
+#[cfg(test)]
+mod start_tests;
