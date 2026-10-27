@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 pub mod extra_paths;
+pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(all(test, target_os = "macos"))]
