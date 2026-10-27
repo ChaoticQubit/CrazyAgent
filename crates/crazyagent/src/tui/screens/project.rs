@@ -3,7 +3,7 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
-use super::planning_line::{planning, planning_key};
+use super::planning_line::{Planning, planning, planning_key};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
@@ -399,8 +399,9 @@ impl GeneralEdit {
         }
     }
 
-    /// Builds the engine edit from the form.
-    /// Takes the form and the setup it edits.
+    /// Builds the engine edit from the form. The form has no roadmap switch, so the roadmap
+    /// planning choice comes from the setup as it is now, not as the form opened.
+    /// Takes the form and the current setup.
     /// Returns the edit with the name only when it changed, or none when nothing changed.
     pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
         let name = self.name.value().trim();
@@ -419,7 +420,13 @@ impl GeneralEdit {
             .collect();
         let research: Vec<ResearchKind> = ResearchKind::CHOICES
             .into_iter()
-            .filter(|kind| self.research.contains(kind))
+            .filter(|kind| {
+                if *kind == ResearchKind::RoadmapPlanning {
+                    setup.research.contains(kind)
+                } else {
+                    self.research.contains(kind)
+                }
+            })
             .collect();
         let unchanged = name == setup.name
             && about == setup.about
@@ -548,6 +555,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
+    pub confirm_plan: Option<SetupAction>,
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
     pub read_paths: Option<Vec<String>>,
@@ -613,6 +621,7 @@ impl ProjectScreen {
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
+            confirm_plan: None,
             adding: None,
             folders: None,
             read_paths: None,
@@ -642,6 +651,7 @@ impl ProjectScreen {
         self.confirm_delete = None;
         self.confirm_stop = None;
         self.confirm_remove = false;
+        self.confirm_plan = None;
         self.adding = None;
         self.folders = None;
         self.general = None;
@@ -968,16 +978,20 @@ impl ProjectScreen {
                 self.context = None;
             }
             SetupQuery::Change {
-                action:
-                    SetupAction::CancelResearch { .. }
-                    | SetupAction::RetryResearch { .. }
-                    | SetupAction::PlanRoadmap { .. },
+                action: SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
                 ..
             } => {
                 self.jobs_read_ms = None;
                 if applied {
                     self.log = None;
                 }
+            }
+            SetupQuery::Change {
+                action: SetupAction::PlanRoadmap { .. },
+                ..
+            } => {
+                self.jobs_read_ms = None;
+                self.setup_due = true;
             }
             SetupQuery::Change { .. } | SetupQuery::ReviewMemory { .. } => {
                 self.memories_read_ms = None;
@@ -1127,6 +1141,19 @@ impl ProjectScreen {
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.confirm_delete = None;
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            };
+        }
+        if let Some(action) = self.confirm_plan.clone() {
+            return match key.code {
+                KeyCode::Char('y') => {
+                    self.confirm_plan = None;
+                    ProjectReply::Change(Box::new(action))
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.confirm_plan = None;
                     ProjectReply::Handled
                 }
                 _ => ProjectReply::Handled,
@@ -1583,7 +1610,7 @@ impl ProjectScreen {
             .iter()
             .map(|m| (m.id.clone(), m.version, m.text.clone()))
             .collect();
-        let work = self.setup.as_ref().map_or(0, |s| s.research.len());
+        let work = self.work_kinds().len();
         let rows = suggested.len() + work;
         let focused = suggested.get(self.overview_cursor).cloned();
         if let Some(reply) = self.planning_reply(key.code) {
@@ -1609,7 +1636,7 @@ impl ProjectScreen {
             }
             KeyCode::Enter => {
                 let index = self.overview_cursor.checked_sub(suggested.len());
-                let kind = index.and_then(|i| self.setup.as_ref()?.research.get(i).copied());
+                let kind = index.and_then(|i| self.work_kinds().get(i).copied());
                 if let Some(kind) = kind {
                     self.read(&kind.report_path());
                 }
@@ -1958,12 +1985,41 @@ impl ProjectScreen {
         }
     }
 
+    /// Whether a planning run can replace roadmap documents the owner may have edited: a plan
+    /// ran before, the context lists one of them, or the context is not read yet.
+    /// Takes the planning state. Returns true when the owner must confirm first.
+    fn plan_replaces(&self, state: &Planning) -> bool {
+        *state != Planning::Idle
+            || self.context.as_ref().is_none_or(|context| {
+                context
+                    .items
+                    .iter()
+                    .any(|item| item.kind == ContextKind::Plan)
+            })
+    }
+
+    /// The research the Overview lists as work rows: the setup's research without roadmap
+    /// planning, which has its own Roadmap line. Takes the screen.
+    /// Returns the kinds in setup order, none before the setup is read.
+    pub(in crate::tui) fn work_kinds(&self) -> Vec<ResearchKind> {
+        self.setup
+            .iter()
+            .flat_map(|setup| setup.research.iter().copied())
+            .filter(|kind| *kind != ResearchKind::RoadmapPlanning)
+            .collect()
+    }
+
     /// Answers Plan roadmap now and Retry for the roadmap planning line once the jobs are
-    /// read. Takes the key. Returns the change or the handled reply with its plain line, or
+    /// read. Either one asks first when it can replace the roadmap documents.
+    /// Takes the key. Returns the change, the handled reply with its confirm or plain line, or
     /// none for a key the planning line does not use.
     fn planning_reply(&mut self, key: KeyCode) -> Option<ProjectReply> {
         let state = planning(self.jobs.as_ref()?);
         match planning_key(&state, &self.project, key)? {
+            Ok(action) if self.plan_replaces(&state) => {
+                self.confirm_plan = Some(action);
+                Some(ProjectReply::Handled)
+            }
             Ok(action) => Some(ProjectReply::Change(Box::new(action))),
             Err(line) => {
                 self.problem = Some(line.into());
@@ -2173,6 +2229,13 @@ impl ProjectScreen {
             assert_eq!(self.tab, Tab::Agents);
             assert!(job > 0);
         }
+        if let Some(action) = &self.confirm_plan {
+            assert!(matches!(self.tab, Tab::Overview | Tab::Settings));
+            assert!(matches!(
+                action,
+                SetupAction::PlanRoadmap { .. } | SetupAction::RetryResearch { .. }
+            ));
+        }
         if let Some(log) = &self.log {
             assert!(log.job > 0);
             assert!(
@@ -2264,6 +2327,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
         "planning_busy" => {
             "A roadmap is already being planned for this project. Wait for it to finish."
+        }
+        "setup_unconfirmed" => {
+            "Confirm this project's setup first. Its setup review has the roadmap switch."
         }
         "research_job_missing" => "That research is gone. The list is up to date now.",
         "research_log_unreadable" => "The agent's output could not be read.",

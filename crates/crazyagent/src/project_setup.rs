@@ -398,14 +398,14 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
-/// The revision a project setup is recorded at; only the owner's
-/// `UpdateProjectSetup` raises it.
+/// The revision a project setup is recorded at; the owner's `UpdateProjectSetup` raises it,
+/// and so does Plan roadmap now when it turns planning on.
 pub(crate) const FIRST_REVISION: u64 = 1;
 
 impl StoredSetup {
-    /// Whether the owner saved this setup after it was recorded: only
-    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
-    /// an onboarding whose setup was saved is finished.
+    /// Whether the owner saved this setup after it was recorded: only owner
+    /// changes raise the revision past [`FIRST_REVISION`], and Plan roadmap now
+    /// refuses an unconfirmed onboarding, so an onboarding whose setup was saved is finished.
     pub fn saved(&self) -> bool {
         self.revision > FIRST_REVISION
     }
@@ -2182,10 +2182,11 @@ fn retry_research(
 }
 
 /// Queues the project's roadmap planning job for Plan roadmap now: its finished or stopped job
-/// runs again, so a project keeps one planning row, or a first one is added. The toggle is
-/// recorded in the setup without raising its revision, so a later edit keeps the job.
+/// runs again, so a project keeps one planning row, or a first one is added. Turning the toggle
+/// on raises the setup revision, so an edit drafted before it is refused as stale instead of
+/// cancelling the job. A found or cloned project plans from its setup review until confirmed.
 /// Takes the transaction, configuration and project. Returns Applied, `project_setup_missing`,
-/// or `planning_busy` while the planning job waits or runs.
+/// `setup_unconfirmed`, or `planning_busy` while the planning job waits or runs.
 fn plan_roadmap(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2194,6 +2195,16 @@ fn plan_roadmap(
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
     };
+    let onboarding: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM onboarding WHERE project=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if onboarding && !stored.saved() {
+        return Ok(rejected("setup_unconfirmed"));
+    }
     let kind = ResearchKind::RoadmapPlanning;
     let jobs = load_jobs(tx, "project", &project_id.as_str())?;
     let waiting = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
@@ -2224,8 +2235,13 @@ fn plan_roadmap(
         }
     }
     if !stored.research.contains(&kind) {
+        let before = stored.revision;
         stored.research.push(kind);
+        stored.revision = before
+            .checked_add(1)
+            .ok_or_else(|| failure("project_setup_revision_limit"))?;
         save_setup(tx, &stored)?;
+        assert!(stored.revision > before);
     }
     assert!(stored.research.contains(&kind));
     Ok(Outcome::Applied)

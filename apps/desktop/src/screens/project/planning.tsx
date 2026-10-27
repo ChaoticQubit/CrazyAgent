@@ -2,9 +2,9 @@ import { useState } from "react";
 import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { planRoadmap, retryResearch } from "../../api-projects";
-import type { ResearchJob } from "../../api-projects";
+import type { ProjectContext, ResearchJob } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
-import { Button } from "../../ui";
+import { Button, ConfirmDialog } from "../../ui";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { changeOutcome, planningJob, researchJobs } from "./research";
@@ -66,6 +66,16 @@ export function planningView(state: PlanningState): PlanningView {
   }
 }
 
+/** The confirm line before a planning run that can replace the owner's roadmap documents. */
+export const REPLACE_LINE = "Planning writes roadmap.md and release-process.md again from the brief and research. Your edits to them are lost.";
+
+/** Whether a planning run can replace roadmap documents the owner may have edited: a plan ran
+ * before, the context lists one of them, or the context isn't read. Inputs: the state and the
+ * context read. Output: true when the owner confirms first. */
+export function planReplaces(state: PlanningState, context: Result<ProjectContext> | undefined): boolean {
+  return state.kind !== "idle" || context?.kind !== "ok" || context.value.items.some((item) => item.kind === "plan");
+}
+
 /** Sends the planning line's action to the engine: Retry runs the failed or stopped planning job
  * again and Plan roadmap now queues a new one. Inputs: the project id and the state. Output: the
  * engine result, or null when the state offers no action. */
@@ -95,11 +105,13 @@ export function PlanningLineView({ view, busy, problem, onAction, onOpen }: {
 }
 
 /** The planning line on the project Overview and in Project Settings, General: reads the state
- * from the project's jobs, and runs Retry or Plan roadmap now through the engine.
+ * from the project's jobs, and runs Retry or Plan roadmap now through the engine, asking first
+ * when the run can replace the roadmap documents.
  * Input: the project data. Output: the section, or a plain line while jobs can't be read. */
 export function PlanningLine({ data }: { data: ProjectData }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
+  const [asking, setAsking] = useState(false);
   if (data.research?.kind === "not_ready") return <NotReady what="roadmap planning isn't in this build." />;
   if (data.research?.kind !== "ok") return null;
   const state = planningState(data.research.value.jobs);
@@ -114,6 +126,11 @@ export function PlanningLine({ data }: { data: ProjectData }) {
     if (outcome.toast) data.notify(outcome.toast);
     if (outcome.reload) data.reload();
   }
-  return <PlanningLineView view={planningView(state)} busy={busy} problem={problem} onAction={() => void act()}
-    onOpen={(path) => data.navigate(`/projects/${encodeURIComponent(data.id)}/context?file=${encodeURIComponent(path)}`)} />;
+  return <>
+    <PlanningLineView view={planningView(state)} busy={busy} problem={problem}
+      onAction={() => { if (planReplaces(state, data.context)) setAsking(true); else void act(); }}
+      onOpen={(path) => data.navigate(`/projects/${encodeURIComponent(data.id)}/context?file=${encodeURIComponent(path)}`)} />
+    <ConfirmDialog open={asking} title="Replace the roadmap?" confirmLabel="Replace" pending={busy}
+      onConfirm={() => { setAsking(false); void act(); }} onCancel={() => setAsking(false)}>{REPLACE_LINE}</ConfirmDialog>
+  </>;
 }

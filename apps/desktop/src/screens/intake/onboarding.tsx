@@ -143,7 +143,7 @@ export function OnboardingReview({ id }: { id: string }) {
   const confirm = async () => {
     if (!draft || !saved || busy) return;
     if (Object.keys(errors).length > 0) { setShowErrors(true); document.getElementById("ob-name")?.focus(); return; }
-    const request = editRequest(saved, draft);
+    const request = editRequest(saved, draft, value?.finished ? undefined : draft.roadmap);
     setBusy(true);
     setProblem("");
     const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision);

@@ -447,10 +447,12 @@ export function draftOf(stored: StoredSetup): ProjectDraft {
 }
 
 /** Builds the engine change for an edited project the way New Project builds a new one, keeping
- * the saved pool and team and adding no documents. Inputs: the saved setup and the edited draft.
+ * the saved pool and team and adding no documents. The roadmap planning choice is the saved one,
+ * so a draft from before Plan roadmap now keeps the job, unless the form shows the switch.
+ * Inputs: the saved setup, the edited draft and the switch's value on a form that shows it.
  * Output: the new name or null when it is unchanged, the setup, and whether anything differs. */
-export function editRequest(stored: StoredSetup, draft: ProjectDraft): { name: string | null; setup: ProjectSetup; changed: boolean } {
-  const built = buildRequest({ ...draft, documents: [], pool: stored.pool, team: stored.team });
+export function editRequest(stored: StoredSetup, draft: ProjectDraft, roadmap = researchChoices(stored.research).roadmap): { name: string | null; setup: ProjectSetup; changed: boolean } {
+  const built = buildRequest({ ...draft, roadmap, documents: [], pool: stored.pool, team: stored.team });
   const name = built.spec.name === stored.name ? null : built.spec.name;
   const same = <T,>(left: T[], right: T[]) => left.length === right.length && left.every((item, index) => item === right[index]);
   const changed = name !== null || built.setup.about !== stored.about || !same(built.setup.tech_stack, stored.tech_stack)

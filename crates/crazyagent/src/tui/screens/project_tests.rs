@@ -2550,6 +2550,9 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         "{}",
         text(&drawn.rows)
     );
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let mut earlier = screen.general.take().expect("the General form opens");
+    earlier.research.push(ResearchKind::MarketResearch);
 
     let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
         panic!("p asks the engine to plan");
@@ -2622,8 +2625,51 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         .unwrap()
         .expect("the setup is saved");
     assert_eq!(
-        (stored.research, stored.revision),
-        (vec![ResearchKind::RoadmapPlanning], 1),
-        "the setup records planning so a later edit keeps the job, without counting as an owner save"
+        (stored.research.clone(), stored.revision),
+        (vec![ResearchKind::RoadmapPlanning], 2),
+        "the setup records planning at a new revision"
+    );
+    settle(&mut screen, &mut controller, start + 2_000).await;
+    let current = screen.setup.clone().expect("the setup is read again");
+    assert_eq!(current.revision, 2, "the screen reads the new revision");
+    assert!(
+        screen.work_kinds().is_empty(),
+        "planning is not listed as research on the Overview"
+    );
+    let Some(SetupAction::Update {
+        expected_revision,
+        setup: edited,
+        ..
+    }) = earlier.action(&current)
+    else {
+        panic!("the earlier form has an edit");
+    };
+    assert_eq!(
+        (edited.research.clone(), expected_revision),
+        (
+            vec![ResearchKind::MarketResearch, ResearchKind::RoadmapPlanning],
+            1
+        ),
+        "a form opened before Plan roadmap now keeps the planning choice"
+    );
+    let stale = serve(
+        &mut controller,
+        SetupQuery::Change {
+            action: SetupAction::Update {
+                project_id: project.clone(),
+                expected_revision,
+                name: None,
+                setup: edited,
+            },
+            generation: 4,
+        },
+    )
+    .await;
+    assert_eq!(
+        stale,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into()
+        })),
+        "an edit drafted before the plan cannot cancel it"
     );
 }

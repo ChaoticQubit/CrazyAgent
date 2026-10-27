@@ -141,6 +141,7 @@ const copy: Record<string, string> = {
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
   planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
+  setup_unconfirmed: "Confirm this project's setup first. Its setup review has the roadmap switch.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
   project_spec_bounds: "Enter a project name of at most 80 characters.",

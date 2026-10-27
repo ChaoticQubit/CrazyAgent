@@ -54,11 +54,11 @@ test("the roadmap toggle is on by default when a project is created, imported or
   const shown = review(view(), imported);
   assert.match(shown, /Plan a roadmap after research/);
   assert.ok(checked(shown), shown);
-  assert.deepEqual(wizard.editRequest(stored(), imported).setup.research, ["roadmap_planning"], "Confirm sends the toggle the owner sees");
-  assert.deepEqual(wizard.editRequest(stored(), { ...imported, roadmap: false }).setup.research, [], "turned off, no planning job is asked for");
+  assert.deepEqual(wizard.editRequest(stored(), imported, imported.roadmap).setup.research, ["roadmap_planning"], "Confirm sends the toggle the owner sees");
+  assert.deepEqual(wizard.editRequest(stored(), { ...imported, roadmap: false }, false).setup.research, [], "turned off, no planning job is asked for");
   const onboarding = read("src/screens/intake/onboarding.tsx");
   assert.match(onboarding, /setDraft\(onboardingDraft\(value, saved\)\)/);
-  assert.match(onboarding, /const request = editRequest\(saved, draft\);/);
+  assert.match(onboarding, /const request = editRequest\(saved, draft, value\?\.finished \? undefined : draft\.roadmap\);/);
   assert.match(read("src/screens/intake/found.tsx"), /navigate\(\{ name: "onboarding", id: started\.id \}\)/, "an imported or cloned folder is set up through this review");
 
   const saved = intake.onboardingDraft(view({ finished: true }), stored());
@@ -69,6 +69,12 @@ test("the roadmap toggle is on by default when a project is created, imported or
   assert.deepEqual([planned.research, planned.roadmap], [["market_research"], true], "the planning kind is the toggle, never a research switch");
   assert.equal(wizard.draftOf(stored()).roadmap, false, "a project from before planning keeps it off");
   assert.equal(wizard.editRequest(stored({ research: ["market_research", "roadmap_planning"] }), planned).changed, false, "an untouched edit keeps the saved toggle");
+  const before = wizard.draftOf(stored({ research: ["market_research"] }));
+  const after = stored({ research: ["market_research", "roadmap_planning"], revision: 5 });
+  assert.deepEqual(wizard.editRequest(after, before), { name: null, setup: wizard.editRequest(after, planned).setup, changed: false },
+    "a form opened before Plan roadmap now has nothing to save");
+  assert.deepEqual(wizard.editRequest(after, { ...before, about: "Plants for offices." }).setup.research, ["market_research", "roadmap_planning"],
+    "saving it later keeps the planning job");
 });
 
 test("the planning state reads waiting, planning, done and failed from the real job list", () => {
@@ -104,6 +110,19 @@ test("the planning state reads waiting, planning, done and failed from the real 
   assert.doesNotMatch(running, /<button/, "while a job runs the line shows its state instead of an action");
 });
 
+test("Plan roadmap now and Retry ask before they can replace the roadmap", () => {
+  const items = (...kinds) => ({ kind: "ok", value: { project_id: "p1", folder: "/Users/mira/Projects/shop", items: kinds.map((kind) => ({ path: kind === "plan" ? "context/roadmap.md" : "context/brief.md", kind, bytes: 10 })) } });
+  assert.equal(planning.planReplaces({ kind: "idle" }, items("brief")), false, "nothing to replace, so it plans at once");
+  assert.equal(planning.planReplaces({ kind: "idle" }, items("brief", "plan")), true, "a roadmap the owner wrote by hand");
+  assert.equal(planning.planReplaces({ kind: "idle" }, undefined), true, "the context isn't read yet");
+  assert.equal(planning.planReplaces({ kind: "done", job: job(2, "roadmap_planning", "done") }, items("brief")), true, "a plan ran before");
+  assert.equal(planning.planReplaces({ kind: "failed", job: job(2, "roadmap_planning", "failed") }, items("brief")), true, "Retry asks too");
+  const source = read("src/screens/project/planning.tsx");
+  assert.match(source, /if \(planReplaces\(state, data\.context\)\) setAsking\(true\); else void act\(\);/);
+  assert.match(source, /<ConfirmDialog open=\{asking\} title="Replace the roadmap\?" confirmLabel="Replace"/);
+  assert.match(planning.REPLACE_LINE, /Your edits to them are lost\.$/);
+});
+
 test("Retry and Plan roadmap now call the engine", () => {
   assert.equal(planning.planningCall("p1", { kind: "waiting" }), null);
   assert.equal(planning.planningCall("p1", { kind: "planning", job: job(2, "roadmap_planning", "running") }), null);
@@ -120,6 +139,7 @@ test("Retry and Plan roadmap now call the engine", () => {
 test("planning_busy shows its sentence", () => {
   const sentence = "A roadmap is already being planned for this project. Wait for it to finish.";
   assert.equal(api.failureSentence("planning_busy"), sentence);
+  assert.equal(api.failureSentence("setup_unconfirmed"), "Confirm this project's setup first. Its setup review has the roadmap switch.");
   const receipt = { kind: "ok", value: {
     kind: "plan_roadmap", generation: "4", project_id: "p1", baseline_id: null, model_access: null, project_spec: null, operation_id: "o",
     outcome: "rejected", pending: false, rejection: "planning_busy",

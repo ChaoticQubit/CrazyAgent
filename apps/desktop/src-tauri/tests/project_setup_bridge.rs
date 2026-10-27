@@ -308,13 +308,34 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         about: "Tracks shared chores for two.".into(),
         ..setup(vec![])
     };
+    let drafted_before = bridge
+        .update_project_setup(&id, edited.clone(), None, Some(1), 14)
+        .await?;
+    assert_eq!(
+        drafted_before.rejection.as_deref(),
+        Some("stale_revision"),
+        "an edit drafted before Plan roadmap now cannot cancel the plan"
+    );
+    assert!(
+        bridge
+            .research_jobs(&id)
+            .await?
+            .jobs
+            .iter()
+            .any(|row| row.kind == ResearchKind::RoadmapPlanning
+                && matches!(
+                    row.status,
+                    ResearchStatus::Queued | ResearchStatus::NeedsPool
+                )),
+        "the planning job still waits"
+    );
     let updated = bridge
         .update_project_setup(
             &id,
             edited.clone(),
             Some("Chore board two".into()),
             None,
-            14,
+            15,
         )
         .await?;
     assert!(
@@ -325,7 +346,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     let saved = bridge.project_setup(&id).await?.unwrap();
     assert_eq!(
         (saved.name.as_str(), saved.about.as_str(), saved.revision),
-        ("Chore board two", "Tracks shared chores for two.", 2)
+        ("Chore board two", "Tracks shared chores for two.", 3)
     );
     assert!(
         bridge
@@ -336,11 +357,11 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             .any(|row| row.id == id && row.name == "Chore board two")
     );
     let stale = bridge
-        .update_project_setup(&id, edited, None, Some(1), 15)
+        .update_project_setup(&id, edited, None, Some(1), 16)
         .await?;
     assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 
-    let removed = bridge.remove_project(&id, 16).await?;
+    let removed = bridge.remove_project(&id, 17).await?;
     assert!(
         matches!(removed.outcome, ActionOutcome::Applied),
         "{removed:?}"
