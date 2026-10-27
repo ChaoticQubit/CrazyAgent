@@ -9,11 +9,15 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 pub const EVENT_TEXT_BYTES_MAX: usize = 1000;
 pub const EVENTS_PER_PROJECT_MAX: i64 = 2000;
 pub const EVENTS_QUEUED_MAX: i64 = 200;
+pub const EVENTS_QUEUED_PER_AGENT_MAX: i64 = 50;
+pub const EVENTS_QUEUED_HARD_MAX: i64 = 2 * EVENTS_QUEUED_MAX;
+pub const COLD_WAKES_PER_HOUR_MAX: u32 = 6;
 pub const EVENTS_PER_WAKE_MAX: usize = 20;
 pub const WAKE_BYTES_MAX: usize = super::MESSAGE_BYTES_MAX;
 pub const HOURLY_CAP_MAX: u32 = 500;
@@ -33,10 +37,14 @@ const OPTIONS_MAX: usize = 9;
 const TASK_EXCERPT_BYTES_MAX: usize = 200;
 const EVENT_HISTORY: &str = "state<>'queued'";
 const NOTIFICATION_HISTORY: &str = "1=1";
+const COLD_PAUSE: i64 = -1;
 const MARKERS: [char; 5] = ['❯', '›', '>', '▶', '→'];
 const BORDERS: [char; 4] = ['│', '|', '┃', '║'];
 
 const _: () = assert!(EVENTS_QUEUED_MAX < EVENTS_PER_PROJECT_MAX);
+const _: () = assert!(EVENTS_QUEUED_PER_AGENT_MAX < EVENTS_QUEUED_MAX);
+const _: () = assert!(EVENTS_QUEUED_HARD_MAX < EVENTS_PER_PROJECT_MAX);
+const _: () = assert!(COLD_WAKES_PER_HOUR_MAX <= HOURLY_CAP_DEFAULT);
 const _: () = assert!(EVENT_TEXT_BYTES_MAX + 256 < WAKE_BYTES_MAX);
 const _: () = assert!(HOURLY_CAP_DEFAULT <= HOURLY_CAP_MAX);
 
@@ -77,6 +85,10 @@ impl EventKind {
         Self::ALL.into_iter().find(|kind| kind.name() == value)
     }
 
+    fn replaceable(self) -> bool {
+        matches!(self, Self::Question | Self::Progress)
+    }
+
     fn verb(self) -> &'static str {
         match self {
             Self::Question => "asks",
@@ -89,8 +101,9 @@ impl EventKind {
 }
 
 /// Where an event is on its way to the master: waiting in the queue, typed into the master,
-/// muted by a wake rule that has its kind off, or carried by the master's own results
-/// message because the master delegated that task.
+/// muted by a wake rule that has its kind off, carried by the master's own results
+/// message because the master delegated that task, or dropped from a full queue for newer
+/// events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventState {
@@ -98,10 +111,17 @@ pub enum EventState {
     Delivered,
     Muted,
     Carried,
+    Dropped,
 }
 
 impl EventState {
-    const ALL: [Self; 4] = [Self::Queued, Self::Delivered, Self::Muted, Self::Carried];
+    const ALL: [Self; 5] = [
+        Self::Queued,
+        Self::Delivered,
+        Self::Muted,
+        Self::Carried,
+        Self::Dropped,
+    ];
 
     fn name(self) -> &'static str {
         match self {
@@ -109,6 +129,7 @@ impl EventState {
             Self::Delivered => "delivered",
             Self::Muted => "muted",
             Self::Carried => "carried",
+            Self::Dropped => "dropped",
         }
     }
 
@@ -199,15 +220,17 @@ pub enum RuleLevel {
 pub enum NotificationKind {
     Escalation,
     WakePaused,
+    QueueFull,
 }
 
 impl NotificationKind {
-    const ALL: [Self; 2] = [Self::Escalation, Self::WakePaused];
+    const ALL: [Self; 3] = [Self::Escalation, Self::WakePaused, Self::QueueFull];
 
     fn name(self) -> &'static str {
         match self {
             Self::Escalation => "escalation",
             Self::WakePaused => "wake_paused",
+            Self::QueueFull => "queue_full",
         }
     }
 
@@ -337,12 +360,14 @@ pub struct AppEvents {
     pub unseen: i64,
 }
 
-/// The events typed into the master in one wake, oldest first, and their text.
+/// The events typed into the master in one wake, oldest first, their text and whether one
+/// of them is a question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wake {
     pub project: ProjectId,
     pub events: Vec<i64>,
     pub text: String,
+    pub asks: bool,
 }
 
 /// One busy sub-agent whose terminal the watch reads for a waiting question.
@@ -359,6 +384,7 @@ pub struct Watched {
 pub struct Watch {
     next: Option<Instant>,
     seen: BTreeMap<i64, String>,
+    screens: BTreeMap<i64, u64>,
 }
 
 impl Watch {
@@ -373,8 +399,9 @@ impl Watch {
         true
     }
 
-    /// Reads each watched agent's screen once: a new question is recorded as a question event
-    /// and marks the agent waiting; a question that left the screen clears the mark. Agents no
+    /// Reads each watched agent's screen once: a new question on a screen unchanged since the
+    /// last scan, so the harness stopped for input, is recorded as a question event and marks
+    /// the agent waiting; a question that left the screen clears the mark. Agents no
     /// longer watched are forgotten. Takes the connection, the terminal host, the busy
     /// sub-agents and the time. Returns any SQLite failure; an unreadable screen is skipped.
     pub fn scan(
@@ -395,15 +422,20 @@ impl Watch {
             self.seen.remove(&agent);
             clear_waiting(connection, agent)?;
         }
+        self.screens.retain(|agent, _| current.contains(agent));
         for watched in agents {
             let Ok(name) = AgentId::team(watched.agent) else {
                 continue;
             };
-            let Ok(stream) = host.attach(&name) else {
+            let Ok(screen) = host.screen(&name) else {
                 continue;
             };
-            match question(&stream.screen) {
-                Some(text) if self.seen.get(&watched.agent) != Some(&text) => {
+            let mut digest = DefaultHasher::new();
+            screen.hash(&mut digest);
+            let digest = digest.finish();
+            let idle = self.screens.insert(watched.agent, digest) == Some(digest);
+            match question(&screen) {
+                Some(text) if idle && self.seen.get(&watched.agent) != Some(&text) => {
                     record(
                         connection,
                         &watched.project,
@@ -425,12 +457,14 @@ impl Watch {
             }
         }
         assert!(self.seen.keys().all(|agent| current.contains(agent)));
+        assert!(self.screens.keys().all(|agent| current.contains(agent)));
         Ok(())
     }
 }
 
-/// Creates the team event tables when the engine database opens. Takes the engine
-/// connection. Returns any SQLite failure.
+/// Creates the team event tables when the engine database opens, and adds the cold start
+/// column to a wake table made before it. Takes the engine connection. Returns any SQLite
+/// failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -450,7 +484,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_event_wakes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
-                at_ms INTEGER NOT NULL
+                at_ms INTEGER NOT NULL,
+                cold INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS team_event_wakes_project ON team_event_wakes(project, at_ms);
             CREATE TABLE IF NOT EXISTS team_event_pauses (
@@ -486,7 +521,22 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );
             CREATE INDEX IF NOT EXISTS team_notifications_project ON team_notifications(project, seen_ms);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    let cold: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_event_wakes') WHERE name='cold')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !cold {
+        connection
+            .execute_batch(
+                "ALTER TABLE team_event_wakes ADD COLUMN cold INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(error)?;
+    }
+    Ok(())
 }
 
 fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
@@ -503,10 +553,12 @@ fn one_line(text: &str, max: usize) -> String {
     bound_text(&joined, max)
 }
 
-/// Names an agent the way events and the master address it until persona names land.
-/// Takes the harness and the team agent id. Returns `<harness>-<id>`.
-pub fn label(harness: &str, agent: i64) -> String {
-    format!("{harness}-{agent}")
+/// Names a sub-agent the way events, the master and every client show it: "Ada
+/// (@onboarding-fix)", "Ada" before its first job, or "Sub-agent 7" without a kept name.
+/// Takes the connection and the team agent id. Returns the label.
+pub fn label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
+    let name = super::names::name(connection, agent)?;
+    Ok(super::names::label(AgentRole::Sub, agent, name.as_ref()))
 }
 
 /// Records one event about a project's sub-agent in the queue for the master: the text
@@ -562,15 +614,29 @@ fn record_in(
     if !owned {
         return Ok(None);
     }
-    let queued: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM team_events WHERE project=?1 AND state='queued'",
-            [project.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if state == EventState::Queued && queued >= EVENTS_QUEUED_MAX {
-        return Ok(None);
+    if state == EventState::Queued {
+        if kind.replaceable() {
+            let same: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM team_events WHERE project=?1 AND agent=?2 AND kind=?3 AND state='queued'
+                     ORDER BY id DESC LIMIT 1",
+                    params![project.as_str(), agent, kind.name()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            if let Some(id) = same {
+                tx.execute(
+                    "UPDATE team_events SET text=?2, task=?3 WHERE id=?1",
+                    params![id, text, task],
+                )
+                .map_err(error)?;
+                return Ok(Some(id));
+            }
+        }
+        if !queue_room(tx, project, agent, kind, now)? {
+            return Ok(None);
+        }
     }
     make_room(
         tx,
@@ -589,8 +655,80 @@ fn record_in(
     Ok(Some(id))
 }
 
+/// Makes room in a full project queue for one more event of an agent: the oldest queued
+/// progress event, then question, is dropped, the agent's own first and only its own once it
+/// holds `EVENTS_QUEUED_PER_AGENT_MAX`; progress never displaces a question. Finished, failed
+/// and change set events are never dropped and may pass the bound up to
+/// `EVENTS_QUEUED_HARD_MAX` while their agent is under its share. A refusal tells the owner
+/// once while that notice is unseen. Takes the transaction, project, agent, kind and time.
+/// Returns whether the event may queue.
+fn queue_room(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    kind: EventKind,
+    now: i64,
+) -> Result<bool, EngineError> {
+    let (all, mine): (i64, i64) = tx
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(agent=?2),0) FROM team_events WHERE project=?1 AND state='queued'",
+            params![project.as_str(), agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?;
+    assert!(mine <= all);
+    if all < EVENTS_QUEUED_MAX {
+        return Ok(true);
+    }
+    let over_share = mine >= EVENTS_QUEUED_PER_AGENT_MAX;
+    let victim: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM team_events WHERE project=?1 AND state='queued'
+             AND (kind='progress' OR (kind='question' AND ?4=0)) AND (?3=0 OR agent=?2)
+             ORDER BY agent=?2 DESC, kind='question', id LIMIT 1",
+            params![
+                project.as_str(),
+                agent,
+                over_share,
+                kind == EventKind::Progress
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(victim) = victim {
+        let changed = tx
+            .execute(
+                "UPDATE team_events SET state='dropped' WHERE id=?1 AND state='queued'",
+                [victim],
+            )
+            .map_err(error)?;
+        assert_eq!(changed, 1);
+        return Ok(true);
+    }
+    if !kind.replaceable() && !over_share && all < EVENTS_QUEUED_HARD_MAX {
+        return Ok(true);
+    }
+    let told: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_notifications WHERE project=?1 AND kind='queue_full' AND seen_ms IS NULL)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !told {
+        let text = format!(
+            "{} has a {} event the master did not get: this project's event queue is full. The Agents tab shows what waits.",
+            label(tx, agent)?,
+            kind.name().replace('_', " ")
+        );
+        notify(tx, project, NotificationKind::QueueFull, &text, now)?;
+    }
+    Ok(false)
+}
+
 /// Records how a sub-agent's task ended once its turn finished: done becomes a finished
-/// event, or a question when its last line asks one; failed becomes a failed event. A task
+/// event, whatever its last line asks; failed becomes a failed event. A task
 /// the master delegated reaches it in the results message, so its event is kept as carried.
 /// The agent's waiting mark ends with the turn. Takes the connection, the task and the time.
 /// Returns the event id, or none for a task still queued, cancelled or unknown.
@@ -634,23 +772,12 @@ pub fn task_ended(
     let (kind, text) = match status.as_str() {
         "done" => {
             let result = result.unwrap_or_default();
-            let asks = result
-                .lines()
-                .rev()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .is_some_and(|line| line.ends_with('?'));
-            let kind = if asks {
-                EventKind::Question
-            } else {
-                EventKind::Finished
-            };
             let text = if result.trim().is_empty() {
                 "Done, with no reply text.".to_owned()
             } else {
                 result
             };
-            (kind, text)
+            (EventKind::Finished, text)
         }
         "failed" => (
             EventKind::Failed,
@@ -735,19 +862,40 @@ pub fn questions(
         .map_err(error)
 }
 
-/// Finds the project's sub-agent a master names: `<harness>-<id>` as events show it,
-/// `team-<id>` or the bare id. Takes the connection, the project and the name.
+const SUB_AGENT_PREFIX: &str = "Sub-agent ";
+
+/// Finds the project's live sub-agent a master names: its persona or `@handle` as the names
+/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`.
+/// Takes the connection, the project and the name.
 /// Returns the team agent id, or none for an unknown name, another project's agent or a master.
 pub fn resolve(
     connection: &Connection,
     project: &ProjectId,
     name: &str,
 ) -> Result<Option<i64>, EngineError> {
-    let name = name.trim().trim_start_matches('@');
-    let (prefix, digits) = match name.rsplit_once('-') {
-        Some((prefix, digits)) => (Some(prefix), digits),
-        None => (None, name),
-    };
+    let name = name.trim();
+    if let Some(agent) = super::names::resolve(connection, project, name)? {
+        let sub: bool = connection
+            .query_row(
+                "SELECT role='sub' FROM team_agents WHERE id=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if sub {
+            return Ok(Some(agent));
+        }
+    }
+    let name = name.trim_start_matches('@');
+    let numbered = name
+        .get(..SUB_AGENT_PREFIX.len())
+        .filter(|head| head.eq_ignore_ascii_case(SUB_AGENT_PREFIX))
+        .map(|_| &name[SUB_AGENT_PREFIX.len()..]);
+    let (prefix, digits) =
+        match numbered.map_or_else(|| name.rsplit_once('-'), |digits| Some(("team", digits))) {
+            Some((prefix, digits)) => (Some(prefix), digits),
+            None => (None, name),
+        };
     let Ok(agent) = digits.parse::<i64>() else {
         return Ok(None);
     };
@@ -807,6 +955,48 @@ pub fn send_to_agent(
     }
     clear_waiting(connection, id)?;
     Ok(Ok(id))
+}
+
+/// The handlers the live master's `message`, `answer` and `status` tools call, set on the
+/// team runtime with `TeamRuntime::with_events`.
+pub const HANDLERS: super::master::TeamEvents = super::master::TeamEvents {
+    send_to_agent: tool_send,
+    answer: tool_send,
+    status: tool_status,
+};
+
+/// Types a live master's message or answer into one of its sub-agents for its team tools.
+/// Takes the connection, terminal host, project, the agent's name and the text.
+/// Returns the sentence the master reads, or the plain reason nothing was typed.
+fn tool_send(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    let refused = |reason: &str| Err(format!("Not sent: {reason}"));
+    match send_to_agent(connection, host, project, agent, text) {
+        Ok(Ok(id)) => Ok(format!(
+            "Typed into {}.",
+            label(connection, id).map_err(|_| "Not sent: the team database is unavailable.")?
+        )),
+        Ok(Err("team_message_invalid")) => refused("the text is empty or too long."),
+        Ok(Err("team_agent_not_found")) => {
+            refused("no live sub-agent of this project has that name.")
+        }
+        Ok(Err("team_agent_not_running")) => refused("that sub-agent's terminal is not running."),
+        Ok(Err(_)) => refused("that sub-agent's terminal did not take the text."),
+        Err(_) => refused("the team database is unavailable."),
+    }
+}
+
+/// Describes the project's team for a live master's status tool. Takes the connection and
+/// the project. Returns the status lines, or the plain reason it could not be read.
+fn tool_status(connection: &Connection, project: &ProjectId) -> Result<String, String> {
+    status(connection, project)
+        .map(|status| status.text())
+        .map_err(|_| "The team status is unavailable right now.".to_owned())
 }
 
 /// Raises an app notification for a decision only the owner makes: security, destructive or
@@ -916,18 +1106,6 @@ pub fn seen(
         .map_err(error)
 }
 
-fn agent_label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
-    let harness: Option<String> = connection
-        .query_row(
-            "SELECT harness FROM team_agents WHERE id=?1",
-            [agent],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    Ok(label(harness.as_deref().unwrap_or("agent"), agent))
-}
-
 fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamEvent> {
     let kind: String = row.get(3)?;
     let state: String = row.get(5)?;
@@ -938,7 +1116,7 @@ fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Resu
     Ok(TeamEvent {
         id: row.get(0)?,
         agent,
-        label: agent_label(connection, agent).unwrap_or_else(|_| label("agent", agent)),
+        label: label(connection, agent).map_err(|_| invalid("agent"))?,
         task: row.get(2)?,
         kind: EventKind::parse(&kind).ok_or_else(|| invalid("kind"))?,
         text: row.get(4)?,
@@ -998,25 +1176,25 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
-    let agents = rows
-        .into_iter()
-        .filter_map(|(agent, harness, status, task, prompt)| {
-            let status = AgentStatus::parse(&status)?;
-            Some(AgentLine {
-                agent,
-                label: label(&harness, agent),
-                harness,
-                status,
-                status_label: status.label().to_owned(),
-                task,
-                task_prompt: prompt.map(|prompt| one_line(&prompt, TASK_EXCERPT_BYTES_MAX)),
-                waiting: waiting.get(&agent).cloned(),
-            })
-        })
-        .collect();
+    let mut agents = Vec::with_capacity(rows.len());
+    for (agent, harness, status, task, prompt) in rows {
+        let Some(status) = AgentStatus::parse(&status) else {
+            continue;
+        };
+        agents.push(AgentLine {
+            agent,
+            label: label(connection, agent)?,
+            harness,
+            status,
+            status_label: status.label().to_owned(),
+            task,
+            task_prompt: prompt.map(|prompt| one_line(&prompt, TASK_EXCERPT_BYTES_MAX)),
+            waiting: waiting.get(&agent).cloned(),
+        });
+    }
     let paused: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM team_event_pauses WHERE project=?1)",
+            "SELECT EXISTS(SELECT 1 FROM team_event_pauses WHERE project=?1 AND agent>=0)",
             [project.as_str()],
             |row| row.get(0),
         )
@@ -1236,7 +1414,7 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
     let (effective, level) = rule(connection, Some(project), None)?;
     let paused: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM team_event_pauses WHERE project=?1)",
+            "SELECT EXISTS(SELECT 1 FROM team_event_pauses WHERE project=?1 AND agent>=0)",
             [project.as_str()],
             |row| row.get(0),
         )
@@ -1356,14 +1534,20 @@ fn pause(
     if added == 0 {
         return Ok(());
     }
-    let whose = if agent == 0 {
-        format!("project {}", project.as_str())
-    } else {
-        agent_label(tx, agent)?
+    let text = match agent {
+        COLD_PAUSE => format!(
+            "Questions stopped starting the master of project {} after {cap} starts in the last hour. They wait until the master runs or the hour rolls over.",
+            project.as_str()
+        ),
+        0 => format!(
+            "Auto-wake of the master for project {} paused after {cap} wakes in the last hour. Events wait in the queue until the hour rolls over or you raise the limit.",
+            project.as_str()
+        ),
+        _ => format!(
+            "Auto-wake of the master for {} paused after {cap} wakes in the last hour. Events wait in the queue until the hour rolls over or you raise the limit.",
+            label(tx, agent)?
+        ),
     };
-    let text = format!(
-        "Auto-wake of the master for {whose} paused after {cap} wakes in the last hour. Events wait in the queue until the hour rolls over or you raise the limit."
-    );
     notify(tx, project, NotificationKind::WakePaused, &text, now).map(drop)
 }
 
@@ -1451,6 +1635,7 @@ pub fn due(
     }
     let mut events = Vec::new();
     let mut text = String::new();
+    let mut asks = false;
     for event in wanted.iter().filter(|event| !capped.contains(&event.agent)) {
         let next = line(event);
         if events.len() >= EVENTS_PER_WAKE_MAX
@@ -1463,6 +1648,7 @@ pub fn due(
         }
         text.push_str(&next);
         events.push(event.id);
+        asks |= event.kind == EventKind::Question;
     }
     if events.is_empty() {
         return Ok(None);
@@ -1472,17 +1658,19 @@ pub fn due(
         project: project.clone(),
         events,
         text,
+        asks,
     }))
 }
 
 /// Marks a wake's events delivered once its text reached the master, counts the wake toward
-/// the hourly cap and ends the pauses of that project and of the agents it carried.
-/// Takes the transaction, the wake and the time. Returns the wake id.
-pub fn woke(tx: &Transaction<'_>, wake: &Wake, now: i64) -> Result<i64, EngineError> {
+/// the hourly cap, and toward the cold cap when it started a master that was not running,
+/// and ends the pauses of that project and of the agents it carried.
+/// Takes the transaction, the wake, whether it was cold and the time. Returns the wake id.
+pub fn woke(tx: &Transaction<'_>, wake: &Wake, cold: bool, now: i64) -> Result<i64, EngineError> {
     assert!(!wake.events.is_empty());
     tx.execute(
-        "INSERT INTO team_event_wakes(project,at_ms) VALUES (?1,?2)",
-        params![wake.project.as_str(), now],
+        "INSERT INTO team_event_wakes(project,at_ms,cold) VALUES (?1,?2,?3)",
+        params![wake.project.as_str(), now, cold],
     )
     .map_err(error)?;
     let id = tx.last_insert_rowid();
@@ -1497,7 +1685,7 @@ pub fn woke(tx: &Transaction<'_>, wake: &Wake, now: i64) -> Result<i64, EngineEr
         assert!(changed <= 1);
     }
     tx.execute(
-        "DELETE FROM team_event_pauses WHERE project=?1 AND (agent=0 OR agent IN (SELECT agent FROM team_events WHERE wake=?2))",
+        "DELETE FROM team_event_pauses WHERE project=?1 AND (agent<=0 OR agent IN (SELECT agent FROM team_events WHERE wake=?2))",
         params![wake.project.as_str(), id],
     )
     .map_err(error)?;
@@ -1506,7 +1694,8 @@ pub fn woke(tx: &Transaction<'_>, wake: &Wake, now: i64) -> Result<i64, EngineEr
 
 /// Delivers due events through the engine-driven master: once nothing else waits for the
 /// master, one engine message with the wake's lines starts its next turn. With no live
-/// master, only a queued question starts one; other events wait for the master to run.
+/// master, only a queued question starts one, at most `COLD_WAKES_PER_HOUR_MAX` an hour;
+/// other events wait for the master to run.
 /// Takes the connection, the project, whether its master runs and the time.
 /// Returns whether a wake was sent.
 pub fn deliver_by_message(
@@ -1527,10 +1716,32 @@ pub fn deliver_by_message(
     if waiting > 0 || !(master_live || asking) {
         return Ok(false);
     }
+    if !master_live {
+        let cap = rule(&tx, Some(project), None)?
+            .0
+            .hourly_cap
+            .min(COLD_WAKES_PER_HOUR_MAX);
+        let cold: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM team_event_wakes WHERE project=?1 AND cold=1 AND at_ms>=?2",
+                params![project.as_str(), now.saturating_sub(HOUR_MS)],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if cold >= i64::from(cap) {
+            pause(&tx, project, COLD_PAUSE, cap, now)?;
+            tx.commit().map_err(error)?;
+            return Ok(false);
+        }
+    }
     let Some(wake) = due(&tx, project, now)? else {
         tx.commit().map_err(error)?;
         return Ok(false);
     };
+    if !master_live && !wake.asks {
+        tx.commit().map_err(error)?;
+        return Ok(false);
+    }
     let sent = append_message(
         &tx,
         project,
@@ -1541,7 +1752,7 @@ pub fn deliver_by_message(
     )?
     .is_ok();
     if sent {
-        woke(&tx, &wake, now)?;
+        woke(&tx, &wake, !master_live, now)?;
     }
     tx.commit().map_err(error)?;
     Ok(sent)

@@ -1000,7 +1000,8 @@ impl TeamRuntime {
             .connection
             .prepare(
                 "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled'))
+                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
                  UNION SELECT project FROM team_settings WHERE keep_warm=1
                  UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
                  UNION SELECT project FROM team_live_masters WHERE live=1",
@@ -1060,8 +1061,8 @@ impl TeamRuntime {
     }
 
     fn sync_pool(&mut self, stored: &StoredSetup, access: &ModelAccess) -> Result<(), EngineError> {
-        for slot in &stored.team.sub_harnesses {
-            let Some(launch) = launch_harness(&slot.harness) else {
+        for harness in super::plan_harnesses(&stored.team) {
+            let Some(launch) = launch_harness(&harness) else {
                 continue;
             };
             let usable = matches!(
@@ -1076,7 +1077,7 @@ impl TeamRuntime {
             self.connection
                 .execute(
                     "UPDATE team_tasks SET status=?3 WHERE project=?1 AND harness=?2 AND status=?4",
-                    params![stored.project_id.as_str(), slot.harness, to, from],
+                    params![stored.project_id.as_str(), harness, to, from],
                 )
                 .map_err(error)?;
         }
@@ -1483,7 +1484,11 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&framing(stored, team_tool));
+            prompt.push_str(&framing(
+                stored,
+                team_tool,
+                &super::available_harnesses(access, project),
+            ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -1659,7 +1664,11 @@ impl TeamRuntime {
         } else {
             None
         };
-        let framing = live_framing(stored, self.workers[&id].team_tool);
+        let framing = live_framing(
+            stored,
+            self.workers[&id].team_tool,
+            &super::available_harnesses(access, &stored.project_id),
+        );
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(framing, grant)).is_ok() {
             worker.briefed = true;
@@ -1719,12 +1728,14 @@ impl TeamRuntime {
         };
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let speaker = if author == "owner" {
-            "[owner]"
+            "[owner] "
+        } else if text.starts_with("[team] ") {
+            ""
         } else {
-            "[team]"
+            "[team] "
         };
         let typed = bound_text(
-            &format!("{heard}{speaker} {text}"),
+            &format!("{heard}{speaker}{text}"),
             super::master::INPUT_TEXT_MAX,
         );
         let state =
@@ -1837,19 +1848,21 @@ impl TeamRuntime {
             return Ok(());
         }
         type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+        let live = crate::master_sessions::live_session(&self.connection, project)?;
         let ready: Vec<ReadyTask> = {
             let mut statement = self
                 .connection
                 .prepare(
                     "SELECT t.id,t.harness,t.status,t.result,t.error FROM team_tasks t
                      WHERE t.project=?1 AND t.delivered=0 AND t.source='master' AND t.status IN ('done','failed','cancelled')
+                     AND (t.session IS NULL OR t.session IS ?2)
                      AND NOT EXISTS (SELECT 1 FROM team_tasks o WHERE o.project=t.project AND o.turn IS t.turn AND t.turn IS NOT NULL
                                      AND o.status IN ('queued','needs_pool','running'))
                      ORDER BY t.id LIMIT 16",
                 )
                 .map_err(error)?;
             statement
-                .query_map([project.as_str()], |row| {
+                .query_map(params![project.as_str(), live], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -1927,12 +1940,17 @@ impl TeamRuntime {
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         for (task, harness, prompt, pin) in queued {
-            let Some(slot) = stored
-                .team
-                .sub_harnesses
-                .iter()
-                .find(|s| s.harness == harness)
-            else {
+            let slot = if stored.team.sub_harnesses.is_empty() {
+                super::slot(&stored.team, &harness)
+            } else {
+                stored
+                    .team
+                    .sub_harnesses
+                    .iter()
+                    .find(|s| s.harness == harness)
+                    .cloned()
+            };
+            let Some(slot) = slot else {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
@@ -2059,6 +2077,12 @@ impl TeamRuntime {
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
+                )
+                .map_err(error)?;
+            self.connection
+                .execute(
+                    "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
+                    params![task, agent],
                 )
                 .map_err(error)?;
             names::assign_task_role(&self.connection, project, agent, task)?;
@@ -3112,6 +3136,9 @@ impl TeamRuntime {
             worktree: PathBuf::from(worktree),
             git_dir: PathBuf::from(git_dir),
         };
+        let task = turn
+            .strip_prefix("task-")
+            .and_then(|task| task.parse::<i64>().ok());
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -3383,24 +3410,12 @@ impl TeamRuntime {
 }
 
 /// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup and whether the team tool is on.
+/// and the project brief. Input: the setup, whether the team tool is on and, for an
+/// empty plan, the harnesses with an eligible account now.
 /// Output: the frame text, with the brief from `master_brief`.
-fn framing(stored: &StoredSetup, team_tool: bool) -> String {
+fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
     let brief = master_brief(stored);
-    let team = stored
-        .team
-        .sub_harnesses
-        .iter()
-        .map(|slot| {
-            format!(
-                "- {}: up to {} agents, tools {}",
-                slot.harness,
-                slot.agents,
-                if slot.tools { "on" } else { "off" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
@@ -3416,11 +3431,16 @@ fn framing(stored: &StoredSetup, team_tool: bool) -> String {
     )
 }
 
-/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
-/// how team events arrive and when to ask the owner. Takes the setup and whether it has
-/// the engine's team tools. Returns the text.
-fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
-    let team = stored
+/// Lists a master's sub-agents: each plan slot with its count and tools, or for an empty
+/// plan the harnesses it can use now under the team maximum. Takes the setup and the
+/// harnesses with an eligible account. Returns lines without a trailing newline.
+fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
+    if stored.team.sub_harnesses.is_empty() {
+        return super::any_harness_text(&stored.team, available)
+            .trim_end()
+            .to_owned();
+    }
+    stored
         .team
         .sub_harnesses
         .iter()
@@ -3433,7 +3453,15 @@ fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
+/// how team events arrive and when to ask the owner. Takes the setup, whether it has the
+/// engine's team tools and, for an empty plan, the harnesses with an eligible account now.
+/// Returns the text.
+fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
+    let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
             "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
@@ -4160,6 +4188,7 @@ fn run_code(error: &RunError) -> &str {
         RunError::Jobs(_) => "research_jobs_failed",
         RunError::Busy => "account_busy",
         RunError::Uncertain(code) => code,
+        RunError::Setup(code) => code,
     }
 }
 
@@ -4350,6 +4379,7 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
+    let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

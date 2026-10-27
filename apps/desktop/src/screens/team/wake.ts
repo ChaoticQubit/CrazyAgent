@@ -23,6 +23,7 @@ const STATES: Record<TeamEvent["state"], string> = {
   delivered: "Told the master",
   muted: "Not sent",
   carried: "In the task result",
+  dropped: "Replaced by newer events",
 };
 
 const LEVELS: Record<WakeRuleLevel, string> = {

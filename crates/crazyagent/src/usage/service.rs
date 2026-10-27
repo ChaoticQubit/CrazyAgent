@@ -169,18 +169,13 @@ impl Usage {
         self
     }
 
-    /// Runs one upkeep step at `now_ms`: counts every live or lately stopped agent's and
-    /// recent research run's records, then polls every account when ten minutes passed
-    /// since the last poll or the owner asked to refresh since. Output: done, or the
-    /// store's failure.
+    /// Runs one upkeep step at `now_ms`: polls every account when ten minutes passed
+    /// since the last poll or the owner asked to refresh since, then counts every live or
+    /// lately stopped agent's and recent research run's records, so a run's own limit
+    /// readings meet a poll as fresh as the step allows. Output: done, or the store's
+    /// failure.
     pub fn step(&mut self, now_ms: i64) -> Result<(), EngineError> {
         let access = (self.access)().unwrap_or_default();
-        self.scan_team(&access, now_ms)?;
-        scan_runs(
-            &self.db,
-            |project, account| pool_of(&access, project, account),
-            now_ms,
-        )?;
         let refresh = refresh_requested(&self.db)?;
         let due = match self.polled_ms {
             None => true,
@@ -192,6 +187,12 @@ impl Usage {
             self.polled_ms = Some(now_ms);
             self.poll_all(&access, now_ms)?;
         }
+        self.scan_team(&access, now_ms)?;
+        scan_runs(
+            &self.db,
+            |project, account| pool_of(&access, project, account),
+            now_ms,
+        )?;
         Ok(())
     }
 

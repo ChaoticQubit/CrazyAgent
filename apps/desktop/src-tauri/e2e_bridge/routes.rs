@@ -406,6 +406,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.project_read_paths(&id).await }.await;
             routed(result)
         }
+        "desktop_project_files" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                query: String,
+            }
+            let Args { id, query } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.project_files(&id, &query).await }.await;
+            routed(result)
+        }
         "desktop_set_project_read_paths" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -556,22 +570,6 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_hand_off(&id, reply, step, generation) .await }.await;
             routed(result)
         }
-        "desktop_team_rename" => {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                id: String,
-                agent: i64,
-                handle: String,
-                generation: u64,
-            }
-            let Args { id, agent, handle, generation } = match parse(args) {
-                Ok(args) => args,
-                Err(invalid) => return invalid,
-            };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .team_rename(&id, agent, handle, generation) .await }.await;
-            routed(result)
-        }
         "desktop_team_events" => {
             let result: Result<_, BridgeError> = async { lock(state).await?.team_events().await }.await;
             routed(result)
@@ -589,6 +587,22 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_wake_rule(target, rule, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_rename" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                agent: i64,
+                handle: String,
+                generation: u64,
+            }
+            let Args { id, agent, handle, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_rename(&id, agent, handle, generation) .await }.await;
             routed(result)
         }
         "desktop_team_seen" => {
@@ -984,6 +998,80 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .close_master(&ticket, &session_id, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_master_sessions" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+            }
+            let Args { ticket } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.master_sessions(&ticket).await }.await;
+            routed(result)
+        }
+        "desktop_master_inputs" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                session_id: String,
+                cursors: Vec<String>,
+            }
+            let Args { ticket, session_id, cursors } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .master_inputs(&ticket, &session_id, &cursors) .await }.await;
+            routed(result)
+        }
+        "desktop_master_session_turns" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                session_id: String,
+                cursor: Option<crazyagent::master_session::MasterCursor>,
+            }
+            let Args { ticket, session_id, cursor } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .session_turns(&ticket, &session_id, cursor) .await }.await;
+            routed(result)
+        }
+        "desktop_new_master_session" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                cancel_running: bool,
+                generation: u64,
+            }
+            let Args { ticket, cancel_running, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .new_master_session(&ticket, cancel_running, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_resume_master_session" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                session_id: String,
+                cancel_running: bool,
+                generation: u64,
+            }
+            let Args { ticket, session_id, cancel_running, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .resume_master_session(&ticket, &session_id, cancel_running, generation) .await }.await;
             routed(result)
         }
         "desktop_cancel_master_turn" => {

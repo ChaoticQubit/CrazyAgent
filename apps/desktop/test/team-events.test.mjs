@@ -34,6 +34,7 @@ test("an event reads like the line the master gets and says where it went", () =
   assert.equal(wake.eventLine(event(1, "question", "queued", "Proceed? | 1. Yes | 2. No")), "claude-7 asks: Proceed? | 1. Yes | 2. No");
   assert.equal(wake.eventLine(event(2, "change_set_ready", "delivered", "3 files")), "claude-7 has changes ready: 3 files");
   assert.equal(wake.eventState("muted"), "Not sent");
+  assert.equal(wake.eventState("dropped"), "Replaced by newer events");
   assert.equal(wake.ruleSource(false, "app"), "Uses the app rule.");
   assert.equal(wake.ruleSource(true, "app"), "Set here. Reset to use the rule above it.");
 });
