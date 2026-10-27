@@ -68,6 +68,9 @@ const EVENTS_QUEUED: usize = 64;
 const WRITE_TIME: Duration = Duration::from_secs(10);
 const PATH_BYTES_MAX: usize = 4096;
 const TEXT_BYTES_MAX: usize = 16384;
+/// The most bytes one diff comment may hold, so with its file and line it fits one typed
+/// agent prompt and one team conversation message.
+pub(super) const COMMENT_BYTES_MAX: usize = 2048;
 const NAME_BYTES_MAX: usize = 128;
 const VERSION_BYTES_MAX: usize = 64;
 const CAPABILITY: &str = "capability";
@@ -191,8 +194,9 @@ pub enum IdeEvent {
 
 impl IdeRequest {
     /// Checks every argument's bounds before any handler runs: paths are relative, at most
-    /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX` and a
-    /// comment is not blank on a line from 1; extension ids are `publisher.name`.
+    /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX`, a comment
+    /// fits `COMMENT_BYTES_MAX` and is not blank on a line from 1; extension ids are
+    /// `publisher.name`.
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
@@ -202,7 +206,7 @@ impl IdeRequest {
             } => {
                 relative(path)
                     && *line > 0
-                    && text.len() <= TEXT_BYTES_MAX
+                    && text.len() <= COMMENT_BYTES_MAX
                     && !text.trim().is_empty()
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
@@ -593,7 +597,9 @@ async fn change_call(
     {
         let root = runtime.ide()?.root;
         match call {
-            IdeCall::Comment { .. } => comments::answer(root, project.clone(), call).await,
+            IdeCall::Comment { .. } => {
+                comments::answer(root, runtime.terminal().ok(), project.clone(), call).await
+            }
             call => changes::answer(root, project.clone(), call).await,
         }
     }

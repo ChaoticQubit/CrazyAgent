@@ -1,14 +1,14 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { COMMENT_SENT, type IdeChangeSet, commentRefusal, commentTarget, refusal } from "./scm-model.js";
+import { type IdeChangeSet, commentRefusal, commentSent, commentTarget, commentTooLong, refusal } from "./scm-model.js";
 
 const CONTROLLER = "crazyagent.comments";
 const FRESH_MS = 5_000;
 
-/** Lets the owner comment on the agent side of a change set's diff, the file in the agent's
- * worktree: each comment goes to the engine with its file and line and reaches the agent
- * as one message in the project's team conversation. Inputs: the extension context and
- * the engine client. Output: none; all is disposed with the extension. */
+/** Lets the owner comment on the agent side of a team agent's change set diff, the file in
+ * the agent's worktree: each comment goes to the engine with its file and line, which
+ * delivers it to the agent that made the set. Inputs: the extension context and the engine
+ * client. Output: none; all is disposed with the extension. */
 export function registerComments(context: vscode.ExtensionContext, engine: Engine): void {
   const controller = vscode.comments.createCommentController(CONTROLLER, "CrazyAgent comments");
   controller.options = { prompt: "Comment for the agent", placeHolder: "What should the agent change here?" };
@@ -55,6 +55,10 @@ export function registerComments(context: vscode.ExtensionContext, engine: Engin
       void vscode.window.showErrorMessage(refusal("changes_not_found"));
       return;
     }
+    if (commentTooLong(text)) {
+      void vscode.window.showErrorMessage(commentRefusal("ide_comment_too_long"));
+      return;
+    }
     const line = (thread.range?.start.line ?? 0) + 1;
     let answer;
     try {
@@ -71,7 +75,7 @@ export function registerComments(context: vscode.ExtensionContext, engine: Engin
     body.appendText(text);
     thread.comments = [...thread.comments, { body, mode: vscode.CommentMode.Preview, author: { name: "You" }, label: "Sent" }];
     thread.canReply = false;
-    void vscode.window.showInformationMessage(COMMENT_SENT);
+    void vscode.window.showInformationMessage(commentSent(target.agent));
   };
 
   context.subscriptions.push(

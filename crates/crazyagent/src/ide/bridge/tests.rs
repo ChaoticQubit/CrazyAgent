@@ -414,6 +414,7 @@ fn ide_request_bounds_are_refused() {
         json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs", "page": 0 } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 0, "text": "x" } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": " " } }),
+        json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": "x".repeat(COMMENT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.accept", "args": { "id": id, "head": "a".repeat(40), "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.extension_request", "args": { "id": "../evil", "version": "1.0.0" } }),
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),

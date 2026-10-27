@@ -80,6 +80,10 @@ function registerComments(context, engine) {
             void vscode.window.showErrorMessage((0, scm_model_js_1.refusal)("changes_not_found"));
             return;
         }
+        if ((0, scm_model_js_1.commentTooLong)(text)) {
+            void vscode.window.showErrorMessage((0, scm_model_js_1.commentRefusal)("ide_comment_too_long"));
+            return;
+        }
         const line = (thread.range?.start.line ?? 0) + 1;
         let answer;
         try {
@@ -97,7 +101,7 @@ function registerComments(context, engine) {
         body.appendText(text);
         thread.comments = [...thread.comments, { body, mode: vscode.CommentMode.Preview, author: { name: "You" }, label: "Sent" }];
         thread.canReply = false;
-        void vscode.window.showInformationMessage(scm_model_js_1.COMMENT_SENT);
+        void vscode.window.showInformationMessage((0, scm_model_js_1.commentSent)(target.agent));
     };
     context.subscriptions.push(controller, engine.on("change_sets_changed", () => {
         loaded = 0;

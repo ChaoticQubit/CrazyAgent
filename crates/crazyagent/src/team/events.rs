@@ -1301,7 +1301,7 @@ const CLOSE_BRACKETS: [char; 16] = [
 /// and tortoise shell ones among them, into parentheses, so agent text can never show a
 /// `[owner]` or `[team]` tag to the master; sub-agent results use it too. Takes the text.
 /// Returns it with them replaced.
-pub(super) fn plain_brackets(text: &str) -> String {
+pub(crate) fn plain_brackets(text: &str) -> String {
     text.chars()
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {

@@ -48,6 +48,15 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
 
 impl Case {
     pub(in crate::ide::bridge) fn new() -> Self {
+        Self::with(ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "7".into(),
+            label: "Ada (@builder) \u{b7} Codex".into(),
+        })
+    }
+
+    /// The case with its change set made by `agent`.
+    pub(in crate::ide::bridge) fn with(agent: ChangeAgent) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let (repo, home, engine) = (root.join("repo"), root.join("home"), root.join("engine"));
@@ -75,11 +84,7 @@ impl Case {
         let db = landing::open(&engine).unwrap();
         let workspace = Workspace {
             project: project.clone(),
-            agent: ChangeAgent {
-                kind: AgentKind::Sub,
-                id: "7".into(),
-                label: "Ada (@builder) \u{b7} Codex".into(),
-            },
+            agent,
             repository: repo.clone(),
             worktree: worktree.clone(),
             git_dir: repo.join(".git/worktrees/agent-7"),
