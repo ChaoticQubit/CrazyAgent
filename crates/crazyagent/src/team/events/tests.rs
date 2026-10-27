@@ -336,6 +336,57 @@ fn the_watch_reads_only_the_visible_screen_of_an_agent_with_long_scrollback_and_
 }
 
 #[test]
+fn the_live_master_tool_handlers_type_into_a_named_sub_agent_and_report_the_team() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = fixture.agent(PROJECT, "sub", "codex", "working");
+    let script = fixture.base.join("ask.sh");
+    let answered = fixture.base.join("answered.txt");
+    std::fs::write(&script, ASK).unwrap();
+    fixture.pane(
+        &host,
+        agent,
+        &[
+            "/bin/sh",
+            script.to_str().unwrap(),
+            answered.to_str().unwrap(),
+        ],
+    );
+    let name = AgentId::team(agent).unwrap();
+    until("the question on screen", || {
+        question(&host.screen(&name).unwrap()).is_some()
+    });
+    assert_eq!(
+        (HANDLERS.answer)(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            "Sub-agent 999",
+            "1"
+        ),
+        Err("Not sent: no live sub-agent of this project has that name.".to_owned())
+    );
+    assert_eq!(
+        (HANDLERS.answer)(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &format!("Sub-agent {agent}"),
+            "1"
+        ),
+        Ok(format!("Typed into Sub-agent {agent}."))
+    );
+    until("the typed answer", || {
+        std::fs::read_to_string(&answered).is_ok_and(|text| text == "answer:1\n")
+    });
+    let told = (HANDLERS.status)(&fixture.connection, &project()).unwrap();
+    assert!(
+        told.contains(&format!("Sub-agent {agent} (codex): Working")),
+        "{told}"
+    );
+}
+
+#[test]
 fn a_watched_agent_that_stops_being_busy_loses_its_waiting_mark() {
     let fixture = Fixture::new();
     let host = fixture.host();
@@ -1131,6 +1182,49 @@ fn wakes_that_start_a_master_that_is_not_running_have_their_own_smaller_cap() {
             .unwrap()
             .ends_with("asks: Question 100?")
     );
+}
+
+#[test]
+fn a_wake_table_made_before_cold_starts_gains_the_column_and_counts_them() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = Connection::open(root.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_event_wakes (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, at_ms INTEGER NOT NULL);
+             INSERT INTO team_event_wakes(project,at_ms) VALUES ('team-events',1);",
+        )
+        .unwrap();
+    super::super::initialize(&connection).unwrap();
+    super::super::initialize(&connection).unwrap();
+    let ada: i64 = {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'sub','codex',0,'working',1,1)",
+                [PROJECT],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    record(
+        &connection,
+        &project(),
+        ada,
+        None,
+        EventKind::Question,
+        "Proceed?",
+        2,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(deliver_by_message(&connection, &project(), false, 3).unwrap());
+    let rows: Vec<(i64, bool)> = connection
+        .prepare("SELECT at_ms,cold FROM team_event_wakes ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, [(1, false), (3, true)]);
 }
 
 #[test]

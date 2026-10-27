@@ -1719,12 +1719,14 @@ impl TeamRuntime {
         };
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let speaker = if author == "owner" {
-            "[owner]"
+            "[owner] "
+        } else if text.starts_with("[team] ") {
+            ""
         } else {
-            "[team]"
+            "[team] "
         };
         let typed = bound_text(
-            &format!("{heard}{speaker} {text}"),
+            &format!("{heard}{speaker}{text}"),
             super::master::INPUT_TEXT_MAX,
         );
         let state =
@@ -4345,6 +4347,7 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
+    let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

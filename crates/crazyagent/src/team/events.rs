@@ -462,8 +462,9 @@ impl Watch {
     }
 }
 
-/// Creates the team event tables when the engine database opens. Takes the engine
-/// connection. Returns any SQLite failure.
+/// Creates the team event tables when the engine database opens, and adds the cold start
+/// column to a wake table made before it. Takes the engine connection. Returns any SQLite
+/// failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -520,7 +521,22 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );
             CREATE INDEX IF NOT EXISTS team_notifications_project ON team_notifications(project, seen_ms);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    let cold: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_event_wakes') WHERE name='cold')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !cold {
+        connection
+            .execute_batch(
+                "ALTER TABLE team_event_wakes ADD COLUMN cold INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(error)?;
+    }
+    Ok(())
 }
 
 fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
@@ -939,6 +955,48 @@ pub fn send_to_agent(
     }
     clear_waiting(connection, id)?;
     Ok(Ok(id))
+}
+
+/// The handlers the live master's `message`, `answer` and `status` tools call, set on the
+/// team runtime with `TeamRuntime::with_events`.
+pub const HANDLERS: super::master::TeamEvents = super::master::TeamEvents {
+    send_to_agent: tool_send,
+    answer: tool_send,
+    status: tool_status,
+};
+
+/// Types a live master's message or answer into one of its sub-agents for its team tools.
+/// Takes the connection, terminal host, project, the agent's name and the text.
+/// Returns the sentence the master reads, or the plain reason nothing was typed.
+fn tool_send(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    let refused = |reason: &str| Err(format!("Not sent: {reason}"));
+    match send_to_agent(connection, host, project, agent, text) {
+        Ok(Ok(id)) => Ok(format!(
+            "Typed into {}.",
+            label(connection, id).map_err(|_| "Not sent: the team database is unavailable.")?
+        )),
+        Ok(Err("team_message_invalid")) => refused("the text is empty or too long."),
+        Ok(Err("team_agent_not_found")) => {
+            refused("no live sub-agent of this project has that name.")
+        }
+        Ok(Err("team_agent_not_running")) => refused("that sub-agent's terminal is not running."),
+        Ok(Err(_)) => refused("that sub-agent's terminal did not take the text."),
+        Err(_) => refused("the team database is unavailable."),
+    }
+}
+
+/// Describes the project's team for a live master's status tool. Takes the connection and
+/// the project. Returns the status lines, or the plain reason it could not be read.
+fn tool_status(connection: &Connection, project: &ProjectId) -> Result<String, String> {
+    status(connection, project)
+        .map(|status| status.text())
+        .map_err(|_| "The team status is unavailable right now.".to_owned())
 }
 
 /// Raises an app notification for a decision only the owner makes: security, destructive or
