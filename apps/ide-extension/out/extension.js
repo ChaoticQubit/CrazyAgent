@@ -3,7 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const engine_js_1 = require("./engine.js");
-const features = [];
+const readonly_js_1 = require("./readonly.js");
+const features = [readonly_js_1.readonly];
 function activate(context) {
     const engine = engine_js_1.Engine.fromEnv(process.env);
     if (engine === undefined)

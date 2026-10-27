@@ -76,26 +76,26 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 /// One team agent the case added: its id, worktree and git metadata folder.
-struct Agent {
-    id: i64,
-    worktree: PathBuf,
-    git_dir: PathBuf,
+pub(crate) struct Agent {
+    pub(crate) id: i64,
+    pub(crate) worktree: PathBuf,
+    pub(crate) git_dir: PathBuf,
 }
 
 /// A real engine database beside a real project repository, whose team agents each get a
 /// real git worktree in the project's `.crazyagent/worktrees/` folder, as the team runtime
 /// adds them.
-struct Case {
+pub(crate) struct Case {
     _tmp: tempfile::TempDir,
-    root: PathBuf,
-    folder: PathBuf,
-    db: Connection,
-    project: ProjectId,
+    pub(crate) root: PathBuf,
+    pub(crate) folder: PathBuf,
+    pub(crate) db: Connection,
+    pub(crate) project: ProjectId,
     created_ms: i64,
 }
 
 impl Case {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let tmp = tempfile::Builder::new()
             .prefix("ca-ide-sections-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -129,7 +129,7 @@ impl Case {
 
     /// Adds a team agent with a real worktree and records where it starts, as a launch
     /// does. Inputs: the role and status. Output: the agent.
-    fn agent(&mut self, role: &str, status: &str) -> Agent {
+    pub(crate) fn agent(&mut self, role: &str, status: &str) -> Agent {
         self.created_ms += 1;
         self.db
             .execute(
@@ -186,7 +186,7 @@ impl Case {
         }
     }
 
-    fn status(&self, agent: &Agent, status: &str) {
+    pub(crate) fn status(&self, agent: &Agent, status: &str) {
         let changed = self
             .db
             .execute(
@@ -198,8 +198,8 @@ impl Case {
     }
 
     /// Ends a turn in which the agent wrote a file, which opens its change set the way the
-    /// team runtime records a finished turn. Input: the agent.
-    fn change(&self, agent: &Agent) {
+    /// team runtime records a finished turn. Input: the agent. Output: the change set.
+    pub(crate) fn change(&self, agent: &Agent) -> crate::landing::ChangeSetId {
         std::fs::write(agent.worktree.join("notes.txt"), "made by the agent\n").unwrap();
         let landing = crate::landing::open(&self.root).unwrap();
         let workspace = crate::landing::Workspace {
@@ -218,16 +218,18 @@ impl Case {
             turn: format!("task-{}", agent.id),
             prompt_line: "Write the notes".into(),
         };
-        let landed = crate::landing_turns::record(&landing, &workspace, &end).unwrap();
-        assert!(matches!(landed, crate::landing_turns::Landed::Added(_)));
+        match crate::landing_turns::record(&landing, &workspace, &end).unwrap() {
+            crate::landing_turns::Landed::Added(id) => id,
+            _ => panic!("the turn opened no change set"),
+        }
     }
 
-    fn file(&self) -> PathBuf {
+    pub(crate) fn file(&self) -> PathBuf {
         self.root.join("ide").join(PROJECT).join(FILE)
     }
 
     /// The written workspace file's folders as (name, path) pairs, in file order.
-    fn folders(&self) -> Vec<(String, PathBuf)> {
+    pub(crate) fn folders(&self) -> Vec<(String, PathBuf)> {
         let text = std::fs::read_to_string(self.file()).unwrap();
         let body: serde_json::Value = serde_json::from_str(&text).unwrap();
         body["folders"]
@@ -286,9 +288,18 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
     assert!(!case.names().contains(&sub(&subs[1])));
     let body: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(case.file()).unwrap()).unwrap();
+    let running: serde_json::Map<String, serde_json::Value> = subs
+        .iter()
+        .map(|agent| {
+            (
+                format!("{}/**", agent.worktree.display()),
+                serde_json::Value::Bool(true),
+            )
+        })
+        .collect();
     assert_eq!(
         body["settings"],
-        serde_json::json!({ "files.readonlyInclude": {} })
+        serde_json::json!({ "files.readonlyInclude": running, "files.readonlyExclude": {} })
     );
 }
 

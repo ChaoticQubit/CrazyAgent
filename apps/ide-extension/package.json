@@ -16,7 +16,31 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
-  "contributes": {},
+  "contributes": {
+    "commands": [
+      {
+        "command": "crazyagent.editAnyway",
+        "title": "Edit anyway",
+        "category": "CrazyAgent",
+        "icon": "$(unlock)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "crazyagent.editAnyway",
+          "when": "activeEditorIsReadonly && resourcePath =~ /\\/worktrees\\/agent-[1-9][0-9]*\\//",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "crazyagent.editAnyway",
+          "when": "activeEditorIsReadonly"
+        }
+      ]
+    }
+  },
   "scripts": {
     "build": "node ../desktop/node_modules/typescript/bin/tsc -p tsconfig.json"
   },

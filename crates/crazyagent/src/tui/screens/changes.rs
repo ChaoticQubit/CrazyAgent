@@ -801,6 +801,7 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
             FileMark::Attributes => ".gitattributes: changes how Git treats files",
             FileMark::Modules => ".gitmodules: changes the project's submodules",
             FileMark::Mode => "File mode changed",
+            FileMark::OwnerEdited => "Edited by you",
         };
         if !marks.contains(&word) {
             marks.push(word);

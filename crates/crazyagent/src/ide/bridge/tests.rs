@@ -464,8 +464,8 @@ fn ide_request_bounds_are_refused() {
 }
 
 /// The extension installs as one folder named `publisher.name-version` from its
-/// `package.json`, holding exactly the embedded files; a changed file is put back and an
-/// unchanged folder is left as it is.
+/// `package.json`, holding exactly the embedded files, which include every built `out/`
+/// file; a changed file is put back and an unchanged folder is left as it is.
 #[test]
 fn extension_installs_as_one_folder_with_the_embedded_files() {
     let manifest: serde_json::Value = serde_json::from_slice(EXTENSION_FILES[0].1).unwrap();
@@ -481,6 +481,16 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
     );
     let main = manifest["main"].as_str().unwrap().trim_start_matches("./");
     assert!(EXTENSION_FILES.iter().any(|(name, _)| *name == main));
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension/out");
+    for built in std::fs::read_dir(out).unwrap() {
+        let name = format!("out/{}", built.unwrap().file_name().to_str().unwrap());
+        assert!(
+            EXTENSION_FILES
+                .iter()
+                .any(|(embedded, _)| *embedded == name),
+            "{name} is built but not embedded"
+        );
+    }
     let extensions = tempfile::tempdir().unwrap();
     let folder = install_extension(extensions.path()).unwrap();
     assert_eq!(folder, extensions.path().join(EXTENSION));
