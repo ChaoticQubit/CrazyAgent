@@ -10,6 +10,8 @@ const DIFF_TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
 const PAGE_BUDGET: usize = 24 * 1024;
 const RECENT_BYTES_MAX: usize = 16 * 1024 * 1024;
 const RECENT_MAX: usize = 32;
+const IDE_FOLDER: &str = ".vscode";
+const WORKSPACE_SUFFIX: &str = ".code-workspace";
 
 /// A change's diff computed once: its files and plain patch text, each cut into pages,
 /// and whether git's output stopped at the byte bound.
@@ -155,6 +157,20 @@ fn named(path: &str, name: &str) -> bool {
     path.rsplit('/').next() == Some(name)
 }
 
+/// Whether the IDE reads a path as its settings: anything under a `.vscode` folder at any
+/// depth, or a `*.code-workspace` file, compared without letter case as macOS opens them.
+/// Input: the repository path. Output: true for IDE settings.
+fn ide_config(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.split('/')
+        .any(|part| part.eq_ignore_ascii_case(IDE_FOLDER))
+        || name
+            .len()
+            .checked_sub(WORKSPACE_SUFFIX.len())
+            .and_then(|start| name.get(start..))
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(WORKSPACE_SUFFIX))
+}
+
 /// Lists the files a change touches with their status, kind and the marks the owner
 /// should look at. Inputs: the repository and the two commits. Output: the files.
 pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFile>, EngineError> {
@@ -216,6 +232,9 @@ pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFi
         }
         if old_mode != "000000" && new_mode != "000000" && old_mode != new_mode {
             marks.push(FileMark::Mode);
+        }
+        if ide_config(path) || old_path.is_some_and(ide_config) {
+            marks.push(FileMark::IdeConfig);
         }
         files.push(ChangedFile {
             path: plain(path),

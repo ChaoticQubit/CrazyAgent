@@ -32,6 +32,7 @@ const MARKS: Record<string, string> = {
   mode: "File mode changed",
   attributes: ".gitattributes: changes how Git treats files",
   modules: ".gitmodules: changes the project's submodules",
+  ide_config: "IDE settings: changes how the IDE behaves in this project",
 };
 
 const MESSAGE_BYTES_MAX = 4096;

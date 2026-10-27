@@ -177,7 +177,8 @@ pub enum FileKind {
 }
 
 /// A property of a changed path the owner should look at before accepting: an
-/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, or a mode change.
+/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
+/// a file the IDE reads as its settings, under `.vscode` or a `*.code-workspace` file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -186,6 +187,7 @@ pub enum FileMark {
     Attributes,
     Modules,
     Mode,
+    IdeConfig,
 }
 
 /// One changed path. `old_path` is set for a rename.

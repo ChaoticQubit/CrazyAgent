@@ -1014,6 +1014,56 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
 }
 
 #[test]
+fn agent_change_to_vscode_folder_or_workspace_file_is_flagged() {
+    let case = Case::new();
+    case.edit(".vscode/extensions.json", "{\"recommendations\": []}\n");
+    case.agent_commit("Recommend nothing");
+    case.start();
+    case.agent(&["mv", ".vscode/extensions.json", "extensions.json"]);
+    case.edit(
+        ".vscode/settings.json",
+        "{\"chat.disableAIFeatures\": false}\n",
+    );
+    case.edit("web/.VSCODE/launch.json", "{}\n");
+    case.edit("shop.code-workspace", "{\"folders\": []}\n");
+    case.edit("docs/Team.CODE-WORKSPACE", "{\"folders\": []}\n");
+    std::fs::create_dir(case.workspace.worktree.join("app")).unwrap();
+    std::os::unix::fs::symlink("../README", case.workspace.worktree.join("app/.vscode")).unwrap();
+    case.edit("vscode/notes.md", "plain\n");
+    case.edit("src/.vscode-old/a.txt", "plain\n");
+    case.edit("notes.code-workspace.md", "plain\n");
+    case.edit(".code-workspaces/a.txt", "plain\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert!(page.next.is_none());
+    let mut flagged: Vec<(&str, Option<&str>)> = page
+        .files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::IdeConfig))
+        .map(|file| (file.path.as_str(), file.old_path.as_deref()))
+        .collect();
+    flagged.sort_unstable();
+    assert_eq!(
+        flagged,
+        [
+            (".vscode/settings.json", None),
+            ("app/.vscode", None),
+            ("docs/Team.CODE-WORKSPACE", None),
+            ("extensions.json", Some(".vscode/extensions.json")),
+            ("shop.code-workspace", None),
+            ("web/.VSCODE/launch.json", None),
+        ]
+    );
+    let link = page
+        .files
+        .iter()
+        .find(|file| file.path == "app/.vscode")
+        .unwrap();
+    assert_eq!(link.marks, [FileMark::Symlink, FileMark::IdeConfig]);
+    assert_eq!(page.files.len(), 10, "{:?}", page.files);
+}
+
+#[test]
 fn commits_the_agent_made_in_a_clean_tree_open_a_change_set_above_the_worktree_start() {
     let case = Case::new();
     let start = case.tip();
