@@ -27,11 +27,9 @@ export interface IdeChangeSet {
 
 export type AcceptOutcome = { kind: "landed"; commit: string; branch: string } | { kind: "conflict"; files: string[] };
 
-export type Reply<T> = { kind: "ok"; value: T } | { kind: "error"; code: string };
-
-export interface Engine {
-  request<T>(name: string, args: Record<string, unknown>): Promise<Reply<T>>;
-  on(event: string, handler: () => void): { dispose(): unknown };
+export interface BasePage {
+  text: string;
+  next: number | null;
 }
 
 export type Opens = "diff" | "base" | "file" | "none";
@@ -46,7 +44,7 @@ export interface ScmResource {
   strikeThrough: boolean;
 }
 
-export type GroupContext = "open" | "waiting" | "resolving" | "restorable";
+export type GroupContext = "open" | "unread" | "waiting" | "resolving" | "restorable";
 
 export interface ScmGroup {
   id: string;
@@ -81,11 +79,14 @@ const MARKS: Record<string, string> = {
 };
 const SUFFIXES: Record<GroupContext, string> = {
   open: "",
+  unread: "",
   waiting: " (updated, waiting for the agent)",
   resolving: " (the agent is updating it)",
   restorable: " (discarded, can be restored)",
 };
 const CONFLICT_SUFFIX = " (conflicts with your branch)";
+const UNREAD = " (CrazyAgent couldn't read these changes)";
+const TOO_LARGE = " (too large to show here)";
 
 const REFUSALS: Record<string, string> = {
   changes_owner_dirty: "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again.",
@@ -190,23 +191,24 @@ function resource(set: IdeChangeSet, file: IdeFile): ScmResource {
 
 /** The Source Control groups for the engine's change sets, in the engine's order: one per
  * set that has one, named "<agent>: <title>" with its state when not open, carrying the
- * actions the desktop offers for that state. Inputs: the sets and now in milliseconds.
- * Output: the groups. */
+ * actions the desktop offers for that state; a set whose files are not shown cannot be
+ * accepted. Inputs: the sets and now in milliseconds. Output: the groups. */
 export function scmGroups(sets: IdeChangeSet[], now: number): ScmGroup[] {
   const groups: ScmGroup[] = [];
   for (const set of sets) {
-    const shown = context(set, now);
-    if (shown === null) continue;
+    const state = context(set, now);
+    if (state === null) continue;
+    const shown = state === "open" && set.problem !== null ? "unread" : state;
     const name = `${plainLine(set.agent)}: ${plainLine(set.title) || "Changes"}`;
-    const state = set.state === "conflict" ? CONFLICT_SUFFIX : SUFFIXES[shown];
-    const problem = set.problem === null ? "" : " (CrazyAgent couldn't read these changes)";
+    const suffix = set.state === "conflict" ? CONFLICT_SUFFIX : SUFFIXES[shown];
+    const problem = set.problem === null ? "" : set.problem === "changes_too_large" ? TOO_LARGE : UNREAD;
     groups.push({
       id: `crazyagent.${set.id}.${shown}`,
       set: set.id,
-      label: `${name}${state}${problem}`,
+      label: `${name}${suffix}${problem}`,
       context: shown,
       accept: shown === "open",
-      discard: shown === "open" || shown === "waiting",
+      discard: shown === "open" || shown === "unread" || shown === "waiting",
       restore: shown === "restorable",
       resources: set.problem === null ? set.files.map((file) => resource(set, file)) : [],
     });

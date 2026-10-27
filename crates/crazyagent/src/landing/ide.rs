@@ -1,21 +1,14 @@
 use super::diff;
 use super::git::failure;
 use super::store::{self, Record};
-use super::{ChangeSetId, ChangeSetView, ChangedFile, FileKind, FileStatus};
+use super::{ChangeSetId, ChangedFile, FileKind, FileStatus};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
-/// The largest base file the IDE diff reads, in bytes.
-pub(crate) const BASE_BYTES_MAX: usize = 4 * 1024 * 1024;
-
-/// One change set of the project an IDE serves, with the agent worktree its files live in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Located {
-    pub(crate) view: ChangeSetView,
-    pub(crate) worktree: PathBuf,
-}
+/// The largest base file the IDE diff reads, in bytes; the bridge pages it into frames.
+pub(crate) const BASE_BYTES_MAX: usize = 1024 * 1024;
 
 fn of_project(
     db: &Connection,
@@ -32,17 +25,13 @@ fn of_project(
 
 /// Finds a change set only when it belongs to the IDE's project; a set of another project
 /// answers exactly as a missing one. Inputs: the store, the project and the change set.
-/// Output: the set and its worktree, or `changes_not_found`.
+/// Output: the agent worktree its files live in, or `changes_not_found`.
 pub(crate) fn locate(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
-) -> Result<Located, EngineError> {
-    let record = of_project(db, project, id)?;
-    Ok(Located {
-        view: record.view(),
-        worktree: record.worktree.clone(),
-    })
+) -> Result<PathBuf, EngineError> {
+    Ok(of_project(db, project, id)?.worktree)
 }
 
 /// Lists every file a change set touches, across all pages of its diff, which the engine

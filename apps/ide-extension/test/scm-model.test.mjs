@@ -71,6 +71,11 @@ test("an Accepted set has no group, a Discarded one keeps Restore only inside it
   const [unread] = model.scmGroups([set({ files: [], problem: "changes_git_failed" })], NOW);
   assert.equal(unread.label, "Ada (@builder): Name the shop for gardens (CrazyAgent couldn't read these changes)");
   assert.deepEqual(unread.resources, []);
+  assert.equal(unread.id, `crazyagent.${ID}.unread`);
+  assert.deepEqual([unread.accept, unread.discard, unread.restore], [false, true, false]);
+  const [large] = model.scmGroups([set({ files: [], problem: "changes_too_large" })], NOW);
+  assert.equal(large.accept, false);
+  assert.equal(large.label, "Ada (@builder): Name the shop for gardens (too large to show here)");
   assert.equal(model.scmGroups([set({ title: "" })], NOW)[0].label, "Ada (@builder): Changes");
 });
 

@@ -1,10 +1,9 @@
 import * as vscode from "vscode";
+import type { Engine, Reply } from "./engine.js";
 import {
   type AcceptOutcome,
   BASE_SCHEME,
-  type Engine,
   type IdeChangeSet,
-  type Reply,
   type ScmGroup,
   type ScmResource,
   acceptedNote,
@@ -77,12 +76,12 @@ export function registerChanges(context: vscode.ExtensionContext, engine: Engine
       problem(UNREACHABLE);
       return;
     }
-    if (reply.kind === "error") return problem(refusal(reply.code));
-    if (!Array.isArray(reply.value)) return problem(refusal("changes_outcome_unknown"));
-    const listed = scmGroups(reply.value, Date.now());
+    if (reply.kind !== "ok") return problem(refusal(reply.code));
+    if (!Array.isArray(reply.data)) return problem(refusal("changes_outcome_unknown"));
+    const listed = scmGroups(reply.data, Date.now());
     sets.clear();
     shownGroups.clear();
-    for (const set of reply.value) sets.set(set.id, set);
+    for (const set of reply.data) sets.set(set.id, set);
     const rows = listed.map((shown) => {
       const set = sets.get(shown.set);
       if (set === undefined) throw new Error("every group names a listed change set");
@@ -120,7 +119,7 @@ export function registerChanges(context: vscode.ExtensionContext, engine: Engine
   const ask = async <T>(name: string, args: Record<string, unknown>): Promise<{ value: T } | null> => {
     try {
       const reply = await engine.request<T>(name, args);
-      if (reply.kind === "ok") return { value: reply.value };
+      if (reply.kind === "ok") return { value: reply.data };
       void vscode.window.showErrorMessage(refusal(reply.code));
       return null;
     } catch {

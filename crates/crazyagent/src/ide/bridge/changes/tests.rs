@@ -1,5 +1,8 @@
 use super::*;
-use crate::landing::{ChangeAgent, FileStatus, RESTORE_WINDOW_MS, TurnEnd, TurnOutcome, Workspace};
+use crate::landing::{
+    ChangeAgent, FileKind, FileStatus, RESTORE_WINDOW_MS, TurnEnd, TurnOutcome, Workspace,
+};
+use crate::protocol::FRAME_BYTES_MAX;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -157,7 +160,7 @@ fn ide_accept_lands_through_the_engine_and_the_set_leaves_pending() {
         &case.project,
         &set.id,
         &set.head,
-        Some("Land the agent's edits"),
+        "Land the agent's edits",
     )
     .unwrap();
     let AcceptOutcome::Landed { commit, branch } = landed else {
@@ -190,16 +193,30 @@ fn ide_accept_of_a_head_the_owner_did_not_review_changes_nothing() {
     let case = Case::new();
     let set = case.only(NOW);
     let start = case.owner_head();
-    let refused = accept(
-        &case.db,
-        &case.home,
-        &case.project,
-        &set.id,
-        &"0".repeat(40),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(refused.0, "changes_stale");
+    for head in [
+        "0".repeat(40),
+        "HEAD".into(),
+        set.head.to_uppercase(),
+        String::new(),
+    ] {
+        let refused = accept(
+            &case.db,
+            &case.home,
+            &case.project,
+            &set.id,
+            &head,
+            "Land it",
+        )
+        .unwrap_err();
+        assert_eq!(refused.0, "changes_stale", "{head}");
+        assert_eq!(
+            discard(&case.db, &case.project, &set.id, &head, NOW)
+                .unwrap_err()
+                .0,
+            "changes_stale",
+            "{head}"
+        );
+    }
     assert_eq!(case.owner_head(), start);
     assert_eq!(case.only(NOW).state, ChangeState::Pending);
 }
@@ -235,21 +252,31 @@ fn ide_discard_then_restore_within_the_window_brings_the_set_back() {
 fn the_base_side_of_a_diff_is_the_file_before_the_agent_touched_it() {
     let case = Case::new();
     let set = case.only(NOW);
+    let whole = |text: &str| BasePage {
+        text: text.into(),
+        next: None,
+    };
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "README").unwrap(),
-        "one\ntwo\nthree\n"
+        base_blob(&case.db, &case.project, &set.id, "README", 0).unwrap(),
+        whole("one\ntwo\nthree\n")
     );
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "OLD").unwrap(),
-        "gone soon\n"
+        base_blob(&case.db, &case.project, &set.id, "OLD", 0).unwrap(),
+        whole("gone soon\n")
     );
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "NOTES").unwrap(),
-        ""
+        base_blob(&case.db, &case.project, &set.id, "NOTES", 0).unwrap(),
+        whole("")
+    );
+    assert_eq!(
+        base_blob(&case.db, &case.project, &set.id, "README", 1)
+            .unwrap_err()
+            .0,
+        "changes_not_found"
     );
     for outside in ["Cargo.toml", "../repo/README", ".git/config", ""] {
         assert_eq!(
-            base_blob(&case.db, &case.project, &set.id, outside)
+            base_blob(&case.db, &case.project, &set.id, outside, 0)
                 .unwrap_err()
                 .0,
             "changes_not_found",
@@ -267,8 +294,8 @@ fn another_projects_ide_never_reads_or_changes_this_projects_change_sets() {
     assert!(change_sets(&case.db, &other, NOW).unwrap().is_empty());
     let refusals = [
         change_diff(&case.db, &other, &set.id, 0).map(|_| ()),
-        base_blob(&case.db, &other, &set.id, "README").map(|_| ()),
-        accept(&case.db, &case.home, &other, &set.id, &set.head, None).map(|_| ()),
+        base_blob(&case.db, &other, &set.id, "README", 0).map(|_| ()),
+        accept(&case.db, &case.home, &other, &set.id, &set.head, "Land it").map(|_| ()),
         discard(&case.db, &other, &set.id, &set.head, NOW).map(|_| ()),
         restore(&case.db, &other, &set.id, NOW),
     ];
@@ -279,4 +306,87 @@ fn another_projects_ide_never_reads_or_changes_this_projects_change_sets() {
     assert_eq!(case.only(NOW), set);
     let page = change_diff(&case.db, &case.project, &set.id, 0).unwrap();
     assert!(page.text.contains("+uno"), "{}", page.text);
+}
+
+#[test]
+fn a_base_text_larger_than_a_frame_reads_back_whole_across_pages() {
+    let text = "line \"quoted\" \\ tab\t bell\u{7} snow \u{2603}\n".repeat(4000);
+    assert!(text.len() > FRAME_BYTES_MAX);
+    let (mut read, mut page) = (String::new(), 0);
+    loop {
+        let shown = page_of(&text, page).unwrap();
+        let escaped = serde_json::to_vec(&shown.text).unwrap().len() - 2;
+        assert!(escaped <= BASE_PAGE_BYTES, "page {page} is {escaped} bytes");
+        let reply = crate::ide::bridge::IdeReply::Ok {
+            data: serde_json::to_value(&shown).unwrap(),
+        };
+        assert!(crate::protocol::encode_frame(&reply).is_ok(), "page {page}");
+        read.push_str(&shown.text);
+        match shown.next {
+            Some(next) => {
+                assert_eq!(next, page + 1);
+                page = next;
+            }
+            None => break,
+        }
+    }
+    assert_eq!(read, text);
+    assert!(page > 1, "{page}");
+    assert_eq!(page_of(&text, page + 1), None);
+    assert_eq!(
+        page_of("", 0),
+        Some(BasePage {
+            text: String::new(),
+            next: None
+        })
+    );
+    assert_eq!(page_of("", 1), None);
+}
+
+#[test]
+fn a_list_past_the_frame_budget_shows_the_sets_that_did_not_fit_as_too_large() {
+    let case = Case::new();
+    let listed = case.only(NOW);
+    let files = (0..100)
+        .map(|index| ChangedFile {
+            path: format!("src/{index:05}/{}", "\u{1}".repeat(40)),
+            old_path: None,
+            status: FileStatus::Added,
+            kind: FileKind::Text,
+            marks: Vec::new(),
+        })
+        .collect();
+    let big = IdeChangeSet {
+        files,
+        message: "Grow the shop\n\nEvery page names its garden.".into(),
+        title: "Grow the shop".into(),
+        ..listed.clone()
+    };
+    let huge = IdeChangeSet {
+        worktree: PathBuf::from(format!("/{}", "w".repeat(LIST_BYTES_MAX))),
+        ..listed.clone()
+    };
+    let kept = fit(vec![
+        big.clone(),
+        big.clone(),
+        huge,
+        big.clone(),
+        listed.clone(),
+    ])
+    .unwrap();
+    assert_eq!(kept.len(), 4, "{kept:?}");
+    assert_eq!(kept[0], big);
+    for summary in &kept[1..3] {
+        assert!(summary.files.is_empty());
+        assert_eq!(summary.message, "Grow the shop");
+        assert_eq!(summary.problem.as_deref(), Some("changes_too_large"));
+        assert_eq!(summary.head, big.head);
+    }
+    assert_eq!(kept[3], listed);
+    let encoded = serde_json::to_vec(&kept).unwrap();
+    assert!(encoded.len() <= LIST_BYTES_MAX, "{}", encoded.len());
+    let reply = crate::ide::bridge::IdeReply::Ok {
+        data: serde_json::to_value(&kept).unwrap(),
+    };
+    assert!(crate::protocol::encode_frame(&reply).is_ok());
 }
