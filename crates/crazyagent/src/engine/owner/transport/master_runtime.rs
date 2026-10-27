@@ -1,6 +1,6 @@
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::adapters::codex::{AuthAccount, AuthControl};
-use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome};
+use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TokenUsage, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::agents::{Hold, Holder};
 use crate::config::ModelAuthentication;
@@ -17,6 +17,7 @@ use crate::sandbox::InstalledSandbox;
 use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
+use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_turn};
 use std::fs::File;
 #[cfg(unix)]
 use std::io::Seek;
@@ -72,6 +73,7 @@ struct ActiveMaster {
     runtime: MasterRuntimeView,
     capture_ref: RequestId,
     provenance: Provenance,
+    reported: Tokens,
 }
 
 impl MasterHost {
@@ -661,6 +663,7 @@ impl OwnerRuntimeHandle {
         };
         let account_ref = prepared.profile.binding().connection.account_ref.clone();
         let resources = prepared.attempt.request.route.resources.clone();
+        let home = launch.home.clone();
         let host = if harness == NativeHarness::Claude {
             MasterHost::Claude(Box::new(
                 ClaudeHost::spawn(
@@ -701,6 +704,7 @@ impl OwnerRuntimeHandle {
                 profile_ref,
                 worktree_lease: prepared.worktree_lease.clone(),
             },
+            reported: Tokens::default(),
         };
         let observed = self
             .collect_master_turn(prepared, turn_id, &mut active)
@@ -709,6 +713,8 @@ impl OwnerRuntimeHandle {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
+        self.count_master_usage(prepared, home, active.reported)
+            .await;
         if let Some(diagnostic) = active.host.diagnostic()
             && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
             && self.authority.root.verify().is_ok()
@@ -743,6 +749,53 @@ impl OwnerRuntimeHandle {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Counts one finished master turn under its project's master row before its home is
+    /// removed: the usage Claude Code reported for the turn, or the Codex records in the
+    /// home. A store that cannot be written leaves the turn uncounted and logs only the
+    /// failure code. Inputs: the prepared turn, its home and the reported usage.
+    async fn count_master_usage(
+        &self,
+        prepared: &PreparedMasterTurn,
+        home: std::path::PathBuf,
+        reported: Tokens,
+    ) {
+        let connection = &prepared.profile.binding().connection;
+        let (format, harness) = match prepared.session.selection.backend {
+            MasterBackend::Claude => (Format::Claude, "claude-code"),
+            MasterBackend::Codex => (Format::Codex, "codex"),
+            MasterBackend::Rcli => return,
+        };
+        let attribution = Attribution {
+            kind: RunKind::Master,
+            project: Some(prepared.session.project_id.clone()),
+            pool: Some(prepared.session.selection.pool_ref.clone()),
+            account: Some(connection.id.clone()),
+            agent: crate::usage::service::master_agent(Some(&prepared.session.project_id)),
+            harness: harness.to_owned(),
+        };
+        let session = prepared.session.session_id.as_str().to_owned();
+        let root = super::changes::engine_root(&self.authority);
+        let counted = tokio::task::spawn_blocking(move || {
+            let db = crate::usage::open(&root?)?;
+            count_turn(
+                &db,
+                &home,
+                format,
+                &attribution,
+                reported,
+                &session,
+                crate::team::now_ms(),
+            )
+        })
+        .await;
+        let problem = match counted {
+            Ok(Ok(_)) => return,
+            Ok(Err(problem)) => crate::usage::service::failure_code(&problem),
+            Err(_) => "usage_unavailable".to_owned(),
+        };
+        eprintln!("master usage not counted: {problem}");
     }
 
     async fn collect_master_turn(
@@ -816,6 +869,9 @@ impl OwnerRuntimeHandle {
             };
             validate_event(&active.provenance, turn_id, &event)?;
             active.capture.record(&event)?;
+            if let EventKind::TurnFinished { usage, .. } = &event.kind {
+                active.reported = reported_tokens(usage);
+            }
             if let Some(native) = event
                 .native_session_id
                 .as_ref()
@@ -905,6 +961,17 @@ impl OwnerRuntimeHandle {
                 _ => {}
             }
         }
+    }
+}
+
+/// The tokens a harness reported for a turn, with an unreported count as zero.
+/// Input: the reported usage. Output: the count.
+fn reported_tokens(usage: &TokenUsage) -> Tokens {
+    Tokens {
+        input: usage.input_tokens.unwrap_or(0),
+        output: usage.output_tokens.unwrap_or(0),
+        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+        cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
     }
 }
 

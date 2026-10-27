@@ -58,6 +58,15 @@ pub fn failure_code(problem: &EngineError) -> String {
     if shaped { code } else { "usage_poll_failed" }.to_owned()
 }
 
+/// Names a project's master as an agent row: `master-<project>`, or `master` when the run
+/// is tied to no project. Input: the project. Output: the agent key.
+pub fn master_agent(project: Option<&ProjectId>) -> String {
+    project.map_or_else(
+        || "master".to_owned(),
+        |project| format!("master-{}", project.as_str()),
+    )
+}
+
 /// The pool that serves a project's runs on an account: the first pool, in settings order,
 /// that lists both. Inputs: the access, the project and the account. Output: the pool.
 pub fn pool_of(
@@ -155,11 +164,10 @@ impl Usage {
     }
 
     fn scan_team(&self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
-        let rows: Vec<(i64, String, String, String, String)> = {
+        let rows: Vec<(i64, String, String, String, Option<String>)> = {
             let mut statement = match self.db.prepare(
                 "SELECT id,project,role,harness,connection FROM team_agents
-                 WHERE connection IS NOT NULL
-                   AND (status IN ('starting','idle','working') OR stopped_ms>=?1)
+                 WHERE status IN ('starting','idle','working') OR stopped_ms>=?1
                  ORDER BY id DESC LIMIT ?2",
             ) {
                 Ok(statement) => statement,
@@ -183,23 +191,25 @@ impl Usage {
                 .map_err(storage)?
         };
         for (id, project, role, harness, connection) in rows {
-            let (Some(format), Ok(project), Ok(account)) = (
-                Format::of(&harness),
-                ProjectId::new(project),
-                CredentialRef::new(connection),
-            ) else {
+            let Some(format) = Format::of(&harness) else {
                 continue;
             };
+            let project = ProjectId::new(project).ok();
+            let account = connection.and_then(|connection| CredentialRef::new(connection).ok());
+            let (kind, agent) = if role == "master" {
+                (RunKind::Master, master_agent(project.as_ref()))
+            } else {
+                (RunKind::Agent, format!("team-{id}"))
+            };
             let attribution = Attribution {
-                kind: if role == "master" {
-                    RunKind::Master
-                } else {
-                    RunKind::Agent
+                kind,
+                pool: match (&project, &account) {
+                    (Some(project), Some(account)) => pool_of(access, project.as_str(), account),
+                    _ => None,
                 },
-                pool: pool_of(access, project.as_str(), &account),
                 project,
                 account,
-                agent: format!("team-{id}"),
+                agent,
                 harness,
             };
             let home = self
@@ -379,3 +389,6 @@ pub fn start_for_engine(
         thread: Some(thread),
     })
 }
+
+#[cfg(all(test, unix))]
+mod tests;
