@@ -2678,6 +2678,7 @@ mod turn_line_tests {
             detail: None,
             cause: None,
             changes: None,
+            engine_request: None,
         };
         let mut lines = Vec::new();
         turn_lines(&turn, &mut lines);
