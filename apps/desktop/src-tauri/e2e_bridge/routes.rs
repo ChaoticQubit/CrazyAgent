@@ -979,6 +979,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.retry_intent().await }.await;
             routed(result)
         }
+        "desktop_drop_intent" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.drop_intent() }.await;
+            routed(result)
+        }
         "desktop_prepare_managed_account" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

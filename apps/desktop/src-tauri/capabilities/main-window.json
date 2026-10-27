@@ -83,6 +83,7 @@
     "allow-desktop-pending-intent",
     "allow-desktop-reconcile-intent",
     "allow-desktop-retry-intent",
+    "allow-desktop-drop-intent",
     "allow-desktop-prepare-managed-account",
     "allow-desktop-start-native-auth",
     "allow-desktop-read-native-auth",

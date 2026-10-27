@@ -80,7 +80,7 @@ test("a profile read that is not in this build yet skips Welcome instead of bloc
   assert.match(markup, /Profile/);
 });
 
-test("an unconfirmed change shows a banner naming it, with Check again and Retry", () => {
+test("an unconfirmed change shows a banner naming it, with Check again and Retry, and Dismiss once the engine says it never recorded it", () => {
   const intent = { kind: "setup_project", generation: "3", project_id: "p-1", baseline_id: null, model_access: null, project_spec: null, operation_id: "op-1" };
   const markup = render({ unconfirmed: { intent, outcome: null, busy: false } });
   assert.match(markup, /We couldn&#x27;t confirm saving the project setup\. Other changes wait until it&#x27;s checked\./);
@@ -88,10 +88,15 @@ test("an unconfirmed change shows a banner naming it, with Check again and Retry
   assert.match(markup, />Retry<\/button>/);
   assert.doesNotMatch(markup, /intent|Reconcile|operation|still being saved/i);
   const unsent = render({ unconfirmed: { intent, outcome: "not_recorded_at_barrier", busy: false } });
-  assert.match(unsent, /Saving the project setup hasn&#x27;t reached the engine\. Retry sends the same change again\./);
+  assert.match(unsent, /Saving the project setup never reached the engine\. Retry sends it again, or Dismiss drops it\./);
+  assert.match(unsent, />Retry<\/button>/);
+  assert.match(unsent, />Dismiss<\/button>/);
+  assert.doesNotMatch(markup, /Dismiss/, "a change that may have been recorded cannot be dismissed");
   const checking = render({ unconfirmed: { intent, outcome: null, busy: true } });
   assert.match(checking, /Checking\.\.\./);
   assert.match(checking, /<button[^>]*disabled=""[^>]*>[\s\S]*?Retry<\/button>/);
+  const unsentChecking = render({ unconfirmed: { intent, outcome: "not_recorded_at_barrier", busy: true } });
+  assert.match(unsentChecking, /<button[^>]*disabled=""[^>]*>Dismiss<\/button>/);
   assert.doesNotMatch(render({}), /class="banner"/);
 });
 

@@ -78,6 +78,7 @@ fn main() {
         "desktop_pending_intent",
         "desktop_reconcile_intent",
         "desktop_retry_intent",
+        "desktop_drop_intent",
         "desktop_prepare_managed_account",
         "desktop_start_native_auth",
         "desktop_read_native_auth",

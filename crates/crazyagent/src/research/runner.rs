@@ -1456,6 +1456,9 @@ fn codex_arguments(
         })
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
+    if !tools {
+        command.args(["-c", "web_search=\"disabled\""]);
+    }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
             let url = endpoint_url(base_url)?;

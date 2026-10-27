@@ -6,6 +6,7 @@ use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
 use crate::tui::keys::Key;
+use crate::tui::screens::project_team::account_name;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -743,7 +744,14 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             Span::styled(graph.nodes[*node].label.clone(), theme.heading),
             Span::styled(format!(" ({count})"), theme.muted),
         ]),
-        Body::Account(account) => styled(account.clone(), Role::Muted, theme),
+        Body::Account(account) => styled(
+            account_name(
+                Some(account),
+                ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
+            ),
+            Role::Muted,
+            theme,
+        ),
         Body::Heading(text) => styled(*text, Role::Muted, theme),
         Body::Blank => Line::default(),
         Body::Edge(edge) => {

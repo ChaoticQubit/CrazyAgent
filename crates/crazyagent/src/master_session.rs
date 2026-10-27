@@ -16,6 +16,39 @@ pub(crate) const REBINDS_MAX: usize = 32;
 pub(crate) const METADATA_BYTES_MAX: usize = 16384;
 pub(crate) const PAGE_BYTES_MAX: usize = 32768;
 pub(crate) const PAGE_ITEMS_MAX: u8 = 32;
+/// The most a master reply spends in its stored turn, measured as JSON: 12 KiB of the
+/// 16 KiB turn body (`METADATA_BYTES_MAX`, the `master_turns` CHECK), whose attempt, runtime
+/// and provenance take the rest (under 2.3 KiB on the owner's turns). Clients read whole
+/// turns, so this is also the most of a reply they show.
+pub(crate) const REPLY_BYTES_MAX: usize = 12 * 1024;
+
+/// Measures a reply as its stored turn holds it: the bytes of its JSON string, quotes and
+/// escapes included. Input: the text. Output: the byte count.
+pub(crate) fn reply_bytes(text: &str) -> usize {
+    serde_json::to_string(text).map_or(usize::MAX, |json| json.len())
+}
+
+/// Fits a master's reply into its stored turn: whole when it measures within
+/// `REPLY_BYTES_MAX`, otherwise its start and a last line saying how many bytes were left
+/// out. Inputs: the text kept and the bytes already left out after it. Output: the reply.
+pub(crate) fn fitted_reply(text: &str, dropped: usize) -> String {
+    if dropped == 0 && reply_bytes(text) <= REPLY_BYTES_MAX {
+        return text.to_owned();
+    }
+    let mut kept = text.len();
+    loop {
+        let fitted = format!(
+            "{}\n\n[{} more bytes of this reply were left out.]",
+            &text[..kept],
+            text.len() - kept + dropped
+        );
+        let excess = reply_bytes(&fitted).saturating_sub(REPLY_BYTES_MAX);
+        if excess == 0 {
+            return fitted;
+        }
+        kept = text.floor_char_boundary(kept.saturating_sub(excess));
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -389,6 +422,19 @@ pub struct MasterTurnView {
     pub tasks: Vec<MasterTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_request: Option<MasterEngineRequest>,
+}
+
+/// What the engine asked the master in a turn the owner started with Ask agent to update
+/// (DEC-095): the change set, the plain line the owner sees in the chat and the text the
+/// master receives. The engine writes it from the change set store; no client supplies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterEngineRequest {
+    pub change_set: crate::landing::ChangeSetId,
+    pub line: String,
+    pub text: String,
 }
 
 /// One task a master turn handed to the project's team, with the engine's note on how it
@@ -471,6 +517,11 @@ pub enum MasterOwnerAction {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    Resolve {
+        project_id: ProjectId,
+        session_id: SessionId,
+        change_set: crate::landing::ChangeSetId,
+    },
     RegisterRcliProfile {
         registration: Box<RcliProfileRegistration>,
     },
@@ -518,6 +569,7 @@ pub(crate) fn validate_action(action: &MasterOwnerAction) -> Result<(), EngineEr
         }
         MasterOwnerAction::Cancel { .. }
         | MasterOwnerAction::Close { .. }
+        | MasterOwnerAction::Resolve { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {}
     }
     Ok(())
