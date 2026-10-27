@@ -153,7 +153,10 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         view.text, given,
         "the view shows exactly what the launch wrote"
     );
-    assert!(view.skills.is_empty(), "a launch that installed no skill records none");
+    assert!(
+        view.skills.is_empty(),
+        "a launch that installed no skill records none"
+    );
     std::fs::remove_file(home.join("AGENTS.md")).unwrap();
     std::os::unix::fs::symlink(
         folder.join(".crazyagent/instructions.md"),
