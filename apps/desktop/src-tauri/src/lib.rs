@@ -2105,9 +2105,10 @@ async fn desktop_ide_open(
     main_window(&window)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
+    let ticket = views.begin(&project);
     let call = read(&state).await?.ide_open(project.clone())?;
     let workbench = ide::workbench(&call.await?)?;
-    ide::show(&app, &window, &views, &project, workbench, bounds)
+    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
 }
 
 #[tauri::command]

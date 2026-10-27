@@ -12,6 +12,7 @@ const page = await import("../src/screens/project/index.tsx");
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const state = (build, unqualified = null) => ({ build, unqualified });
 const shown = (ideState) => renderToStaticMarkup(createElement(view.IdeStatus, { state: ideState, busy: false, onAction: () => {} }));
+const escaped = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;").replaceAll("'", "&#x27;");
 
 test("each build state renders its plain line, and only Missing and Failed offer an action", () => {
   const cases = [
@@ -27,7 +28,7 @@ test("each build state renders its plain line, and only Missing and Failed offer
     assert.equal(status.action, action, build.state);
     assert.equal(status.ready, build.state === "ready", build.state);
     const markup = shown(state(build));
-    assert.ok(markup.includes(line), `${build.state}: ${markup}`);
+    assert.ok(markup.includes(escaped(line)), `${build.state}: ${markup}`);
     assert.equal(markup.includes(">Retry<"), action === "retry", `${build.state} Retry: ${markup}`);
     assert.equal(markup.includes(">Download<"), action === "download", `${build.state} Download: ${markup}`);
   }
@@ -72,18 +73,22 @@ test("the app menu the IDE tab uses owns none of Cmd+Z, W, N, P, F or comma", ()
   for (const owned of ["undo", "redo", "close_window", "MenuItem::with_id", "MenuItemBuilder", "accelerator", "CmdOrCtrl", "Cmd+"]) {
     assert.ok(!menu.includes(owned), `the IDE menu holds ${owned}`);
   }
-  assert.match(source, /set_menu\(ide_menu\(app\)/, "showing the IDE installs its menu");
+  assert.match(source, /ide_menu\(app\)\.and_then\(\|menu\| app\.set_menu\(menu\)\)/, "showing the IDE installs its menu");
+  const show = source.slice(source.indexOf("pub fn show("), source.indexOf("pub fn place("));
+  assert.ok(show.indexOf("ide_menu(app)") < show.indexOf("set_focus()"), "the menu is swapped before the IDE takes focus");
   assert.match(source, /set_menu\(Menu::default\(app\)/, "hiding it gives the app its own menu back");
 });
 
 test("the IDE webview runs the input guard, locks navigation and opens other links outside", () => {
   const source = read("src-tauri/src/ide.rs");
   assert.match(source, /include_str!\("ide_guard\.js"\)/);
-  assert.match(source, /\.initialization_script\(GUARD\)/);
-  assert.match(source, /\.on_navigation\(/);
+  assert.match(source, /\.initialization_script_for_all_frames\(GUARD\)/, "extension webview frames are guarded too");
+  assert.match(source, /\.on_navigation\(move \|next\| navigation_allowed\(next, &server, port\)\)/, "a refused load is only refused");
+  assert.doesNotMatch(source, /on_navigation\([^\n]*outside/, "no load, frame or not, opens the browser");
   assert.match(source, /\.on_new_window\(/);
   assert.match(source, /NewWindowResponse::Deny/);
   assert.match(source, /open::open_link/);
+  assert.match(source, /link_admitted\(&LINKS, Instant::now\(\)\)/, "links from window.open reach the browser at most once a second");
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json"));
   assert.deepEqual(allowed.webviews, ["main"], "the IDE webview gets no app command");
 });
@@ -98,4 +103,35 @@ test("the IDE tab follows its panel, hides with the tab, closes with the project
   assert.match(index, /closeIde\(projectId\)/, "leaving the project closes its IDE webview");
   assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }), { x: 10, y: 81, width: 900, height: 601 });
   assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }), null, "a hidden panel has no bounds");
+});
+
+test("an open dialog, drawer or menu hides the IDE webview until the last one closes", async () => {
+  const overlay = await import("../src/ui/overlay.tsx");
+  assert.equal(overlay.overlayShown(), false);
+  const first = overlay.cover();
+  const second = overlay.cover();
+  assert.equal(overlay.overlayShown(), true);
+  first();
+  first();
+  assert.equal(overlay.overlayShown(), true, "a release counts once");
+  second();
+  assert.equal(overlay.overlayShown(), false);
+  const ui = read("src/ui/overlay.tsx");
+  const modal = ui.slice(ui.indexOf("function useModal"), ui.indexOf("export function Dialog"));
+  assert.match(modal, /useCover\(open\)/, "every Dialog, Drawer and ConfirmDialog counts while open");
+  const menu = ui.slice(ui.indexOf("export function Menu"));
+  assert.match(menu, /useCover\(open\)/, "an open menu counts too");
+  const tab = read("src/screens/project/ide.tsx");
+  assert.match(tab, /const covered = useOverlayShown\(\);/);
+  assert.match(tab, /if \(!ready \|\| !element \|\| covered\) return;/, "while covered the webview is hidden and not opened");
+  assert.match(tab, /\}, \[projectId, ready, covered\]\);/, "it opens again once the overlay closes");
+});
+
+test("an open the tab gave up on is refused quietly instead of showing a problem", () => {
+  const tab = read("src/screens/project/ide.tsx");
+  assert.match(tab, /result\.code === "ide_open_cancelled"/);
+  const lib = read("src-tauri/src/lib.rs");
+  const open = lib.slice(lib.indexOf("async fn desktop_ide_open"), lib.indexOf("async fn desktop_ide_place"));
+  assert.ok(open.indexOf("views.begin(&project)") >= 0 && open.indexOf("views.begin(&project)") < open.indexOf("ide_open(project"), "the ticket is taken before the engine call");
+  assert.match(open, /ide::show\(&app, &window, &views, &project, workbench, bounds, ticket\)/);
 });

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
 import { HEARTBEAT_MS, bounds, hideIde, ideStatus, ideView, openFailure, openIde, placeIde, touchIde } from "../../api-ide";
 import type { IdeTabState } from "../../api-ide";
+import { useOverlayShown } from "../../ui";
 import "./ide.css";
 
 const POLL_MS = 1_000;
@@ -24,7 +25,8 @@ export function IdeStatus({ state, busy, onAction }: { state: IdeTabState; busy:
 
 /** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
  * native webview over the panel. The webview follows the panel's bounds, hides when the tab
- * is left, and the engine hears every minute that the owner still uses it.
+ * is left or a dialog, drawer or menu opens over the page, and the engine hears every minute
+ * that the owner still uses it.
  * Input: the project id. Output: the tab. */
 export function IdeTab({ projectId }: { projectId: string }) {
   const panel = useRef<HTMLDivElement>(null);
@@ -32,6 +34,7 @@ export function IdeTab({ projectId }: { projectId: string }) {
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const ready = state !== null && ideStatus(state).ready;
+  const covered = useOverlayShown();
   const waiting = state === null
     || (state.unqualified === null && (state.build.state === "downloading" || state.build.state === "verifying"));
 
@@ -54,7 +57,7 @@ export function IdeTab({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     const element = panel.current;
-    if (!ready || !element) return;
+    if (!ready || !element || covered) return;
     let live = true;
     let shown = false;
     const place = () => {
@@ -69,6 +72,7 @@ export function IdeTab({ projectId }: { projectId: string }) {
         if (result.kind === "ok") void hideIde(projectId);
         return;
       }
+      if (result.kind === "error" && result.code === "ide_open_cancelled") return;
       if (result.kind !== "ok") {
         setProblem(failureLine(result, openFailure));
         return;
@@ -93,7 +97,7 @@ export function IdeTab({ projectId }: { projectId: string }) {
       window.clearInterval(beat);
       void hideIde(projectId);
     };
-  }, [projectId, ready]);
+  }, [projectId, ready, covered]);
 
   const act = async () => {
     setBusy(true);

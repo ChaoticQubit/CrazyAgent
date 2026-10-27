@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
@@ -20,6 +21,9 @@ const TOKEN_HEX: usize = 64;
 const TOKEN_FILE_BYTES_MAX: u64 = 256;
 const WEBVIEW_HOST_CHARS: usize = 52;
 const SPAN_MAX: f64 = 100_000.0;
+const LINK_GAP: Duration = Duration::from_secs(1);
+
+static LINKS: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn refused(code: &'static str) -> BridgeError {
     BridgeError { code, cause: None }
@@ -135,16 +139,27 @@ pub fn navigation_allowed(url: &Url, server: &Url, webview_port: u16) -> bool {
             })
 }
 
-/// Hands a link the IDE may not load itself to the owner's browser, and refuses the load.
-/// Input: the URL. Output: false, always.
-fn outside(url: &Url) -> bool {
-    if matches!(url.scheme(), "http" | "https") {
+/// Whether one more link may reach the owner's browser now: at most one per `LINK_GAP`,
+/// so no page in the IDE can flood the browser with tabs. Inputs: the time of the last
+/// link sent and now. Output: true when this link goes, which then becomes the last.
+fn link_admitted(last: &Mutex<Option<Instant>>, now: Instant) -> bool {
+    let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+    if last.is_some_and(|at| now.saturating_duration_since(at) < LINK_GAP) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Hands a link the IDE opened as a new window, which WebKit allows only on a click, to the
+/// owner's browser, at most once a second. Input: the URL.
+fn outside(url: &Url) {
+    if matches!(url.scheme(), "http" | "https") && link_admitted(&LINKS, Instant::now()) {
         let link = url.to_string();
         tauri::async_runtime::spawn(async move {
             let _ = open::open_link(&link).await;
         });
     }
-    false
 }
 
 struct Loaded {
@@ -157,17 +172,46 @@ struct Held {
     loaded: HashMap<String, Loaded>,
     shown: Option<String>,
     launches: u64,
+    opening: HashMap<String, u64>,
+    asks: u64,
+}
+
+impl Held {
+    /// Takes an open's ticket when it is still the project's newest and no hide or close
+    /// came since. Inputs: the project and the ticket. Output: true when it may show.
+    fn admit(&mut self, project: &ProjectId, ticket: u64) -> bool {
+        if self.opening.get(project.as_str()) != Some(&ticket) {
+            return false;
+        }
+        self.opening.remove(project.as_str());
+        true
+    }
+
+    /// Gives up the project's open still waiting for the engine. Input: the project.
+    fn cancel(&mut self, project: &ProjectId) {
+        self.opening.remove(project.as_str());
+    }
 }
 
 /// The IDE webviews of the main window: each project's webview label and the workbench URL
-/// it loaded, the project shown now, and a count that keeps a replaced webview's label
-/// unique while the old one closes.
+/// it loaded, the project shown now, a count that keeps a replaced webview's label unique
+/// while the old one closes, and the open of each project still waiting for the engine.
 #[derive(Default)]
 pub struct IdeViews(Mutex<Held>);
 
 impl IdeViews {
     fn lock(&self) -> MutexGuard<'_, Held> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts one open of a project's IDE before the engine is asked, so a hide or close
+    /// that comes first stops it from showing. Input: the project. Output: its ticket.
+    pub fn begin(&self, project: &ProjectId) -> u64 {
+        let mut held = self.lock();
+        held.asks += 1;
+        let ticket = held.asks;
+        held.opening.insert(project.as_str().to_owned(), ticket);
+        ticket
     }
 }
 
@@ -224,10 +268,12 @@ fn restore_menu(app: &AppHandle) -> Result<(), BridgeError> {
 }
 
 /// Shows a project's IDE over its panel: the loaded webview when its workbench is the same,
-/// else a new child webview with the input guard, the navigation lock and outside links sent
-/// to the browser. Any other project's IDE is hidden, and the app menu gives up Cmd+Z, W,
-/// N, P, F and comma while the IDE shows. Inputs: the app, the main window, the views, the
-/// project, its workbench and the panel. Output: Ok once shown.
+/// else a new child webview with the input guard in every frame, a navigation lock that only
+/// refuses, and links opened as new windows sent to the browser. Any other project's IDE is
+/// hidden, and the app menu gives up Cmd+Z, W, N, P, F and comma before the IDE takes focus.
+/// Inputs: the app, the main window, the views, the project, its workbench, the panel and
+/// the open's ticket. Output: Ok once shown, or `ide_open_cancelled` when a hide or close or a
+/// newer open came while the engine opened it.
 pub fn show(
     app: &AppHandle,
     window: &WebviewWindow,
@@ -235,8 +281,12 @@ pub fn show(
     project: &ProjectId,
     workbench: Workbench,
     bounds: Bounds,
+    ticket: u64,
 ) -> Result<(), BridgeError> {
     let mut held = views.lock();
+    if !held.admit(project, ticket) {
+        return Err(refused("ide_open_cancelled"));
+    }
     if let Some(other) = held.shown.take().filter(|other| other != project.as_str())
         && let Some(webview) = held
             .loaded
@@ -274,8 +324,8 @@ pub fn show(
             let server = workbench.server.clone();
             let port = workbench.webview_port;
             let builder = WebviewBuilder::new(&label, WebviewUrl::External(workbench.url.clone()))
-                .initialization_script(GUARD)
-                .on_navigation(move |next| navigation_allowed(next, &server, port) || outside(next))
+                .initialization_script_for_all_frames(GUARD)
+                .on_navigation(move |next| navigation_allowed(next, &server, port))
                 .on_new_window(|next, _| {
                     outside(&next);
                     NewWindowResponse::Deny
@@ -300,9 +350,12 @@ pub fn show(
         }
     };
     held.shown = Some(project.as_str().to_owned());
+    if let Err(error) = ide_menu(app).and_then(|menu| app.set_menu(menu)) {
+        held.shown = None;
+        webview.hide().map_err(failed)?;
+        return Err(failed(error));
+    }
     webview.set_focus().map_err(failed)?;
-    app.set_menu(ide_menu(app).map_err(failed)?)
-        .map_err(failed)?;
     Ok(())
 }
 
@@ -328,10 +381,12 @@ pub fn place(
     Ok(())
 }
 
-/// Hides a project's IDE webview when its tab is left, keeping it loaded, and gives the
-/// app its own menu back. Inputs: the app, the views and the project. Output: Ok.
+/// Hides a project's IDE webview when its tab is left or an overlay covers it, keeping it
+/// loaded, stops an open of it still waiting for the engine, and gives the app its own menu
+/// back. Inputs: the app, the views and the project. Output: Ok.
 pub fn hide(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<(), BridgeError> {
     let mut held = views.lock();
+    held.cancel(project);
     if held.shown.as_deref() != Some(project.as_str()) {
         return Ok(());
     }
@@ -346,10 +401,12 @@ pub fn hide(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<()
     restore_menu(app)
 }
 
-/// Closes a project's IDE webview when the project page closes, and gives the app its own
-/// menu back if that IDE was shown. Inputs: the app, the views and the project. Output: Ok.
+/// Closes a project's IDE webview when the project page closes, stops an open of it still
+/// waiting for the engine, and gives the app its own menu back if that IDE was shown.
+/// Inputs: the app, the views and the project. Output: Ok.
 pub fn close(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<(), BridgeError> {
     let mut held = views.lock();
+    held.cancel(project);
     let shown = held.shown.as_deref() == Some(project.as_str());
     if shown {
         held.shown = None;
@@ -510,5 +567,44 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_open_the_tab_gave_up_on_is_refused_and_only_the_newest_open_shows() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+        let first = views.begin(&alpha);
+        let second = views.begin(&alpha);
+        assert!(second > first);
+        assert!(
+            !views.lock().admit(&alpha, first),
+            "a replaced open never shows"
+        );
+        assert!(views.lock().admit(&alpha, second));
+        assert!(!views.lock().admit(&alpha, second), "a ticket shows once");
+        let hidden = views.begin(&alpha);
+        views.lock().cancel(&alpha);
+        assert!(
+            !views.lock().admit(&alpha, hidden),
+            "hide or close before the engine answered"
+        );
+        let other = views.begin(&beta);
+        views.lock().cancel(&alpha);
+        assert!(
+            views.lock().admit(&beta, other),
+            "cancelling one project leaves the other"
+        );
+    }
+
+    #[test]
+    fn links_reach_the_browser_at_most_once_a_second() {
+        let last = Mutex::new(None);
+        let now = Instant::now();
+        assert!(link_admitted(&last, now));
+        assert!(!link_admitted(&last, now + Duration::from_millis(500)));
+        assert!(!link_admitted(&last, now + Duration::from_millis(999)));
+        assert!(link_admitted(&last, now + LINK_GAP));
+        assert!(!link_admitted(&last, now + LINK_GAP));
     }
 }
