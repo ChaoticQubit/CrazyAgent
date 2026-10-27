@@ -356,3 +356,128 @@ fn token_sums_past_the_integer_range_still_report_saturated() {
     assert_eq!(report.agents[0].tokens.output, 3);
     assert_eq!(report.days[0].tokens.input, u64::MAX);
 }
+
+/// How many accounts, runs and days `fill_past_one_frame` writes: past every cap.
+pub(crate) const WIDE_ROWS: usize = 70;
+
+/// Names one row `fill_past_one_frame` writes: the prefix and index padded to the
+/// 128-byte identity limit. Inputs: the prefix and the index. Output: the name.
+pub(crate) fn wide(prefix: &str, index: usize) -> String {
+    format!("{:x<128}", format!("{prefix}-{index:03}-"))
+}
+
+/// Fills a usage store past what one reply frame holds: `WIDE_ROWS` accounts' limits with
+/// every field at its widest, and one run on each of `WIDE_ROWS` days with its own 128-byte
+/// project, pool, account and agent, the newest run spending the most tokens.
+/// Inputs: the store and the time of the newest run.
+pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
+    let percent = 100.0_f64 / 3.0;
+    for index in 0..WIDE_ROWS {
+        db.execute(
+            "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,
+                weekly_percent,weekly_resets_ms,five_hour_reset_override_ms,
+                weekly_reset_override_ms,source,observed_ms,checked_ms,failure,
+                five_hour_polled_percent,five_hour_polled_resets_ms,weekly_polled_percent,
+                weekly_polled_resets_ms)
+             VALUES (?1,?2,?3,?4,?3,?4,?4,?4,'transcript',?5,?5,?6,?3,?4,?3,?4)",
+            params![
+                wide("account", index),
+                "p".repeat(crate::usage::PLAN_BYTES_MAX),
+                percent,
+                crate::usage::RESET_MS_MAX,
+                now_ms,
+                "f".repeat(crate::usage::FAILURE_BYTES_MAX),
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO usage_tokens VALUES
+             (?1,'agent',?2,?3,?4,?5,'claude-code','s',?6,?6,?6,?6)",
+            params![
+                now_ms - index as i64 * DAY,
+                wide("project", index),
+                wide("pool", index),
+                wide("account", index),
+                wide("agent", index),
+                spent(index),
+            ],
+        )
+        .unwrap();
+    }
+}
+
+/// Tokens the run at `index` spent: near the integer range, falling with the index.
+/// Input: the index. Output: the tokens.
+fn spent(index: usize) -> i64 {
+    i64::MAX / 4 - index as i64 * 1_000_000_000_000
+}
+
+#[test]
+fn an_offset_beyond_fourteen_hours_is_refused_even_at_the_integer_edges() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    for offset in [i32::MIN, i32::MIN + 1, -841, 841, i32::MAX] {
+        assert_eq!(
+            report(&db, None, None, offset, MIDNIGHT).unwrap_err().0,
+            "usage_request_invalid",
+            "offset {offset}"
+        );
+    }
+    for offset in [-840, 0, 840] {
+        assert!(
+            report(&db, None, None, offset, MIDNIGHT).is_ok(),
+            "offset {offset}"
+        );
+    }
+}
+
+#[test]
+fn a_report_past_one_reply_frame_keeps_its_largest_rows_and_newest_days_and_fits() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    db.execute_batch(LANDING).unwrap();
+    let now = MIDNIGHT + DAY;
+    fill_past_one_frame(&db, now);
+    for index in 0..WIDE_ROWS {
+        db.execute(
+            "INSERT INTO landing_change_sets VALUES (?1,'sub',?2,'accepted',?3,?3,?4)",
+            params![wide("project", index), index.to_string(), spent(index), now],
+        )
+        .unwrap();
+    }
+
+    let report = report(&db, None, None, 0, now).unwrap();
+    let encoded = serde_json::to_vec(&report).unwrap();
+    assert!(encoded.len() <= REPORT_BYTES_MAX, "{} bytes", encoded.len());
+    assert!(
+        crate::protocol::encode_frame(&serde_json::json!({ "kind": "report", "report": &report }))
+            .is_ok(),
+        "the reply that carries it fits one frame"
+    );
+    assert!(
+        !report.limits.is_empty() && report.limits.len() < LIMITS_MAX,
+        "the widest report is trimmed to fit: {} limits",
+        report.limits.len()
+    );
+    assert_eq!(report.limits[0].account.as_str(), wide("account", 0));
+    for rows in [
+        &report.projects,
+        &report.pools,
+        &report.accounts,
+        &report.agents,
+    ] {
+        assert!(!rows.is_empty() && rows.len() < ROWS_MAX, "{}", rows.len());
+    }
+    assert_eq!(
+        report.projects[0].key,
+        wide("project", 0),
+        "the largest project stays first"
+    );
+    assert_eq!(report.lines[0].project, wide("project", 0));
+    assert!(!report.days.is_empty() && report.days.len() < DAYS_MAX);
+    assert_eq!(
+        report.days.last().unwrap().day_ms,
+        now,
+        "the newest day stays"
+    );
+}
