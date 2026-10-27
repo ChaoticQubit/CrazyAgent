@@ -111,6 +111,8 @@ fn main() {
         "desktop_set_skill_enabled",
         "desktop_remove_skill",
         "desktop_skill_detail",
+        "desktop_skill_import_scan",
+        "desktop_import_skill",
         "desktop_add_mcp_server",
         "desktop_update_mcp_server",
         "desktop_approve_mcp_server",

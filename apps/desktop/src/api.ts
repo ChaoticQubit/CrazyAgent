@@ -1,10 +1,10 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView } from "./engine-client";
+export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -610,6 +610,19 @@ export function removeSkill(id: string): Promise<Result<void>> {
  * Output: the detail, or the engine's refusal such as a removed skill. */
 export function skillDetail(id: string, projectId?: string): Promise<Result<SkillDetail>> {
   return call<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
+}
+
+/** Looks for skills in the owner's `~/.claude/skills` and `~/.codex/skills`, read only when
+ * the owner asks. Output: each skill found with its state against the app's skills. */
+export function skillImportScan(): Promise<Result<ImportList>> {
+  return call<ImportList>("desktop_skill_import_scan", {});
+}
+
+/** Imports one ticked skill into the app's skills, turned on for every project, leaving out
+ * dotfiles and credential-like files. Inputs: the found folder and, for a skill whose files
+ * differ, the added skill's id to replace. Output: the skill and the paths left out. */
+export function importSkill(folder: string, replace: string | null): Promise<Result<ImportedSkill>> {
+  return call<ImportedSkill>("desktop_import_skill", { folder, replace });
 }
 
 /** Reads MCP servers for global settings (no project) or one project's settings.

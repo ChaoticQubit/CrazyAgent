@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const api = await import("../src/api.ts");
 const plugins = await import("../src/screens/settings/plugins.tsx");
 const { SkillsView, SkillDetailView, ServersView, serverSpecInput, serverNameError, secretNameError, skillFolderError, serverWord, pluginSwitch, serverFacts, secretsInput,
-  skillBody, fileSize } = plugins;
+  skillBody, fileSize, ImportSkillsView, importable, importWord, importSentence } = plugins;
 const router = await import("../src/ui/router.ts");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
@@ -197,8 +197,9 @@ test("every plugins and folder chooser command the settings call is registered i
   const lib = read("src-tauri/src/lib.rs");
   const handler = lib.slice(lib.indexOf("generate_handler!["));
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions;
-  const commands = [...source.matchAll(/call<[^(]*>\("(desktop_(?:plugin|add_skill|set_skill|remove_skill|skill_detail|add_mcp|approve_mcp|set_mcp|remove_mcp|check_mcp|switch_plugin|pick)[a-z_]*)"/g)].map((match) => match[1]);
-  assert.equal(new Set(commands).size, 15);
+  const commands = [...source.matchAll(/call<[^(]*>\("(desktop_(?:plugin|add_skill|set_skill|remove_skill|skill_detail|skill_import|import_skill|add_mcp|approve_mcp|set_mcp|remove_mcp|check_mcp|switch_plugin|pick)[a-z_]*)"/g)].map((match) => match[1]);
+  assert.equal(new Set(commands).size, 17);
+  assert.ok(commands.includes("desktop_skill_import_scan") && commands.includes("desktop_import_skill"));
   for (const command of commands) {
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
     assert.ok(allowed.includes(`allow-${command.replaceAll("_", "-")}`), `${command} missing from main-window.json`);
@@ -212,4 +213,69 @@ test("refusals from the native open commands read as plain sentences", () => {
     assert.doesNotMatch(api.plainError(code), / \([a-z0-9_]+\)$/, code);
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
+});
+
+const found = (patch = {}) => ({ from: "claude", folder: "/Users/owner/.claude/skills/notes", name: "notes", line: "Writes release notes.", state: { kind: "new" }, ...patch });
+const importProps = (list, patch = {}) => ({ list, ticked: new Set(), outcomes: [], onTick: forbidden, onRetry: forbidden, ...patch });
+
+test("Import my skills is offered in global settings only, next to Add skill", () => {
+  const global = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill()] }, { onImport: forbidden })));
+  assert.match(global, /Import my skills/);
+  assert.match(global, /Add skill/);
+  const empty = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [] }, { onImport: forbidden })));
+  assert.match(empty, /Import my skills/);
+  const project = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill()] }, { projectId: "app" })));
+  assert.doesNotMatch(project, /Import my skills/);
+});
+
+test("found skills show their source and state, and only new or differing ones can be ticked", () => {
+  const value = { found: [
+    found(),
+    found({ from: "codex", folder: "/Users/owner/.codex/skills/graph", name: "graph", line: "Builds a code graph.", state: { kind: "added", id: "skill-9" } }),
+    found({ folder: "/Users/owner/.claude/skills/style", name: "style", line: "House style.", state: { kind: "differs", id: "skill-3" } }),
+    found({ folder: "/Users/owner/.claude/skills/heavy", name: "heavy", line: "", state: { kind: "unusable", code: "skill_import_too_large" } }),
+  ], more: 2 };
+  const markup = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "ok", value }, { ticked: new Set(["/Users/owner/.claude/skills/notes"]) })));
+  assert.match(markup, /From ~\/\.claude\/skills and ~\/\.codex\/skills/);
+  assert.match(markup, /Claude Code: ~\/\.claude\/skills\/notes/);
+  assert.match(markup, /Codex: ~\/\.codex\/skills\/graph/);
+  assert.match(markup, /Writes release notes\./);
+  assert.match(markup, /Already added/);
+  assert.match(markup, /Differs/);
+  assert.match(markup, /Importing replaces the added copy and keeps its project switches\./);
+  assert.match(markup, /Can&#x27;t import/);
+  assert.match(markup, /A skill brought in from your skills folders can be up to 2 MB\./);
+  assert.match(markup, /And 2 more not shown/);
+  const boxes = [...markup.matchAll(/<input type="checkbox"([^>]*)\/>/g)].map((match) => match[1]);
+  assert.equal(boxes.length, 4);
+  assert.match(boxes[0], /checked=""/);
+  assert.doesNotMatch(boxes[0], /disabled/);
+  assert.match(boxes[1], /disabled=""/);
+  assert.doesNotMatch(boxes[2], /disabled/);
+  assert.match(boxes[3], /disabled=""/);
+  assert.doesNotMatch(markup, /skill-9|skill-3/);
+  assert.deepEqual([{ kind: "new" }, { kind: "differs", id: "a" }, { kind: "added", id: "a" }, { kind: "unusable", code: "x" }].map(importable), [true, true, false, false]);
+  assert.deepEqual([{ kind: "new" }, { kind: "added", id: "a" }].map(importWord), ["", "Already added"]);
+});
+
+test("the import's outcomes say what was left out and why a skill was not imported", () => {
+  const imported = (skipped, total) => ({ kind: "ok", value: { skill: skill({ name: "notes" }), skipped, skipped_total: total } });
+  assert.equal(importSentence({ name: "notes", result: imported([], 0) }), "Imported notes.");
+  assert.equal(importSentence({ name: "notes", result: imported([".env", "api_key.txt"], 2) }), "Imported notes. Left out .env, api_key.txt.");
+  assert.equal(importSentence({ name: "notes", result: imported([".env"], 3) }), "Imported notes. Left out .env and 2 more.");
+  const refused = { kind: "error", code: "skill_link_outside", message: api.plainError("skill_link_outside") };
+  assert.equal(importSentence({ name: "leaky", result: refused }), "Couldn't import leaky: This folder links to files outside it.");
+  const markup = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "ok", value: { found: [], more: 0 } },
+    { outcomes: [{ name: "notes", result: imported([".env"], 1) }, { name: "leaky", result: refused }] })));
+  assert.match(markup, /Imported notes\. Left out \.env\./);
+  assert.match(markup, /Couldn&#x27;t import leaky/);
+  assert.match(markup, /No skills found in those folders/);
+  assert.equal(api.plainError("skill_import_name_changed"), "This folder now holds a different skill. Look for your skills again.");
+});
+
+test("the import list shows plain loading, not ready and error states", () => {
+  assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "loading" }))), /skeleton/);
+  assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "not_ready" }))), /Importing skills/);
+  const failed = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "error", code: "skill_import_home_unknown", message: api.plainError("skill_import_home_unknown") })));
+  assert.match(failed, /Your home folder is unknown, so your skills can&#x27;t be found\./);
 });

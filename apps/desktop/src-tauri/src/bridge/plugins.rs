@@ -91,6 +91,36 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
+    /// Looks for skills in the owner's Claude Code and Codex skills folders, only when the
+    /// owner opens Import my skills. Output: each skill found with its state.
+    pub async fn skill_import_scan(
+        &mut self,
+    ) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
+        self.plugins_ready()?;
+        self.controller()?
+            .skill_import_scan()
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Imports one ticked skill. Inputs: its found folder and, for a skill whose files
+    /// differ, the added skill's id to replace. Output: the skill and the paths left out.
+    pub async fn import_skill(
+        &mut self,
+        folder: String,
+        replace: Option<String>,
+    ) -> Result<crazyagent::skills::import::Imported, BridgeError> {
+        self.plugins_ready()?;
+        let mut done = self
+            .controller()?
+            .import_skills(vec![(folder, replace)])
+            .await
+            .map_err(plugin_failure)?;
+        assert_eq!(done.len(), 1, "one pick gives one outcome");
+        let (_, result) = done.remove(0);
+        result.map_err(|code| plugin_failure(EngineError(code)))
+    }
+
     /// Removes a skill and the engine's copy of its folder.
     pub async fn remove_skill(&mut self, id: String) -> Result<(), BridgeError> {
         self.plugins_ready()?;

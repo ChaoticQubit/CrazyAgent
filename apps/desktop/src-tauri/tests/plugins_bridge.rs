@@ -61,6 +61,31 @@ async fn flow(root: &Path) -> Result<(), String> {
             .enabled
     );
 
+    let found = root.join("home/.claude/skills/style");
+    std::fs::create_dir_all(&found).unwrap();
+    std::fs::write(
+        found.join("SKILL.md"),
+        "---\nname: style\ndescription: House style.\n---\n",
+    )
+    .unwrap();
+    std::fs::write(found.join(".env"), "TOKEN=dummy-value").unwrap();
+    let imported = bridge
+        .import_skill(found.display().to_string(), None)
+        .await
+        .map_err(code)?;
+    assert_eq!(imported.skill.name, "style");
+    assert!(imported.skill.enabled);
+    assert_eq!(imported.skipped, vec![".env"]);
+    assert_eq!(
+        bridge
+            .import_skill(found.display().to_string(), None)
+            .await
+            .unwrap_err()
+            .code,
+        "skill_name_taken"
+    );
+    bridge.remove_skill(imported.skill.id).await.map_err(code)?;
+
     let server_path = root.join("servers").join("mcp_fixture.py");
     std::fs::create_dir_all(root.join("servers")).unwrap();
     std::fs::write(&server_path, FIXTURE).unwrap();
@@ -165,6 +190,8 @@ fn plugins_commands_use_the_local_main_window_acl() {
         "desktop_check_mcp_server",
         "desktop_project_plugins",
         "desktop_skill_detail",
+        "desktop_skill_import_scan",
+        "desktop_import_skill",
     ] {
         assert!(
             authority

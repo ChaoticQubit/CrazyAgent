@@ -1462,6 +1462,26 @@ async fn desktop_skill_detail(
 }
 
 #[tauri::command]
+async fn desktop_skill_import_scan(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.skill_import_scan().await
+}
+
+#[tauri::command]
+async fn desktop_import_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    folder: String,
+    replace: Option<String>,
+) -> Result<crazyagent::skills::import::Imported, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.import_skill(folder, replace).await
+}
+
+#[tauri::command]
 async fn desktop_remove_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2075,6 +2095,8 @@ pub fn run() {
             desktop_set_skill_enabled,
             desktop_remove_skill,
             desktop_skill_detail,
+            desktop_skill_import_scan,
+            desktop_import_skill,
             desktop_add_mcp_server,
             desktop_update_mcp_server,
             desktop_approve_mcp_server,

@@ -1177,6 +1177,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.skill_detail(id, project_id).await }.await;
             routed(result)
         }
+        "desktop_skill_import_scan" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.skill_import_scan().await }.await;
+            routed(result)
+        }
+        "desktop_import_skill" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                folder: String,
+                replace: Option<String>,
+            }
+            let Args { folder, replace } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.import_skill(folder, replace).await }.await;
+            routed(result)
+        }
         "desktop_remove_skill" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
