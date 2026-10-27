@@ -618,7 +618,7 @@ async fn desktop_project_files(
     query: String,
 ) -> Result<Vec<String>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.project_files(&id, &query).await
+    read(&state).await?.project_files(&id, &query).await
 }
 
 #[tauri::command]
