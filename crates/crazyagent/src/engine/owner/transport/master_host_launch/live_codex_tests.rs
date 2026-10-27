@@ -288,7 +288,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         "# Browsky\n\n{}\n{}",
         setup.about,
         if tools_section {
-            crate::launch_context::master_tools_section(&setup)
+            crate::launch_context::master_tools_section(&setup, &[])
         } else {
             String::new()
         }
