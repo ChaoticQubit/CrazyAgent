@@ -916,6 +916,95 @@ fn an_escalation_is_an_unseen_notification_until_the_owner_sees_it() {
     );
 }
 
+#[test]
+fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
+    let fixture = Fixture::new();
+    let quiet = escalate(
+        &fixture.connection,
+        &project(),
+        "Delete the old release branch?",
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    let busy = ["team-other", "team-third", "team-fourth"].map(|id| ProjectId::new(id).unwrap());
+    let flood = VIEW_NOTIFICATIONS_MAX + 10;
+    for at in 0..flood {
+        for team in &busy {
+            escalate(
+                &fixture.connection,
+                team,
+                "Spend on a new provider?",
+                2 + at,
+            )
+            .unwrap()
+            .unwrap();
+        }
+    }
+    assert!(3 * flood > APP_NOTIFICATIONS_MAX);
+
+    let view = app(&fixture.connection).unwrap();
+    assert_eq!(view.unseen, 1 + 3 * flood);
+    let count = |id: &str, unseen: i64| ProjectUnseen {
+        project_id: ProjectId::new(id).unwrap(),
+        unseen,
+    };
+    assert_eq!(
+        view.projects,
+        [
+            count(PROJECT, 1),
+            count("team-fourth", flood),
+            count(OTHER, flood),
+            count("team-third", flood),
+        ]
+    );
+    assert_eq!(view.notifications.len() as i64, APP_NOTIFICATIONS_MAX);
+    assert!(
+        view.notifications.iter().any(|item| item.id == quiet),
+        "the quiet project's escalation stays in the app window"
+    );
+    assert!(
+        view.notifications
+            .windows(2)
+            .all(|pair| pair[0].id > pair[1].id)
+    );
+    for team in &busy {
+        let shown: Vec<i64> = view
+            .notifications
+            .iter()
+            .filter(|item| &item.project_id == team)
+            .map(|item| item.id)
+            .collect();
+        let newest: Vec<i64> = notifications(&fixture.connection, Some(team), 16)
+            .unwrap()
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(shown.len() >= 16 && shown.len() as i64 <= VIEW_NOTIFICATIONS_MAX);
+        assert_eq!(
+            shown[..16],
+            newest[..],
+            "each busy project shows its newest"
+        );
+    }
+
+    assert_eq!(
+        seen(&fixture.connection, Some(&project()), quiet, 99).unwrap(),
+        1
+    );
+    let view = app(&fixture.connection).unwrap();
+    assert_eq!(view.unseen, 3 * flood);
+    assert_eq!(
+        view.projects,
+        [
+            count("team-fourth", flood),
+            count(OTHER, flood),
+            count("team-third", flood),
+        ],
+        "a project with nothing unseen has no count"
+    );
+}
+
 fn wakes(connection: &Connection) -> Vec<String> {
     let mut statement = connection
         .prepare("SELECT text FROM team_messages WHERE project=?1 AND author='engine' ORDER BY id")
