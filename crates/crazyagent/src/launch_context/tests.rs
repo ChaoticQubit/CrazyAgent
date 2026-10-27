@@ -195,6 +195,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -231,6 +232,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let fresh = || AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
     };
     let context = fresh().with_team_tool(engine, &record).unwrap();
     assert_eq!(
@@ -333,6 +335,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
     }
     .with_index(&plugins);
     let home = root.join("codex");
@@ -370,6 +373,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: String::new(),
+        process: None,
     };
 
     agents.shell(&plant);
@@ -456,4 +460,65 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
         crowded.len()
     );
     assert!(crowded.contains(" more\n"));
+}
+
+#[test]
+fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let folder = root.join("project");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    crate::agent_home::save_app(&data, "APP-RULE-41\n").unwrap();
+    crate::agent_home::save_project(&folder, "PROJECT-RULE-42\n").unwrap();
+    let project = crate::agent_home::AgentProject {
+        data,
+        id: ProjectId::new("process").unwrap(),
+        folder: Some(folder),
+    };
+    let text = crate::agent_home::text(&project).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Process { project, text }),
+    };
+    let home = |name: &str| {
+        let home = root.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        home
+    };
+
+    let claude = home("claude");
+    let installed = context.install("claude-code", &claude, false).unwrap();
+    let written = fs::read_to_string(claude.join("CLAUDE.md")).unwrap();
+    let app = written.find("APP-RULE-41").unwrap();
+    assert!(app < written.find("PROJECT-RULE-42").unwrap());
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    assert!(
+        prompt.starts_with("# Project context from CrazyAgent\n") && prompt.ends_with(&written),
+        "Claude Code skips its user CLAUDE.md with setting sources off, so its prompt file carries the text"
+    );
+    assert!(!claude.join("AGENTS.md").exists());
+    drop(installed);
+    assert!(
+        !claude.join("CLAUDE.md").exists(),
+        "the launch's file goes with it"
+    );
+
+    let codex = home("codex");
+    let installed = context.install("codex", &codex, false).unwrap();
+    let written = fs::read_to_string(codex.join("AGENTS.md")).unwrap();
+    assert!(written.find("APP-RULE-41").unwrap() < written.find("PROJECT-RULE-42").unwrap());
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"].as_str().unwrap();
+    assert!(
+        !developer.contains("APP-RULE-41"),
+        "Codex reads its AGENTS.md itself, so the text is not given twice"
+    );
+    assert!(!codex.join("CLAUDE.md").exists());
+    drop(installed);
 }

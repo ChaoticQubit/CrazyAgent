@@ -74,6 +74,15 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
+    process: Option<Process>,
+}
+
+/// The owner's app and project instructions one launch writes into the agent's home,
+/// with the project they belong to.
+#[derive(Debug)]
+struct Process {
+    project: crate::agent_home::AgentProject,
+    text: String,
 }
 
 /// The files one launch wrote into its agent home, and the lock that keeps a second launch
@@ -103,10 +112,34 @@ pub fn for_project(
     let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0))?;
     let instructions = project_instructions(&tx, project)?;
+    let home_project = agent_project(&tx, project)?;
     drop(tx);
+    let text = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
+        process: Some(Process {
+            project: home_project,
+            text,
+        }),
+    })
+}
+
+/// Names what an agent home of the project receives the owner's instructions from: the
+/// engine data folder (the folder of `engine.db`) and the project's recorded folder.
+/// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
+pub(crate) fn agent_project(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<crate::agent_home::AgentProject, LaunchError> {
+    let folder = crate::project_setup::load_setup(tx, project)
+        .map_err(unavailable)?
+        .map(|setup| setup.project_folder())
+        .filter(|folder| folder.is_absolute());
+    Ok(crate::agent_home::AgentProject {
+        data: engine_root(tx)?,
+        id: project.clone(),
+        folder,
     })
 }
 
@@ -325,6 +358,15 @@ impl AgentContext {
         };
         remove(&state);
         directory(&state, true)?;
+        if let Some(process) = &self.process {
+            let harness = crate::agent_home::Harness::from_id(id)
+                .ok_or_else(|| failure("launch_harness_unsupported"))?;
+            crate::agent_home::prepare(home, harness, &process.project, &process.text)
+                .map_err(|problem| LaunchError(problem.0))?;
+            installed
+                .removals
+                .push(home.join(harness.instruction_file()));
+        }
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
         let skills = tools && !self.plugins.skills.is_empty();
         if id == "codex" {
@@ -346,6 +388,14 @@ impl AgentContext {
                 .arguments
                 .extend([OsString::from("--mcp-config"), mcp.into_os_string()]);
             let mut text = self.instructions.clone();
+            if let Some(process) = self
+                .process
+                .as_ref()
+                .filter(|process| !process.text.is_empty())
+            {
+                text.push('\n');
+                text.push_str(&process.text);
+            }
             if skills {
                 let plugin = state.join("plugin");
                 directory(&plugin, true)?;
@@ -360,7 +410,13 @@ impl AgentContext {
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
             }
-            assert!(text.len() <= INSTRUCTIONS_BYTES_MAX + SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
+            assert!(
+                text.len()
+                    <= INSTRUCTIONS_BYTES_MAX
+                        + SKILLS_INDEX_BYTES_MAX
+                        + SECTION_SLACK
+                        + crate::agent_home::PROCESS_BYTES_MAX
+            );
             let instructions = state.join("instructions.md");
             write_private(&instructions, text.as_bytes())?;
             installed.arguments.extend([
