@@ -4,6 +4,7 @@ use super::{
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use crate::storage::versioned;
 use crate::terminal::{AgentId, Host, HostError, type_prompt};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -311,14 +312,21 @@ impl EventsStatus {
 pub struct AgentRule {
     pub agent: i64,
     pub rule: WakeRule,
+    #[serde(default)]
+    pub version: u64,
 }
 
-/// The wake rules a project's settings show: what is stored at each level and the rule in
-/// force for the project with the level it came from.
+/// The wake rules a project's settings show: what is stored at each level with the version a
+/// change sends back, and the rule in force for the project with the level it came from. A
+/// level with no rule of its own is at version 0.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WakeView {
     pub app: Option<WakeRule>,
+    #[serde(default)]
+    pub app_version: u64,
     pub project: Option<WakeRule>,
+    #[serde(default)]
+    pub project_version: u64,
     pub agents: Vec<AgentRule>,
     pub effective: WakeRule,
     pub level: RuleLevel,
@@ -357,6 +365,8 @@ pub struct AgentQuestions {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AppEvents {
     pub rule: Option<WakeRule>,
+    #[serde(default)]
+    pub rule_version: u64,
     pub effective: WakeRule,
     pub notifications: Vec<Notification>,
     pub unseen: i64,
@@ -1526,11 +1536,28 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
         paused,
         wake: WakeView {
             app,
+            app_version: rule_version(connection, &RuleTarget::App)?,
             project: mine,
+            project_version: rule_version(
+                connection,
+                &RuleTarget::Project {
+                    project_id: project.clone(),
+                },
+            )?,
             agents: own
                 .into_iter()
-                .map(|(agent, rule)| AgentRule { agent, rule })
-                .collect(),
+                .map(|(agent, rule)| {
+                    let target = RuleTarget::Agent {
+                        project_id: project.clone(),
+                        agent,
+                    };
+                    Ok(AgentRule {
+                        agent,
+                        rule,
+                        version: rule_version(connection, &target)?,
+                    })
+                })
+                .collect::<Result<_, EngineError>>()?,
             effective,
             level,
         },
@@ -1555,6 +1582,7 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
         .map_err(error)?;
     Ok(AppEvents {
         rule,
+        rule_version: rule_version(connection, &RuleTarget::App)?,
         effective: rule.unwrap_or_default(),
         notifications: app_notifications(connection)?,
         unseen,
@@ -1562,13 +1590,35 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     })
 }
 
-/// Sets or clears the wake rule at one level; clearing returns that level to the level
-/// above it. Takes the connection, the level and the rule or none.
-/// Returns Ok, or `team_wake_cap_invalid` or `team_agent_not_found`.
+/// Names the versioned item of one wake-rule level.
+fn rule_item(target: &RuleTarget) -> versioned::Item {
+    match target {
+        RuleTarget::App => versioned::team_rule_item(None, 0),
+        RuleTarget::Project { project_id } => versioned::team_rule_item(Some(project_id), 0),
+        RuleTarget::Agent { project_id, agent } => {
+            versioned::team_rule_item(Some(project_id), *agent)
+        }
+    }
+}
+
+/// Reads the version of one wake-rule level, 0 when the level has no rule of its own.
+/// Takes the connection and the level. Returns the version, or `versioned_unavailable`.
+pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64, EngineError> {
+    if matches!(target, RuleTarget::Agent { agent, .. } if *agent <= 0) {
+        return Ok(0);
+    }
+    Ok(versioned::current(connection, &rule_item(target))?.version)
+}
+
+/// Sets or clears the wake rule at one level when the owner's screen showed its current
+/// version; clearing returns that level to the level above it and to version 0. Takes the
+/// transaction, the level, the rule or none and the version the screen showed.
+/// Returns Ok, or `team_wake_cap_invalid`, `team_agent_not_found` or `stale_revision`.
 pub fn set_rule(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     target: &RuleTarget,
     rule: Option<&WakeRule>,
+    version: u64,
 ) -> Result<Result<(), &'static str>, EngineError> {
     if rule.is_some_and(|rule| rule.hourly_cap > HOURLY_CAP_MAX) {
         return Ok(Err("team_wake_cap_invalid"));
@@ -1577,7 +1627,7 @@ pub fn set_rule(
         RuleTarget::App => ("", 0),
         RuleTarget::Project { project_id } => (project_id.as_str(), 0),
         RuleTarget::Agent { project_id, agent } => {
-            let owned: bool = connection
+            let owned: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='sub')",
                     params![agent, project_id.as_str()],
@@ -1590,12 +1640,19 @@ pub fn set_rule(
             (project_id.as_str(), *agent)
         }
     };
+    let item = rule_item(target);
+    if versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(Err(versioned::STALE_CODE));
+    }
     match rule {
-        None => connection.execute(
-            "DELETE FROM team_wake_rules WHERE project=?1 AND agent=?2",
-            params![project, agent],
-        ),
-        Some(rule) => connection.execute(
+        None => {
+            versioned::forget(tx, &item)?;
+            tx.execute(
+                "DELETE FROM team_wake_rules WHERE project=?1 AND agent=?2",
+                params![project, agent],
+            )
+        }
+        Some(rule) => tx.execute(
             "INSERT INTO team_wake_rules(project,agent,question,finished,failed,change_set_ready,progress,hourly_cap)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(project,agent) DO UPDATE SET question=excluded.question, finished=excluded.finished,

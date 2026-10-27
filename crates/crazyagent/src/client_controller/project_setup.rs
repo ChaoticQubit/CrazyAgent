@@ -67,17 +67,19 @@ impl OwnerController {
 
     /// Reads the extra read-only folders the owner saved for a project's agents.
     /// Takes the project id.
-    /// Returns the folders in saved order, none when nothing was saved.
+    /// Returns the folders in saved order, none when nothing was saved, and their version.
     pub async fn project_read_paths(
         &mut self,
         project_id: ProjectId,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<crate::project_setup::ReadPaths, EngineError> {
         match self
             .read(OwnerRead::ProjectReadPaths { project_id })
             .await?
             .data
         {
-            OwnerData::ProjectReadPaths { paths, .. } => Ok(paths),
+            OwnerData::ProjectReadPaths { paths, version, .. } => {
+                Ok(crate::project_setup::ReadPaths { paths, version })
+            }
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
@@ -258,17 +260,23 @@ impl OwnerController {
     }
 
     /// Replaces a project's extra read-only folders for its agents' sandboxes.
-    /// Takes the project id, the typed folders and the client generation.
-    /// Returns the actual owner response; a refused folder is a plain rejection.
+    /// Takes the project id, the version the screen showed, the typed folders and the client
+    /// generation. Returns the actual owner response; a refused folder is a plain rejection,
+    /// and folders changed since the screen read them are `stale_revision`.
     pub async fn set_project_read_paths(
         &mut self,
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_read_paths(project_id.clone()).await?;
         self.begin_mutation(
-            OwnerMutation::SetProjectReadPaths { project_id, paths },
+            OwnerMutation::SetProjectReadPaths {
+                project_id,
+                version,
+                paths,
+            },
             generation,
         )?;
         self.send_pending().await

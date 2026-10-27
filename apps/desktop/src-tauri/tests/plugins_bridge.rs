@@ -55,7 +55,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     );
     assert!(
         !bridge
-            .set_skill_enabled(skill.id.clone(), false)
+            .set_skill_enabled(skill.id.clone(), false, skill.version)
             .await
             .map_err(code)?
             .enabled

@@ -63,15 +63,17 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Turns a skill on or off where it was added. Output: the skill.
+    /// Turns a skill on or off where it was added, when the screen showed its current
+    /// version. Output: the skill, or `stale_revision` after another change.
     pub async fn set_skill_enabled(
         &mut self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<SkillView, BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .set_skill_enabled(id, enabled)
+            .set_skill_enabled(id, enabled, version)
             .await
             .map_err(plugin_failure)
     }
@@ -152,15 +154,17 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Changes how an MCP server runs; it then waits for approval again.
+    /// Changes how an MCP server runs; it then waits for approval again. Inputs: id, the new
+    /// command or URL and the version the screen showed.
     pub async fn update_mcp_server(
         &mut self,
         id: String,
         spec: ServerSpec,
+        version: u64,
     ) -> Result<ServerView, BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .update_mcp_server(id, spec)
+            .update_mcp_server(id, spec, version)
             .await
             .map_err(plugin_failure)
     }
@@ -178,15 +182,17 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Turns an MCP server on or off where it was added.
+    /// Turns an MCP server on or off where it was added, when the screen showed its current
+    /// version.
     pub async fn set_mcp_server_enabled(
         &mut self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<ServerView, BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .set_mcp_server_enabled(id, enabled)
+            .set_mcp_server_enabled(id, enabled, version)
             .await
             .map_err(plugin_failure)
     }
@@ -200,18 +206,20 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Switches a global skill or MCP server on or off for one project.
+    /// Switches a global skill or MCP server on or off for one project, when the screen
+    /// showed the item's current version.
     pub async fn switch_plugin(
         &mut self,
         project_id: String,
         id: String,
         on: bool,
+        version: u64,
     ) -> Result<(), BridgeError> {
         self.plugins_ready()?;
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("plugin_project_unknown"))?;
         self.controller()?
-            .switch_plugin(project, id, on)
+            .switch_plugin(project, id, on, version)
             .await
             .map_err(plugin_failure)
     }

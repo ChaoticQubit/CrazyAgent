@@ -305,7 +305,7 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let (id, name, enabled, on_here) = match item {
+        let (id, name, enabled, on_here, version) = match item {
             Item::Skill(index) => {
                 let skill = &self.skills[index];
                 (
@@ -313,6 +313,7 @@ impl ProjectPlugins {
                     skill.name.clone(),
                     skill.enabled,
                     skill.on_here,
+                    skill.version,
                 )
             }
             Item::Server(index) => {
@@ -322,6 +323,7 @@ impl ProjectPlugins {
                     server.name.clone(),
                     server.enabled,
                     server.on_here,
+                    server.version,
                 )
             }
         };
@@ -337,6 +339,7 @@ impl ProjectPlugins {
                     project: self.project.clone(),
                     id,
                     on: !on,
+                    version,
                 },
                 if on {
                     format!("{name} is off for this project.")
@@ -348,6 +351,7 @@ impl ProjectPlugins {
                 PluginChange::SetSkill {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
@@ -355,6 +359,7 @@ impl ProjectPlugins {
                 PluginChange::SetServer {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),

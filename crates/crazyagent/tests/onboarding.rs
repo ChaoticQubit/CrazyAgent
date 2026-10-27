@@ -958,9 +958,10 @@ async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_insta
 async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_on_again() {
     let mut bench = Bench::start(|_| {}).await;
     bench.generation += 1;
+    let version = bench.owner.setup_status().await.unwrap().version;
     let off = bench
         .owner
-        .set_pack_entry("graphify".into(), false, bench.generation)
+        .set_pack_entry("graphify".into(), false, version, bench.generation)
         .await
         .unwrap();
     assert_eq!(rejection(&off), None, "{off:?}");
@@ -969,7 +970,7 @@ async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_
     bench.generation += 1;
     let on = bench
         .owner
-        .set_pack_entry("graphify".into(), true, bench.generation)
+        .set_pack_entry("graphify".into(), true, version + 1, bench.generation)
         .await
         .unwrap();
     assert_eq!(rejection(&on), None, "{on:?}");

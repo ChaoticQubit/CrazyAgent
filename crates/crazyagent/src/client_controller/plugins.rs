@@ -130,13 +130,17 @@ impl OwnerController {
         Ok(done)
     }
 
-    /// Turns a skill on or off where it was added. Inputs: skill id and the new state.
+    /// Turns a skill on or off where it was added. Inputs: skill id, the new state and the
+    /// version the screen showed. Output: the skill, or `stale_revision` after another change.
     pub async fn set_skill_enabled(
         &self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<SkillView, EngineError> {
-        self.plugins_client()?.set_skill_enabled(id, enabled).await
+        self.plugins_client()?
+            .set_skill_enabled(id, enabled, version)
+            .await
     }
 
     /// Removes a skill and the engine's copy of its folder. Input: the skill id.
@@ -184,12 +188,16 @@ impl OwnerController {
     }
 
     /// Changes an MCP server's command or URL; it then waits for approval again.
+    /// Inputs: id, the new spec and the version the screen showed.
     pub async fn update_mcp_server(
         &self,
         id: String,
         spec: ServerSpec,
+        version: u64,
     ) -> Result<ServerView, EngineError> {
-        self.plugins_client()?.update_mcp_server(id, spec).await
+        self.plugins_client()?
+            .update_mcp_server(id, spec, version)
+            .await
     }
 
     /// Approves an MCP server exactly as shown to the owner. Inputs: id and the shown spec.
@@ -201,14 +209,16 @@ impl OwnerController {
         self.plugins_client()?.approve_mcp_server(id, spec).await
     }
 
-    /// Turns an MCP server on or off where it was added. Inputs: id and the new state.
+    /// Turns an MCP server on or off where it was added. Inputs: id, the new state and the
+    /// version the screen showed. Output: the server, or `stale_revision` after another change.
     pub async fn set_mcp_server_enabled(
         &self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<ServerView, EngineError> {
         self.plugins_client()?
-            .set_mcp_server_enabled(id, enabled)
+            .set_mcp_server_enabled(id, enabled, version)
             .await
     }
 
@@ -217,14 +227,18 @@ impl OwnerController {
         self.plugins_client()?.remove_mcp_server(id).await
     }
 
-    /// Switches a global skill or MCP server on or off for one project.
+    /// Switches a global skill or MCP server on or off for one project. Inputs: the project,
+    /// the item id, the new state and the item's version the screen showed.
     pub async fn switch_plugin(
         &self,
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     ) -> Result<(), EngineError> {
-        self.plugins_client()?.switch_plugin(project, id, on).await
+        self.plugins_client()?
+            .switch_plugin(project, id, on, version)
+            .await
     }
 
     /// Saves or replaces one MCP server secret. Inputs: server id, name and value.

@@ -548,7 +548,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_remove: bool,
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
-    pub read_paths: Option<Vec<String>>,
+    pub read_paths: Option<crate::project_setup::ReadPaths>,
     pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
@@ -562,6 +562,7 @@ pub(in crate::tui) struct ProjectScreen {
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
     read_paths_read_ms: Option<i64>,
+    folders_version: u64,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -624,6 +625,7 @@ impl ProjectScreen {
             jobs_read_ms: None,
             context_read_ms: None,
             read_paths_read_ms: None,
+            folders_version: 0,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -840,8 +842,8 @@ impl ProjectScreen {
                 self.memories = Some(memories);
                 self.memories_read_ms = Some(self.now_ms);
             }
-            SetupView::ReadPaths(paths) => {
-                self.read_paths = Some(paths);
+            SetupView::ReadPaths(saved) => {
+                self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
             SetupView::Item(chunk) => {
@@ -1893,9 +1895,10 @@ impl ProjectScreen {
             }
             KeyCode::Char('f') => {
                 match &self.read_paths {
-                    Some(paths) => {
+                    Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
-                        input.set(&paths.join(":"));
+                        input.set(&saved.paths.join(":"));
+                        self.folders_version = saved.version;
                         self.folders = Some(AddFile {
                             input,
                             busy: false,
@@ -1983,6 +1986,7 @@ impl ProjectScreen {
                     .collect();
                 let action = SetupAction::SetReadPaths {
                     project_id: self.project.clone(),
+                    version: self.folders_version,
                     paths,
                 };
                 if let Err(error) = action.validate() {

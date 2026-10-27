@@ -345,15 +345,25 @@ impl Plugins {
                 let skill = &self.skills[index];
                 let enabled = !skill.enabled;
                 let done = format!("{} is {}.", skill.name, if enabled { "on" } else { "off" });
-                let id = skill.id.clone();
-                self.change(PluginChange::SetSkill { id, enabled }, done, ctx);
+                let (id, version) = (skill.id.clone(), skill.version);
+                let change = PluginChange::SetSkill {
+                    id,
+                    enabled,
+                    version,
+                };
+                self.change(change, done, ctx);
             }
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let enabled = !server.enabled;
                 let done = format!("{} is {}.", server.name, if enabled { "on" } else { "off" });
-                let id = server.id.clone();
-                self.change(PluginChange::SetServer { id, enabled }, done, ctx);
+                let (id, version) = (server.id.clone(), server.version);
+                let change = PluginChange::SetServer {
+                    id,
+                    enabled,
+                    version,
+                };
+                self.change(change, done, ctx);
             }
             None => {}
         }
@@ -1564,8 +1574,11 @@ impl EditServer {
                     "Changed {}. Approve it before agents can use it.",
                     self.server.name
                 ));
-                let id = self.server.id.clone();
-                send(ctx, SettingsJob::Plugin(PluginChange::Update { id, spec }));
+                let (id, version) = (self.server.id.clone(), self.server.version);
+                send(
+                    ctx,
+                    SettingsJob::Plugin(PluginChange::Update { id, spec, version }),
+                );
             }
         }
     }
@@ -1827,6 +1840,10 @@ impl Screen for EditServer {
                 ctx.say(Message::success(&done, ""));
             }
             Ok(None) => {}
+            Err(code) if code == crate::storage::versioned::STALE_CODE => {
+                ctx.say(Message::error(plugin_plain(code), ""));
+                return back_to(self.project.as_ref(), ctx);
+            }
             Err(code) => ctx.say(Message::error(plugin_plain(code), "")),
         }
         Flow::Handled

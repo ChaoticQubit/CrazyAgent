@@ -81,6 +81,7 @@ pub(in crate::tui) enum SettingsJob {
     Schedule,
     SetSchedule {
         change: crate::scheduling::ScheduleChange,
+        version: u64,
         generation: u64,
     },
     Ranking,
@@ -97,6 +98,7 @@ pub(in crate::tui) enum PluginChange {
     SetSkill {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveSkill {
         id: String,
@@ -114,6 +116,7 @@ pub(in crate::tui) enum PluginChange {
     SetServer {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveServer {
         id: String,
@@ -124,6 +127,7 @@ pub(in crate::tui) enum PluginChange {
     Update {
         id: String,
         spec: ServerSpec,
+        version: u64,
     },
     SetSecret {
         id: String,
@@ -138,6 +142,7 @@ pub(in crate::tui) enum PluginChange {
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     },
 }
 
@@ -498,16 +503,20 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
-            SettingsJob::SetSchedule { change, generation } => {
-                SettingsEvent::ScheduleSet(match self.settings_controller() {
-                    Ok(controller) => applied(
-                        controller.set_account_schedule(change, generation).await,
-                        "account_schedule_outcome_unknown",
-                        lost,
-                    ),
-                    Err(error) => Err(error),
-                })
-            }
+            SettingsJob::SetSchedule {
+                change,
+                version,
+                generation,
+            } => SettingsEvent::ScheduleSet(match self.settings_controller() {
+                Ok(controller) => applied(
+                    controller
+                        .set_account_schedule(change, version, generation)
+                        .await,
+                    "account_schedule_outcome_unknown",
+                    lost,
+                ),
+                Err(error) => Err(error),
+            }),
             SettingsJob::AddMemory {
                 scope,
                 text,
@@ -578,8 +587,12 @@ impl NativeOwner {
             PluginChange::AddSkill { scope, folder } => {
                 controller.add_skill(scope, folder).await.map(|_| None)
             }
-            PluginChange::SetSkill { id, enabled } => controller
-                .set_skill_enabled(id, enabled)
+            PluginChange::SetSkill {
+                id,
+                enabled,
+                version,
+            } => controller
+                .set_skill_enabled(id, enabled, version)
                 .await
                 .map(|_| None),
             PluginChange::RemoveSkill { id } => controller.remove_skill(id).await.map(|()| None),
@@ -595,25 +608,35 @@ impl NativeOwner {
             PluginChange::Approve { id, spec } => {
                 controller.approve_mcp_server(id, spec).await.map(Some)
             }
-            PluginChange::SetServer { id, enabled } => controller
-                .set_mcp_server_enabled(id, enabled)
+            PluginChange::SetServer {
+                id,
+                enabled,
+                version,
+            } => controller
+                .set_mcp_server_enabled(id, enabled, version)
                 .await
                 .map(Some),
             PluginChange::RemoveServer { id } => {
                 controller.remove_mcp_server(id).await.map(|()| None)
             }
             PluginChange::CheckServer { id } => controller.check_mcp_server(id).await.map(Some),
-            PluginChange::Update { id, spec } => {
-                controller.update_mcp_server(id, spec).await.map(Some)
-            }
+            PluginChange::Update { id, spec, version } => controller
+                .update_mcp_server(id, spec, version)
+                .await
+                .map(Some),
             PluginChange::SetSecret { id, name, value } => {
                 controller.set_mcp_secret(id, name, value).await.map(Some)
             }
             PluginChange::RemoveSecret { id, name } => {
                 controller.remove_mcp_secret(id, name).await.map(Some)
             }
-            PluginChange::Switch { project, id, on } => controller
-                .switch_plugin(project, id, on)
+            PluginChange::Switch {
+                project,
+                id,
+                on,
+                version,
+            } => controller
+                .switch_plugin(project, id, on, version)
                 .await
                 .map(|()| None),
         };
@@ -1661,6 +1684,7 @@ mod tests {
                 project: project.clone(),
                 id: skills[0].id.clone(),
                 on: false,
+                version: skills[0].version,
             }))
             .await;
         changed(switched);

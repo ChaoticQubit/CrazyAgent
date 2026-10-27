@@ -45,6 +45,7 @@ enum Action {
     SetSkill {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveSkill {
         id: String,
@@ -57,6 +58,7 @@ enum Action {
     UpdateServer {
         id: String,
         spec: ServerSpec,
+        version: u64,
     },
     Approve {
         id: String,
@@ -65,6 +67,7 @@ enum Action {
     SetServer {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveServer {
         id: String,
@@ -73,6 +76,7 @@ enum Action {
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     },
     SetSecret {
         id: String,
@@ -314,13 +318,20 @@ impl OwnerClient {
         }
     }
 
-    /// Turns a skill on or off where it was added. Inputs: skill id and the new state.
+    /// Turns a skill on or off where it was added. Inputs: skill id, the new state and the
+    /// version the owner's screen showed; a skill changed since is refused `stale_revision`.
     pub async fn set_skill_enabled(
         &self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<SkillView, EngineError> {
-        self.skill_reply(Action::SetSkill { id, enabled }).await
+        self.skill_reply(Action::SetSkill {
+            id,
+            enabled,
+            version,
+        })
+        .await
     }
 
     /// Removes a skill and its stored folder copy. Input: the skill id.
@@ -341,12 +352,15 @@ impl OwnerClient {
     }
 
     /// Changes how an MCP server runs. Any change sends it back to "Waiting for approval".
+    /// Inputs: id, the new command or URL and the version the owner's screen showed; a server
+    /// changed since is refused `stale_revision`.
     pub async fn update_mcp_server(
         &self,
         id: String,
         spec: ServerSpec,
+        version: u64,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::UpdateServer { id, spec }, None)
+        self.server_reply(Action::UpdateServer { id, spec, version }, None)
             .await
     }
 
@@ -360,14 +374,23 @@ impl OwnerClient {
         self.server_reply(Action::Approve { id, spec }, None).await
     }
 
-    /// Turns an MCP server on or off where it was added. Output: the server.
+    /// Turns an MCP server on or off where it was added. Inputs: id, the new state and the
+    /// version the owner's screen showed. Output: the server, or `stale_revision`.
     pub async fn set_mcp_server_enabled(
         &self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::SetServer { id, enabled }, None)
-            .await
+        self.server_reply(
+            Action::SetServer {
+                id,
+                enabled,
+                version,
+            },
+            None,
+        )
+        .await
     }
 
     /// Removes an MCP server and deletes its saved secrets. Input: the server id.
@@ -376,14 +399,22 @@ impl OwnerClient {
     }
 
     /// Switches a global skill or MCP server on or off for one project.
-    /// Inputs: the project, the global item id and the new state.
+    /// Inputs: the project, the global item id, the new state and the item's version the
+    /// owner's screen showed; an item changed since is refused `stale_revision`.
     pub async fn switch_plugin(
         &self,
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     ) -> Result<(), EngineError> {
-        self.done_reply(Action::Switch { project, id, on }).await
+        self.done_reply(Action::Switch {
+            project,
+            id,
+            on,
+            version,
+        })
+        .await
     }
 
     /// Saves one secret for an MCP server, sent only as a separate frame and kept by the
@@ -754,9 +785,20 @@ async fn handle(
                 },
             }
         }
-        Action::SetSkill { id, enabled } => {
-            let ResultValue::Skill(skill) =
-                actor(engine, Command::SetSkill { id, enabled }).await?
+        Action::SetSkill {
+            id,
+            enabled,
+            version,
+        } => {
+            let ResultValue::Skill(skill) = actor(
+                engine,
+                Command::SetSkill {
+                    id,
+                    enabled,
+                    version,
+                },
+            )
+            .await?
             else {
                 return Err(unknown());
             };
@@ -769,15 +811,27 @@ async fn handle(
         Action::AddServer { scope, name, spec } => {
             server(actor(engine, Command::AddServer { scope, name, spec }).await?)?
         }
-        Action::UpdateServer { id, spec } => {
-            server(actor(engine, Command::UpdateServer { id, spec }).await?)?
+        Action::UpdateServer { id, spec, version } => {
+            server(actor(engine, Command::UpdateServer { id, spec, version }).await?)?
         }
         Action::Approve { id, spec } => {
             server(actor(engine, Command::Approve { id, spec }).await?)?
         }
-        Action::SetServer { id, enabled } => {
-            server(actor(engine, Command::SetServer { id, enabled }).await?)?
-        }
+        Action::SetServer {
+            id,
+            enabled,
+            version,
+        } => server(
+            actor(
+                engine,
+                Command::SetServer {
+                    id,
+                    enabled,
+                    version,
+                },
+            )
+            .await?,
+        )?,
         Action::RemoveServer { id } => {
             let ResultValue::Removed(references) =
                 actor(engine, Command::RemoveServer { id: id.clone() }).await?
@@ -799,8 +853,22 @@ async fn handle(
             }
             Reply::Done
         }
-        Action::Switch { project, id, on } => {
-            actor(engine, Command::Switch { project, id, on }).await?;
+        Action::Switch {
+            project,
+            id,
+            on,
+            version,
+        } => {
+            actor(
+                engine,
+                Command::Switch {
+                    project,
+                    id,
+                    on,
+                    version,
+                },
+            )
+            .await?;
             Reply::Done
         }
         Action::SetSecret { id, name } => {

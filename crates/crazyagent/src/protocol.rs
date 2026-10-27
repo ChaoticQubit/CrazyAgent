@@ -205,6 +205,7 @@ pub enum Command {
     #[serde(skip_deserializing)]
     AccountSchedule {
         change: crate::scheduling::ScheduleChange,
+        version: u64,
     },
     ProposePlan {
         plan: crate::coordination::WorkPlan,

@@ -7,6 +7,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::plugins::{Scope, ServerSpec, ServerStatus, plain_problem};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
+use rusqlite::OptionalExtension;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -219,7 +220,7 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
         .collect();
     assert_eq!(global, vec!["linear-method", "release-notes"]);
     controller
-        .switch_plugin(project.clone(), linear.id.clone(), false)
+        .switch_plugin(project.clone(), linear.id.clone(), false, linear.version)
         .await
         .unwrap();
     let here: Vec<(String, Option<bool>)> = controller
@@ -248,7 +249,7 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
     );
 
     controller
-        .set_skill_enabled(release.id.clone(), false)
+        .set_skill_enabled(release.id.clone(), false, release.version)
         .await
         .unwrap();
     let effective = controller.project_plugins(project.clone()).await.unwrap();
@@ -275,7 +276,7 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
         ]
     );
     controller
-        .switch_plugin(project.clone(), linear.id.clone(), true)
+        .switch_plugin(project.clone(), linear.id.clone(), true, linear.version + 1)
         .await
         .unwrap();
     let names: Vec<String> = controller
@@ -380,7 +381,7 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
     assert_eq!(checked.problem, None);
 
     let changed = controller
-        .update_mcp_server(server.id.clone(), other.clone())
+        .update_mcp_server(server.id.clone(), other.clone(), checked.version)
         .await
         .unwrap();
     assert_eq!(changed.status_label, "Waiting for approval");
@@ -398,7 +399,7 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
         .await
         .unwrap();
     let off = controller
-        .set_mcp_server_enabled(server.id.clone(), false)
+        .set_mcp_server_enabled(server.id.clone(), false, changed.version)
         .await
         .unwrap();
     assert_eq!(off.status_label, "Off");
@@ -410,8 +411,8 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
             .servers
             .is_empty()
     );
-    controller
-        .set_mcp_server_enabled(server.id.clone(), true)
+    let on = controller
+        .set_mcp_server_enabled(server.id.clone(), true, off.version)
         .await
         .unwrap();
 
@@ -486,7 +487,7 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
         .collect();
     assert_eq!(names, vec!["fixture"]);
     controller
-        .switch_plugin(project.clone(), server.id.clone(), false)
+        .switch_plugin(project.clone(), server.id.clone(), false, on.version)
         .await
         .unwrap();
     let names: Vec<String> = controller
@@ -500,7 +501,7 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
     assert_eq!(names, vec!["remote"]);
     assert_eq!(
         controller
-            .switch_plugin(project.clone(), remote.id.clone(), false)
+            .switch_plugin(project.clone(), remote.id.clone(), false, remote.version)
             .await
             .unwrap_err()
             .0,
@@ -712,5 +713,197 @@ async fn a_server_check_folder_swapped_for_a_link_is_refused() {
         "a later check must not write through the link"
     );
     assert_eq!(second.problem.as_deref(), Some("The server can't start."));
+    case.close().await;
+}
+
+fn stored_version(root: &Path, id: &str) -> Option<i64> {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let tables: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'versioned_items'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if tables == 0 {
+        return None;
+    }
+    db.query_row(
+        "SELECT version FROM versioned_items WHERE item = ?1",
+        [format!("plugin:{id}")],
+        |row| row.get(0),
+    )
+    .optional()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn stale_skill_write_is_refused() {
+    let case = Case::new().await;
+    let mut controller = case.controller().await;
+    let project = create_project(&mut controller, "app").await;
+    let root = case.root.path().to_path_buf();
+    let skill = controller
+        .add_skill(
+            Scope::Global,
+            skill_folder(&root, "release", "release-notes"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(skill.version, 0);
+    assert!(skill.enabled);
+
+    let future = controller
+        .set_skill_enabled(skill.id.clone(), false, 1)
+        .await
+        .unwrap_err();
+    assert_eq!(future.0, "stale_revision");
+    assert_eq!(stored_version(&root, &skill.id), None);
+    let missing = controller
+        .set_skill_enabled("skill-missing".into(), false, 7)
+        .await
+        .unwrap_err();
+    assert_eq!(missing.0, "skill_not_found");
+
+    let off = controller
+        .set_skill_enabled(skill.id.clone(), false, 0)
+        .await
+        .unwrap();
+    assert!(!off.enabled);
+    assert_eq!(off.version, 1);
+    assert_eq!(stored_version(&root, &skill.id), Some(1));
+    let stale = controller
+        .set_skill_enabled(skill.id.clone(), true, 0)
+        .await
+        .unwrap_err();
+    assert_eq!(stale.0, "stale_revision");
+    let listed = controller.plugin_skills(None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].enabled);
+    assert_eq!(listed[0].version, 1);
+
+    let stale_switch = controller
+        .switch_plugin(project.clone(), skill.id.clone(), false, 0)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_switch.0, "stale_revision");
+    let here = controller
+        .plugin_skills(Some(project.clone()))
+        .await
+        .unwrap();
+    assert_eq!(here[0].on_here, Some(true));
+    assert_eq!(here[0].version, 1);
+    controller
+        .switch_plugin(project.clone(), skill.id.clone(), false, 1)
+        .await
+        .unwrap();
+    let here = controller
+        .plugin_skills(Some(project.clone()))
+        .await
+        .unwrap();
+    assert_eq!(here[0].on_here, Some(false));
+    assert_eq!(here[0].version, 2);
+    let on = controller
+        .set_skill_enabled(skill.id.clone(), true, 2)
+        .await
+        .unwrap();
+    assert!(on.enabled);
+    assert_eq!(on.version, 3);
+
+    controller.remove_skill(skill.id.clone()).await.unwrap();
+    assert_eq!(stored_version(&root, &skill.id), None);
+    drop(controller);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn stale_mcp_server_write_is_refused() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let command = fixture(&root);
+    let server = controller
+        .add_mcp_server(
+            Scope::Global,
+            "fixture".into(),
+            ServerSpec::Stdio {
+                command: command.clone(),
+                args: vec![],
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.version, 0);
+    let other = ServerSpec::Stdio {
+        command: command.clone(),
+        args: vec!["--other".into()],
+    };
+
+    let invalid = controller
+        .update_mcp_server(
+            server.id.clone(),
+            ServerSpec::Http {
+                url: "http://example.com/mcp".into(),
+            },
+            5,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.0, "server_url_invalid");
+    let future = controller
+        .update_mcp_server(server.id.clone(), other.clone(), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(future.0, "stale_revision");
+    assert_eq!(stored_version(&root, &server.id), None);
+
+    let changed = controller
+        .update_mcp_server(server.id.clone(), other.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(changed.version, 1);
+    assert_eq!(changed.runs, format!("{command} --other"));
+    let stale_update = controller
+        .update_mcp_server(
+            server.id.clone(),
+            ServerSpec::Stdio {
+                command: command.clone(),
+                args: vec![],
+            },
+            0,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale_update.0, "stale_revision");
+    let stale_off = controller
+        .set_mcp_server_enabled(server.id.clone(), false, 0)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_off.0, "stale_revision");
+    let listed = controller.plugin_servers(None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].runs, format!("{command} --other"));
+    assert_ne!(listed[0].status_label, "Off");
+    assert_eq!(listed[0].version, 1);
+
+    let off = controller
+        .set_mcp_server_enabled(server.id.clone(), false, 1)
+        .await
+        .unwrap();
+    assert_eq!(off.status_label, "Off");
+    assert_eq!(off.version, 2);
+    assert_eq!(stored_version(&root, &server.id), Some(2));
+
+    controller
+        .remove_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(stored_version(&root, &server.id), None);
+    drop(controller);
     case.close().await;
 }

@@ -1462,7 +1462,7 @@ fn execute(
             crate::project_setup::execute(tx, config, action, revision)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
-        Command::AccountSchedule { change } => crate::scheduling::apply(
+        Command::AccountSchedule { change, version } => crate::scheduling::apply(
             tx,
             config
                 .settings
@@ -1470,6 +1470,7 @@ fn execute(
                 .as_ref()
                 .unwrap_or(&crate::config::ModelAccess::default()),
             change,
+            *version,
         ),
         Command::Team { action } => crate::team::execute(
             tx,
@@ -2405,6 +2406,7 @@ fn owner_read(
                 .into_iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(

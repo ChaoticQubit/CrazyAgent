@@ -209,6 +209,7 @@ pub struct SkillView {
     pub on_here: Option<bool>,
     pub source: String,
     pub folder: String,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +236,7 @@ pub struct ServerView {
     pub checks: u64,
     pub secrets: Vec<SecretView>,
     pub on_here: Option<bool>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,6 +461,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "plugin_switch_global_only",
         "Only items from global settings can be switched here.",
+    ),
+    (
+        "stale_revision",
+        "This changed in another window, so yours was not saved. The list shows it now.",
     ),
     (
         "plugin_store_unavailable",

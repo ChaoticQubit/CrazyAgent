@@ -70,7 +70,7 @@ test("every setup command the client calls is a desktop command the bridge maps 
   const setupCodes = setup.match(/const SETUP_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
   assert.ok(setupCodes, "the bridge lists its setup codes");
   assert.ok(bridge.includes("fn rejection_code(code: &str) -> String {\n    crazyagent::protocol::plain_code(code).to_owned()\n}"), "owner receipts keep setup codes");
-  for (const code of ["setup_busy", "pack_unknown", "pack_not_installed", "pack_name_taken"]) {
+  for (const code of ["setup_busy", "pack_unknown", "pack_not_installed", "pack_name_taken", "stale_revision"]) {
     assert.ok(setupCodes[1].includes(`"${code}"`), code);
     assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }

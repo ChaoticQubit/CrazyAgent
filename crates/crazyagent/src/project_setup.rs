@@ -364,6 +364,15 @@ pub struct StoredDocument {
     pub bytes: u64,
 }
 
+/// A project's extra read-only folders in saved order, with the version the owner's screen
+/// sends back when it changes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPaths {
+    pub paths: Vec<String>,
+    pub version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredSetup {
@@ -660,7 +669,7 @@ pub enum SetupView {
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
-    ReadPaths(Vec<String>),
+    ReadPaths(ReadPaths),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -709,6 +718,7 @@ pub enum SetupAction {
     },
     SetReadPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
 }
@@ -1762,7 +1772,11 @@ pub(crate) fn execute(
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
-        SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
+        SetupAction::SetReadPaths {
+            project_id,
+            version,
+            paths,
+        } => set_read_paths(tx, project_id, *version, paths),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2172,11 +2186,14 @@ const REMOVED_WITH_PROJECT: [&str; 10] = [
 ];
 
 /// Saves a project's extra read-only folders once each passes
-/// [`crate::sandbox::extra_paths::checked`]. Takes the transaction, project and typed paths.
-/// Returns Applied, or a plain rejection for an unknown project or a refused path.
+/// [`crate::sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
+/// Takes the transaction, project, the version the screen showed and the typed paths.
+/// Returns Applied, or a plain rejection for an unknown project, a refused path or
+/// `stale_revision` when the folders changed since.
 fn set_read_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     paths: &[String],
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
@@ -2196,6 +2213,10 @@ fn set_read_paths(
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
+    let item = crate::storage::versioned::read_paths_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
+    }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
@@ -2204,8 +2225,8 @@ fn set_read_paths(
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops; the version of its instructions and its agents' own instructions go
-/// too. Returns `invalid_project` for an unknown project.
+/// running one stops; its read folders, the versions of those and of its instructions, and
+/// its agents' own instructions go too. Returns `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2231,10 +2252,12 @@ fn remove(
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
-    crate::storage::versioned::forget(
-        tx,
-        &crate::storage::versioned::process_text_item(Some(project_id)),
-    )?;
+    for item in [
+        crate::storage::versioned::process_text_item(Some(project_id)),
+        crate::storage::versioned::read_paths_item(project_id),
+    ] {
+        crate::storage::versioned::forget(tx, &item)?;
+    }
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

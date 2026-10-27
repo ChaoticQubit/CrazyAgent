@@ -767,6 +767,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "team_master_no_terminal" => Some(
             "This master harness has no terminal app. Its conversation stays on the Conversation tab.",
         ),
+        "stale_revision" => {
+            Some("This changed in another window, so yours was not saved. The saved one shows now.")
+        }
         _ => None,
     }
 }

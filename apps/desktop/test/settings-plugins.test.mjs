@@ -12,12 +12,12 @@ const router = await import("../src/ui/router.ts");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const skill = (patch = {}) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", line: "Builds polished front ends.", scope: { kind: "global" },
-  scope_label: "For every project", enabled: true, on_here: null, source: "/Users/owner/skills/frontend-design",
+  scope_label: "For every project", enabled: true, on_here: null, version: 0, source: "/Users/owner/skills/frontend-design",
   folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", ...patch });
 const server = (patch = {}) => ({ id: "server-1", name: "github", scope: { kind: "global" }, scope_label: "For every project",
   spec: { kind: "stdio", command: "/opt/homebrew/bin/npx", args: ["-y", "@modelcontextprotocol/server-github"] },
   runs: "/opt/homebrew/bin/npx -y @modelcontextprotocol/server-github", enabled: true, status: "approved", status_label: "Approved",
-  problem: null, tools: [], checks: 0, secrets: [{ name: "GITHUB_TOKEN", saved: true }], on_here: null, ...patch });
+  problem: null, tools: [], checks: 0, secrets: [{ name: "GITHUB_TOKEN", saved: true }], on_here: null, version: 0, ...patch });
 const skillsProps = (skills, patch = {}) => ({ skills, failure: "", onAdd: forbidden, onOpen: forbidden, onToggle: forbidden, onRemove: forbidden, onRetry: forbidden, ...patch });
 const detail = (patch = {}) => ({ skill: skill(), text: "---\nname: frontend-design\ndescription: Builds polished front ends.\n---\n\n# Steps\n\n- Read the brief\n- Ship `npm run build`\n",
   files: [{ path: "SKILL.md", bytes: 812 }, { path: "references/tokens.md", bytes: 4300 }], files_more: 0, ...patch });

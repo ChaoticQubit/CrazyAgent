@@ -117,8 +117,9 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 33] = [
+const SETUP_CODES: [&str; 34] = [
     "owner_outcome_unknown_reconcile_same_identity",
+    "stale_revision",
     "setup_checksum_mismatch",
     "setup_download_failed",
     "setup_homebrew_missing",
@@ -552,28 +553,30 @@ impl NativeBridge {
             .await
     }
 
-    /// Switches one installed pack entry on or off as one owner intent.
-    /// Inputs: its id, the state and a fresh draft generation. Output: the new status.
+    /// Switches one installed pack entry on or off as one owner intent. Inputs: its id,
+    /// the state, the pack version shown and a fresh draft generation. Output: the new status.
     pub async fn set_pack_entry(
         &mut self,
         id: String,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
         let id = pack_ids(vec![id])?.remove(0);
-        self.setup_change(OwnerMutation::SetPackEntry { id, on }, generation)
+        self.setup_change(OwnerMutation::SetPackEntry { id, on, version }, generation)
             .await
     }
 
-    /// Removes one installed pack entry and what it added, as one owner intent.
-    /// Inputs: its id and a fresh draft generation. Output: the new status.
+    /// Removes one installed pack entry and what it added, as one owner intent. Inputs: its
+    /// id, the pack version shown and a fresh draft generation. Output: the new status.
     pub async fn remove_pack_entry(
         &mut self,
         id: String,
+        version: u64,
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
         let id = pack_ids(vec![id])?.remove(0);
-        self.setup_change(OwnerMutation::RemovePackEntry { id }, generation)
+        self.setup_change(OwnerMutation::RemovePackEntry { id, version }, generation)
             .await
     }
 

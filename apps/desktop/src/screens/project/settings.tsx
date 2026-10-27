@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
+import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { ProjectCatalog, StoredSetup } from "../../api-projects";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
@@ -230,7 +230,7 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
 }
 
 function SandboxSection({ data }: { data: ProjectData }) {
-  const [saved, setSaved] = useState<string[] | null>(null);
+  const [saved, setSaved] = useState<ReadPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
@@ -239,7 +239,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
     let live = true;
     void loadReadPaths(data.id).then((result) => {
       if (!live) return;
-      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
+      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value.paths); }
       else setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result));
     });
     return () => { live = false; };
@@ -254,18 +254,22 @@ function SandboxSection({ data }: { data: ProjectData }) {
   }
 
   async function save() {
+    if (saved === null) return;
     setBusy(true);
-    const result = await saveReadPaths(data.id, paths, nextGeneration());
-    setBusy(false);
-    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result));
+    const result = await saveReadPaths(data.id, paths, saved.version, nextGeneration());
+    if (result.kind !== "ok") { setBusy(false); return setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result)); }
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    setSaved(paths);
+    if (state.kind !== "applied") { setBusy(false); return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again."); }
+    const fresh = await loadReadPaths(data.id);
+    setBusy(false);
+    if (fresh.kind !== "ok") return setNote("Read-only folders saved. Reopen this page to change them again.");
+    setSaved(fresh.value);
+    setPaths(fresh.value.paths);
     setNote("");
     data.notify("Read-only folders saved. Agents started from now on get them.");
   }
 
-  const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
+  const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Sandbox</h2>
     <p className="pj-secondary">Agents find the toolchains this project uses (Rust, Node, Python and Homebrew) on their own and can read them, never change them. Add other folders they may read here. They can never read credential files, such as .npmrc, .netrc or .ssh, even inside these folders.</p>

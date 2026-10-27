@@ -185,9 +185,13 @@ impl NativeOwner {
                     SetupAction::RetryResearch { project_id, job } => {
                         controller.retry_research(project_id, job, generation).await
                     }
-                    SetupAction::SetReadPaths { project_id, paths } => {
+                    SetupAction::SetReadPaths {
+                        project_id,
+                        version,
+                        paths,
+                    } => {
                         controller
-                            .set_project_read_paths(project_id, paths, generation)
+                            .set_project_read_paths(project_id, version, paths, generation)
                             .await
                     }
                 }

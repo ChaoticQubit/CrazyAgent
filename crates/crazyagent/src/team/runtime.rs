@@ -3537,8 +3537,10 @@ impl TeamRuntime {
                 now,
             )? {
                 Ok(task) => {
-                    if let Some(role) = &delegation.role {
-                        names::set_task_role(&tx, project, task, role)?;
+                    if let Some(role) = &delegation.role
+                        && names::set_task_role(&tx, project, task, role, 0)?.is_err()
+                    {
+                        return Err(error("team_task_role_stale"));
                     }
                 }
                 Err(code) => refused.push(format!(

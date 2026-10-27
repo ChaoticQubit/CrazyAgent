@@ -5,6 +5,7 @@ use crate::plugins::{
     SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
     SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
 };
+use crate::storage::versioned;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -40,6 +41,7 @@ pub(crate) enum Command {
     SetSkill {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveSkill {
         id: String,
@@ -52,6 +54,7 @@ pub(crate) enum Command {
     UpdateServer {
         id: String,
         spec: ServerSpec,
+        version: u64,
     },
     Approve {
         id: String,
@@ -60,6 +63,7 @@ pub(crate) enum Command {
     SetServer {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveServer {
         id: String,
@@ -68,6 +72,7 @@ pub(crate) enum Command {
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     },
     AttachSecret {
         id: String,
@@ -520,8 +525,31 @@ fn on_here(scope: &Scope, id: &str, project: Option<&ProjectId>, off: &[String])
     }
 }
 
-fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> SkillView {
-    SkillView {
+/// Reads one plugin's version, 0 for a plugin the owner never changed.
+fn plugin_version(connection: &Connection, id: &str) -> Result<u64, EngineError> {
+    Ok(versioned::current(connection, &versioned::plugin_item(id)?)?.version)
+}
+
+/// Writes the next version of one plugin when the owner's screen showed the current one,
+/// before its On switch, project switches or command change. Takes the transaction, the
+/// plugin id and the version shown. Returns the plain refusal `stale_revision` otherwise.
+fn owner_change(tx: &Transaction<'_>, id: &str, version: u64) -> Result<(), EngineError> {
+    match versioned::owner_write(tx, &versioned::plugin_item(id)?, version)? {
+        Ok(next) => {
+            assert_eq!(next, version + 1);
+            Ok(())
+        }
+        Err(_) => Err(error(versioned::STALE_CODE)),
+    }
+}
+
+fn skill_view(
+    connection: &Connection,
+    record: &SkillRecord,
+    root: &Path,
+    on_here: Option<bool>,
+) -> Result<SkillView, EngineError> {
+    Ok(SkillView {
         id: record.id.clone(),
         name: record.name.clone(),
         description: record.description.clone(),
@@ -532,7 +560,8 @@ fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> Skill
         on_here,
         source: record.source.clone(),
         folder: root.join(&record.folder).display().to_string(),
-    }
+        version: plugin_version(connection, &record.id)?,
+    })
 }
 
 fn status(record: &ServerRecord) -> ServerStatus {
@@ -557,11 +586,16 @@ fn secret_saved(root: &Path, reference: &str) -> bool {
         .is_ok_and(|metadata| metadata.is_file())
 }
 
-fn server_view(record: &ServerRecord, root: &Path, on_here: Option<bool>) -> ServerView {
+fn server_view(
+    connection: &Connection,
+    record: &ServerRecord,
+    root: &Path,
+    on_here: Option<bool>,
+) -> Result<ServerView, EngineError> {
     let status = status(record);
     let digest = record.spec.digest();
     let current = record.check.as_ref().filter(|check| check.digest == digest);
-    ServerView {
+    Ok(ServerView {
         id: record.id.clone(),
         name: record.name.clone(),
         scope: record.scope.clone(),
@@ -589,7 +623,8 @@ fn server_view(record: &ServerRecord, root: &Path, on_here: Option<bool>) -> Ser
             })
             .collect(),
         on_here,
-    }
+        version: plugin_version(connection, &record.id)?,
+    })
 }
 
 fn page<T: Serialize>(items: Vec<T>, offset: u16) -> Result<(Vec<T>, Option<u16>), EngineError> {
@@ -911,7 +946,9 @@ pub(crate) fn execute(
     root: &Path,
     command: Command,
 ) -> Result<ResultValue, EngineError> {
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     let value = run(&tx, root, command)?;
     let committed = tx.commit().map_err(error);
     match (&value, committed) {
@@ -939,7 +976,7 @@ pub(super) fn run(
         Command::AddSkill { scope, source } => {
             let (record, _) = add_skill(tx, root, scope, source, &skill_folder::PICKED)?;
             ResultValue::Skill(Box::new(SkillChange {
-                view: skill_view(&record, root, None),
+                view: skill_view(tx, &record, root, None)?,
                 added: true,
             }))
         }
@@ -951,15 +988,20 @@ pub(super) fn run(
             };
             ResultValue::Imported(
                 Box::new(SkillChange {
-                    view: skill_view(&record, root, None),
+                    view: skill_view(tx, &record, root, None)?,
                     added,
                 }),
                 meta.skipped,
                 meta.skipped_total,
             )
         }
-        Command::SetSkill { id, enabled } => {
+        Command::SetSkill {
+            id,
+            enabled,
+            version,
+        } => {
             let mut record: SkillRecord = load(tx, "skill", &id)?;
+            owner_change(tx, &id, version)?;
             record.enabled = enabled;
             save(
                 tx,
@@ -970,12 +1012,13 @@ pub(super) fn run(
                 &record,
             )?;
             ResultValue::Skill(Box::new(SkillChange {
-                view: skill_view(&record, root, None),
+                view: skill_view(tx, &record, root, None)?,
                 added: false,
             }))
         }
         Command::RemoveSkill { id } => {
             let record: SkillRecord = load(tx, "skill", &id)?;
+            versioned::forget(tx, &versioned::plugin_item(&id)?)?;
             tx.execute("DELETE FROM plugin_items WHERE id=?1", [&id])
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
@@ -984,18 +1027,19 @@ pub(super) fn run(
         }
         Command::AddServer { scope, name, spec } => {
             let record = add_server(tx, scope, name, spec)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
-        Command::UpdateServer { id, spec } => {
+        Command::UpdateServer { id, spec, version } => {
             spec.validate()?;
             let mut record: ServerRecord = load(tx, "server", &id)?;
+            owner_change(tx, &id, version)?;
             if record.spec != spec {
                 record.spec = spec;
                 record.approved = None;
                 record.check = None;
                 put_server(tx, &record)?;
             }
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::Approve { id, spec } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
@@ -1004,23 +1048,34 @@ pub(super) fn run(
             }
             record.approved = Some(record.spec.digest());
             put_server(tx, &record)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
-        Command::SetServer { id, enabled } => {
+        Command::SetServer {
+            id,
+            enabled,
+            version,
+        } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
+            owner_change(tx, &id, version)?;
             record.enabled = enabled;
             put_server(tx, &record)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::RemoveServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
+            versioned::forget(tx, &versioned::plugin_item(&id)?)?;
             tx.execute("DELETE FROM plugin_items WHERE id=?1", [&id])
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
             ResultValue::Removed(record.secrets.into_iter().map(|s| s.reference).collect())
         }
-        Command::Switch { project, id, on } => {
+        Command::Switch {
+            project,
+            id,
+            on,
+            version,
+        } => {
             if !project_exists(tx, &project)? {
                 return Err(error("plugin_project_unknown"));
             }
@@ -1035,6 +1090,7 @@ pub(super) fn run(
                 Some("global") => {}
                 Some(_) => return Err(error("plugin_switch_global_only")),
             }
+            owner_change(tx, &id, version)?;
             if on {
                 tx.execute(
                     "DELETE FROM plugin_switches WHERE project=?1 AND item=?2",
@@ -1068,7 +1124,7 @@ pub(super) fn run(
                 }
             };
             put_server(tx, &record)?;
-            ResultValue::Secret(Box::new(server_view(&record, root, None)), replaced)
+            ResultValue::Secret(Box::new(server_view(tx, &record, root, None)?), replaced)
         }
         Command::DetachSecret { id, name } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
@@ -1080,13 +1136,13 @@ pub(super) fn run(
             let removed = record.secrets.remove(index);
             put_server(tx, &record)?;
             ResultValue::Secret(
-                Box::new(server_view(&record, root, None)),
+                Box::new(server_view(tx, &record, root, None)?),
                 Some(removed.reference),
             )
         }
         Command::Server { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
@@ -1111,7 +1167,7 @@ pub(super) fn run(
                 });
             }
             put_server(tx, &record)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::Skills { project, offset } => {
             let off = match &project {
@@ -1123,12 +1179,13 @@ pub(super) fn run(
                 .filter(|record| visible(&record.scope, project.as_ref()))
                 .map(|record| {
                     skill_view(
+                        tx,
                         record,
                         root,
                         on_here(&record.scope, &record.id, project.as_ref(), &off),
                     )
                 })
-                .collect();
+                .collect::<Result<_, EngineError>>()?;
             let (views, next) = page(views, offset)?;
             ResultValue::Skills(views, next)
         }
@@ -1143,7 +1200,7 @@ pub(super) fn run(
             };
             let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
             ResultValue::Skill(Box::new(SkillChange {
-                view: skill_view(&record, root, here),
+                view: skill_view(tx, &record, root, here)?,
                 added: false,
             }))
         }
@@ -1157,12 +1214,13 @@ pub(super) fn run(
                 .filter(|record| visible(&record.scope, project.as_ref()))
                 .map(|record| {
                     server_view(
+                        tx,
                         record,
                         root,
                         on_here(&record.scope, &record.id, project.as_ref(), &off),
                     )
                 })
-                .collect();
+                .collect::<Result<_, EngineError>>()?;
             let (views, next) = page(views, offset)?;
             ResultValue::Servers(views, next)
         }

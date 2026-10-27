@@ -887,6 +887,11 @@ impl ProjectPage {
             ctx,
             SettingsJob::SetSchedule {
                 change: crate::scheduling::ScheduleChange::ProjectStrategy { project, strategy },
+                version: self
+                    .screen
+                    .schedule
+                    .as_ref()
+                    .map_or(0, |schedule| schedule.version),
                 generation,
             },
         );

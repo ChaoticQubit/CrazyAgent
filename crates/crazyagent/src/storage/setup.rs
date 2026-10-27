@@ -3,6 +3,7 @@ use super::*;
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{SetupAction, SetupStatus, progress};
+use crate::storage::versioned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -351,6 +352,36 @@ fn installed(
     Ok(rows)
 }
 
+/// Takes an installed entry for an owner switch or removal once the pack is still at the
+/// version the screen showed, writing the next pack version before the entry changes.
+/// Inputs: the transaction, the entry and the version shown. Output: the entry's record,
+/// or none when the entry is not installed or the pack moved on (see `refusal`).
+fn owned(
+    tx: &Transaction<'_>,
+    entry: &PackManifestEntry,
+    version: u64,
+) -> Result<Option<PackRecord>, EngineError> {
+    if entry_switch(tx, &entry.id)?.is_none() {
+        return Ok(None);
+    }
+    let Ok(next) = versioned::owner_write(tx, &versioned::default_pack_item(), version)? else {
+        return Ok(None);
+    };
+    assert_eq!(next, version + 1);
+    let record = adopted(tx, entry)?;
+    assert!(record.is_some(), "an installed pack entry is adopted");
+    Ok(record)
+}
+
+/// Names why `owned` gave no record: `pack_not_installed` before `stale_revision`.
+/// Inputs: the transaction and the entry. Output: the refusal code.
+fn refusal(tx: &Transaction<'_>, entry: &PackManifestEntry) -> Result<&'static str, EngineError> {
+    Ok(match entry_switch(tx, &entry.id)? {
+        None => "pack_not_installed",
+        Some(_) => versioned::STALE_CODE,
+    })
+}
+
 fn manifest() -> Result<PackManifest, EngineError> {
     crate::setup::pack::default_pack()
 }
@@ -395,22 +426,22 @@ pub(crate) fn apply_owner(
             progress::with(root, |state| state.graph_tool = graph_tool);
             Ok(Outcome::Applied)
         }
-        SetupAction::Set { id, on } => {
+        SetupAction::Set { id, on, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
             };
-            let Some(mut record) = adopted(tx, known)? else {
-                return Ok(rejected("pack_not_installed"));
+            let Some(mut record) = owned(tx, known, *version)? else {
+                return Ok(rejected(refusal(tx, known)?));
             };
             set(tx, root, &mut record, *on)?;
             Ok(Outcome::Applied)
         }
-        SetupAction::Remove { id } => {
+        SetupAction::Remove { id, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
             };
-            let Some(record) = adopted(tx, known)? else {
-                return Ok(rejected("pack_not_installed"));
+            let Some(record) = owned(tx, known, *version)? else {
+                return Ok(rejected(refusal(tx, known)?));
             };
             let mut moved = Vec::new();
             if let Err(problem) = remove_items(tx, root, &record, &mut moved) {
@@ -435,6 +466,7 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         dependencies: progress::dependency_rows(&progress),
         pack: progress::pack_rows(&manifest, &installed, &progress),
         running: progress.running,
+        version: versioned::current(tx, &versioned::default_pack_item())?.version,
     })
 }
 
