@@ -17,9 +17,9 @@ use crate::master_session::{
     METADATA_BYTES_MAX, MasterAccountState, MasterBackend, MasterBinding, MasterBootstrapAuth,
     MasterCursor, MasterOwnerAction, MasterReason, MasterReply, MasterRuntimeView,
     MasterSessionPhase, MasterSessionView, MasterTurnPage, MasterTurnPhase, MasterTurnView,
-    PAGE_BYTES_MAX, REBINDS_MAX, RcliConfiguredProfileProof, RcliProfileRegistration,
-    RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code, error, master_scope,
-    validate_action, validate_page, validate_selection,
+    PAGE_BYTES_MAX, REBINDS_MAX, REPLY_BYTES_MAX, RcliConfiguredProfileProof,
+    RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code,
+    error, master_scope, reply_bytes, validate_action, validate_page, validate_selection,
 };
 use crate::model_gateway::{
     self, Attempt, AttemptCompletion, AttemptOutcome, AttemptRequest,
@@ -867,7 +867,7 @@ fn validate_runtime_record(
                 .as_ref()
                 .ok_or_else(|| error("master_runtime_missing"))?;
             if reply.text.is_empty()
-                || reply.text.len() > 8192
+                || reply.text.len() > REPLY_BYTES_MAX
                 || reply.text.contains('\0')
                 || reply.provenance.attempt_id != attempt.request.id
                 || reply.provenance.runtime_ref != runtime.runtime_ref
@@ -2564,7 +2564,7 @@ fn observe_turn(
                 .as_ref()
                 .ok_or_else(|| error("master_runtime_missing"))?;
             if reply.text.trim().is_empty()
-                || reply.text.len() > 8192
+                || reply_bytes(&reply.text) > REPLY_BYTES_MAX
                 || reply.text.contains('\0')
                 || reply.provenance.attempt_id != attempt.request.id
                 || reply.provenance.runtime_ref != runtime.runtime_ref
@@ -5389,11 +5389,12 @@ fallback_allowed = false
             setup
         }
 
-        /// Runs the fixture's turn to a reply that carries the given delegate calls and
-        /// reports that reply `times` times, as a host resending its observation does.
-        /// Inputs: the calls and the count. Output: the stored reply.
+        /// Runs the fixture's turn to a reply of the given text that carries the given
+        /// delegate calls and reports that reply `times` times, as a host resending its
+        /// observation does. Inputs: the text, the calls and the count. Output: the reply.
         async fn reply_with(
             &self,
+            text: &str,
             delegations: Vec<crate::team::Delegation>,
             times: usize,
         ) -> MasterReply {
@@ -5435,7 +5436,7 @@ fallback_allowed = false
             .await
             .unwrap();
             let reply = MasterReply {
-                text: "I handed the README to a sub-agent.".into(),
+                text: text.into(),
                 provenance: crate::master_session::MasterReplyProvenance {
                     attempt_id: prepared.attempt.request.id.clone(),
                     runtime_ref: runtime.runtime_ref.clone(),
@@ -5463,6 +5464,29 @@ fallback_allowed = false
     }
 
     #[tokio::test]
+    async fn a_long_master_reply_is_stored_and_read_back_whole() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let text = "The README now covers setup, tests and the release steps.\n".repeat(190);
+        assert!(text.len() > 8192);
+        let reply = case.reply_with(&text, Vec::new(), 1).await;
+        assert_eq!(reply.text, text);
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let revision = owner_revision(&tx).unwrap();
+        let session = load_session(&tx, &case.session.session_id, revision)
+            .unwrap()
+            .unwrap();
+        let turn = load_turn(&tx, &session, &case.turn.id, revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.phase, MasterTurnPhase::Succeeded);
+        assert_eq!(turn.reply.map(|reply| reply.text), Some(text));
+        drop(tx);
+        case.close().await;
+    }
+
+    #[tokio::test]
     async fn a_master_reply_hands_its_delegate_calls_to_the_team_once() {
         let case = Fixture::new(true).await;
         case.register().await;
@@ -5477,7 +5501,8 @@ fallback_allowed = false
                 prompt: "Check the tests".into(),
             },
         ];
-        case.reply_with(delegations, 2).await;
+        case.reply_with("I handed the README to a sub-agent.", delegations, 2)
+            .await;
         let db = case.db();
         let tasks: Vec<(String, String, String)> = db
             .prepare("SELECT source,harness,prompt FROM team_tasks WHERE project=?1 ORDER BY id")
@@ -5520,6 +5545,7 @@ fallback_allowed = false
         case.register().await;
         let setup = case.team_plan();
         case.reply_with(
+            "I handed the README to a sub-agent.",
             vec![crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),

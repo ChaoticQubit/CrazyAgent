@@ -115,33 +115,36 @@ export function resultSummary(text: string): string {
   return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
 }
 
-/** Builds the Team panel: each agent with its role, plain name, harness, account, current task and
- * the folder it works in (the master in the project folder, a sub-agent in its own worktree),
- * then the tasks handed from the master or the owner to a sub-agent. "running" hides stopped agents
- * and finished tasks. Sub-agents are named by harness and order, such as "Codex 2", never by id.
+/** Names a team agent's account as the owner sees it in Accounts, never by its id. Inputs: the
+ * owner's account names and the account id. Output: the name, "An account in the pool" for an id
+ * not listed, or "No account yet". */
+export function accountName(accounts: { id: string; name: string }[], id: string | null): string {
+  return id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+}
+
+/** Builds the Team panel: each agent with its role, plain name, harness, account, current task
+ * (between tasks, its last one) and the folder it works in (the master in the project folder, a
+ * sub-agent in its own worktree), then the tasks handed from the master or the owner to a
+ * sub-agent. "running" hides stopped agents and finished tasks. Each agent keeps the engine's
+ * name, such as "Sub-agent 3", as in the graph.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
  * Output: the agent rows and task rows in engine order. */
 export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
   filter: TeamFilter, now: number): { agents: TeamAgentRow[]; tasks: TeamTaskRow[] } {
-  const names = new Map<number, string>();
-  const counts = new Map<string, number>();
-  for (const agent of status.agents) {
-    if (agent.role === "master") { names.set(agent.id, "Master"); continue; }
-    const count = (counts.get(agent.harness) ?? 0) + 1;
-    counts.set(agent.harness, count);
-    names.set(agent.id, `${harnessLabel(agent.harness)} ${count}`);
-  }
-  const account = (id: string | null) => id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+  const names = new Map(status.agents.map((agent) => [agent.id, agent.label]));
+  const account = (id: string | null) => accountName(accounts, id);
   const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
     const held = status.tasks.find((item) => item.id === agent.task);
+    const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>
+      item.agent === agent.id && (newest === undefined || item.id > newest.id) ? item : newest, undefined);
     return {
       key: `agent-${agent.id}`,
       role: agent.role === "master" ? "Master" : "Sub-agent",
-      name: names.get(agent.id) ?? harnessLabel(agent.harness),
+      name: agent.label,
       harness: harnessLabel(agent.harness),
       account: account(agent.account),
       word: teamAgentWord(agent.status),
-      task: agent.problem ?? (held ? firstLine(held.prompt) : agent.status === "idle" ? "Waiting for work" : ""),
+      task: agent.problem ?? (held ? firstLine(held.prompt) : last ? `Last task: ${firstLine(last.prompt)}` : agent.status === "idle" ? "Waiting for work" : ""),
       folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
     };
   });

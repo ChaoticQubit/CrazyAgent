@@ -1,8 +1,7 @@
-import { listAccounts, nextGeneration } from "../../api";
+import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
 import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState } from "../../api-projects";
-import { useLoad } from "../../state";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
@@ -37,12 +36,13 @@ export function useTeam(id: string): [TeamRead, () => void] {
 
 /** Team panel for the project page: each agent's role, working folder, harness, account, status and current task,
  * then the tasks the master or the owner handed to sub-agents with status and a result summary.
- * Inputs: the project data, the latest team read, the filter, the harness catalog and a reload.
+ * Inputs: the project data, the latest team read, the filter, the harness catalog, the owner's
+ * account names and a reload.
  * Output: the panel, or a loading, Not ready yet or error line. */
-export function TeamPanel({ data, team, filter, harnesses, reload }: {
-  data: ProjectData; team: TeamRead; filter: TeamFilter; harnesses: HarnessEntry[] | null; reload: () => void;
+export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
+  data: ProjectData; team: TeamRead; filter: TeamFilter; harnesses: HarnessEntry[] | null;
+  accounts: { id: string; name: string }[]; reload: () => void;
 }) {
-  const [accounts] = useLoad(listAccounts, []);
   const [stopping, setStopping] = useState<TeamTaskRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [shown, setShown] = useState<string | null>(null);
@@ -65,7 +65,7 @@ export function TeamPanel({ data, team, filter, harnesses, reload }: {
   if (team.result.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
   if (team.result.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>;
   const status = team.result.value;
-  const panel = teamPanel(status, accounts.kind === "ok" ? accounts.value : [], (id) => harnessName(harnesses, id), filter, team.at);
+  const panel = teamPanel(status, accounts, (id) => harnessName(harnesses, id), filter, team.at);
   const working = status.agents.filter((agent) => agent.status === "working").length;
   return <section className="pj-stack-s" aria-labelledby="pj-team-title">
     <div className="pj-row between">

@@ -199,6 +199,13 @@ export function nodeDetail(node: GraphNode, harness: (id: string) => string = (i
   }
 }
 
+/** Puts each node's account name in place of the engine's account id, so the graph names
+ * accounts as the Team panel does. Inputs: the graph and an account namer. Output: a new graph;
+ * the input is left unchanged. */
+export function namedAccounts(graph: TeamGraph, account: (id: string) => string): TeamGraph {
+  return { ...graph, nodes: graph.nodes.map((node) => node.account === null ? node : { ...node, account: account(node.account) }) };
+}
+
 /** Whether the graph can still change soon: an agent starting or working, or a task sent or
  * running. Input: the graph. Output: true to read it again quickly. */
 export function graphLive(graph: TeamGraph): boolean {
