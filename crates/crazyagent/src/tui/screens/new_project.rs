@@ -1612,7 +1612,12 @@ pub(in crate::tui) const ANY_HARNESS_NOTE: &str =
 /// Names the agents an empty sub-agent list allows.
 /// Takes the team plan. Returns, for example, "Any harness, up to 64 agents".
 pub(in crate::tui) fn any_harness_total(team: &TeamPlan) -> String {
-    format!("Any harness, up to {} agents", team.max_agents)
+    let noun = if team.max_agents == 1 {
+        "agent"
+    } else {
+        "agents"
+    };
+    format!("Any harness, up to {} {noun}", team.max_agents)
 }
 
 /// Describes a team in one plain sentence.

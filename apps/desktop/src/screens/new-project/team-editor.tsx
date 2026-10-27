@@ -3,8 +3,8 @@ import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
 import type { PoolChoice, ResearchKind } from "../../api-projects";
 import {
-  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, harnessChoices, harnessLabel, poolFits, poolName,
-  removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes, totalAgents,
+  ANY_HARNESS_NOTE, HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, agentTotalText, harnessChoices, harnessLabel,
+  poolFits, poolName, removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes,
 } from "./wizard";
 import type { TeamDraft } from "./wizard";
 
@@ -106,7 +106,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
           </div>;
         })}
       </div>}
-      {team.sub_harnesses.length === 0 && <p className="pj-help">Only the master. Add a harness to run agents beside it.</p>}
+      {team.sub_harnesses.length === 0 && <p className="pj-help">{ANY_HARNESS_NOTE}</p>}
       <div><button type="button" className="btn" disabled={team.sub_harnesses.length >= SUB_HARNESSES_MAX} onClick={() => onChange(addHarnessRow(team, harnesses))}>+ Add harness</button></div>
     </section>
     <section className="pj-stack-s" aria-labelledby={`${prefix}-range`}>
@@ -122,7 +122,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
         <span>agents, counting the master.</span>
       </div>
       {errors.range && <p className="pj-error" id={`${prefix}-range-error`} role="alert">{errors.range}</p>}
-      <p className="pj-help">This team has {totalAgents(team)} {totalAgents(team) === 1 ? "agent" : "agents"}.</p>
+      <p className="pj-help">{agentTotalText(team)}</p>
     </section>
     {research.length > 0 && <section className="pj-stack-s"><h3>Research</h3>
       <p>Research uses {researchHarnesses.join(" and ")}: {research.map((kind) => RESEARCH_LABELS[kind]).join(", ")}.</p></section>}
