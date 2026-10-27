@@ -274,6 +274,7 @@ pub struct ResearchRunner {
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
     terminal: Option<Arc<dyn Host>>,
     agents: Option<Arc<Agents>>,
+    settings: Option<(PathBuf, PathBuf)>,
 }
 
 /// Where one launch of a claimed research job runs: the canonical project folder, its
@@ -372,7 +373,16 @@ impl ResearchRunner {
             custody: Mutex::new(custody),
             terminal: None,
             agents: None,
+            settings: None,
         })
+    }
+
+    /// Reads the owner's model settings from these two files at each tools-on launch, so
+    /// the agent's sandbox keeps the ports of the configured local model endpoints free of
+    /// its listeners. Takes the global and project settings files. Returns the runner.
+    pub fn with_settings(mut self, global: &Path, project: &Path) -> Self {
+        self.settings = Some((global.to_path_buf(), project.to_path_buf()));
+        self
     }
 
     /// Runs every research agent in its harness's interactive app in a pane of `host` named
@@ -785,7 +795,14 @@ impl ResearchRunner {
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
+        let kept = match (&self.settings, job.tools) {
+            (Some((global, local)), true) => crate::config::resolve_config(global, local)
+                .ok()
+                .and_then(|config| config.settings.model_access)
+                .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)),
+            _ => Vec::new(),
+        };
+        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
         }

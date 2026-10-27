@@ -679,7 +679,8 @@ pub fn start_for_engine(
         Some(codex) => ResearchRunner::new(&database, &state, codex, ResearchLimits::default()),
         None => ResearchRunner::without_codex(&database, &state, ResearchLimits::default()),
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())?
+    .with_settings(global, project);
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)

@@ -524,6 +524,131 @@ fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port()
     }
 }
 
+/// One owner model connection in settings, at `url`. Input: its id and URL. Output: the
+/// connection as the settings file writes it.
+fn connection(id: &str, url: &str) -> String {
+    format!(
+        r#"{{ id = "{id}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "{url}" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}"#
+    )
+}
+
+/// Writes owner settings whose one local model connection listens on `port`, as the owner
+/// configures LM Studio or vLLM, and reads them back through the engine's settings
+/// resolution. Input: the case and the port. Output: the model access settings.
+fn local_model_access(case: &Case, port: u16) -> crazyagent::config::ModelAccess {
+    use std::os::unix::fs::PermissionsExt;
+    let global = case.root.join("global.toml");
+    fs::write(
+        &global,
+        format!(
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{}]\npools = [{{ id = \"local-pool\", members = [\"local-connection\"], projects = [], roles = [], fallback_allowed = false }}]\n",
+            connection("local-connection", &format!("http://127.0.0.1:{port}/v1"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
+    crazyagent::config::resolve_config(&global, &case.root.join("project.toml"))
+        .unwrap()
+        .settings
+        .model_access
+        .unwrap()
+}
+
+#[test]
+fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_on_it() {
+    let case = case();
+    let server = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let ports = crazyagent::sandbox::owner_ports(&local_model_access(&case, port));
+    assert_eq!(ports, [port]);
+    let open = sandbox(&case, SandboxNetwork::Open)
+        .keep_ports(&ports)
+        .unwrap();
+    assert!(
+        open.profile().contains(&format!(
+            "(deny network-bind (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"))"
+        )),
+        "{}",
+        open.profile()
+    );
+    let served = std::thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut got = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut got).unwrap();
+        got
+    });
+    let sent = run(
+        &open,
+        &case.profiles.join("reach-model.sb"),
+        &format!("printf hello | /usr/bin/nc -w 2 127.0.0.1 {port}"),
+    );
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert_eq!(
+        served.join().unwrap(),
+        "hello",
+        "a tools-on agent still reaches the owner's model server on a kept port"
+    );
+    for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+        let name = format!("kept-{port}-{}.sb", host.replace([':', '.'], "-"));
+        let (got, said) = listen(&open, &case, &name, host, port, false);
+        assert_eq!(got, "", "{host} {port}");
+        assert!(
+            said.contains("Operation not permitted"),
+            "an agent cannot take {host}:{port} from the owner's model server: {said}"
+        );
+    }
+}
+
+#[test]
+fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
+    let access: crazyagent::config::ModelAccess = toml::from_str(&format!(
+        "accounts = [\"local-account\"]\nconnections = [{}]\n",
+        [
+            connection("a", "http://localhost:1234/v1"),
+            connection("b", "http://[::1]:8000/v1"),
+            connection("c", "https://LOCALHOST/v1"),
+            connection("d", "http://127.0.0.1:8080/v1"),
+            connection("e", "http://127.0.0.1:8080/v2"),
+            connection("f", "http://10.0.0.5:9000/v1"),
+            connection("g", "https://api.example.com/v1"),
+            connection("h", "not a url"),
+        ]
+        .join(", ")
+    ))
+    .unwrap();
+    assert_eq!(
+        crazyagent::sandbox::owner_ports(&access),
+        [443, 1234, 8000, 8080],
+        "loopback endpoints only, each port once, the scheme's port when none is named"
+    );
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    assert!(matches!(
+        open.clone().keep_ports(&[0]),
+        Err(SandboxError::Invalid(_))
+    ));
+    let many: Vec<u16> =
+        (20_000..20_000 + crazyagent::sandbox::KEPT_PORTS_MAX as u16 + 1).collect();
+    assert!(matches!(
+        open.clone().keep_ports(&many),
+        Err(SandboxError::Invalid(_))
+    ));
+    let kept = open
+        .keep_ports(&many[..crazyagent::sandbox::KEPT_PORTS_MAX])
+        .unwrap()
+        .keep_ports(&[1455, 11434, 20_000])
+        .unwrap();
+    assert_eq!(
+        kept.profile().matches("(local ip \"*:20000\")").count(),
+        2,
+        "a kept port is denied once for bind and once for inbound"
+    );
+}
+
 #[test]
 fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     let case = case();
