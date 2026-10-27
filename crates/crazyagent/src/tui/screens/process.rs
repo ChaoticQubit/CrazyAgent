@@ -1,8 +1,12 @@
 use super::settings::{draw_page, step};
+use super::settings_accounts::{send as send_settings, settings_event};
+use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
+use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
-use crate::tui::client::process::{ProcessEvent, ProcessQuery};
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Message, draw_lines, hint, sections_hint};
 use crate::tui::keys::Key;
@@ -12,12 +16,14 @@ use crate::tui::text::{char_width, coded, indent, row, styled, wrap};
 use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 #[cfg(test)]
 mod tests;
 
 const PAGE_STEP: usize = 10;
+const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
 const EDITOR_ROWS_MIN: usize = 3;
 const EDITOR_CHROME_ROWS: usize = 2;
 
@@ -41,9 +47,123 @@ enum State {
     Ready { saved: String },
 }
 
-/// The one plain sentence for a Process refusal. Input: the code.
-/// Output: the sentence, or the fallback naming the code.
-fn message(code: &str) -> String {
+/// One catalog skill the editor tags: its name as characters, its engine id and its name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Skill {
+    name: Vec<char>,
+    id: String,
+    title: String,
+}
+
+/// The skills the editor tags, from the engine's catalog: the first skill of each name,
+/// longest names first so a longer name wins over a name it contains.
+/// Input: the catalog. Output: the tags.
+fn catalog(skills: &[SkillView]) -> Vec<Skill> {
+    let mut tags: Vec<Skill> = Vec::new();
+    for skill in skills {
+        let usable = !skill.name.is_empty()
+            && skill.name.len() <= crate::plugins::skill_folder::NAME_BYTES_MAX
+            && !tags.iter().any(|tag| tag.title == skill.name);
+        if usable {
+            tags.push(Skill {
+                name: skill.name.chars().collect(),
+                id: skill.id.clone(),
+                title: skill.name.clone(),
+            });
+        }
+    }
+    tags.sort_by_key(|tag| std::cmp::Reverse(tag.name.len()));
+    tags
+}
+
+fn name_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | ':' | '-')
+}
+
+fn ends_at(chars: &[char], end: usize) -> bool {
+    match chars.get(end) {
+        None => true,
+        Some(next) if !name_char(*next) => true,
+        Some(next) => {
+            !(next.is_ascii_alphanumeric() || *next == '_')
+                && chars.get(end + 1).is_none_or(|after| !name_char(*after))
+        }
+    }
+}
+
+/// Finds the catalog skill names in one line that touch a range of characters: a whole
+/// name, not part of a longer name, with sentence punctuation after it allowed.
+/// Inputs: the line's characters, the range and the tags, longest first.
+/// Output: each name's first character, the character after it and its tag, in order.
+fn skill_ranges(
+    chars: &[char],
+    from: usize,
+    to: usize,
+    skills: &[Skill],
+) -> Vec<(usize, usize, usize)> {
+    let to = to.min(chars.len());
+    let mut found = Vec::new();
+    let mut at = from.saturating_sub(NAME_REACH);
+    while at < to {
+        let free = at == 0 || !name_char(chars[at - 1]);
+        let hit = free
+            .then(|| {
+                skills.iter().position(|skill| {
+                    chars[at..].starts_with(&skill.name) && ends_at(chars, at + skill.name.len())
+                })
+            })
+            .flatten();
+        match hit {
+            Some(index) => {
+                let end = at + skills[index].name.len();
+                found.push((at, end, index));
+                at = end;
+            }
+            None => at += 1,
+        }
+    }
+    found
+}
+
+/// Splits one drawn editor line into plain text and tagged skill names.
+/// Inputs: the drawn characters, the first line character on screen, the names found
+/// and the tag style. Output: the spans, which join back to the drawn text.
+fn tagged(
+    text: &str,
+    left: usize,
+    ranges: &[(usize, usize, usize)],
+    tag: Style,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for &(start, end, _) in ranges {
+        if end <= left {
+            continue;
+        }
+        let start = (start.max(left) - left).min(chars.len());
+        let end = (end - left).min(chars.len());
+        if start < at || start >= end {
+            continue;
+        }
+        if at < start {
+            spans.push(Span::raw(chars[at..start].iter().collect::<String>()));
+        }
+        spans.push(Span::styled(
+            chars[start..end].iter().collect::<String>(),
+            tag,
+        ));
+        at = end;
+    }
+    if at < chars.len() {
+        spans.push(Span::raw(chars[at..].iter().collect::<String>()));
+    }
+    spans
+}
+
+/// The one plain sentence for a Process refusal, also for an agent's Instructions view.
+/// Input: the code. Output: the sentence, or the fallback naming the code.
+pub(in crate::tui) fn message(code: &str) -> String {
     match code {
         "process_text_too_large" => "This text is over 64 KB. Shorten it, then save again.".into(),
         "process_text_invalid" => {
@@ -58,12 +178,19 @@ fn message(code: &str) -> String {
         "process_folder_missing" => "CrazyAgent's data folder is missing. Restart the engine, then try again.".into(),
         "process_folder_unsafe" => "CrazyAgent's data folder isn't a plain folder, so nothing was saved.".into(),
         "process_unavailable" => "Instructions aren't ready in this engine yet.".into(),
+        "process_agent_unknown" => "This agent isn't part of this project's team.".into(),
+        "process_agent_unsupported" => "CrazyAgent doesn't write instructions for this agent's harness.".into(),
+        "agent_instructions_unsafe" => "This agent's instructions file is a link or not a plain file, so CrazyAgent won't read it.".into(),
+        "agent_instructions_too_large" => "This agent's instructions file is larger than CrazyAgent writes, so it isn't shown.".into(),
+        "agent_instructions_invalid" => "This agent's instructions file has characters CrazyAgent doesn't write, so it isn't shown.".into(),
+        "agent_instructions_unreadable" => "This agent's instructions file couldn't be read. Try again.".into(),
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
 }
 
-fn size(bytes: usize) -> String {
+/// Writes a byte count the way the Process pages show sizes. Input: bytes. Output: words.
+pub(in crate::tui) fn size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes} bytes")
     } else {
@@ -260,6 +387,7 @@ pub(in crate::tui) struct ProcessPage {
     pending: Option<ProcessQuery>,
     preview: Option<(Seed, String)>,
     preview_top: usize,
+    skills: Vec<Skill>,
 }
 
 impl ProcessPage {
@@ -274,6 +402,7 @@ impl ProcessPage {
             pending: None,
             preview: None,
             preview_top: 0,
+            skills: Vec::new(),
         }
     }
 
@@ -315,12 +444,47 @@ impl ProcessPage {
         self.send(query, ctx);
     }
 
+    fn skill_at_cursor(&self) -> Option<&Skill> {
+        let chars: Vec<char> = self.editor.lines[self.editor.row].chars().collect();
+        let column = self.editor.column;
+        skill_ranges(&chars, column, column + 1, &self.skills)
+            .into_iter()
+            .find(|&(start, end, _)| start <= column && column <= end)
+            .map(|(_, _, index)| &self.skills[index])
+    }
+
+    fn open_skill(&self, ctx: &mut Ctx) -> Flow {
+        let Some(skill) = self.skill_at_cursor() else {
+            ctx.say(Message::warning(
+                "No skill name at the cursor.",
+                "Move the cursor onto an underlined skill name, then press Ctrl-O.",
+            ));
+            return Flow::Handled;
+        };
+        if self.changed() {
+            ctx.say(Message::warning(
+                "Save first.",
+                "Ctrl-S saves your instructions; opening a skill leaves this page.",
+            ));
+            return Flow::Handled;
+        }
+        Flow::Replace(Box::new(SkillDetailPage::new(
+            skill.id.clone(),
+            skill.title.clone(),
+        )))
+    }
+
     fn apply(&mut self, event: &ProcessEvent, ctx: &mut Ctx) {
         if self.pending.as_ref() != Some(&event.query) {
             return;
         }
         self.pending = None;
-        match (&event.query, &event.result) {
+        let result = match &event.result {
+            Ok(ProcessReply::Text(text)) => Ok(text),
+            Ok(ProcessReply::Agent(_)) => return,
+            Err(code) => Err(code),
+        };
+        match (&event.query, result) {
             (ProcessQuery::Read { .. }, Ok(text)) => {
                 self.editor = Editor::new(text);
                 self.state = State::Ready {
@@ -344,6 +508,7 @@ impl ProcessPage {
             (ProcessQuery::ImportGlobal | ProcessQuery::Default, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
+            (ProcessQuery::Agent { .. }, _) => {}
         }
     }
 
@@ -475,11 +640,15 @@ impl ProcessPage {
         let (shown_lines, (column, line)) =
             self.editor.view(width.saturating_sub(gutter).max(2), rows);
         let first = lines.len();
-        for text in shown_lines {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{} ", ctx.glyphs.vline), theme.accent),
-                Span::raw(text),
-            ]));
+        let (top, left) = (self.editor.top, self.editor.left);
+        let tag = theme.accent.add_modifier(Modifier::UNDERLINED);
+        for (offset, text) in shown_lines.into_iter().enumerate() {
+            let chars: Vec<char> = self.editor.lines[top + offset].chars().collect();
+            let drawn = text.chars().count();
+            let ranges = skill_ranges(&chars, left, left + drawn, &self.skills);
+            let mut spans = vec![Span::styled(format!("{} ", ctx.glyphs.vline), theme.accent)];
+            spans.extend(tagged(&text, left, &ranges, tag));
+            lines.push(Line::from(spans));
         }
         if let Some(problem) = &self.problem {
             lines.push(styled(problem.clone(), Role::Error, theme));
@@ -521,6 +690,9 @@ impl Screen for ProcessPage {
             State::Loading => return vec![back],
         }
         let mut hints = vec![hint("Ctrl-S", "Save")];
+        if !self.skills.is_empty() {
+            hints.push(hint("Ctrl-O", "Open skill"));
+        }
         if self.scope == Scope::App {
             hints.push(hint("Ctrl-G", "Import global"));
             hints.push(hint("Ctrl-D", "Default process"));
@@ -559,6 +731,7 @@ impl Screen for ProcessPage {
                 self.send(ProcessQuery::Default, ctx);
                 Flow::Handled
             }
+            (State::Ready { .. }, Key::Ctrl('o')) => self.open_skill(ctx),
             (State::Ready { .. }, key) if self.editor.key(key) => {
                 self.problem = self.invalid();
                 Flow::Handled
@@ -580,10 +753,29 @@ impl Screen for ProcessPage {
         {
             self.apply(event, ctx);
         }
+        match (settings_event(arrival), &self.scope) {
+            (Some(SettingsEvent::Plugins(Ok((skills, _)))), Scope::App) => {
+                self.skills = catalog(skills);
+            }
+            (
+                Some(SettingsEvent::ProjectPlugins(project, Ok((skills, _)))),
+                Scope::Project { id, .. },
+            ) if project == id => {
+                self.skills = catalog(skills);
+            }
+            _ => {}
+        }
         Flow::Handled
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        let job = match &self.scope {
+            Scope::App => SettingsJob::Plugins,
+            Scope::Project { id, .. } => SettingsJob::ProjectPlugins {
+                project: id.clone(),
+            },
+        };
+        send_settings(ctx, job);
         if self.state == State::Loading {
             let query = ProcessQuery::Read {
                 project: self.project(),

@@ -36,4 +36,16 @@ impl OwnerController {
     pub async fn default_process(&self) -> Result<String, EngineError> {
         self.process_client()?.default_process().await
     }
+
+    /// Reads what one team agent received at its last launch. Inputs: the project and the
+    /// agent id, or none for the project's newest master. Output: the read-only view.
+    pub async fn agent_instructions(
+        &self,
+        project: ProjectId,
+        agent: Option<i64>,
+    ) -> Result<crate::engine::owner::AgentInstructions, EngineError> {
+        self.process_client()?
+            .agent_instructions(project, agent)
+            .await
+    }
 }

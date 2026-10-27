@@ -2490,7 +2490,8 @@ impl TeamRuntime {
             return Err("project folder overlaps engine state".into());
         }
         let agent = self.agent_folder(id);
-        let own_home = agent.join("home");
+        let own_home = agent_home(&self.state, id);
+        assert_eq!(own_home.parent(), Some(agent.as_path()));
         let tmp = agent.join("tmp");
         for directory in [&agent, &own_home, &tmp] {
             private_directory(directory)
@@ -4327,6 +4328,16 @@ impl Drop for TeamService {
     fn drop(&mut self) {
         self.halt();
     }
+}
+
+/// The private home one team agent's harness runs with as its CLAUDE_CONFIG_DIR or
+/// CODEX_HOME. Inputs: the team state folder (`<runtime>/team`) and the agent id.
+/// Output: `<state>/agents/agent-<id>/home`.
+pub fn agent_home(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("agents")
+        .join(format!("agent-{id}"))
+        .join("home")
 }
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
