@@ -779,15 +779,22 @@ async fn handle(
             server(actor(engine, Command::SetServer { id, enabled }).await?)?
         }
         Action::RemoveServer { id } => {
-            let ResultValue::Removed(references) =
-                actor(engine, Command::RemoveServer { id: id.clone() }).await?
-            else {
+            let root = engine_root(authority)?;
+            let secrets = root.clone();
+            let removed = engine
+                .settled_job(
+                    |reply| Job::Plugins(Command::RemoveServer { id: id.clone() }, reply),
+                    move |result| match result {
+                        Ok(ResultValue::Removed(references)) => {
+                            crate::storage::plugins::remove_secrets(&secrets, references)
+                        }
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
-            let root = engine_root(authority)?;
-            for reference in references {
-                crate::storage::plugins::remove_secret(&root, &reference)?;
-            }
             let checked = root.join(CHECK_FOLDER).join(&id);
             let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checked))
                 .await
@@ -839,14 +846,21 @@ async fn handle(
             Reply::Server { server: *view }
         }
         Action::RemoveSecret { id, name } => {
-            let ResultValue::Secret(view, removed) =
-                actor(engine, Command::DetachSecret { id, name }).await?
-            else {
+            let root = engine_root(authority)?;
+            let detached = engine
+                .settled_job(
+                    |reply| Job::Plugins(Command::DetachSecret { id, name }, reply),
+                    move |result| match result {
+                        Ok(ResultValue::Secret(_, Some(reference))) => {
+                            crate::storage::plugins::remove_secret(&root, reference)
+                        }
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Secret(view, _) = detached else {
                 return Err(unknown());
             };
-            if let Some(reference) = removed {
-                crate::storage::plugins::remove_secret(&engine_root(authority)?, &reference)?;
-            }
             Reply::Server { server: *view }
         }
         Action::Check { id } => start_check(engine, authority, id).await?,

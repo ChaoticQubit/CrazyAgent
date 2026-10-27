@@ -386,14 +386,24 @@ async fn handle(
             }
         }
         Action::Remove { id } => {
-            let ResultValue::Removed(connection) =
-                actor(engine, admission, Command::Remove(id)).await?
-            else {
+            let keys = authority.clone();
+            let removed = engine
+                .settled_job(
+                    |reply| Job::Accounts(admission.clone(), Command::Remove(id), reply),
+                    move |result| match result {
+                        Ok(ResultValue::Removed(connection)) => match &connection.auth {
+                            ModelAuthentication::ApiKey { credential_ref } => {
+                                remove_key(&keys.root, credential_ref)
+                            }
+                            _ => Ok(()),
+                        },
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
-            if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
-                remove_key(root, credential_ref)?;
-            }
             Reply::Removed
         }
         Action::ReplaceKey { id } => {

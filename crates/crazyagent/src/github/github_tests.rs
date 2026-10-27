@@ -295,6 +295,78 @@ fn denied_device_sign_in_reports_a_plain_problem_and_saves_nothing() {
     assert_eq!(scratch.state(), None);
 }
 
+/// How long a test watches for a save that must never come: a sign-in thread that saves
+/// does so within milliseconds of GitHub's answer.
+const LATE_SAVE_WINDOW: Duration = Duration::from_secs(3);
+
+#[test]
+fn a_device_token_github_grants_after_sign_out_is_never_saved() {
+    let scratch = Scratch::new();
+    let (asked, engine_asked) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let asked = Mutex::new(asked);
+    let released = Mutex::new(released);
+    let answered = token();
+    let server = Server::start(move |seen, _| match seen.path.as_str() {
+        "/login/device/code" => {
+            let host = seen.header("host").unwrap().to_owned();
+            Answer::json(
+                200,
+                serde_json::json!({
+                    "device_code": "device-test-code",
+                    "user_code": "WDJB-MJHT",
+                    "verification_uri": format!("http://{host}/login/device"),
+                    "expires_in": 900,
+                    "interval": 1,
+                }),
+            )
+        }
+        "/login/oauth/access_token" => Answer::json(
+            200,
+            serde_json::json!({
+                "access_token": answered,
+                "token_type": "bearer",
+                "scope": "repo,read:user",
+            }),
+        ),
+        "/user" => {
+            asked.lock().unwrap().send(()).unwrap();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
+            user(seen, &answered)
+        }
+        _ => Answer::json(404, serde_json::json!({})),
+    });
+    let account = scratch.account(&server);
+    account.sign_in().unwrap();
+    engine_asked
+        .recv_timeout(Duration::from_secs(30))
+        .expect("GitHub granted the code and the engine asked whose token it is");
+    assert!(!account.sign_out().unwrap().signed_in);
+    release.send(()).unwrap();
+
+    let deadline = Instant::now() + LATE_SAVE_WINDOW;
+    while Instant::now() < deadline {
+        assert_eq!(
+            scratch.state(),
+            None,
+            "a token GitHub granted after sign-out must not be saved"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let item = reference(&format!("{}.github", scratch.namespace), "token").unwrap();
+    assert_eq!(
+        scratch.store.get(&item).unwrap_err().0,
+        "credential_missing",
+        "nor may it reach the credential store"
+    );
+    let status = account.status();
+    assert!(!status.signed_in && !status.waiting, "{status:?}");
+}
+
 #[test]
 fn verification_page_on_another_host_is_refused() {
     let scratch = Scratch::new();

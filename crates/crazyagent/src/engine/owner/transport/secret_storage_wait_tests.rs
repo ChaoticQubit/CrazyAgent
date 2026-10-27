@@ -253,3 +253,211 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
     );
     busy.stop().await;
 }
+
+/// Waits up to ten seconds until no file under the engine root holds the secret: once
+/// storage answers late, the engine deletes it in a task of its own after the owner's
+/// wait. Inputs: the root and the secret. Output: true once no file holds it.
+async fn none_hold(root: &Path, secret: &[u8]) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while holders(root, secret) > 0 {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    true
+}
+
+/// Finds the one file under the engine root that holds the secret.
+/// Inputs: the root and the secret. Output: its path.
+fn holding(root: &Path, secret: &[u8]) -> PathBuf {
+    let mut found = Vec::new();
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                folders.push(path);
+            } else if metadata.is_file()
+                && std::fs::read(&path)
+                    .is_ok_and(|bytes| bytes.windows(secret.len()).any(|window| window == secret))
+            {
+                found.push(path);
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:?}");
+    found.remove(0)
+}
+
+async fn server_with_secrets(busy: &Busy, name: &str, secrets: &[(&str, &str)]) -> String {
+    let server = busy
+        .client
+        .add_mcp_server(
+            Scope::Global,
+            name.into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    for (secret_name, value) in secrets {
+        busy.client
+            .set_mcp_secret(
+                server.id.clone(),
+                (*secret_name).into(),
+                AccountSecret::new(value.as_bytes().to_vec()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(holders(&busy.engine_root(), value.as_bytes()), 1);
+    }
+    server.id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_removed_while_storage_is_busy_leaves_no_key_on_disk() {
+    let busy = Busy::start().await;
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let secret = format!("sk-removed-{}", std::process::id());
+    let added = busy
+        .client
+        .add_account(
+            AccountDraft {
+                provider: Provider::OpenaiCompatible,
+                method: SignInMethod::Url,
+                name: "Lab server".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(AccountSecret::new(secret.as_bytes().to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 1);
+
+    let (swept, sweep) = busy.occupy_storage();
+    let removed = busy.client.remove_account(added.id.clone()).await;
+    let code = removed.err().map(|error| error.0).unwrap_or_default();
+    assert!(
+        code.contains("outcome_unknown"),
+        "the request must outlast the owner wait behind the real sweep: {code}"
+    );
+    settled(&swept, sweep).await;
+
+    assert!(
+        busy.client
+            .list_accounts(None, 10)
+            .await
+            .unwrap()
+            .accounts
+            .is_empty(),
+        "storage committed the removal after the wait"
+    );
+    assert!(
+        none_hold(&busy.engine_root(), secret.as_bytes()).await,
+        "the key of a removed account must not stay on disk"
+    );
+    busy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_removed_while_storage_is_busy_leaves_none_of_its_secrets_on_disk() {
+    let busy = Busy::start().await;
+    let first = format!("removed-first-{}", std::process::id());
+    let second = format!("removed-second-{}", std::process::id());
+    let id = server_with_secrets(
+        &busy,
+        "busy-removed",
+        &[
+            ("API_TOKEN", first.as_str()),
+            ("OTHER_TOKEN", second.as_str()),
+        ],
+    )
+    .await;
+
+    let (swept, sweep) = busy.occupy_storage();
+    let removed = busy.client.remove_mcp_server(id.clone()).await;
+    outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
+    settled(&swept, sweep).await;
+
+    assert!(
+        busy.client.plugin_server(id).await.is_err(),
+        "storage committed the removal after the wait"
+    );
+    for value in [&first, &second] {
+        assert!(
+            none_hold(&busy.engine_root(), value.as_bytes()).await,
+            "a secret of a removed server must not stay on disk"
+        );
+    }
+    busy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_secret_removed_while_storage_is_busy_leaves_no_file_on_disk() {
+    let busy = Busy::start().await;
+    let value = format!("detached-busy-secret-{}", std::process::id());
+    let id = server_with_secrets(&busy, "busy-detached", &[("API_TOKEN", value.as_str())]).await;
+
+    let (swept, sweep) = busy.occupy_storage();
+    let removed = busy
+        .client
+        .remove_mcp_secret(id.clone(), "API_TOKEN".into())
+        .await;
+    outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
+    settled(&swept, sweep).await;
+
+    assert!(
+        busy.client
+            .plugin_server(id)
+            .await
+            .unwrap()
+            .secrets
+            .is_empty(),
+        "storage committed the removal after the wait"
+    );
+    assert!(
+        none_hold(&busy.engine_root(), value.as_bytes()).await,
+        "a removed secret must not stay on disk"
+    );
+    busy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_secret_file_that_cannot_be_deleted_keeps_none_of_the_others_of_a_removed_server() {
+    let busy = Busy::start().await;
+    let first = format!("stuck-first-{}", std::process::id());
+    let second = format!("stuck-second-{}", std::process::id());
+    let id = server_with_secrets(
+        &busy,
+        "stuck-removed",
+        &[
+            ("API_TOKEN", first.as_str()),
+            ("OTHER_TOKEN", second.as_str()),
+        ],
+    )
+    .await;
+    let stuck = holding(&busy.engine_root(), first.as_bytes());
+    std::fs::remove_file(&stuck).unwrap();
+    std::fs::create_dir(&stuck).unwrap();
+
+    assert!(
+        busy.client.remove_mcp_server(id.clone()).await.is_err(),
+        "the owner hears that a secret file could not be deleted"
+    );
+    assert!(busy.client.plugin_server(id).await.is_err());
+    assert_eq!(
+        holders(&busy.engine_root(), second.as_bytes()),
+        0,
+        "one file that cannot be deleted must not keep the server's other secrets"
+    );
+    busy.stop().await;
+}

@@ -307,7 +307,9 @@ impl GitHub {
             .name("github-sign-in".into())
             .spawn(move || {
                 let outcome = api::finish_device(&account.endpoints, &client_id, start, &flag)
-                    .and_then(|token| account.keep(&token, GitHubMethod::Device));
+                    .and_then(|token| {
+                        account.keep(&token, GitHubMethod::Device, Some(flag.as_ref()))
+                    });
                 settle(&account.root, &flag, outcome.err());
             });
         if spawned.is_err() {
@@ -354,8 +356,7 @@ impl GitHub {
         token: &SecretString,
         method: GitHubMethod,
     ) -> Result<GitHubStatus, EngineError> {
-        let login = self.keep(token, method)?;
-        replace_pending(&self.root, None);
+        let login = self.keep(token, method, None)?;
         Ok(GitHubStatus {
             signed_in: true,
             login: Some(login),
@@ -365,8 +366,29 @@ impl GitHub {
         })
     }
 
-    fn keep(&self, token: &SecretString, method: GitHubMethod) -> Result<String, EngineError> {
+    /// Saves a token GitHub accepted. A device sign-in passes its cancel flag and saves
+    /// nothing once a sign-out or newer sign-in set it; any other sign-in cancels the one
+    /// waiting. Both happen under the pending lock those take, so no token lands after them.
+    /// Inputs: the token, the method and the device flag. Output: the login, or the refusal.
+    fn keep(
+        &self,
+        token: &SecretString,
+        method: GitHubMethod,
+        device: Option<&AtomicBool>,
+    ) -> Result<String, EngineError> {
         let login = api::login(&self.endpoints, token)?;
+        let mut pending = pending();
+        match device {
+            Some(cancel) if cancel.load(Ordering::Acquire) => {
+                return Err(failure("github_sign_in_cancelled"));
+            }
+            Some(_) => {}
+            None => {
+                if let Some(old) = pending.remove(&self.root) {
+                    old.cancel.store(true, Ordering::Release);
+                }
+            }
+        }
         let credential = self.store.put(&self.service(), TOKEN_ACCOUNT, token)?;
         state::save(
             &self.root,
