@@ -193,6 +193,17 @@ pub fn dismiss(db: &Connection, kind: ActionKind, id: i64) -> Result<Outcome, En
     Ok(shown)
 }
 
+/// Replaces the payload of a pending action, so its check can keep what it found, such as
+/// an outcome no later start can tell either. Inputs: the ledger, the action id and a
+/// payload of at most PAYLOAD_BYTES_MAX bytes. Output: Ok, or `ledger_invalid`,
+/// `ledger_finished` when it already ended, `ledger_missing` or `ledger_unavailable`.
+pub fn note(db: &Connection, id: ActionId, payload: &str) -> Result<(), EngineError> {
+    if payload.len() > PAYLOAD_BYTES_MAX {
+        return Err(failure("ledger_invalid"));
+    }
+    store::replace(db, id, payload)
+}
+
 /// The pending actions of one kind, oldest first: intents recorded with no outcome, whose
 /// effect may or may not have happened. Inputs: the ledger and the kind. Output: at most
 /// PENDING_MAX actions.

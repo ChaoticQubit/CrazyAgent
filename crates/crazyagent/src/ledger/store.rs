@@ -81,6 +81,22 @@ pub(super) fn finish(
     Ok(())
 }
 
+/// Replaces the payload of a pending action. Inputs: the ledger, the id and the payload.
+/// Output: Ok, `ledger_finished`, `ledger_missing` or `ledger_unavailable`.
+pub(super) fn replace(db: &Connection, id: ActionId, payload: &str) -> Result<(), EngineError> {
+    let changed = db
+        .execute(
+            "UPDATE ledger_actions SET payload=?1 WHERE id=?2 AND outcome IS NULL",
+            params![payload, id.0],
+        )
+        .map_err(storage)?;
+    if changed == 0 {
+        return Err(ended(db, None, id)?);
+    }
+    assert_eq!(changed, 1);
+    Ok(())
+}
+
 /// Names why an action is not pending: `ledger_finished` when it ended, `ledger_missing`
 /// when no action of the kind, any when none is named, has that id. Inputs: the ledger,
 /// the kind or none and the id. Output: that refusal, or `ledger_unavailable`.

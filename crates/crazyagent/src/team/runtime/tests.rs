@@ -2946,6 +2946,61 @@ fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_ow
     );
 }
 
+/// A delivery an engine start found unknown stays unknown at every later start: no later
+/// start reads a record for it, so a newer session of the agent that shows the same first
+/// line neither settles it as delivered nor drops it from the owner's list.
+#[test]
+fn an_unknown_delivery_is_not_settled_later_by_a_newer_session() {
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Working);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+
+    drop(fixture.runtime());
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        [key.clone()]
+    );
+    let marked = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
+        .unwrap()
+        .expect("the unknown intent is still open");
+    assert!(
+        marked.payload.contains(r#""unknown":true"#),
+        "{}",
+        marked.payload
+    );
+
+    let file = fixture.base.join(format!("session-{master}.jsonl"));
+    let typed = serde_json::json!({"type": "user", "message": {"content": INTERRUPTED}});
+    std::fs::write(&file, format!("{TURN_OPEN}\n{typed}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    fixture.keep(master, &record);
+
+    for _ in 0..2 {
+        drop(fixture.runtime());
+        assert_eq!(
+            outcomes(&fixture, "message", &key),
+            [None],
+            "a newer session settles nothing"
+        );
+        assert_eq!(
+            pending_keys(&fixture, ledger::ActionKind::Message),
+            [key.clone()]
+        );
+        assert_eq!(message_state(&fixture, message), "failed");
+        assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+        assert_eq!(noted(&fixture, delivery::DELIVERED_NOTE), 0);
+    }
+}
+
 /// Unknown deliveries the owner has not dismissed stay pending up to `UNKNOWN_KEPT` of each
 /// kind; a start closes the oldest beyond that as unknown, so undismissed ones never fill
 /// the ledger that every delivery and agent start shares.

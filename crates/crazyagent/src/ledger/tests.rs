@@ -444,3 +444,30 @@ fn only_marked_actions_and_listed_accepts_are_notices() {
     assert_eq!(notice(&action(ActionKind::LandingAccept, "not json")), None);
     assert_eq!(notice(&action(ActionKind::Dispatch, "{}")), None);
 }
+
+#[test]
+fn a_pending_payload_is_replaced_until_the_action_ends() {
+    let (_root, db) = store();
+    let id = begin(&db, ActionKind::Message, "alpha/m-1", "{\"seen\":false}").unwrap();
+    note(&db, id, "{\"seen\":true}").unwrap();
+    let kept = pending_key(&db, ActionKind::Message, "alpha/m-1")
+        .unwrap()
+        .expect("still pending");
+    assert_eq!((kept.id, kept.payload.as_str()), (id, "{\"seen\":true}"));
+    assert_eq!(
+        code(note(&db, id, &"x".repeat(PAYLOAD_BYTES_MAX + 1))),
+        "ledger_invalid"
+    );
+    assert_eq!(
+        pending(&db, ActionKind::Message).unwrap()[0].payload,
+        "{\"seen\":true}",
+        "a refused note changes nothing"
+    );
+    finish(&db, id, Outcome::Unknown).unwrap();
+    assert_eq!(code(note(&db, id, "{}")), "ledger_finished");
+    assert_eq!(stored_outcome(&db, id).as_deref(), Some("unknown"));
+    assert_eq!(
+        code(note(&db, ActionId(id.0 + 1000), "{}")),
+        "ledger_missing"
+    );
+}

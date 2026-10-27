@@ -30,7 +30,8 @@ pub(super) const UNKNOWN_TASK: &str = "CrazyAgent closed while it was handing th
 
 /// What a delivery intent keeps to check it after a restart: the agent, its pane record,
 /// the session record and the harness that reads it, the record's length before the item
-/// was typed, the item's first line, and the newest owner note typed with it.
+/// was typed, the item's first line, the newest owner note typed with it, and whether an
+/// engine start already found its outcome unknown, after which no record is read for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
@@ -41,6 +42,8 @@ struct Intent {
     offset: u64,
     marker: String,
     notes: Option<i64>,
+    #[serde(default)]
+    unknown: bool,
 }
 
 /// Records, before the runtime types a message or task into an agent, that it is about to,
@@ -90,6 +93,7 @@ pub(super) fn intend(
                 .unwrap_or_default(),
         ),
         notes,
+        unknown: false,
     };
     let payload = serde_json::to_string(&intent).map_err(error)?;
     match ledger::begin(connection, kind, &key, &payload) {
@@ -128,9 +132,9 @@ pub(super) fn ended(
 /// notes delivered, and a task that arrived fails with a plain reason, which its master
 /// hears once the transaction committed; neither is typed again. One that never arrived
 /// waits and is typed once more. One the record cannot tell about is failed with a note,
-/// never typed again, and its intent stays pending for the owner, checked again at each
-/// start, up to `UNKNOWN_KEPT` of each kind. Input: the engine connection. Output: Ok, or
-/// a SQLite or ledger failure.
+/// never typed again, and its intent stays pending for the owner, up to `UNKNOWN_KEPT` of
+/// each kind, marked so later starts keep it unknown without reading any record again.
+/// Input: the engine connection. Output: Ok, or a SQLite or ledger failure.
 pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     ledger::initialize(connection)?;
     let tx =
@@ -162,13 +166,24 @@ pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Closes as unknown every unknown delivery intent of one kind but the newest
-/// `UNKNOWN_KEPT`, which stay pending until the owner dismisses them. Inputs: the
-/// transaction and the kind's unknown intents, oldest first, as `ledger::pending` lists
-/// them. Output: Ok, or a ledger failure.
+/// `UNKNOWN_KEPT`, which stay pending until the owner dismisses them, each marked found
+/// unknown so no later start reads a record for it or settles it on a newer session.
+/// Inputs: the transaction and the kind's unknown intents, oldest first, as
+/// `ledger::pending` lists them. Output: Ok, or a ledger failure.
 fn keep_newest(tx: &Transaction<'_>, unknown: &[Action]) -> Result<(), EngineError> {
     let older = unknown.len().saturating_sub(UNKNOWN_KEPT);
     for action in &unknown[..older] {
         ledger::finish(tx, action.id, Outcome::Unknown)?;
+    }
+    for action in &unknown[older..] {
+        let Some(mut kept) = intent(action).filter(|kept| !kept.unknown) else {
+            continue;
+        };
+        kept.unknown = true;
+        let payload = serde_json::to_string(&kept).map_err(error)?;
+        if payload.len() <= ledger::PAYLOAD_BYTES_MAX {
+            ledger::note(tx, action.id, &payload)?;
+        }
     }
     Ok(())
 }
@@ -186,10 +201,11 @@ impl Check for Delivered {
 
 /// Tells from the agent's session record whether an intended item was typed: the record
 /// the intent named, read past its offset, else the record of the intent's pane or of the
-/// agent's latest pane, read from where that pane's turns begin. Inputs: the intent and the
-/// agent's latest pane record. Output: Done, NotStarted, or Unknown with no readable record.
+/// agent's latest pane, read from where that pane's turns begin. An intent an earlier start
+/// found unknown stays unknown, read from no record. Inputs: the intent and the agent's
+/// latest pane record. Output: Done, NotStarted, or Unknown with no readable record.
 fn delivered(intent: &Intent, latest: Option<&PaneRecord>) -> Resolution {
-    if intent.marker.is_empty() {
+    if intent.unknown || intent.marker.is_empty() {
         return Resolution::Unknown;
     }
     let found = match (&intent.harness, &intent.record) {
