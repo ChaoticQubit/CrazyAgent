@@ -521,7 +521,7 @@ impl Team {
         };
         open.read = match &event.result {
             Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
-            Ok(ProcessReply::Text(_)) => return,
+            Ok(ProcessReply::Text(_) | ProcessReply::Current(_) | ProcessReply::Saved(_)) => return,
             Err(code) if code == NOT_READY => Load::NotReady,
             Err(code) => Load::Failed(code.clone()),
         };

@@ -645,7 +645,7 @@ test("the Agents tab counts working team agents and running research like the pr
     agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "working", { task: 11 }), teamAgent(4, "stopped")],
     tasks: [teamTask(10, "running", { agent: 2 }), teamTask(11, "running", { agent: 3 })],
     events: { recent: [], waiting: [], notifications: [], paused: false, questions: [],
-      wake: { app: null, project: null, agents: [], effective: { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 }, level: "shipped" } } };
+      wake: { app: null, app_version: 0, project: null, project_version: 0, agents: [], effective: { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 }, level: "shipped" } } };
   const data = { ...tabData([job("running", { started_ms: 1_000 })]), setup: { kind: "ok", value: { team: { max_agents: 5 } } },
     assigned: { pool: { id: "pool-1", name: "Work", members: ["a", "b"] } }, team: { result: { kind: "ok", value: team }, at: 1_000 } };
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data }));

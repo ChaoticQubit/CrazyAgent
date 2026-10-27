@@ -335,9 +335,10 @@ export function loadTeamEvents(): Promise<Result<AppTeamEvents>> {
 }
 
 /** Sets the wake rule of the app, a project or one agent, or clears it with null so the level
- * above applies. Inputs: the level, the rule or null and a generation. Output: the receipt. */
-export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, generation });
+ * above applies; a rule changed since the version shown is refused with `stale_revision`.
+ * Inputs: the level, the rule or null, the version shown and a generation. Output: the receipt. */
+export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, version, generation });
 }
 
 /** Marks a project's owner notifications up to one id as seen. Inputs: the project id, the
@@ -436,10 +437,13 @@ export function promoteProjectMemory(id: string, memory: string, version: number
   return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
 }
 
+/** A project's extra read-only folders in saved order and the version a change sends back. */
+export type ReadPaths = { paths: string[]; version: number };
+
 /** Reads the extra read-only folders this project's agents get beside its toolchains.
- * Input: project id. Output: the folders in saved order. */
-export function loadReadPaths(id: string): Promise<Result<string[]>> {
-  return call<string[]>("desktop_project_read_paths", { id });
+ * Input: project id. Output: the folders in saved order and their version. */
+export function loadReadPaths(id: string): Promise<Result<ReadPaths>> {
+  return call<ReadPaths>("desktop_project_read_paths", { id });
 }
 
 /** Lists this project's files for `@` tags: tracked and untracked, not ignored paths
@@ -449,10 +453,11 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
   return call<string[]>("desktop_project_files", { id, query });
 }
 
-/** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
- * Inputs: project id, the folders and a generation. Output: the receipt. */
-export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+/** Replaces this project's extra read-only folders; the engine refuses unsafe ones, and
+ * folders changed since the version shown with `stale_revision`.
+ * Inputs: project id, the folders, the version shown and a generation. Output: the receipt. */
+export function saveReadPaths(id: string, paths: string[], version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
 }
 
 /** Deletes one document or research report from the project folder.

@@ -200,6 +200,7 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
     let project_id = ProjectId::new("setup-pooled").unwrap();
     let action = |paths: Vec<String>| SetupAction::SetReadPaths {
         project_id: project_id.clone(),
+        version: 0,
         paths,
     };
     let limit = crate::sandbox::extra_paths::EXTRA_PATHS_MAX;

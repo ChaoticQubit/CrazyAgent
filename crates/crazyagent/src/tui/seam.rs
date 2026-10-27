@@ -156,6 +156,7 @@ impl std::fmt::Debug for Request {
             Self::Intake(_) => "Intake",
             Self::Changes(_) => "Changes",
             Self::Process(_) => "Process",
+            Self::Recovery(_) => "Recovery",
             Self::Cleanup(_) => "Cleanup",
             Self::Reconnect => "Reconnect",
         })

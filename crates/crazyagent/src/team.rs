@@ -374,6 +374,7 @@ pub enum TeamAction {
     Wake {
         target: events::RuleTarget,
         rule: Option<events::WakeRule>,
+        version: u64,
     },
     Seen {
         project_id: ProjectId,
@@ -420,7 +421,7 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::Wake { target, rule } => {
+            Self::Wake { target, rule, .. } => {
                 if rule.is_some_and(|rule| rule.hourly_cap > events::HOURLY_CAP_MAX) {
                     return Err(failure("team_wake_cap_invalid"));
                 }
@@ -1449,13 +1450,20 @@ pub fn execute(
 }
 
 fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
-    let TeamAction::Wake { target, rule } = action else {
+    let TeamAction::Wake {
+        target,
+        rule,
+        version,
+    } = action
+    else {
         unreachable!("only a wake rule action has no project");
     };
-    Ok(match events::set_rule(tx, target, rule.as_ref())? {
-        Ok(()) => Outcome::Applied,
-        Err(code) => rejected(code),
-    })
+    Ok(
+        match events::set_rule(tx, target, rule.as_ref(), *version)? {
+            Ok(()) => Outcome::Applied,
+            Err(code) => rejected(code),
+        },
+    )
 }
 
 fn master_reply(

@@ -243,6 +243,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         landing: &base,
         events: Some(&EVENTS),
         host: Some(&host),
+        config: None,
     };
     let deadline = Instant::now() + WAIT;
     while server.try_wait().unwrap().is_none() {

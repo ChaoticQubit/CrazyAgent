@@ -22,7 +22,7 @@ const RUNNING: &str = "a.status IN ('starting','working')";
 pub fn settings(db: &Connection, project: &ProjectId) -> Result<WorkspaceSettings, EngineError> {
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     let mut running = db
-        .prepare_cached(&format!(
+        .prepare(&format!(
             "SELECT w.worktree FROM team_agents a
              JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
              WHERE a.project=?1 AND {RUNNING} ORDER BY a.id LIMIT ?2"
@@ -37,7 +37,7 @@ pub fn settings(db: &Connection, project: &ProjectId) -> Result<WorkspaceSetting
         .collect::<Result<_, _>>()
         .map_err(unavailable)?;
     let mut unlocked = db
-        .prepare_cached(&format!(
+        .prepare(&format!(
             "SELECT w.worktree, u.path FROM ide_unlocked u
              JOIN team_agents a ON a.id=u.agent AND u.turns=a.turns
              JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project

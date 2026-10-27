@@ -78,6 +78,49 @@ pub fn agent_instructions_item(project: &ProjectId, agent: i64) -> Item {
     ))
 }
 
+/// Names the versioned item of one project's extra read-only folders. Input: the project.
+/// Output: the item.
+pub fn read_paths_item(project: &ProjectId) -> Item {
+    named(format!("read-paths:{}", project.as_str()))
+}
+
+/// Names the versioned item of one wake-rule level. Inputs: the project, none for the app
+/// level, and the sub-agent id, 0 for the app or project level; team agent ids are never
+/// reused, so an agent's level needs no project. Output: the item.
+pub fn team_rule_item(project: Option<&ProjectId>, agent: i64) -> Item {
+    assert!(agent >= 0);
+    assert!(agent == 0 || project.is_some());
+    named(match (project, agent) {
+        (None, _) => "team-rule:app".to_owned(),
+        (Some(project), 0) => format!("team-rule:project:{}", project.as_str()),
+        (Some(_), agent) => format!("team-rule:agent:team-{agent}"),
+    })
+}
+
+/// Names the versioned item of the role the master gave one team task; task ids are never
+/// reused. Input: the task id, above 0. Output: the item.
+pub fn task_role_item(task: i64) -> Item {
+    assert!(task > 0);
+    named(format!("task-role:task-{task}"))
+}
+
+/// Names the versioned item of one skill or MCP server: its On switch, its project switches
+/// and, for a server, its command. Input: the plugin id. Output: the item, or
+/// `versioned_item_invalid` for an id that cannot name one.
+pub fn plugin_item(id: &str) -> Result<Item, EngineError> {
+    Item::new(&format!("plugin:{id}"))
+}
+
+/// Names the versioned item of the default pack's On switches and installed entries.
+pub fn default_pack_item() -> Item {
+    named("default-pack".to_owned())
+}
+
+/// Names the versioned item of the owner's account scheduling choices.
+pub fn account_schedule_item() -> Item {
+    named("account-schedule".to_owned())
+}
+
 fn named(name: String) -> Item {
     assert!(Item::new(&name).is_ok());
     Item(name)
@@ -133,6 +176,32 @@ pub struct Force {
     pub replaced_writer: LastWriter,
     pub version: u64,
     pub at_ms: i64,
+}
+
+/// The plain refusal of a stale owner write to a structured item. Every client already
+/// shows it as "this changed since you opened it".
+pub const STALE_CODE: &str = "stale_revision";
+
+/// Writes the next version of an item only the owner edits, such as a toggle or a schedule,
+/// in the caller's transaction before the caller writes the value. Inputs: an immediate
+/// transaction on `engine.db`, the item and the version the owner's screen showed.
+/// Output: the new version, the stale refusal, or `versioned_unavailable`.
+pub fn owner_write(
+    tx: &Transaction<'_>,
+    item: &Item,
+    expected: u64,
+) -> Result<Result<u64, Stale>, EngineError> {
+    let owner = Writer::Owner {
+        force_after_conflict: false,
+    };
+    match write_if(tx, item, expected, &owner) {
+        Ok(version) => {
+            assert_eq!(version, expected + 1);
+            Ok(Ok(version))
+        }
+        Err(Refusal::Stale(stale)) => Ok(Err(stale)),
+        Err(Refusal::Failed(failed)) => Err(failed),
+    }
 }
 
 /// Writes one shared item's next version when the writer read the current one, so no write
@@ -203,10 +272,10 @@ pub fn write_if(
     Ok(version)
 }
 
-/// Reads one shared item's current version and its writer. Input: a transaction on
-/// `engine.db` and the item. Output: the version (0 for an item never written), or
-/// `versioned_unavailable`.
-pub fn current(tx: &Transaction<'_>, item: &Item) -> Result<Current, EngineError> {
+/// Reads one shared item's current version and its writer. Input: a connection or
+/// transaction on `engine.db` and the item. Output: the version (0 for an item never
+/// written), or `versioned_unavailable`.
+pub fn current(tx: &Connection, item: &Item) -> Result<Current, EngineError> {
     if !exists(tx)? {
         return Ok(Current {
             version: 0,
@@ -354,7 +423,7 @@ fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
         .map_err(|_| failure("versioned_unavailable"))
 }
 
-fn exists(tx: &Transaction<'_>) -> Result<bool, EngineError> {
+fn exists(tx: &Connection) -> Result<bool, EngineError> {
     tx.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
          AND name IN ('versioned_items', 'versioned_forces')",

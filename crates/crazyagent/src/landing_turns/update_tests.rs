@@ -169,6 +169,10 @@ fn an_update_for_a_sub_agent_no_longer_on_the_team_is_refused_and_changes_nothin
     assert_eq!(head, before.head);
     let refused = update(&case.db, &case.id).unwrap_err();
     assert_eq!(refused.0, "team_agent_not_found");
+    assert!(
+        crate::engine::owner::CHANGES_CODES.contains(&refused.0.as_str()),
+        "the desktop shows this refusal as itself, not as an unknown outcome"
+    );
     assert_eq!(case.set(), before);
     assert_eq!((case.agent_head(), case.readme()), (head, readme));
     assert!(!case.readme().contains("<<<<<<<"));

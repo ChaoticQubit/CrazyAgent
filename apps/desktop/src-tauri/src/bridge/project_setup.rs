@@ -337,8 +337,11 @@ impl NativeBridge {
 
     /// Reads the extra read-only folders a project's agents get beside its toolchains.
     /// Takes the project id.
-    /// Returns the folders in saved order.
-    pub async fn project_read_paths(&mut self, id: &str) -> Result<Vec<String>, BridgeError> {
+    /// Returns the folders in saved order and the version a change sends back.
+    pub async fn project_read_paths(
+        &mut self,
+        id: &str,
+    ) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
         let paths = self
             .controller()?
             .project_read_paths(project(id)?)
@@ -369,11 +372,13 @@ impl NativeBridge {
 
     /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
     /// path, the home folder, a credential location and the CrazyAgent data folder.
-    /// Takes the project id, the folders and the client generation.
-    /// Returns the actual commit receipt.
+    /// Takes the project id, the version the screen showed, the folders and the client
+    /// generation. Returns the actual commit receipt; folders changed since the screen read
+    /// them are the plain rejection `stale_revision`.
     pub async fn set_project_read_paths(
         &mut self,
         id: &str,
+        version: u64,
         paths: Vec<String>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
@@ -381,7 +386,11 @@ impl NativeBridge {
         let project_id = project(id)?;
         self.controller()?
             .begin_mutation(
-                OwnerMutation::SetProjectReadPaths { project_id, paths },
+                OwnerMutation::SetProjectReadPaths {
+                    project_id,
+                    version,
+                    paths,
+                },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

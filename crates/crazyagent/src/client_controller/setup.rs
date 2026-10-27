@@ -34,29 +34,32 @@ impl OwnerController {
     }
 
     /// Turns one installed default-pack entry on or off for every project.
-    /// Takes the entry id, on or off and the client generation.
-    /// Returns the actual owner response; a rejection carries a plain code.
+    /// Takes the entry id, on or off, the pack version the screen showed and the client
+    /// generation. Returns the actual owner response; a rejection carries a plain code,
+    /// `stale_revision` once the pack changed elsewhere.
     pub async fn set_pack_entry(
         &mut self,
         id: String,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.setup_status().await?;
-        self.begin_mutation(OwnerMutation::SetPackEntry { id, on }, generation)?;
+        self.begin_mutation(OwnerMutation::SetPackEntry { id, on, version }, generation)?;
         self.send_pending().await
     }
 
     /// Removes one installed default-pack entry; an entry that is not installed is refused.
-    /// Takes the entry id and the client generation.
+    /// Takes the entry id, the pack version the screen showed and the client generation.
     /// Returns the actual owner response; a rejection carries a plain code.
     pub async fn remove_pack_entry(
         &mut self,
         id: String,
+        version: u64,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.setup_status().await?;
-        self.begin_mutation(OwnerMutation::RemovePackEntry { id }, generation)?;
+        self.begin_mutation(OwnerMutation::RemovePackEntry { id, version }, generation)?;
         self.send_pending().await
     }
 

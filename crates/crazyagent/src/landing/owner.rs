@@ -1,5 +1,5 @@
 use super::diff::{self, plain};
-use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared};
+use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
 use super::{AcceptOutcome, ChangeSetId, ChangeState, MESSAGE_BYTES_MAX};
@@ -195,11 +195,20 @@ fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), Eng
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
-/// file where the squash would write. Inputs: the checkout, its root, the tip and the
-/// squash tree. Output: Ok when Accept can write without touching the owner's work.
+/// file where the squash would write. A submodule counts by the commit it records, so no
+/// git runs inside it under config the engine did not write. Inputs: the checkout, its
+/// root, the tip and the squash tree. Output: Ok when Accept can write without touching
+/// the owner's work.
 fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result<(), EngineError> {
     if !owner.test(&["diff-index", "--cached", "--quiet", tip, "--"])?
-        || !owner.test(&["diff", "--no-ext-diff", "--no-textconv", "--quiet", "--"])?
+        || !owner.test(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=all",
+            "--quiet",
+            "--",
+        ])?
     {
         return Err(failure("changes_owner_dirty"));
     }
@@ -234,7 +243,12 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
-    shared(&record.repository)?.run(&["update-ref", "-d", &pending_ref(&record.id)])?;
+    flow::set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &pending_ref(&record.id),
+        None,
+    )?;
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
 }
@@ -277,8 +291,10 @@ pub(super) fn accept(
         return Err(failure("changes_stale"));
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
-    let owner = Repo::open(&repository.join(".git"), Some(&repository))?;
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&git_dir, Some(&repository))?;
     let (reference, tip) = owner_branch(&owner, &repository)?;
+    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -307,6 +323,7 @@ pub(super) fn accept(
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
     let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
+    verify_objects(&git_dir, &[&commit], &[&tip, &record.head, &record.base])?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),
         old: tip.clone(),
@@ -364,14 +381,14 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let agent = flow::agent(&record)?;
-    if agent.commit_of("HEAD")?.as_deref() != Some(record.head.as_str())
-        || !flow::holds_only(&agent, &record.head)?
-    {
+    let agent = flow::agent(db, &record)?;
+    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
         return Err(failure("changes_agent_busy"));
     }
-    let owner = Repo::open(&repository.join(".git"), Some(&repository))?;
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
+    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -379,6 +396,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let (tree, conflicts) = merge(&owner, &record.base, &tip, &record.head)?;
     let message = "Merge the owner's branch into this agent's work\n";
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], message, ENGINE)?;
+    verify_objects(&git_dir, &[&merged], &[&record.head, &tip, &record.base])?;
     record.state = ChangeState::Updating;
     record.waiting = true;
     record.base = tip;
@@ -387,7 +405,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let stats = diff::stats(&owner, &record.base, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
-    owner.run(&["update-ref", &pending_ref(id), &merged])?;
+    flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });
@@ -528,13 +546,18 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             }
         }
         Some(Intent::Reset { target }) => {
-            let agent = flow::agent(record)?;
-            let current = agent
-                .commit_of("HEAD")?
-                .ok_or_else(|| failure("changes_git_failed"))?;
-            let reset = flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
-            if reset {
-                flow::reset_agent(&agent, &target)?;
+            let agent = match flow::agent(db, record) {
+                Err(refused) if refused.0 == "changes_workspace_invalid" => None,
+                opened => Some(opened?),
+            };
+            let mut reset = false;
+            if let Some(agent) = &agent
+                && let Ok(current) = agent.head()
+                && (flow::holds_only(&agent.repo, &target)?
+                    || flow::holds_only(&agent.repo, &current)?)
+            {
+                flow::reset_agent(agent, &target)?;
+                reset = true;
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };

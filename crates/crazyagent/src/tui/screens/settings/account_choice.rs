@@ -266,6 +266,7 @@ impl ChoiceEditor {
             let generation = ctx.next_generation();
             ctx.request(Request::Settings(Box::new(SettingsJob::SetSchedule {
                 change,
+                version: schedule.version,
                 generation,
             })));
         }

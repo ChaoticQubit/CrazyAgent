@@ -9,6 +9,19 @@ fn engine() -> (tempfile::TempDir, Connection) {
     (directory, connection)
 }
 
+fn give_role(
+    connection: &Connection,
+    project: &ProjectId,
+    task: i64,
+    role: &str,
+    expected: u64,
+) -> Result<u64, versioned::Stale> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let done = set_task_role(&tx, project, task, role, expected).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
 fn project(name: &str) -> ProjectId {
     ProjectId::new(name).unwrap()
 }
@@ -257,7 +270,7 @@ fn a_task_role_becomes_the_handle_and_a_new_job_without_one_gets_its_task_handle
     let alpha = project("alpha");
     let sub = agent(&connection, "alpha", "sub", "working");
     let named = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, named, "Onboarding fix").unwrap();
+    give_role(&connection, &alpha, named, "Onboarding fix", 0).unwrap();
     assert_eq!(
         assign_task_role(&connection, &alpha, sub, named).unwrap(),
         Some("onboarding-fix".into())
@@ -283,7 +296,7 @@ fn a_task_role_becomes_the_handle_and_a_new_job_without_one_gets_its_task_handle
         Some(format!("task-{plain}"))
     );
     let ignored = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, ignored, "!!!").unwrap();
+    give_role(&connection, &alpha, ignored, "!!!", 0).unwrap();
     assert_eq!(
         assign_task_role(&connection, &alpha, sub, ignored).unwrap(),
         Some(format!("task-{ignored}"))
@@ -295,12 +308,12 @@ fn task_roles_of_tasks_that_no_longer_exist_are_dropped() {
     let (_directory, connection) = engine();
     let alpha = project("alpha");
     let gone = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, gone, "old-job").unwrap();
+    give_role(&connection, &alpha, gone, "old-job", 0).unwrap();
     connection
         .execute("DELETE FROM team_tasks WHERE id=?1", [gone])
         .unwrap();
     let kept = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, kept, "new-job").unwrap();
+    give_role(&connection, &alpha, kept, "new-job", 0).unwrap();
     let roles: Vec<i64> = connection
         .prepare("SELECT task FROM team_task_roles ORDER BY task")
         .unwrap()
@@ -454,5 +467,81 @@ fn labels_read_persona_role_harness_and_status() {
     assert_eq!(
         line("Sub-agent 3", "mystery-tool", "Stopped"),
         "Sub-agent 3 \u{b7} mystery-tool \u{b7} stopped"
+    );
+}
+
+fn stored_role(connection: &Connection, task: i64) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT role FROM team_task_roles WHERE task=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+#[test]
+fn stale_task_role_write_is_refused() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let master = agent(&connection, "alpha", "master", "working");
+    let delegated = task(&connection, "alpha");
+    assert_eq!(
+        give_role(&connection, &alpha, delegated, "Onboarding fix", 0),
+        Ok(1),
+        "the master names the role of a task it just created at version 0"
+    );
+    let by_master = versioned::LastWriter::Agent(AgentId::team(master).unwrap());
+    for version in [0, 4] {
+        assert_eq!(
+            give_role(&connection, &alpha, delegated, "Release notes", version),
+            Err(versioned::Stale {
+                version,
+                current: 1,
+                writer: by_master.clone(),
+            }),
+            "a role write from version {version} never replaces version 1"
+        );
+    }
+    assert_eq!(
+        stored_role(&connection, delegated).as_deref(),
+        Some("Onboarding fix"),
+        "the stale write changed nothing"
+    );
+    assert_eq!(
+        give_role(&connection, &alpha, delegated, "Release notes", 1),
+        Ok(2),
+        "after a re-read the redo lands"
+    );
+    assert_eq!(
+        stored_role(&connection, delegated).as_deref(),
+        Some("Release notes")
+    );
+
+    connection
+        .execute("DELETE FROM team_tasks WHERE id=?1", [delegated])
+        .unwrap();
+    let next = task(&connection, "alpha");
+    assert!(next > delegated, "task ids are never reused");
+    assert_eq!(give_role(&connection, &alpha, next, "Docs", 0), Ok(1));
+    assert_eq!(stored_role(&connection, delegated), None);
+    assert_eq!(
+        versioned::current(&connection, &versioned::task_role_item(delegated))
+            .unwrap()
+            .version,
+        0,
+        "a gone task's role forgets its version"
+    );
+
+    let beta = project("beta");
+    let unmastered = task(&connection, "beta");
+    assert_eq!(give_role(&connection, &beta, unmastered, "Docs", 0), Ok(1));
+    assert_eq!(
+        versioned::current(&connection, &versioned::task_role_item(unmastered))
+            .unwrap()
+            .writer,
+        versioned::LastWriter::Owner,
+        "without a recorded master the owner's turn wrote it"
     );
 }

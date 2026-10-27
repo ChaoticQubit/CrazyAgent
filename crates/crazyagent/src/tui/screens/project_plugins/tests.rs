@@ -53,6 +53,7 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         on_here,
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
+        version: 2,
     }
 }
 
@@ -76,6 +77,7 @@ fn server(name: &str, scope: Scope, status: ServerStatus, on_here: Option<bool>)
         checks: 0,
         secrets: Vec::new(),
         on_here,
+        version: 2,
     }
 }
 
@@ -186,7 +188,7 @@ fn space_switches_an_every_project_item_for_this_project_only() {
     let change = sent(view.key(press(KeyCode::Char(' '))));
     assert!(matches!(
         change,
-        PluginChange::Switch { ref project, ref id, on: false }
+        PluginChange::Switch { ref project, ref id, on: false, version: 2 }
             if project.as_str() == "tidepool" && id == "pl0xfrontend-design"
     ));
     assert!(view.busy());
@@ -249,7 +251,7 @@ fn project_only_items_turn_on_and_off_for_this_project() {
     let change = sent(view.key(press(KeyCode::Char(' '))));
     assert!(matches!(
         change,
-        PluginChange::SetSkill { ref id, enabled: false } if id == "pl0xtidepool-style"
+        PluginChange::SetSkill { ref id, enabled: false, version: 2 } if id == "pl0xtidepool-style"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(view.notice, Some(Notice::plain("tidepool-style is off.")));
@@ -258,7 +260,7 @@ fn project_only_items_turn_on_and_off_for_this_project() {
     let change = sent(view.key(press(KeyCode::Char(' '))));
     assert!(matches!(
         change,
-        PluginChange::SetServer { ref id, enabled: false } if id == "pl0xpostgres"
+        PluginChange::SetServer { ref id, enabled: false, version: 2 } if id == "pl0xpostgres"
     ));
 }
 
@@ -497,7 +499,7 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     let change = sent(view.key(press(KeyCode::Char('y'))));
     assert!(matches!(
         change,
-        PluginChange::RemoveSkill { ref id } if id == "pl0xtidepool-style"
+        PluginChange::RemoveSkill { ref id, version: 2 } if id == "pl0xtidepool-style"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(view.notice, Some(Notice::plain("Removed tidepool-style.")));
@@ -515,7 +517,7 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     let change = sent(view.key(press(KeyCode::Char('y'))));
     assert!(matches!(
         change,
-        PluginChange::RemoveServer { ref id } if id == "pl0xpostgres"
+        PluginChange::RemoveServer { ref id, version: 2 } if id == "pl0xpostgres"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(
@@ -784,13 +786,17 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
         project: switched,
         id,
         on,
+        version,
     } = sent(view.key(press(KeyCode::Char(' '))))
     else {
         panic!("a project switch expected");
     };
     assert_eq!(switched, project());
     assert!(!on);
-    controller.switch_plugin(switched, id, on).await.unwrap();
+    controller
+        .switch_plugin(switched, id, on, version)
+        .await
+        .unwrap();
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(
         view.notice,

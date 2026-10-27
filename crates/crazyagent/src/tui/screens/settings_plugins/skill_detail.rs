@@ -132,7 +132,7 @@ impl SkillDetailPage {
             return;
         }
         let skill = &detail.skill;
-        let id = skill.id.clone();
+        let (id, version) = (skill.id.clone(), skill.version);
         let (change, done) = match (&self.project, skill.on_here) {
             (Some(_), Some(_)) if !skill.enabled => {
                 ctx.say(Message::error(
@@ -149,6 +149,7 @@ impl SkillDetailPage {
                     project: project.clone(),
                     id,
                     on: !on,
+                    version,
                 },
                 format!(
                     "{} is {} for this project.",
@@ -160,6 +161,7 @@ impl SkillDetailPage {
                 PluginChange::SetSkill {
                     id,
                     enabled: !skill.enabled,
+                    version,
                 },
                 format!(
                     "{} is {}.",

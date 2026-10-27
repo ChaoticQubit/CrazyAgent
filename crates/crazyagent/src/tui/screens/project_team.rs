@@ -209,6 +209,9 @@ impl TeamView {
                         self.read_ms = None;
                     }
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
+                        if code == crate::storage::versioned::STALE_CODE {
+                            self.read_ms = None;
+                        }
                         self.notice = Some(Notice::problem(team_plain(&code)));
                     }
                     Ok(_) => {}
@@ -572,6 +575,24 @@ impl TeamView {
         Some((own, own.unwrap_or(fallback)))
     }
 
+    /// Gives the version of a level's own rule the last read showed, 0 when it has none.
+    /// Takes the level. Returns the version a change of that level sends.
+    fn wake_version(&self, level: WakeLevel) -> u64 {
+        let Some(status) = self.status.as_ref() else {
+            return 0;
+        };
+        let wake = &status.events.wake;
+        match level {
+            WakeLevel::App => wake.app_version,
+            WakeLevel::Project => wake.project_version,
+            WakeLevel::Agent(id) => wake
+                .agents
+                .iter()
+                .find(|rule| rule.agent == id)
+                .map_or(0, |rule| rule.version),
+        }
+    }
+
     fn wake_key(&mut self, key: KeyEvent) -> TeamReply {
         let Some(edit) = self.wake else {
             return TeamReply::Ignored;
@@ -669,11 +690,16 @@ impl TeamView {
                 agent,
             },
         };
+        let version = self.wake_version(level);
         self.changing = Some(match rule {
             Some(_) => "Wake rule saved.".to_owned(),
             None => "Wake rule reset. The rule above it applies.".to_owned(),
         });
-        TeamReply::Change(TeamAction::Wake { target, rule })
+        TeamReply::Change(TeamAction::Wake {
+            target,
+            rule,
+            version,
+        })
     }
 
     fn mark_seen(&mut self) -> TeamReply {
@@ -1257,6 +1283,10 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_task_limit" => "This project has reached its task limit.".into(),
         "team_wake_cap_invalid" => "Set the hourly limit between 0 and 500 wakes.".into(),
+        "stale_revision" => {
+            "This changed in another window, so yours was not saved. The saved one shows now."
+                .into()
+        }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
         other => plain_problem(other),

@@ -284,7 +284,12 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
         .await
         .unwrap();
     owner
-        .switch_plugin(project.clone(), switched.id.clone(), false)
+        .switch_plugin(
+            project.clone(),
+            switched.id.clone(),
+            false,
+            switched.version,
+        )
         .await
         .unwrap();
     owner
