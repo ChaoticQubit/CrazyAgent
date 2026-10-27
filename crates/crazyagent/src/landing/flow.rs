@@ -199,25 +199,30 @@ pub(super) fn reset_agent(repo: &Repo, target: &str) -> Result<(), EngineError> 
     Ok(())
 }
 
-/// Records a reset of the agent's worktree to `target`, runs it and clears the record,
-/// or skips it when the worktree holds more than `expected`, so the agent's newer work
-/// stays. Inputs: the store, the change set and both commits. Output: Ok once saved.
+/// Records a reset of the agent's worktree to `target` after its change set closed, runs
+/// it and clears the record, or skips it when the worktree holds more than `expected`, so
+/// the agent's newer work stays; the worktree's next change set opens above whichever
+/// commit it now starts from. Inputs: the store, the closed change set and both commits.
+/// Output: Ok once saved.
 pub(super) fn reset_if_quiet(
     db: &Connection,
     record: &mut Record,
     expected: &str,
     target: &str,
 ) -> Result<(), EngineError> {
+    assert!(!record.is_open());
     let repo = agent(record)?;
     if repo.commit_of("HEAD")?.as_deref() != Some(expected) || !holds_only(&repo, expected)? {
         record.intent = None;
-        return store::save(db, record);
+        store::save(db, record)?;
+        return store::set_base(db, &record.worktree, expected);
     }
     record.intent = Some(Intent::Reset {
         target: target.to_owned(),
     });
     store::save(db, record)?;
     reset_agent(&repo, target)?;
+    store::set_base(db, &record.worktree, target)?;
     record.intent = None;
     store::save(db, record)
 }
@@ -294,9 +299,29 @@ fn commit_worktree(
     repo.commit_tree(&tree, &[head], message, ENGINE).map(Some)
 }
 
+/// Records the commit a newly added agent worktree holds as the base its change sets
+/// open above. Inputs: the store, the owner checkout, the worktree and its git folder.
+/// Output: Ok once stored.
+pub(super) fn start(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    check_places(repository, worktree, git_dir)?;
+    let _held = hold(repository);
+    let head = Repo::open(git_dir, Some(worktree))?
+        .commit_of("HEAD")?
+        .ok_or_else(|| failure("changes_git_failed"))?;
+    store::set_base(db, worktree, &head)
+}
+
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
-/// one above the worktree's HEAD. The change set is stored before HEAD moves, so a stop
-/// between the two loses nothing: the next turn end commits the same tree again.
+/// one above the base recorded for the worktree, else its HEAD, so commits the agent
+/// made itself are part of it; their changed paths count against the bounds too. The
+/// change set is stored before HEAD moves, so a stop between the two loses nothing: the
+/// next turn end commits the same tree again.
 /// Inputs: the store, the workspace, the turn end, the bounds and the time now.
 /// Output: the open change set, None when nothing is pending.
 pub(super) fn record(
@@ -327,6 +352,16 @@ pub(super) fn record(
     let head = repo
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;
+    let base = match store::base_of(db, worktree)? {
+        Some(base) if repo.commit_of(&base)?.as_deref() == Some(base.as_str()) => base,
+        _ => head.clone(),
+    };
+    let above = open
+        .as_ref()
+        .map_or(base.as_str(), |record| record.base.as_str());
+    if above != head && diff::changed_paths(&repo, above, &head)?.len() > bounds.files {
+        return Err(failure("changes_too_large"));
+    }
     let line = subject(&turn.prompt_line);
     let message = format!(
         "{}\n\nTurn {turn_id} ended: {}.\n",
@@ -335,7 +370,7 @@ pub(super) fn record(
     );
     let committed = commit_worktree(&repo, &workspace.worktree, &head, bounds, &message)?;
     let mut record = match open {
-        None if committed.is_none() => return Ok(None),
+        None if committed.is_none() && head == base => return Ok(None),
         None => Record {
             id: new_id()?,
             project: workspace.project.clone(),
@@ -343,8 +378,8 @@ pub(super) fn record(
             repository: workspace.repository.clone(),
             worktree: workspace.worktree.clone(),
             git_dir: workspace.git_dir.clone(),
-            base: head.clone(),
-            head: head.clone(),
+            base: base.clone(),
+            head: base,
             state: ChangeState::Pending,
             last_outcome: turn.outcome,
             turn: turn_id.clone(),
@@ -367,12 +402,10 @@ pub(super) fn record(
     if committed.is_none() && record.head == current && record.state != ChangeState::Updating {
         return Ok(Some(record.id));
     }
-    if committed.is_some() || record.state == ChangeState::Updating {
-        record.state = ChangeState::Pending;
-        record.conflicts.clear();
-        record.last_outcome = turn.outcome;
-        record.turn = turn_id;
-    }
+    record.state = ChangeState::Pending;
+    record.conflicts.clear();
+    record.last_outcome = turn.outcome;
+    record.turn = turn_id;
     record.head = current.clone();
     let stats = diff::stats(&repo, &record.base, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);

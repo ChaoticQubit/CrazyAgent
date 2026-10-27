@@ -432,8 +432,14 @@ pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
                 let current = agent
                     .commit_of("HEAD")?
                     .ok_or_else(|| failure("changes_git_failed"))?;
-                if flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)? {
+                let reset =
+                    flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
+                if reset {
                     flow::reset_agent(&agent, &target)?;
+                }
+                if !record.is_open() {
+                    let start = if reset { &target } else { &record.head };
+                    store::set_base(db, &record.worktree, start)?;
                 }
                 record.intent = None;
                 store::save(db, &record)?;

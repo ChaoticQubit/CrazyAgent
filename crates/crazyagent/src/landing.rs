@@ -228,11 +228,31 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     Ok(db)
 }
 
+/// Records the commit a newly added agent worktree starts from, so the change sets it
+/// opens later hold every commit the agent makes above it. Call it once, right after the
+/// worktree is added and before any agent runs in it. Inputs: the store, the owner's
+/// checkout root, the worktree and its git metadata folder. Output: Ok once stored.
+pub fn record_worktree_start(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return flow::start(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
 /// fsmonitor off, and adds it to that worktree's open change set or opens one above the
-/// worktree's HEAD. A failed or cancelled turn commits too. Inputs: the store, the
-/// workspace and the turn end. Output: the change set the work now belongs to, None
-/// when nothing is pending.
+/// commit the worktree started from, or its HEAD when no start is recorded, so commits
+/// the agent made itself land too. A failed or cancelled turn commits too. Inputs: the
+/// store, the workspace and the turn end. Output: the change set the work now belongs
+/// to, None when nothing is pending.
 pub fn record_turn_end(
     db: &Connection,
     workspace: &Workspace,

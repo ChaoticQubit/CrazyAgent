@@ -35,7 +35,11 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
 CREATE INDEX IF NOT EXISTS landing_change_sets_project
-    ON landing_change_sets(project, updated_ms);";
+    ON landing_change_sets(project, updated_ms);
+CREATE TABLE IF NOT EXISTS landing_bases (
+    worktree TEXT PRIMARY KEY,
+    base TEXT NOT NULL
+);";
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
@@ -275,6 +279,40 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
         _ => storage(error),
     })?;
     Ok(())
+}
+
+/// Stores the commit the next change set of a worktree opens above. Inputs: the store,
+/// the worktree and the commit. Output: Ok once stored.
+pub(super) fn set_base(
+    db: &Connection,
+    worktree: &std::path::Path,
+    base: &str,
+) -> Result<(), EngineError> {
+    assert!(super::git::is_object_id(base));
+    db.execute(
+        "INSERT OR REPLACE INTO landing_bases(worktree,base) VALUES (?1,?2)",
+        params![path_text(worktree)?, base],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Reads the commit the next change set of a worktree opens above. Inputs: the store
+/// and the worktree path. Output: the commit, None when none is recorded, or
+/// `changes_unavailable` for a stored value that is not an object id.
+pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>, EngineError> {
+    let base: Option<String> = db
+        .query_row(
+            "SELECT base FROM landing_bases WHERE worktree=?1",
+            [worktree],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match base {
+        Some(base) if !super::git::is_object_id(&base) => Err(failure("changes_unavailable")),
+        base => Ok(base),
+    }
 }
 
 /// Reads one change set. Inputs: the store and the id. Output: the record, or

@@ -1885,6 +1885,25 @@ impl TeamRuntime {
                 params![id, stored.project_id.as_str(), landing[0], landing[1], landing[2]],
             )
             .map_err(error)?;
+        if kept.is_none() {
+            let paths = landing.each_ref().map(Path::new);
+            let started = crate::landing::open(&self.root).and_then(|db| {
+                crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2])
+            });
+            if let Err(problem) = started {
+                let problem = with_code(
+                    "the agent worktree's starting commit could not be recorded",
+                    Some(&problem.0),
+                );
+                self.connection
+                    .execute(
+                        "UPDATE team_agents SET status='failed', error=?2, stopped_ms=?3 WHERE id=?1",
+                        params![id, bound_text(&problem, 400), now_ms()],
+                    )
+                    .map_err(error)?;
+                return Ok(Err(problem));
+            }
+        }
         let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
             Ok(hosted) => hosted,
             Err(problem) => {
