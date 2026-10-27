@@ -105,7 +105,8 @@ impl Case {
         .unwrap();
         let tx = connection.unchecked_transaction().unwrap();
         let switch = launch_context::master_tools(&tx, project).map_err(|problem| problem.0)?;
-        let text = launch_context::for_master(&tx, project, tools).map_err(|problem| problem.0)?;
+        let text =
+            launch_context::for_master(&tx, project, tools, None).map_err(|problem| problem.0)?;
         drop(tx);
         Ok((switch, text))
     }

@@ -413,9 +413,10 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
             .unwrap()
     };
 
+    let probe_step = latest(STEPS) + 1;
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
 
-    assert_eq!(version(&db).unwrap(), 3);
+    assert_eq!(version(&db).unwrap(), probe_step);
     assert_eq!(probed(&db), vec![3]);
     let mut after = rows(&db);
     assert_eq!(after.remove("migration_probe").unwrap().len(), 1);
@@ -423,7 +424,7 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     let first = backups[0].file_name().unwrap().to_str().unwrap().to_owned();
-    assert!(first.starts_with("1-to-3-"), "{first}");
+    assert!(first.starts_with(&format!("1-to-{probe_step}-")), "{first}");
     assert_eq!(
         std::fs::read(backups[0].join("global.toml")).unwrap(),
         std::fs::read(root.global()).unwrap()
@@ -432,10 +433,13 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
     assert_eq!(root.backups().len(), 1, "nothing is pending, so no backup");
 
-    db.execute_batch("DROP TABLE migration_probe; PRAGMA user_version = 2")
-        .unwrap();
+    db.execute_batch(&format!(
+        "DROP TABLE migration_probe; PRAGMA user_version = {}",
+        latest(STEPS)
+    ))
+    .unwrap();
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
-    assert_eq!(version(&db).unwrap(), 3);
+    assert_eq!(version(&db).unwrap(), probe_step);
     assert_eq!(probed(&db), vec![3]);
     let names: Vec<String> = root
         .backups()
@@ -445,7 +449,9 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     assert_eq!(names.len(), 2);
     assert!(names.contains(&first));
     assert!(
-        names.iter().any(|name| name.starts_with("2-to-3-")),
+        names
+            .iter()
+            .any(|name| name.starts_with(&format!("{}-to-{probe_step}-", latest(STEPS)))),
         "{names:?}"
     );
 }
@@ -470,7 +476,10 @@ async fn failing_step_rolls_back_and_names_the_backup() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     assert!(
-        failed.starts_with("storage_migration_failed: step 4 failed:"),
+        failed.starts_with(&format!(
+            "storage_migration_failed: step {} failed:",
+            latest(STEPS) + 2
+        )),
         "{failed}"
     );
     assert!(failed.contains("the database is unchanged"), "{failed}");
@@ -486,7 +495,7 @@ async fn failing_step_rolls_back_and_names_the_backup() {
     drop(copy);
 
     upgrade(&mut db, &root.database(), Some(&sources), &steps(&[probe])).unwrap();
-    assert_eq!(version(&db).unwrap(), 3);
+    assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
 }
 
 #[tokio::test]
@@ -509,9 +518,10 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     assert!(
-        failed.starts_with(
-            "storage_migration_failed: step 4 failed: the step ended the upgrade transaction;"
-        ),
+        failed.starts_with(&format!(
+            "storage_migration_failed: step {} failed: the step ended the upgrade transaction;",
+            latest(STEPS) + 2
+        )),
         "{failed}"
     );
     assert!(
@@ -615,4 +625,72 @@ fn backup_names_use_a_sortable_utc_stamp() {
     ] {
         assert_eq!(backup_time(other), None, "{other}");
     }
+}
+
+/// A setup body as engines before DEC-096 addendum 3 saved it.
+/// Takes the project, the sub-harness list as JSON and the team maximum. Returns the body.
+fn setup_body(project: &str, sub: &str, max: u8) -> String {
+    format!(
+        r#"{{"project_id":"{project}","name":"P","about":"","tech_stack":[],"platforms":[],"research":[],"pool":null,"team":{{"master":"codex","master_tools":true,"sub_harnesses":{sub},"min_agents":1,"max_agents":{max}}},"documents":[],"folder":"/tmp/{project}","created_ms":1,"revision":3}}"#
+    )
+}
+
+#[test]
+fn an_old_empty_team_plan_of_one_agent_widens_once_to_the_team_maximum() {
+    let root = Root::new();
+    let mut db = root.connection();
+    crate::project_setup::initialize(&db).unwrap();
+    let chosen = r#"[{"harness":"codex","agents":1,"tools":true}]"#;
+    for (project, body) in [
+        ("old-solo", setup_body("old-solo", "[]", 1)),
+        ("chosen", setup_body("chosen", chosen, 2)),
+        ("lowered", setup_body("lowered", "[]", 3)),
+        ("broken", "not json".to_owned()),
+    ] {
+        db.execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            [project, body.as_str()],
+        )
+        .unwrap();
+    }
+    db.execute_batch("PRAGMA user_version = 2").unwrap();
+    let before = setups_or_text(&db);
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let after = setups_or_text(&db);
+    let mut widened: serde_json::Value = serde_json::from_str(&before["old-solo"]).unwrap();
+    widened["team"]["max_agents"] = crate::project_setup::TEAM_AGENTS_MAX.into();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&after["old-solo"]).unwrap(),
+        widened
+    );
+    for kept in ["chosen", "lowered", "broken"] {
+        assert_eq!(after[kept], before[kept], "{kept}");
+    }
+    let read: crate::project_setup::StoredSetup = serde_json::from_str(&after["old-solo"]).unwrap();
+    assert!(read.team.validate().is_ok());
+
+    db.execute(
+        "UPDATE project_setups SET body=?1 WHERE project='old-solo'",
+        [setup_body("old-solo", "[]", 1)],
+    )
+    .unwrap();
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+    let again: serde_json::Value = serde_json::from_str(&setups_or_text(&db)["old-solo"]).unwrap();
+    assert_eq!(
+        again["team"]["max_agents"], 1,
+        "the owner's later choice of one agent survives the next engine start"
+    );
+}
+
+/// Reads every saved setup body as stored text, by project.
+fn setups_or_text(db: &Connection) -> BTreeMap<String, String> {
+    db.prepare("SELECT project, body FROM project_setups")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }

@@ -590,6 +590,17 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_files(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    query: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_files(&id, &query).await
+}
+
+#[tauri::command]
 async fn desktop_set_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -734,22 +745,6 @@ async fn desktop_team_hand_off(
 }
 
 #[tauri::command]
-async fn desktop_team_rename(
-    window: WebviewWindow,
-    state: State<'_, NativeState>,
-    id: String,
-    agent: i64,
-    handle: String,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
-    lock(&state)
-        .await?
-        .team_rename(&id, agent, handle, generation)
-        .await
-}
-
-#[tauri::command]
 async fn desktop_team_events(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -770,6 +765,22 @@ async fn desktop_team_wake_rule(
     lock(&state)
         .await?
         .team_wake_rule(target, rule, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_rename(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    handle: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_rename(&id, agent, handle, generation)
         .await
 }
 
@@ -2227,6 +2238,7 @@ pub fn run() {
             desktop_add_project_documents,
             desktop_delete_project_context,
             desktop_project_read_paths,
+            desktop_project_files,
             desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,

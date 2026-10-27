@@ -361,11 +361,15 @@ async fn handle(
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
 /// it finishes or undoes Accepts and worktree resets an engine stop interrupted and
-/// deletes discarded refs past their restore window. Input: the authority, for the
-/// engine root. Runs until the server aborts it.
-pub(super) async fn upkeep(authority: Arc<Authority>) {
+/// deletes discarded refs past their restore window. Input: the authority, held weakly so
+/// a server dropped without its stop path still releases it. Runs until the server aborts
+/// it or the authority is gone.
+pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
     loop {
-        let tended = match engine_root(&authority) {
+        let Some(root) = authority.upgrade().map(|authority| engine_root(&authority)) else {
+            return;
+        };
+        let tended = match root {
             Ok(root) => tokio::task::spawn_blocking(move || {
                 let db = landing::open(&root)?;
                 landing::reconcile(&db)?;

@@ -1605,12 +1605,39 @@ pub(in crate::tui) fn harness_name(id: &str, catalog: Option<&[HarnessChoice]>) 
     .to_owned()
 }
 
+/// What an empty sub-agent list means (DEC-096 addendum 3), shown where the list would be.
+pub(in crate::tui) const ANY_HARNESS_NOTE: &str =
+    "Any harness, no limit. Add a harness to limit which ones run and how many.";
+
+/// Says what an empty sub-agent list runs: any harness, or no sub-agent at all under a team
+/// maximum of one. Takes the team plan. Returns the note for the place the list would be.
+pub(in crate::tui) fn any_harness_note(team: &TeamPlan) -> &'static str {
+    if team.max_agents <= 1 {
+        "No sub-agents run with a team maximum of 1. Raise the maximum to let any harness run."
+    } else {
+        ANY_HARNESS_NOTE
+    }
+}
+
+/// Names the sub-agents an empty sub-agent list allows: the team maximum less the master.
+/// Takes the team plan. Returns, for example, "Any harness, up to 63 agents".
+pub(in crate::tui) fn any_harness_total(team: &TeamPlan) -> String {
+    let subs = team.max_agents.saturating_sub(1);
+    match subs {
+        0 => "No sub-agents (team maximum is 1)".to_owned(),
+        1 => "Any harness, up to 1 agent".to_owned(),
+        _ => format!("Any harness, up to {subs} agents"),
+    }
+}
+
 /// Describes a team in one plain sentence.
 /// Takes the team plan and the harness catalog when known.
 /// Returns, for example, "Codex leads. Claude Code x2, Codex x1. Tools on."
 pub(in crate::tui) fn team_summary(team: &TeamPlan, catalog: Option<&[HarnessChoice]>) -> String {
     let mut text = format!("{} leads.", harness_name(&team.master, catalog));
-    if !team.sub_harnesses.is_empty() {
+    if team.sub_harnesses.is_empty() {
+        text.push_str(&format!(" {}.", any_harness_total(team)));
+    } else {
         let slots: Vec<String> = team
             .sub_harnesses
             .iter()
