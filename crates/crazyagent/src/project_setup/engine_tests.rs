@@ -1086,6 +1086,120 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     engine.stop().await;
 }
 
+/// Reads one project's newest research job of a kind. Inputs: the owner client, the project
+/// and the kind. Output: the job.
+async fn job_of(
+    owner: &mut OwnerController,
+    project: &ProjectId,
+    kind: ResearchKind,
+) -> ResearchJob {
+    owner
+        .research_jobs(project.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|job| job.kind == kind)
+        .expect("the project has a job of this kind")
+}
+
+#[tokio::test]
+async fn a_retried_job_whose_research_was_turned_off_is_not_cancelled_by_the_next_save() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let planning = ResearchKind::RoadmapPlanning;
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let planned = owner.plan_roadmap(project.clone(), 2).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(saved.revision, 2);
+    assert!(saved.research.contains(&planning));
+
+    let mut off = saved.editable();
+    off.research = vec![ResearchKind::MarketResearch];
+    let response = owner
+        .update_project_setup(project.clone(), 2, None, off, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let before_retry = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(before_retry.revision, 3);
+    assert!(!before_retry.research.contains(&planning));
+    let job = job_of(&mut owner, &project, planning).await;
+    assert_eq!(job.status, ResearchStatus::Cancelled);
+
+    let retried = owner.retry_research(project.clone(), job.id, 4).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    let after_retry = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        after_retry.revision, 4,
+        "turning the kind back on raises the revision"
+    );
+    assert_eq!(
+        after_retry.research,
+        [ResearchKind::MarketResearch, planning],
+        "the retried kind is on again"
+    );
+    let queued = job_of(&mut owner, &project, planning).await;
+    assert_eq!(
+        (queued.id, queued.status, queued.cancel_requested),
+        (job.id, ResearchStatus::Queued, false)
+    );
+
+    let mut drafted_before = before_retry.editable();
+    drafted_before.about = "Plans meals for two.".into();
+    let stale = owner
+        .update_project_setup(project.clone(), 3, None, drafted_before, 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(stale),
+        rejected("stale_revision"),
+        "an edit drafted before the retry cannot turn the kind off unseen"
+    );
+    let mut fresh = after_retry.editable();
+    fresh.about = "Plans meals for two.".into();
+    let response = owner
+        .update_project_setup(project.clone(), 4, None, fresh, 6)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let kept = job_of(&mut owner, &project, planning).await;
+    assert_eq!(
+        (kept.id, kept.status, kept.cancel_requested),
+        (job.id, ResearchStatus::Queued, false),
+        "the next save keeps the retried job"
+    );
+
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch).await;
+    let stopped = owner.cancel_research(project.clone(), market.id, 7).await;
+    assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
+    let retried = owner.retry_research(project.clone(), market.id, 8).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .project_setup(project.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        5,
+        "a kind still on keeps the revision"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Releasing an account cancels the research job and closes the master conversation that
 /// hold it, does not fail on a holder whose conversation already ended, and reads the
 /// account free once the remaining holds end.

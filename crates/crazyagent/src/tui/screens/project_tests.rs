@@ -981,7 +981,8 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     .await;
     assert_eq!(
         settle(&mut screen, &mut controller, start + 4_000).await,
-        ["jobs", "log"]
+        ["setup", "jobs", "log"],
+        "a retry may turn its research back on, so the setup is read again"
     );
     assert_eq!(
         screen.focused_job().map(|job| (job.status, job.attempts)),

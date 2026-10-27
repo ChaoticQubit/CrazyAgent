@@ -2148,9 +2148,11 @@ fn cancel_research(
     Ok(Outcome::Applied)
 }
 
-/// Queues a failed or cancelled research job again with a fresh attempt budget.
+/// Queues a failed or cancelled research job again with a fresh attempt budget. A job whose
+/// kind was turned off turns it back on, so the next setup edit does not cancel it again.
 /// Takes the transaction, configuration, project and job id. Returns Applied,
-/// `research_job_missing`, or `research_job_not_retryable` for a job that is not stopped.
+/// `research_job_missing`, `project_setup_missing`, `setup_unconfirmed` for a kind turned off in
+/// an unconfirmed setup review, or `research_job_not_retryable` for a job that is not stopped.
 fn retry_research(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2166,6 +2168,12 @@ fn retry_research(
     ) {
         return Ok(rejected("research_job_not_retryable"));
     }
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    if !stored.research.contains(&job.kind) && unconfirmed(tx, project_id, &stored)? {
+        return Ok(rejected("setup_unconfirmed"));
+    }
     let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
     let changed = tx
         .execute(
@@ -2178,7 +2186,46 @@ fn retry_research(
     if changed != 1 {
         return Ok(rejected("research_job_not_retryable"));
     }
+    turn_on(tx, &mut stored, job.kind)?;
     Ok(Outcome::Applied)
+}
+
+/// Whether a found or cloned project's setup review is still open, so its setup was never saved.
+/// Takes the transaction, project and stored setup. Returns true until the owner confirms it.
+fn unconfirmed(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    stored: &StoredSetup,
+) -> Result<bool, EngineError> {
+    let onboarding: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM onboarding WHERE project=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(onboarding && !stored.saved())
+}
+
+/// Turns a research kind on in the stored setup and raises its revision, so an edit drafted
+/// before it is refused as stale instead of cancelling the kind's job. A kind already on is kept.
+/// Takes the transaction, the stored setup and the kind. Returns nothing.
+fn turn_on(
+    tx: &Transaction<'_>,
+    stored: &mut StoredSetup,
+    kind: ResearchKind,
+) -> Result<(), EngineError> {
+    if !stored.research.contains(&kind) {
+        let before = stored.revision;
+        stored.research.push(kind);
+        stored.revision = before
+            .checked_add(1)
+            .ok_or_else(|| failure("project_setup_revision_limit"))?;
+        save_setup(tx, stored)?;
+        assert!(stored.revision > before);
+    }
+    assert!(stored.research.contains(&kind));
+    Ok(())
 }
 
 /// Queues the project's roadmap planning job for Plan roadmap now: its finished or stopped job
@@ -2195,14 +2242,7 @@ fn plan_roadmap(
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
     };
-    let onboarding: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM onboarding WHERE project=?1)",
-            [project_id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if onboarding && !stored.saved() {
+    if unconfirmed(tx, project_id, &stored)? {
         return Ok(rejected("setup_unconfirmed"));
     }
     let kind = ResearchKind::RoadmapPlanning;
@@ -2234,16 +2274,7 @@ fn plan_roadmap(
             insert_job(tx, project_id, kind, harnesses[0], waiting, now_ms())?;
         }
     }
-    if !stored.research.contains(&kind) {
-        let before = stored.revision;
-        stored.research.push(kind);
-        stored.revision = before
-            .checked_add(1)
-            .ok_or_else(|| failure("project_setup_revision_limit"))?;
-        save_setup(tx, &stored)?;
-        assert!(stored.revision > before);
-    }
-    assert!(stored.research.contains(&kind));
+    turn_on(tx, &mut stored, kind)?;
     Ok(Outcome::Applied)
 }
 
