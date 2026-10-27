@@ -429,8 +429,9 @@ async fn ide_capability_is_dead_after_server_stop() {
 }
 
 /// The capability file's token admits only `ide.session`, which swaps it once for a
-/// session token and removes the file, so a process that reads the file later, or tries a
-/// second session, gets nothing. A file someone replaced is kept, and its grant is dead.
+/// session token and removes the file, so a process that reads the file later gets nothing,
+/// and a second session try ends the grant. A file someone replaced is kept, and its grant
+/// is dead.
 #[tokio::test]
 async fn ide_session_takes_the_capability_file_once() {
     let mut case = Case::start().await;
@@ -457,19 +458,24 @@ async fn ide_session_takes_the_capability_file_once() {
     );
     assert!(path.is_file());
     let first = session(&socket, &path).await;
-    assert_eq!(
-        exchange(&socket, file, &request("alpha", taken.clone())).await,
-        rejected("ide_capability_refused")
-    );
     let ide = packet(MAGIC, 0, &first);
-    assert_eq!(
-        exchange(&socket, ide, &request("alpha", taken.clone())).await,
-        rejected("ide_session_taken")
-    );
     assert!(matches!(
         exchange(&socket, ide, &request("alpha", workspace())).await,
         Some(IdeReply::Ok { .. })
     ));
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", taken.clone())).await,
+        rejected("ide_session_taken")
+    );
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", workspace())).await,
+        rejected("ide_capability_refused"),
+        "asking for the session again ends it"
+    );
+    assert_eq!(
+        exchange(&socket, file, &request("alpha", taken.clone())).await,
+        rejected("ide_capability_refused")
+    );
     let beta = ProjectId::new("beta").unwrap();
     let replaced = issue(&case.runtime, &beta).unwrap();
     let beta_file = packet(MAGIC, 0, &token(&replaced));
@@ -483,9 +489,56 @@ async fn ide_session_takes_the_capability_file_once() {
     assert_eq!(std::fs::read_to_string(&replaced).unwrap(), "x");
     assert_eq!(
         exchange(&socket, beta_file, &request("beta", workspace())).await,
+        rejected("ide_capability_replaced_preserved"),
+        "the spent token ends the dead grant and the replaced file is kept"
+    );
+    assert_eq!(std::fs::read_to_string(&replaced).unwrap(), "x");
+    assert_eq!(
+        exchange(&socket, beta_file, &request("beta", workspace())).await,
         rejected("ide_capability_refused")
     );
     std::fs::remove_file(&replaced).unwrap();
+    case.stop().await;
+}
+
+/// Something in the IDE sandbox that read the capability file before the extension and
+/// took the session first loses it when the extension tries the file's token: the grant
+/// ends, its subscription closes and both its tokens are dead, so the race fails closed.
+/// A new launch gets a working capability again.
+#[tokio::test]
+async fn a_second_session_attempt_revokes_the_first_session() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let file = packet(MAGIC, 0, &token(&path));
+    let thief = packet(MAGIC, 0, &session(&socket, &path).await);
+    let mut events = subscribe(&socket, thief, "alpha").await;
+    let taken = request("alpha", json!({ "name": "ide.session", "args": {} }));
+
+    assert_eq!(
+        exchange(&socket, file, &taken).await,
+        rejected("ide_session_taken")
+    );
+
+    assert_eq!(
+        read_reply(&mut events).await,
+        rejected("ide_capability_revoked")
+    );
+    assert_eq!(
+        exchange(&socket, thief, &request("alpha", workspace())).await,
+        rejected("ide_capability_refused")
+    );
+    assert_eq!(
+        exchange(&socket, file, &taken).await,
+        rejected("ide_capability_refused")
+    );
+    let again = issue(&case.runtime, &alpha).unwrap();
+    let owner = packet(MAGIC, 0, &session(&socket, &again).await);
+    assert!(matches!(
+        exchange(&socket, owner, &request("alpha", workspace())).await,
+        Some(IdeReply::Ok { .. })
+    ));
     case.stop().await;
 }
 

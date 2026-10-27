@@ -1,3 +1,4 @@
+use crate::engine::EngineError;
 use crate::paths::Platform;
 use serde_json::{Map, Value, json};
 use std::path::Path;
@@ -79,6 +80,28 @@ pub fn profiles(platform: Platform, owner_shell: &Path) -> Map<String, Value> {
         profiles[IDE_SHELL] == settings[&format!("terminal.integrated.automationProfile.{os}")]
     );
     settings
+}
+
+/// The IDE terminal settings for this machine, for the Remote settings file the engine
+/// writes before each IDE server start: [`profiles`] for the current platform, with the
+/// owner's login shell read from the account database, never from `SHELL`. Output: the
+/// keys, or `ide_shell_unknown` when the account database names no shell for the owner.
+#[cfg(unix)]
+pub fn machine_profiles() -> Result<Map<String, Value>, EngineError> {
+    use crate::engine::owner::failure;
+    let shell =
+        crate::sandbox::ide_shell::owner_shell().map_err(|_| failure("ide_shell_unknown"))?;
+    if !shell.is_absolute() {
+        return Err(failure("ide_shell_unknown"));
+    }
+    Ok(profiles(Platform::CURRENT, &shell))
+}
+
+/// The IDE terminal settings for this machine where the IDE shell is PowerShell and needs
+/// no login shell path. Output: [`profiles`] for the current platform.
+#[cfg(not(unix))]
+pub fn machine_profiles() -> Result<Map<String, Value>, EngineError> {
+    Ok(profiles(Platform::CURRENT, Path::new("")))
 }
 
 #[cfg(test)]
