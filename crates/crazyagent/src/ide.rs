@@ -6,6 +6,8 @@ pub mod env;
 #[cfg(unix)]
 pub mod ports;
 #[cfg(unix)]
+pub mod sandbox;
+#[cfg(unix)]
 pub mod server;
 #[cfg(unix)]
 pub mod token;

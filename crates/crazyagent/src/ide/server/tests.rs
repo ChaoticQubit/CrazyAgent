@@ -109,10 +109,14 @@ fn group_listeners(group: i32) -> Vec<String> {
 
 #[tokio::test]
 async fn ide_server_listens_only_on_loopback() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("loopback");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let group = servers.group(&project).unwrap();
     assert_eq!(info.url, format!("http://127.0.0.1:{}/", info.port));
     let addresses = group_listeners(group);
@@ -133,7 +137,13 @@ async fn ide_server_listens_only_on_loopback() {
             format!("127.0.0.1:{}", info.webview_port)
         )]
     );
-    assert_eq!(servers.open(&project, &cached_build()).await.unwrap(), info);
+    assert_eq!(
+        servers
+            .open(&project, checkout.path(), &cached_build())
+            .await
+            .unwrap(),
+        info
+    );
     assert_eq!(servers.group(&project), Some(group));
     servers.stop_all().await;
     gone(group).await;
@@ -142,10 +152,14 @@ async fn ide_server_listens_only_on_loopback() {
 
 #[tokio::test]
 async fn request_without_the_token_is_refused() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("refused");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let host = format!("127.0.0.1:{}", info.port);
     let token = fs::read_to_string(&info.token_path).unwrap();
     let wrong = "0".repeat(token.len());
@@ -160,11 +174,15 @@ async fn request_without_the_token_is_refused() {
 
 #[tokio::test]
 async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlist() {
+    let checkout = scratch();
     let data = scratch();
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let project = project("token");
     let build = cached_build();
-    let first = servers.open(&project, &build).await.unwrap();
+    let first = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let folder = servers.project_folder(&project).unwrap();
     assert_eq!(first.token_path, folder.join(token::FILE));
     assert_eq!(first.capability_path, folder.join(CAPABILITY));
@@ -182,7 +200,10 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(old.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(servers.stop(&project).await);
     assert!(!first.token_path.exists());
-    let second = servers.open(&project, &build).await.unwrap();
+    let second = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_eq!(second.token_path, first.token_path);
     assert_eq!(mode(&second.token_path), 0o600);
     let new = fs::read_to_string(&second.token_path).unwrap();
@@ -291,11 +312,15 @@ fn server_env_holds_only_allowlisted_names() {
 
 #[tokio::test]
 async fn port_is_stable_for_a_project_across_restarts() {
+    let checkout = scratch();
     let data = scratch();
     let build = cached_build();
     let project = project("ports");
     let servers = Servers::new(data.path(), IDLE_LIMIT);
-    let first = servers.open(&project, &build).await.unwrap();
+    let first = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let folder = servers.project_folder(&project).unwrap();
     assert_ne!(first.port, first.webview_port);
     assert_eq!(
@@ -306,7 +331,10 @@ async fn port_is_stable_for_a_project_across_restarts() {
         })
     );
     assert!(servers.stop(&project).await);
-    let again = servers.open(&project, &build).await.unwrap();
+    let again = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_eq!(
         (again.port, again.webview_port),
         (first.port, first.webview_port)
@@ -316,7 +344,10 @@ async fn port_is_stable_for_a_project_across_restarts() {
 
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.port)).unwrap();
     let restarted = Servers::new(data.path(), IDLE_LIMIT);
-    let moved = restarted.open(&project, &build).await.unwrap();
+    let moved = restarted
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_ne!(moved.port, first.port);
     assert_eq!(moved.webview_port, first.webview_port);
     assert_eq!(
@@ -328,18 +359,25 @@ async fn port_is_stable_for_a_project_across_restarts() {
     );
     drop(held);
     assert!(restarted.stop(&project).await);
-    let kept = restarted.open(&project, &build).await.unwrap();
+    let kept = restarted
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     assert_eq!(kept.port, moved.port);
     restarted.stop_all().await;
 }
 
 #[tokio::test]
 async fn idle_server_stops_after_the_idle_limit() {
+    let checkout = scratch();
     let data = scratch();
     let idle = Duration::from_secs(3);
     let servers = Servers::new(data.path(), idle);
     let project = project("idle");
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     let group = servers.group(&project).unwrap();
     let mut untouched = Instant::now();
     for _ in 0..3 {
@@ -362,6 +400,7 @@ async fn idle_server_stops_after_the_idle_limit() {
 
 #[tokio::test]
 async fn no_ide_server_process_survives_engine_stop() {
+    let checkout = scratch();
     let root = scratch();
     let global = root.path().join("global.toml");
     fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
@@ -378,7 +417,10 @@ async fn no_ide_server_process_survives_engine_stop() {
     .unwrap();
     let project = project("engine-stop");
     let servers = service.owner_runtime().unwrap().ide();
-    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
     assert!(
         info.token_path
             .starts_with(root.path().join(crate::ide::FOLDER))
@@ -404,17 +446,25 @@ async fn no_ide_server_process_survives_engine_stop() {
 
 #[tokio::test]
 async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_again() {
+    let checkout = scratch();
     let data = scratch();
     let build = cached_build();
     let project = project("crashed");
-    let (left, path, name) = (data.path().to_path_buf(), build.clone(), project.clone());
+    let (left, path, name, opened) = (
+        data.path().to_path_buf(),
+        build.clone(),
+        project.clone(),
+        checkout.path().to_path_buf(),
+    );
     let (old, old_group, old_token) = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let crashed = Servers::new(&left, IDLE_LIMIT);
-        let info = runtime.block_on(crashed.open(&name, &path)).unwrap();
+        let info = runtime
+            .block_on(crashed.open(&name, &opened, &path))
+            .unwrap();
         let group = crashed.group(&name).unwrap();
         let token = fs::read_to_string(&info.token_path).unwrap();
         std::mem::forget(crashed);
@@ -424,7 +474,10 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
     .unwrap();
     assert!(present(old_group));
     let servers = Servers::new(data.path(), IDLE_LIMIT);
-    let info = servers.open(&project, &build).await.unwrap();
+    let info = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
     let leader = Pid::from_raw(old_group).unwrap();
     assert!(
         rustix::process::waitpid(Some(leader), rustix::process::WaitOptions::NOHANG)

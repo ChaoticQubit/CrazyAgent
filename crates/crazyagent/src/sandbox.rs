@@ -1269,7 +1269,7 @@ fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
 /// Escapes a plain absolute path for a Seatbelt regex, so every character matches itself.
 /// Input: a path that passes `clean_absolute`, so it holds no quote or backslash.
 /// Output: the pattern text, without anchors.
-fn seatbelt_pattern(path: &Path) -> String {
+pub(crate) fn seatbelt_pattern(path: &Path) -> String {
     let text = path.display().to_string();
     assert!(text.starts_with('/'));
     regex_escape(&text)
