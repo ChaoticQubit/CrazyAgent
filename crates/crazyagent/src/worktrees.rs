@@ -34,11 +34,28 @@ const LINKS_LEFT_OUT_MAX: usize = 64;
 const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
 
 /// The Git config the engine writes as an agent worktree's `config.worktree`, which Git
-/// reads for that worktree alone once `extensions.worktreeConfig` is on: every remote URL
-/// there, named or typed, is rewritten to a transport named for the rule, and every
-/// transport is refused before anything connects or runs. The project folder keeps its
-/// remotes and the owner's credentials.
-pub const REMOTE_LOCK: &[u8] = b"[protocol]\n\tallow = never\n[url \"agent-worktrees-are-local-only-use-the-project-folder::\"]\n\tinsteadOf =\n";
+/// reads last for that worktree alone once `extensions.worktreeConfig` is on: every
+/// transport is refused, each built-in one by name too, so neither an owner URL rewrite nor
+/// an owner per-transport allow carries a remote past it, and a URL no owner rule rewrites
+/// goes to the rule's transport. The project folder keeps its remotes and credentials.
+pub const REMOTE_LOCK: &[u8] = concat!(
+    "[protocol]\n\tallow = never\n",
+    "[protocol \"file\"]\n\tallow = never\n",
+    "[protocol \"git\"]\n\tallow = never\n",
+    "[protocol \"ssh\"]\n\tallow = never\n",
+    "[protocol \"http\"]\n\tallow = never\n",
+    "[protocol \"https\"]\n\tallow = never\n",
+    "[protocol \"ftp\"]\n\tallow = never\n",
+    "[protocol \"ftps\"]\n\tallow = never\n",
+    "[protocol \"ext\"]\n\tallow = never\n",
+    "[protocol \"fd\"]\n\tallow = never\n",
+    "[url \"agent-worktrees-are-local-only-use-the-project-folder::\"]\n\tinsteadOf =\n",
+)
+.as_bytes();
+
+/// The lock agent worktrees got before [`REMOTE_LOCK`] named each transport. A worktree
+/// holding it still counts as locked, as one made before any lock does.
+const PREVIOUS_REMOTE_LOCK: &[u8] = b"[protocol]\n\tallow = never\n[url \"agent-worktrees-are-local-only-use-the-project-folder::\"]\n\tinsteadOf =\n";
 
 /// The line Git prints for a fetch, pull or push tried in an agent worktree.
 pub const REMOTE_REFUSAL: &str =
@@ -1764,21 +1781,29 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
 /// Output: None when there is none, else whether it is a plain file holding exactly
 /// [`REMOTE_LOCK`].
 fn remote_lock(metadata: &Path) -> Option<bool> {
+    holds(metadata, REMOTE_LOCK)
+}
+
+/// Reads a worktree's `config.worktree` against one lock. Inputs: the worktree's Git
+/// metadata folder and the lock bytes. Output: None when there is none, else whether it is
+/// a plain file holding exactly those bytes.
+fn holds(metadata: &Path, lock: &[u8]) -> Option<bool> {
     let path = metadata.join("config.worktree");
     match std::fs::symlink_metadata(&path) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => None,
-        Ok(found) if found.is_file() && found.len() == REMOTE_LOCK.len() as u64 => {
-            Some(bounded_read(&path, REMOTE_LOCK.len()).is_ok_and(|bytes| bytes == REMOTE_LOCK))
+        Ok(found) if found.is_file() && found.len() == lock.len() as u64 => {
+            Some(bounded_read(&path, lock.len()).is_ok_and(|bytes| bytes == lock))
         }
         _ => Some(false),
     }
 }
 
 /// Tells whether a worktree's Git metadata holds no per-worktree config but the engine's
-/// remote lock: none at all, as worktrees made before the lock have, or exactly
-/// [`REMOTE_LOCK`]. Input: the metadata folder. Output: the answer.
+/// remote lock: none at all, as worktrees made before the lock have, exactly
+/// [`REMOTE_LOCK`], or exactly [`PREVIOUS_REMOTE_LOCK`]. Input: the metadata folder.
+/// Output: the answer.
 pub(crate) fn remote_lock_kept(metadata: &Path) -> bool {
-    remote_lock(metadata) != Some(false)
+    remote_lock(metadata) != Some(false) || holds(metadata, PREVIOUS_REMOTE_LOCK) == Some(true)
 }
 
 /// Tells whether a repository config listing turns `extensions.worktreeConfig` on as Git
@@ -2303,6 +2328,13 @@ mod tests {
         std::fs::write(&config, REMOTE_LOCK).unwrap();
         assert_eq!(remote_lock(metadata), Some(true));
         assert!(remote_lock_kept(metadata));
+        std::fs::write(&config, PREVIOUS_REMOTE_LOCK).unwrap();
+        assert_eq!(remote_lock(metadata), Some(false));
+        assert!(remote_lock_kept(metadata));
+        let mut previous_longer = PREVIOUS_REMOTE_LOCK.to_vec();
+        previous_longer.extend_from_slice(b"[core]\n\tfsmonitor = touch /tmp/x\n");
+        std::fs::write(&config, &previous_longer).unwrap();
+        assert!(!remote_lock_kept(metadata));
         let mut longer = REMOTE_LOCK.to_vec();
         longer.extend_from_slice(b"[core]\n\tfsmonitor = touch /tmp/x\n");
         std::fs::write(&config, &longer).unwrap();
