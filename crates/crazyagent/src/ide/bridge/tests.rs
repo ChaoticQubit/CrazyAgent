@@ -749,7 +749,7 @@ fn every_compiled_extension_file_is_embedded() {
 }
 
 /// The extension installs as one folder named `publisher.name-version` from its
-/// `package.json`, holding exactly the embedded files, which are every file tsc compiled;
+/// `package.json`, holding exactly the embedded files, every file tsc compiled among them;
 /// a changed file is put back and an unchanged folder is left as it is.
 #[test]
 fn extension_installs_as_one_folder_with_the_embedded_files() {
@@ -795,6 +795,45 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
         EXTENSION_FILES[1].1
     );
     assert_eq!(std::fs::read_dir(extensions.path()).unwrap().count(), 1);
+}
+
+/// Every file the extension's `package.json` names by a relative path, its entry point and
+/// its two color themes among them, ships in the embedded extension with the repository's
+/// bytes, so the installed folder holds each file VSCodium loads from it.
+#[test]
+fn every_file_the_extension_manifest_names_is_embedded() {
+    let manifest: serde_json::Value = serde_json::from_slice(EXTENSION_FILES[0].1).unwrap();
+    let mut named = Vec::new();
+    let mut values = vec![&manifest];
+    while let Some(value) = values.pop() {
+        match value {
+            serde_json::Value::String(text) if text.starts_with("./") => {
+                named.push(text.trim_start_matches("./").to_owned());
+            }
+            serde_json::Value::Array(items) => values.extend(items),
+            serde_json::Value::Object(fields) => values.extend(fields.values()),
+            _ => {}
+        }
+    }
+    for wanted in [
+        "out/extension.js",
+        "themes/crazyagent-dark.json",
+        "themes/crazyagent-light.json",
+    ] {
+        assert!(named.iter().any(|name| name == wanted), "{named:?}");
+    }
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension");
+    for name in &named {
+        let (_, bytes) = EXTENSION_FILES
+            .iter()
+            .find(|(path, _)| *path == name.as_str())
+            .unwrap_or_else(|| panic!("{name} is named in package.json but not embedded"));
+        assert_eq!(
+            *bytes,
+            std::fs::read(source.join(name)).unwrap().as_slice(),
+            "{name}"
+        );
+    }
 }
 
 /// An Accept slower than the handshake timeout, here because another writer holds the

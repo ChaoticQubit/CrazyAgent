@@ -557,3 +557,71 @@ fn an_interrupted_download_reads_missing_and_the_engine_start_never_fetches_off_
     assert!(!on_engine_start(&other));
     assert!(!other.join("ide").exists());
 }
+
+/// A failure recorded less than `FAILED_BACKOFF` ago keeps the engine start from fetching
+/// again; an older failure, one dated in the future or any other state does not, and the
+/// owner's Retry fetches at once either way.
+#[test]
+fn a_recent_failure_backs_off_the_engine_start_but_not_the_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(tmp.path());
+    assert!(!backing_off(&runtime));
+    let failed = BuildState::Failed {
+        code: "ide_build_hash_mismatch".into(),
+    };
+    write_state(&runtime, &failed).unwrap();
+    assert!(backing_off(&runtime));
+    let dated = |at: std::time::SystemTime| {
+        std::fs::File::options()
+            .write(true)
+            .open(runtime.join(IDE_FOLDER).join(STATE_FILE))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    let now = std::time::SystemTime::now();
+    dated(now - FAILED_BACKOFF + Duration::from_secs(60));
+    assert!(backing_off(&runtime));
+    dated(now - FAILED_BACKOFF - Duration::from_secs(60));
+    assert!(!backing_off(&runtime));
+    dated(now + Duration::from_secs(60 * 60));
+    assert!(!backing_off(&runtime));
+    write_state(&runtime, &BuildState::Missing).unwrap();
+    assert!(!backing_off(&runtime));
+    write_state(&runtime, &failed).unwrap();
+    assert!(backing_off(&runtime));
+    let bytes = pack(&server_tree(tmp.path()), &tmp.path().join("build.tar.gz"));
+    let server = Server::start(bytes.clone(), false);
+    assert!(ensure_with(&runtime, build(&server.url, &bytes)));
+    let ready = wait_for(&runtime, |now| matches!(now, BuildState::Ready { .. }));
+    assert_eq!(
+        ready,
+        BuildState::Ready {
+            version: VERSION.into(),
+            root: runtime.join("ide/builds").join(VERSION)
+        }
+    );
+    assert!(!backing_off(&runtime));
+    assert_eq!(server.hits(), 1);
+}
+
+/// macOS with Seatbelt runs the IDE server, so the engine fetches its build there.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_with_seatbelt_is_qualified_to_fetch_the_ide_build() {
+    assert!(Path::new("/usr/bin/sandbox-exec").is_file());
+    assert!(qualified());
+}
+
+/// Linux and Windows run no IDE server until IDE-12a and IDE-12b, so neither the engine
+/// start nor the owner's Retry downloads, extracts or records a build there.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_unqualified_platform_never_fetches_or_records_the_ide_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(tmp.path());
+    assert!(!qualified());
+    assert!(!ensure(&runtime));
+    assert_eq!(state(&runtime), BuildState::Missing);
+    assert!(!runtime.join(IDE_FOLDER).exists());
+}

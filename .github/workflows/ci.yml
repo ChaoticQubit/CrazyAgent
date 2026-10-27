@@ -301,6 +301,52 @@ jobs:
         run: cargo fetch --locked
       - name: Lint workspace
         run: make lint
+      - id: ide
+        name: Read the pinned IDE build
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { appendFileSync, readFileSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
+            const { version } = manifest;
+            const build = manifest.builds["aarch64-apple-darwin"];
+            const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
+            const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
+              && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
+            if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
+            appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
+          '
+      - if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.tool_cache }}/vscodium-reh-web/${{ steps.ide.outputs.version }}/arm64
+          key: ci-macos-vscodium-reh-web-darwin-arm64-${{ steps.ide.outputs.version }}
+      - name: Provision the pinned IDE build
+        env:
+          IDE_VERSION: ${{ steps.ide.outputs.version }}
+          IDE_URL: ${{ steps.ide.outputs.url }}
+          IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
+          IDE_BYTES: ${{ steps.ide.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/vscodium-reh-web/$IDE_VERSION/arm64"
+          work="$RUNNER_TEMP/vscodium-reh-web"
+          build=".local-state/ide-cache/vscodium-$IDE_VERSION"
+          rm -rf "$work" "$build"
+          mkdir -p "$prefix" "$work" "$build"
+          if [ -f "$prefix/vscodium.tgz" ]; then
+            cp "$prefix/vscodium.tgz" "$work/vscodium.tgz"
+          fi
+          if ! echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
+            rm -f "$work/vscodium.tgz"
+            curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
+            test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
+            echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
+            cp "$work/vscodium.tgz" "$prefix/vscodium.tgz.$$"
+            mv "$prefix/vscodium.tgz.$$" "$prefix/vscodium.tgz"
+          fi
+          tar -xzf "$work/vscodium.tgz" -C "$build"
+          test -f "$build/out/server-main.js"
       - name: Test engine and desktop crates
         run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
       - name: Test Node suites

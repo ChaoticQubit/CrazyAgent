@@ -35,9 +35,10 @@ pub const CONNECTIONS_MAX: usize = 16;
 /// The built-in extension's folder name in an extensions folder: publisher.name-version.
 pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
-/// The built-in extension's files by path inside its folder: its manifest and the
-/// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
+/// The built-in extension's files by path inside its folder: its manifest, the
+/// JavaScript the repository's tsc compiled from `apps/ide-extension/src` and the two
+/// color themes its manifest contributes.
+pub const EXTENSION_FILES: [(&str, &[u8]); 24] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -125,6 +126,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
     (
         "out/terminal.js",
         include_bytes!("../../../../apps/ide-extension/out/terminal.js"),
+    ),
+    (
+        "themes/crazyagent-dark.json",
+        include_bytes!("../../../../apps/ide-extension/themes/crazyagent-dark.json"),
+    ),
+    (
+        "themes/crazyagent-light.json",
+        include_bytes!("../../../../apps/ide-extension/themes/crazyagent-light.json"),
     ),
 ];
 

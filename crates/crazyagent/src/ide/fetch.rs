@@ -15,6 +15,7 @@ const STATE_BYTES_MAX: u64 = 64 * 1024;
 const PROGRESS_BYTES: u64 = 1024 * 1024;
 const ENTRIES_MAX: usize = 200_000;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const FAILED_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Where the engine's IDE build stands, as the IDE tab shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,10 +135,29 @@ pub fn state(runtime: &Path) -> BuildState {
     }
 }
 
+/// Tells whether the IDE server can run on this platform, so the engine fetches its build
+/// here: the IDE sandbox's qualification, which holds on macOS only until IDE-12a.
+/// Output: the answer.
+#[cfg(unix)]
+pub fn qualified() -> bool {
+    super::sandbox::qualified()
+}
+
+/// Tells whether the IDE server can run on this platform: never on Windows until IDE-12b,
+/// so the engine never fetches its build there. Output: false.
+#[cfg(not(unix))]
+pub fn qualified() -> bool {
+    false
+}
+
 /// Starts fetching the pinned IDE build for this platform in the background unless it is
-/// ready or already being fetched; a platform with no build records Failed.
+/// ready or already being fetched; a qualified platform with no build records Failed, and
+/// an unqualified one fetches and records nothing.
 /// Input: the engine root. Output: true when this call started a fetch.
 pub fn ensure(runtime: &Path) -> bool {
+    if !qualified() {
+        return false;
+    }
     match crate::update::target()
         .ok_or_else(|| failure("ide_build_unsupported_platform"))
         .and_then(manifest::current)
@@ -152,7 +172,8 @@ pub fn ensure(runtime: &Path) -> bool {
 
 /// The first-launch trigger: fetches the IDE build only for the engine's default data
 /// folder, so an engine run on any other root (a test, a scratch profile) never
-/// downloads. Input: the engine root. Output: true when a fetch started.
+/// downloads, and not while a recent failure backs off.
+/// Input: the engine root. Output: true when a fetch started.
 pub fn on_engine_start(runtime: &Path) -> bool {
     let default = std::env::var_os("CRAZYAGENT_HOME").is_none()
         && crate::update::data_root().is_some_and(|root| {
@@ -161,7 +182,20 @@ pub fn on_engine_start(runtime: &Path) -> bool {
                 _ => false,
             }
         });
-    default && ensure(runtime)
+    default && !backing_off(runtime) && ensure(runtime)
+}
+
+/// Tells whether a failed fetch was recorded less than `FAILED_BACKOFF` ago, so an engine
+/// start leaves it to the owner's Retry instead of downloading the whole build again. A
+/// state file dated in the future reads as expired. Input: the engine root. Output: the
+/// answer.
+fn backing_off(runtime: &Path) -> bool {
+    matches!(read_state(runtime), Some(BuildState::Failed { .. }))
+        && std::fs::metadata(runtime.join(IDE_FOLDER).join(STATE_FILE))
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|since| since < FAILED_BACKOFF)
 }
 
 fn ensure_with(runtime: &Path, build: Build) -> bool {
