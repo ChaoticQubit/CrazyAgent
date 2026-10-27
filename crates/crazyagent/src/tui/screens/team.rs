@@ -536,7 +536,7 @@ impl Team {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
-        if let Some((title, lines)) = self.cleanup.lines(limit, ctx) {
+        if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
         }

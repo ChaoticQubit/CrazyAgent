@@ -1141,6 +1141,63 @@ fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
 }
 
 #[test]
+fn twenty_agents_at_80x24_keep_the_question_and_y_removes_every_one_read() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    let agents: Vec<_> = (1..=20)
+        .map(|id| finished(id, &format!("Agent {id} (@task-{id})"), 1024 * 1024))
+        .collect();
+    shell.arrive(cleanup_reply(
+        read.clone(),
+        Ok(CleanupReply::Finished(agents)),
+    ));
+    let rows = render(&mut shell);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Clean up 20 finished agents (20 MB)"),
+        "{text}"
+    );
+    for (y, id) in (3..13).zip(1..) {
+        assert_eq!(
+            pane_row(&rows, y),
+            padded(&format!("Agent {id} (@task-{id})  sub-agent, Codex  1 MB")),
+            "{text}"
+        );
+    }
+    assert_eq!(pane_row(&rows, 13), padded("and 10 more (10 MB)"), "{text}");
+    assert_eq!(pane_row(&rows, 14), padded(""), "{text}");
+    assert!(pane_row(&rows, 15).starts_with("Each agent's working copy"));
+    assert_eq!(
+        pane_row(&rows, 20),
+        padded("y Remove and free 20 MB   n Keep them"),
+        "the question is the box's last line:\n{text}"
+    );
+
+    shell.arrive(cleanup_reply(
+        read,
+        Ok(CleanupReply::Finished(vec![finished(21, "Late", 1)])),
+    ));
+    shell.key(Key::Char('y'));
+    assert_eq!(
+        cleanup_sent(&mut shell),
+        vec![CleanupQuery::Remove {
+            project: project(),
+            agents: (1..=20).collect(),
+        }],
+        "y removes the agents the box opened with, shown or counted"
+    );
+    let rows = render(&mut shell);
+    assert!(
+        pane_row(&rows, 20).contains("Removing"),
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_nothing() {
     use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
     let read = CleanupQuery::Finished { project: project() };

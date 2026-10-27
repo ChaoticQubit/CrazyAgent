@@ -10,7 +10,7 @@ use crate::tui::screens::Flow;
 use crate::tui::screens::app_setup::size;
 use crate::tui::screens::new_project::harness_name;
 use crate::tui::seam::{Arrival, Request};
-use crate::tui::text::{styled, wrap};
+use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
 use ratatui::text::Line;
 
@@ -176,10 +176,17 @@ impl Cleanup {
         }
     }
 
-    /// The box lines while it is open: the agents to remove with role, harness and size,
-    /// then what removal does. Inputs: the line width and the context. Output: the title
-    /// and lines, or None while closed.
-    pub(super) fn lines(&self, limit: usize, ctx: &Ctx) -> Option<(String, Vec<Line<'static>>)> {
+    /// The box lines while it is open: the agents to remove with role, harness and size, as
+    /// many as fit after the explanation and the question, the rest counted in one "and N
+    /// more" row, then what removal does and the question, always the last line.
+    /// Inputs: the line width, the box's inner height and the context. Output: the title and
+    /// at most `room` lines (one when `room` is zero), or None while closed.
+    pub(super) fn lines(
+        &self,
+        limit: usize,
+        room: usize,
+        ctx: &Ctx,
+    ) -> Option<(String, Vec<Line<'static>>)> {
         let theme = &ctx.theme;
         let agents = match &self.stage {
             Stage::Closed => return None,
@@ -192,22 +199,16 @@ impl Cleanup {
             Stage::Confirm(agents) | Stage::Removing(agents) => agents,
         };
         let title = format!("Clean up {} ({})", agents_word(agents.len()), space(agents));
-        let mut lines = Vec::new();
-        for agent in agents {
-            let role = match agent.role {
-                AgentRole::Master => "master",
-                AgentRole::Sub => "sub-agent",
-            };
-            let row = format!(
-                "{}  {role}, {}  {}",
-                super::plain(&agent.label).replace('\n', " "),
-                harness_name(&agent.harness, None),
-                space(std::slice::from_ref(agent))
-            );
-            lines.extend(wrap(&row, limit).into_iter().map(Line::raw));
-        }
-        lines.push(Line::default());
-        lines.extend(
+        let question = match self.stage {
+            Stage::Removing(_) => ctx.loading("Removing..."),
+            _ => styled(
+                format!("y Remove and free {}   n Keep them", space(agents)),
+                Role::Warning,
+                theme,
+            ),
+        };
+        let mut tail = vec![Line::default()];
+        tail.extend(
             wrap(
                 "Each agent's working copy and folder are deleted. Landed work stays in your project. The engine checks each one again first and keeps any that changed.",
                 limit,
@@ -215,15 +216,45 @@ impl Cleanup {
             .into_iter()
             .map(|text| styled(text, Role::Muted, theme)),
         );
-        lines.push(Line::default());
-        lines.push(match self.stage {
-            Stage::Removing(_) => ctx.loading("Removing..."),
-            _ => styled(
-                format!("y Remove and free {}   n Keep them", space(agents)),
-                Role::Warning,
-                theme,
-            ),
-        });
+        tail.push(Line::default());
+        if tail.len() + 2 > room {
+            tail.clear();
+        }
+        tail.push(question);
+        let free = room.saturating_sub(tail.len());
+        let mut lines = Vec::new();
+        let mut shown = 0;
+        for (index, agent) in agents.iter().enumerate() {
+            let role = match agent.role {
+                AgentRole::Master => "master",
+                AgentRole::Sub => "sub-agent",
+            };
+            let row = wrap(
+                &format!(
+                    "{}  {role}, {}  {}",
+                    super::plain(&agent.label).replace('\n', " "),
+                    harness_name(&agent.harness, None),
+                    space(std::slice::from_ref(agent))
+                ),
+                limit,
+            );
+            let more = usize::from(index + 1 < agents.len());
+            if lines.len() + row.len() + more > free {
+                break;
+            }
+            lines.extend(row.into_iter().map(Line::raw));
+            shown += 1;
+        }
+        let rest = &agents[shown..];
+        if !rest.is_empty() && lines.len() < free {
+            lines.push(Line::raw(cut(
+                &format!("and {} more ({})", rest.len(), space(rest)),
+                limit,
+                ctx.glyphs.ellipsis,
+            )));
+        }
+        lines.extend(tail);
+        assert!(lines.len() <= room.max(1));
         Some((title, lines))
     }
 }
