@@ -344,3 +344,103 @@ fn pending_actions_are_bounded_and_finished_ones_are_pruned_to_the_kept_count() 
     );
     assert_eq!(stored_outcome(&db, oldest), None);
 }
+
+#[test]
+fn the_owner_dismisses_only_a_notice_of_its_kind_with_the_outcome_it_shows() {
+    let (root, db) = store();
+    let starting = begin(&db, ActionKind::AgentSpawn, "team-4", "{\"team_agent\":4}").unwrap();
+    let notice_text = "{\"team_agent\":5,\"pane\":false,\"unknown\":true}";
+    let start = begin(&db, ActionKind::AgentSpawn, "team-5", notice_text).unwrap();
+    let landed = begin(&db, ActionKind::LandingAccept, "set-9", "{\"landed\":true}").unwrap();
+    let dropped = begin(
+        &db,
+        ActionKind::LandingAccept,
+        "set-8",
+        "{\"landed\":false}",
+    )
+    .unwrap();
+    drop(db);
+
+    let db = open(root.path()).unwrap();
+    assert_eq!(
+        code(dismiss(&db, ActionKind::AgentSpawn, starting.get())),
+        "ledger_not_notice"
+    );
+    assert_eq!(
+        code(dismiss(&db, ActionKind::LandingAccept, start.get())),
+        "ledger_missing"
+    );
+    assert_eq!(
+        code(dismiss(&db, ActionKind::AgentSpawn, dropped.get() + 100)),
+        "ledger_missing"
+    );
+    assert_eq!(
+        stored_outcome(&db, starting),
+        None,
+        "a refused dismiss changes nothing"
+    );
+    assert_eq!(
+        ids(&pending(&db, ActionKind::AgentSpawn).unwrap()),
+        vec![starting, start]
+    );
+
+    assert_eq!(
+        dismiss(&db, ActionKind::AgentSpawn, start.get()).unwrap(),
+        Outcome::Unknown
+    );
+    assert_eq!(
+        dismiss(&db, ActionKind::LandingAccept, landed.get()).unwrap(),
+        Outcome::Done
+    );
+    assert_eq!(
+        dismiss(&db, ActionKind::LandingAccept, dropped.get()).unwrap(),
+        Outcome::Failed
+    );
+    assert_eq!(stored_outcome(&db, start).as_deref(), Some("unknown"));
+    assert_eq!(stored_outcome(&db, landed).as_deref(), Some("done"));
+    assert_eq!(stored_outcome(&db, dropped).as_deref(), Some("failed"));
+    assert_eq!(
+        ids(&pending(&db, ActionKind::AgentSpawn).unwrap()),
+        vec![starting]
+    );
+    assert!(pending(&db, ActionKind::LandingAccept).unwrap().is_empty());
+    assert_eq!(
+        code(dismiss(&db, ActionKind::AgentSpawn, start.get())),
+        "ledger_finished"
+    );
+    begin(&db, ActionKind::AgentSpawn, "team-5", "{\"team_agent\":5}").unwrap();
+}
+
+#[test]
+fn only_marked_actions_and_listed_accepts_are_notices() {
+    let action = |kind, payload: &str| Action {
+        id: ActionId(1),
+        kind,
+        key: "k".to_owned(),
+        payload: payload.to_owned(),
+        started_ms: 1,
+    };
+    let unknown = "{\"unknown\":true}";
+    assert_eq!(
+        notice(&action(ActionKind::WorktreeCreate, unknown)),
+        Some(Outcome::Unknown)
+    );
+    assert_eq!(
+        notice(&action(ActionKind::Message, unknown)),
+        Some(Outcome::Unknown)
+    );
+    assert_eq!(
+        notice(&action(ActionKind::AgentSpawn, "{\"unknown\":false}")),
+        None
+    );
+    assert_eq!(
+        notice(&action(ActionKind::AgentSpawn, "{\"landed\":true}")),
+        None
+    );
+    assert_eq!(
+        notice(&action(ActionKind::LandingAccept, "{\"landed\":1}")),
+        None
+    );
+    assert_eq!(notice(&action(ActionKind::LandingAccept, "not json")), None);
+    assert_eq!(notice(&action(ActionKind::Dispatch, "{}")), None);
+}

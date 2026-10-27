@@ -50,34 +50,26 @@ pub(super) fn insert(
     Ok(ActionId(db.last_insert_rowid()))
 }
 
-/// Sets the outcome of a pending action, then deletes finished actions older than the
-/// FINISHED_KEPT newest. Inputs: the ledger, the id, the outcome and the time.
-/// Output: Ok, `ledger_finished`, `ledger_missing` or `ledger_unavailable`.
+/// Sets the outcome of a pending action, of the given kind when one is named, then deletes
+/// finished actions older than the FINISHED_KEPT newest. Inputs: the ledger, the kind or
+/// none, the id, the outcome and the time. Output: Ok, `ledger_finished`,
+/// `ledger_missing` (also for an action of another kind) or `ledger_unavailable`.
 pub(super) fn finish(
     db: &Connection,
+    kind: Option<ActionKind>,
     id: ActionId,
     outcome: Outcome,
     now_ms: i64,
 ) -> Result<(), EngineError> {
     let changed = db
         .execute(
-            "UPDATE ledger_actions SET outcome=?1,finished_ms=?2 WHERE id=?3 AND outcome IS NULL",
-            params![outcome.name(), now_ms, id.0],
+            "UPDATE ledger_actions SET outcome=?1,finished_ms=?2
+             WHERE id=?3 AND outcome IS NULL AND (?4 IS NULL OR kind=?4)",
+            params![outcome.name(), now_ms, id.0, kind.map(ActionKind::name)],
         )
         .map_err(storage)?;
     if changed == 0 {
-        let kept: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM ledger_actions WHERE id=?1)",
-                [id.0],
-                |row| row.get(0),
-            )
-            .map_err(storage)?;
-        return Err(failure(if kept {
-            "ledger_finished"
-        } else {
-            "ledger_missing"
-        }));
+        return Err(ended(db, kind, id)?);
     }
     db.execute(
         "DELETE FROM ledger_actions WHERE outcome IS NOT NULL AND id <=
@@ -87,6 +79,28 @@ pub(super) fn finish(
     )
     .map_err(storage)?;
     Ok(())
+}
+
+/// Names why an action is not pending: `ledger_finished` when it ended, `ledger_missing`
+/// when no action of the kind, any when none is named, has that id. Inputs: the ledger,
+/// the kind or none and the id. Output: that refusal, or `ledger_unavailable`.
+pub(super) fn ended(
+    db: &Connection,
+    kind: Option<ActionKind>,
+    id: ActionId,
+) -> Result<EngineError, EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ledger_actions WHERE id=?1 AND (?2 IS NULL OR kind=?2))",
+            params![id.0, kind.map(ActionKind::name)],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    Ok(failure(if kept {
+        "ledger_finished"
+    } else {
+        "ledger_missing"
+    }))
 }
 
 /// Reads the pending actions of one kind, oldest first, at most PENDING_MAX of them.
