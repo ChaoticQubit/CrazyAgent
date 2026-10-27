@@ -872,6 +872,7 @@ impl App {
             | OwnerEvent::Settings(_)
             | OwnerEvent::TeamGraph { .. }
             | OwnerEvent::Intake(_)
+            | OwnerEvent::Changes(_)
             | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {

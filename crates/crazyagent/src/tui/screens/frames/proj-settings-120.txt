@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Settings
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
-───────────────────────────────────────────────────────━━━━━━━━━━───────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
+───────────────────────────────────────────────────────────────────━━━━━━━━━━───────────────────────────────────────────
   Project settings
 
   Name      Fieldnotes Mobile   g Edit details
