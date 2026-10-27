@@ -401,6 +401,7 @@ impl TeamRuntime {
                  COMMIT;"
             ))
             .map_err(error)?;
+        delivery::settle(&connection)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
@@ -408,6 +409,7 @@ impl TeamRuntime {
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| EngineError("team_state_not_canonical".into()))?;
+        spawn_ledger::recover(&connection, &root);
         Ok(Self {
             connection,
             root,
@@ -458,6 +460,7 @@ impl TeamRuntime {
             .into_iter()
             .filter_map(|agent| agent.team_agent().map(|id| (id, agent)))
             .collect();
+        spawn_ledger::recover_panes(&self.root, &records, &panes);
         for (id, agent) in panes {
             let refusal = match records.get(&id) {
                 Some(record) => self.adopt(&host, id, record, &access)?.err(),
@@ -1525,12 +1528,15 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
+            return Ok(());
+        }
         if team_tool {
             tool::clear(&self.tool_record(id));
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
-            return Ok(());
+            return delivery::ended(&self.connection, Some(Busy::Message(message)), false);
         }
         worker.busy = Some(Busy::Message(message));
         self.connection
@@ -1838,6 +1844,9 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let (typed, noted) = live_input(&heard, &author, &text);
         let newest = newest.filter(|_| noted);
+        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
+            return Ok(());
+        }
         let state = match super::master::master_input(
             &self.connection,
             host.as_ref(),
@@ -1855,6 +1864,11 @@ impl TeamRuntime {
                 params![message, state],
             )
             .map_err(error)?;
+        delivery::ended(
+            &self.connection,
+            Some(Busy::Message(message)),
+            state == "answered",
+        )?;
         if state == "failed" {
             return self.note(
                 project,
@@ -2151,6 +2165,9 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            if !delivery::intend(&self.connection, Busy::Task(task), agent, &prompt, None)? {
+                continue;
+            }
             let prompt = format!(
                 "You are a sub-agent of the project \"{}\". Work only inside {}.\nYour task: {}\nWhen you finish, reply with a short summary of what you did.",
                 stored.name,
@@ -2161,6 +2178,7 @@ impl TeamRuntime {
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
+                delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
                 continue;
             }
             worker.busy = Some(Busy::Task(task));
@@ -2358,13 +2376,34 @@ impl TeamRuntime {
         self.launch(stored, id, role, harness, tools, account, None, Some(kept))
     }
 
+    /// Prepares and starts the agent of one `team_agents` row as `start_agent` does, then
+    /// settles in the action ledger what the start left pending: its worktree intent, and
+    /// its harness start when no worker runs it. Takes and returns as `start_agent`.
+    #[allow(clippy::too_many_arguments)]
+    fn launch(
+        &mut self,
+        stored: &StoredSetup,
+        id: i64,
+        role: AgentRole,
+        harness: &str,
+        tools: bool,
+        account: &TeamAccount,
+        again: Option<&HostedRestart>,
+        kept: Option<[String; 3]>,
+    ) -> Result<Result<i64, String>, EngineError> {
+        let launched = self.start_agent(stored, id, role, harness, tools, account, again, kept);
+        let running = self.workers.contains_key(&id);
+        spawn_ledger::settle(&self.connection, &self.root, id, running);
+        launched
+    }
+
     /// Prepares and starts the agent of one `team_agents` row: a new agent in a new
     /// worktree, or with `kept` a revived one in the worktree recorded for it. Takes the
     /// setup, the row id, role, harness, tools switch, account, the register restart if any
     /// and the kept worktree. Returns the id, or the plain reason it failed, which the row
     /// then records.
     #[allow(clippy::too_many_arguments)]
-    fn launch(
+    fn start_agent(
         &mut self,
         stored: &StoredSetup,
         id: i64,
@@ -2462,7 +2501,9 @@ impl TeamRuntime {
                 return Ok(Err(problem));
             }
         }
-        let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
+        let hosted = match spawn_ledger::begin_spawn(&self.root, id, plan.pane.is_some())
+            .and_then(|()| self.host(stored, id, role, &plan.harness, &account.connection, again))
+        {
             Ok(hosted) => hosted,
             Err(problem) => {
                 self.connection
@@ -2666,6 +2707,7 @@ impl TeamRuntime {
             .join("worktrees")
             .join(format!("agent-{id}"));
         if !adopt {
+            spawn_ledger::begin_worktree(&self.root, id, &root, &worktree)?;
             add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
                 with_code("the agent worktree could not be added", Some(run_code(&e)))
             })?;
@@ -2903,6 +2945,7 @@ impl TeamRuntime {
                         )
                         .map_err(error)?;
                 }
+                spawn_ledger::spawned(&self.root, id, crate::ledger::Outcome::Done);
                 let busy = self.workers[&id].busy;
                 if let Some(hosted) = &self.workers[&id].hosted {
                     hosted.started(group);
@@ -3016,6 +3059,7 @@ impl TeamRuntime {
                     }
                     None => {}
                 }
+                delivery::ended(&self.connection, busy, true)?;
                 self.land(id, &project, busy, end)?;
                 if !matches!(
                     end,
@@ -3085,6 +3129,7 @@ impl TeamRuntime {
                 Ok(false)
             }
             Report::Ended { problem } => {
+                spawn_ledger::spawned(&self.root, id, crate::ledger::Outcome::Failed);
                 let mut worker = self.workers.remove(&id).expect("worker exists");
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
@@ -3115,6 +3160,7 @@ impl TeamRuntime {
                     )?,
                     None => {}
                 }
+                delivery::ended(&self.connection, worker.busy, true)?;
                 self.land(id, &worker.project, worker.busy, TurnEnd::Closed)?;
                 if worker.live
                     && let Some(started) = worker.turn_started.take()
@@ -4696,6 +4742,12 @@ pub fn agents(
         .collect::<Result<_, _>>()
         .map_err(error)
 }
+
+#[path = "runtime/delivery.rs"]
+mod delivery;
+
+#[path = "runtime/spawn_ledger.rs"]
+mod spawn_ledger;
 
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]

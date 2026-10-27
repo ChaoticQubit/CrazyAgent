@@ -1030,7 +1030,10 @@ pub fn escalate(
     Ok(Ok(id))
 }
 
-fn notify(
+/// Adds one owner notification inside the caller's transaction, dropping the project's
+/// oldest ones beyond `NOTIFICATIONS_PER_PROJECT_MAX`. Inputs: the transaction, the
+/// project, the kind, the bounded text and the time. Output: the notification id.
+pub(crate) fn notify(
     tx: &Transaction<'_>,
     project: &ProjectId,
     kind: NotificationKind,

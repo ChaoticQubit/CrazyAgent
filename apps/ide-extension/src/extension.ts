@@ -1,5 +1,12 @@
 import type * as vscode from "vscode";
+import { registerBaseContent } from "./base-content.js";
+import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
+import { sidebarAgents } from "./sidebar/agents.js";
+import { sidebarChanges } from "./sidebar/changes.js";
+import { sidebarContext } from "./sidebar/context.js";
+import { sidebarMemories } from "./sidebar/memories.js";
+import { registerChanges } from "./scm.js";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -7,7 +14,15 @@ import { Engine } from "./engine.js";
  */
 export type Feature = (context: vscode.ExtensionContext, engine: Engine) => void;
 
-const features: Feature[] = [];
+const features: Feature[] = [
+  registerBaseContent,
+  registerChanges,
+  registerComments,
+  sidebarMemories,
+  sidebarAgents,
+  sidebarChanges,
+  sidebarContext,
+];
 
 /**
  * Starts every feature when the CrazyAgent engine launched this IDE server, which it
