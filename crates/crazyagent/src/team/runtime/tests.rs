@@ -2178,6 +2178,151 @@ fn a_resume_the_reader_refuses_starts_fresh_with_the_lost_note() {
     host.close(&[]).unwrap();
 }
 
+/// A resume whose revive fails with a database error leaves no resume armed: the owner's
+/// next new session revives the same master in a fresh harness conversation, never in
+/// the conversation the failed resume was for.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_resume_whose_revive_fails_leaves_no_resume_for_the_next_session() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the first session's master is briefed and kept",
+        |f| {
+            live_turns(&f.connection) == (1, false)
+                && kept_conversation(&f.connection, "s-one").is_some()
+        },
+    );
+    let master = masters(&fixture.connection)[0];
+    let (first, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    super::super::master::set_live(&fixture.connection, &project, false).unwrap();
+    fixture.until(&mut team, "the master stops while the switch is off", |f| {
+        f.agent_status(master).0 == AgentStatus::Stopped && host.alive().unwrap().is_empty()
+    });
+
+    fixture
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER hold_revive BEFORE UPDATE OF status ON team_agents
+             WHEN NEW.status='starting' BEGIN SELECT RAISE(ABORT, 'revive held for the test'); END",
+        )
+        .unwrap();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let mut failed = None;
+    for _ in 0..40 {
+        if let Err(problem) = team.tick() {
+            failed = Some(problem.0);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let failed = failed.expect("the resume's revive fails with the database error");
+    assert!(failed.contains("revive held for the test"), "{failed}");
+    assert!(
+        team.resuming.is_none(),
+        "a failed revive leaves no resume armed"
+    );
+
+    fixture
+        .connection
+        .execute_batch("DROP TRIGGER hold_revive")
+        .unwrap();
+    switch_session(&fixture.connection, "s-new");
+    fixture.until(
+        &mut team,
+        "the new session's master is briefed and kept",
+        |f| {
+            live_turns(&f.connection) == (2, false)
+                && kept_conversation(&f.connection, "s-new").is_some()
+        },
+    );
+    let (fresh, _) = kept_conversation(&fixture.connection, "s-new").unwrap();
+    assert_ne!(fresh, first, "the new session has its own conversation");
+    let launched = launches(&fixture, master);
+    assert_eq!(launched.len(), 2, "{launched:?}");
+    assert!(!launched[1].contains("resume"), "{launched:?}");
+    assert_eq!(masters(&fixture.connection), [master]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+const CRASHING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  case "$line" in
+    *"crash now"*)
+      echo 'Left by a turn that never ended.' > crash.md
+      /bin/sleep 1.5
+      exit 1
+      ;;
+  esac
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// A live master whose pane ends in the middle of a turn still lands that turn: the
+/// files it changed show as a pending change set under the turn's key, and the turn is
+/// counted as closed, as a turn that ends normally is.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, CRASHING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(master).unwrap(), b"crash now\r")
+        .unwrap();
+    fixture.until(&mut team, "the turn opens", |f| {
+        live_turns(&f.connection) == (1, true)
+    });
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    fixture.until(&mut team, "the ended pane's open turn lands", |_| {
+        !crate::landing::list(&landing, &project).unwrap().is_empty()
+    });
+    let sets = crate::landing::list(&landing, &project).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].agent.id, master.to_string());
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].files, 1);
+    assert_eq!(live_turns(&fixture.connection), (2, false));
+    let outcome: String = fixture
+        .connection
+        .query_row(
+            "SELECT outcome FROM team_master_turns WHERE agent=?1 AND turn=2",
+            [master],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "closed");
+    assert!(turned_off(&fixture, "its terminal ended"));
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 fn live_turns(connection: &Connection) -> (i64, bool) {
     connection
         .query_row(

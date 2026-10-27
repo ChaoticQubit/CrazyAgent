@@ -1650,10 +1650,9 @@ impl TeamRuntime {
                 record: record.clone(),
             };
             self.resuming = Some((*agent, resume));
-            let revived =
-                self.revive(stored, *agent, AgentRole::Master, harness, tools, account)?;
+            let revived = self.revive(stored, *agent, AgentRole::Master, harness, tools, account);
             self.resuming = None;
-            if let Ok(id) = revived {
+            if let Ok(id) = revived? {
                 assert_eq!(id, *agent);
                 return Ok(Ok(self.seat_session(id, session.as_ref(), None)));
             }
@@ -3126,6 +3125,29 @@ impl TeamRuntime {
                     None => {}
                 }
                 self.land(id, &worker.project, worker.busy, TurnEnd::Closed)?;
+                if worker.live
+                    && let Some(started) = worker.turn_started.take()
+                {
+                    let turn = super::master::turn_ended(
+                        &self.connection,
+                        &worker.project,
+                        id,
+                        Some(started),
+                        now_ms(),
+                        TurnEnd::Closed.name(),
+                    )?;
+                    self.connection
+                        .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
+                        .map_err(error)?;
+                    self.land_turn(
+                        id,
+                        &worker.project,
+                        format!("live-{turn}"),
+                        format!("Master turn {turn}"),
+                        "the live master's turn",
+                        TurnEnd::Closed,
+                    )?;
+                }
                 let status = if problem.is_some() && !worker.stopping {
                     AgentStatus::Failed
                 } else {
