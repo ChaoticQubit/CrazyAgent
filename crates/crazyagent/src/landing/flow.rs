@@ -191,9 +191,11 @@ fn proposed(repo: &Repo, record: &Record, roots: &[&Path]) -> Result<String, Eng
     let printed = String::from_utf8_lossy(&printed);
     let fields: Vec<&str> = printed.split_terminator('\0').collect();
     let mut subjects = fields
-        .chunks_exact(2)
-        .filter(|commit| commit[0] != ENGINE.1)
-        .map(|commit| subject(commit[1], roots))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|[author, _]| *author != ENGINE.1)
+        .map(|[_, line]| subject(line, roots))
         .filter(|line| !line.is_empty());
     let Some(mut message) = subjects.next() else {
         return Ok(String::new());

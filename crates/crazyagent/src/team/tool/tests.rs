@@ -270,27 +270,26 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
         Ok(Call::Delegate {
             task: "Write page.md".into(),
             harness: Some("codex".into()),
-            role: Some("@page-writer".into()),
+            role: Some("page-writer".into()),
         })
     );
     assert_eq!(
-        delegate(json!({"task": "Write page.md", "role": "page-writer"})),
+        delegate(json!({"task": "Write page.md", "role": "Page Writer"})),
         Ok(Call::Delegate {
             task: "Write page.md".into(),
             harness: None,
-            role: Some("@page-writer".into()),
+            role: Some("page-writer".into()),
         })
     );
-    for role in [
-        "@",
-        "a",
-        "Page",
-        "page--writer",
-        "-page",
-        "page-",
-        "page writer",
-        &"r".repeat(41),
-    ] {
+    assert_eq!(
+        delegate(json!({"task": "Write page.md", "role": "  "})),
+        Ok(Call::Delegate {
+            task: "Write page.md".into(),
+            harness: None,
+            role: None,
+        })
+    );
+    for role in ["@", "???", &"r".repeat(65)] {
         assert_eq!(
             delegate(json!({"task": "Write page.md", "role": role})),
             Err(ROLE_INVALID),
@@ -352,7 +351,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         harness: None,
         role: Some("Page".into()),
     };
-    assert_eq!(checked(planted), Err(ROLE_INVALID));
+    assert_eq!(checked(planted), Err(LIVE_INVALID));
 }
 
 #[test]

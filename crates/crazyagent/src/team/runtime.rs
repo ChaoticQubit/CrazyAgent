@@ -960,7 +960,8 @@ impl TeamRuntime {
                 "SELECT project FROM team_messages WHERE state='pending'
                  UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled'))
                  UNION SELECT project FROM team_settings WHERE keep_warm=1
-                 UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')",
+                 UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
+                 UNION SELECT project FROM team_live_masters WHERE live=1",
             )
             .map_err(error)?;
         let mut projects: BTreeSet<ProjectId> = statement
