@@ -1609,3 +1609,47 @@ fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     assert_eq!(again, first);
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
 }
+
+/// An Accept an engine stop interrupted is listed once in the action ledger after the
+/// engine settles it, for the recovery banner: done when it landed, failed when it was
+/// dropped, and never left pending.
+#[test]
+fn an_interrupted_accept_is_listed_in_the_ledger_once_settled() {
+    for (step, outcome) in [
+        (owner::Step::Recorded, "failed"),
+        (owner::Step::FilesWritten, "done"),
+        (owner::Step::BranchMoved, "done"),
+    ] {
+        let case = Case::new();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+        reconcile(&case.db).unwrap();
+        reconcile(&case.db).unwrap();
+        let engine = Path::new(case.db.path().unwrap()).parent().unwrap();
+        let ledger = crate::ledger::open(engine).unwrap();
+        let rows: Vec<(String, String, Option<String>)> = ledger
+            .prepare("SELECT kind,action_key,outcome FROM ledger_actions ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "landing_accept".to_owned(),
+                id.as_str().to_owned(),
+                Some(outcome.to_owned())
+            )],
+            "{step:?}"
+        );
+        assert!(
+            crate::ledger::pending(&ledger, crate::ledger::ActionKind::LandingAccept)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

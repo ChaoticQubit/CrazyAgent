@@ -405,15 +405,64 @@ pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
     store::initialize(db)?;
     for found in store::in_flight(db)? {
         let _held = hold(&found.repository);
+        let accept = matches!(found.intent, Some(Intent::Land { .. }));
         let settled = store::load(db, &found.id).and_then(|mut record| settle(db, &mut record));
         if let Err(error) = settled {
             eprintln!(
                 "landing_reconcile_failed cause={}",
                 crate::protocol::plain_code(&error.0)
             );
+        } else if accept {
+            list_accept(db, &found.id);
         }
     }
     Ok(())
+}
+
+/// Lists an Accept an engine stop interrupted in the action ledger once it is settled, so
+/// the recovery banner can name it: Done when it landed, Failed when it was dropped. A
+/// listing a stop left pending is ended rather than listed twice; a ledger that cannot be
+/// written logs its plain code. Inputs: the store and the change set.
+fn list_accept(db: &Connection, id: &ChangeSetId) {
+    use crate::ledger::{ActionKind, Outcome};
+    let listed = store::load(db, id).and_then(|record| {
+        let root = db
+            .path()
+            .map(Path::new)
+            .and_then(Path::parent)
+            .ok_or_else(|| failure("ledger_unavailable"))?;
+        let ledger = crate::ledger::open(root)?;
+        let outcome = if record.state == ChangeState::Accepted {
+            Outcome::Done
+        } else {
+            Outcome::Failed
+        };
+        let action = match crate::ledger::pending(&ledger, ActionKind::LandingAccept)?
+            .into_iter()
+            .find(|action| action.key == id.as_str())
+        {
+            Some(action) => action.id,
+            None => {
+                let payload = serde_json::json!({
+                    "project": record.project.as_str(),
+                    "change_set": id.as_str(),
+                });
+                crate::ledger::begin(
+                    &ledger,
+                    ActionKind::LandingAccept,
+                    id.as_str(),
+                    &payload.to_string(),
+                )?
+            }
+        };
+        crate::ledger::finish(&ledger, action, outcome)
+    });
+    if let Err(error) = listed {
+        eprintln!(
+            "landing_ledger_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// Loads a change set for an owner action, first settling an intent a failed or stopped
