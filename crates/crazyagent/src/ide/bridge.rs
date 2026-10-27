@@ -1,4 +1,5 @@
 use crate::engine::EngineError;
+use crate::engine::owner::transport::changes::CHANGES_TIMEOUT;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
@@ -490,8 +491,11 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 
 /// Serves one IDE capability connection after its handshake: admits the token, reads one
 /// request for the capability's own project and answers it, or turns the connection into
-/// the project's event subscription. The handshake deadline bounds everything but the
-/// subscription. Inputs: the stream, handshake packet, owner runtime and deadline.
+/// the project's event subscription. The handshake deadline bounds the request and every
+/// call but the subscription and the Changes calls, which run git under the desktop's
+/// Changes bound. Accept, Discard or Restore past that bound is `changes_outcome_unknown`,
+/// and what one did is reported even when its capability was revoked while it ran.
+/// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
     mut stream: UnixStream,
     packet: [u8; 37],
@@ -499,27 +503,41 @@ pub(crate) async fn serve(
     deadline: Instant,
 ) {
     let opened = tokio::time::timeout_at(deadline, open(&mut stream, &packet, &runtime)).await;
-    let reply = match opened {
-        Err(_) => None,
-        Ok(Err(error)) => Some(refusal(&error)),
+    let (reply, wrote) = match opened {
+        Err(_) => (None, false),
+        Ok(Err(error)) => (Some(refusal(&error)), false),
         Ok(Ok((_, IdeCall::Events {}))) => {
             events(&mut stream, &packet, &runtime).await;
-            None
+            (None, false)
         }
         Ok(Ok((project, call))) => {
-            let answered =
-                tokio::time::timeout_at(deadline, answer(&runtime, &project, call)).await;
-            Some(match answered {
+            let writes = matches!(
+                call,
+                IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. }
+            );
+            let reads = matches!(
+                call,
+                IdeCall::ChangeSets {} | IdeCall::ChangeDiff { .. } | IdeCall::BaseBlob { .. }
+            );
+            let bound = if writes || reads {
+                deadline.max(Instant::now() + CHANGES_TIMEOUT)
+            } else {
+                deadline
+            };
+            let answered = tokio::time::timeout_at(bound, answer(&runtime, &project, call)).await;
+            let reply = match answered {
                 Ok(Ok(reply)) => reply,
                 Ok(Err(error)) => refusal(&error),
+                Err(_) if writes => refusal(&failure("changes_outcome_unknown")),
                 Err(_) => refusal(&failure("ide_request_timeout")),
-            })
+            };
+            (Some(reply), writes)
         }
     };
     if let Some(reply) = reply {
         let reply = match runtime.ide_grants().admit(&packet) {
-            Ok(_) => reply,
-            Err(error) => refusal(&error),
+            Err(error) if !wrote => refusal(&error),
+            _ => reply,
         };
         let _ = write(&mut stream, &reply).await;
     }

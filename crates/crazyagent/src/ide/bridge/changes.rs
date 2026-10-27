@@ -326,4 +326,4 @@ pub(crate) fn restore(
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(in crate::ide::bridge) mod tests;

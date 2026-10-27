@@ -1,12 +1,17 @@
+use super::changes::change_sets;
+use super::changes::tests::{Case as ChangeCase, NOW};
 use super::*;
 use crate::engine::Engine;
 use crate::engine::owner::OwnerServer;
+use crate::landing::{AcceptOutcome, ChangeState};
 use crate::protocol::FRAME_BYTES_MAX;
 use serde_json::json;
 use std::ffi::OsStr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const HELD: Duration = Duration::from_secs(2);
 
 /// A real engine with its owner server running under a private temporary root.
 struct Case {
@@ -151,6 +156,26 @@ async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> UnixStream
         })
     );
     stream
+}
+
+/// A change set of a real repository in the running engine's own store, with the
+/// capability of its project. Input: the case. Output: the change set case, the owner
+/// socket and the capability's handshake.
+fn change_set(case: &Case) -> (ChangeCase, PathBuf, [u8; 37]) {
+    let changes = ChangeCase::in_store(Some(case.root.path()));
+    let capability = issue(&case.runtime, &changes.project).unwrap();
+    let socket = case.socket(&capability);
+    (changes, socket, packet(MAGIC, 0, &token(&capability)))
+}
+
+/// The handshake timeout of the case's engine, from the same files `Case::start` resolves.
+fn handshake_timeout(case: &Case) -> Duration {
+    let config = crate::config::resolve_config(
+        &case.root.path().join("global.toml"),
+        &case.root.path().join("project.toml"),
+    )
+    .unwrap();
+    Duration::from_millis(config.settings.timeout_ms)
 }
 
 /// A capability answers IDE requests for its own project only: another project, an owner
@@ -468,4 +493,84 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
         EXTENSION_FILES[1].1
     );
     assert_eq!(std::fs::read_dir(extensions.path()).unwrap().count(), 1);
+}
+
+/// An Accept slower than the handshake timeout, here because another writer holds the
+/// engine store for `HELD`, answers with the commit it landed instead of a timeout, and
+/// the owner's branch holds that commit.
+#[tokio::test]
+async fn a_slow_ide_accept_answers_with_the_commit_it_landed() {
+    let mut case = Case::start().await;
+    let (changes, socket, ide) = change_set(&case);
+    assert!(HELD > handshake_timeout(&case));
+    let set = changes.only(NOW);
+    let start = changes.owner_head();
+    let accept = json!({
+        "name": "ide.accept",
+        "args": { "id": set.id, "head": set.head, "message": "Land the agent's edits" }
+    });
+    changes.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let mut stream = send(&socket, ide, &request(changes.project.as_str(), accept)).await;
+    tokio::time::sleep(HELD).await;
+    assert_eq!(
+        changes.owner_head(),
+        start,
+        "the Accept waits for the store"
+    );
+    changes.db.execute_batch("COMMIT").unwrap();
+    let reply = read_reply(&mut stream).await;
+    assert!(started.elapsed() >= HELD);
+    let Some(IdeReply::Ok { data }) = reply else {
+        panic!("{reply:?}");
+    };
+    let landed: AcceptOutcome = serde_json::from_value(data).unwrap();
+    let AcceptOutcome::Landed { commit, branch } = landed else {
+        panic!("{landed:?}");
+    };
+    assert_eq!(branch, "main");
+    assert_ne!(commit, start);
+    assert_eq!(changes.owner_head(), commit);
+    assert!(
+        change_sets(&changes.db, &changes.project, NOW)
+            .unwrap()
+            .is_empty(),
+        "an accepted set has no group"
+    );
+    case.stop().await;
+}
+
+/// A Discard still running past the handshake timeout when its capability is revoked
+/// answers with what it did: the set is discarded and restorable until the time it names,
+/// while the revoked capability is refused from then on.
+#[tokio::test]
+async fn an_ide_discard_answers_with_its_outcome_after_its_capability_is_revoked() {
+    let mut case = Case::start().await;
+    let (changes, socket, ide) = change_set(&case);
+    assert!(HELD > handshake_timeout(&case));
+    let set = changes.only(NOW);
+    let discard = json!({ "name": "ide.discard", "args": { "id": set.id, "head": set.head } });
+    changes.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut stream = send(&socket, ide, &request(changes.project.as_str(), discard)).await;
+    tokio::time::sleep(HELD).await;
+    revoke(&case.runtime, &changes.project).unwrap();
+    changes.db.execute_batch("COMMIT").unwrap();
+    let reply = read_reply(&mut stream).await;
+    let Some(IdeReply::Ok { data }) = reply else {
+        panic!("{reply:?}");
+    };
+    let until: u64 = serde_json::from_value(data).unwrap();
+    let discarded = changes.only(until - 1);
+    assert_eq!(discarded.state, ChangeState::Discarded);
+    assert_eq!(discarded.restorable_until, Some(until));
+    assert_eq!(
+        exchange(
+            &socket,
+            ide,
+            &request(changes.project.as_str(), workspace())
+        )
+        .await,
+        rejected("ide_capability_refused")
+    );
+    case.stop().await;
 }

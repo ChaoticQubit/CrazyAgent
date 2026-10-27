@@ -6,18 +6,18 @@ use crate::protocol::FRAME_BYTES_MAX;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const NOW: u64 = 1_800_000_000_000;
+pub(in crate::ide::bridge) const NOW: u64 = 1_800_000_000_000;
 
 /// One owner repository on `main` with its own git identity, an agent worktree added
 /// from it holding a modified, an added and a deleted file, an owner home with no global
 /// git config, and an engine store with the change set that turn made.
-struct Case {
+pub(in crate::ide::bridge) struct Case {
     _tmp: tempfile::TempDir,
     repo: PathBuf,
     home: PathBuf,
     worktree: PathBuf,
-    db: Connection,
-    project: ProjectId,
+    pub(in crate::ide::bridge) db: Connection,
+    pub(in crate::ide::bridge) project: ProjectId,
 }
 
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
@@ -48,12 +48,27 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
 
 impl Case {
     fn new() -> Self {
+        Self::in_store(None)
+    }
+
+    /// The case with its change set in the store of an engine root, such as a running
+    /// owner server's, or of a new root in the case's own folder. Input: the engine root,
+    /// or None. Output: the case.
+    pub(in crate::ide::bridge) fn in_store(engine: Option<&Path>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let (repo, home, engine) = (root.join("repo"), root.join("home"), root.join("engine"));
-        for folder in [&repo, &home, &engine] {
+        let (repo, home) = (root.join("repo"), root.join("home"));
+        for folder in [&repo, &home] {
             std::fs::create_dir(folder).unwrap();
         }
+        let engine = match engine {
+            Some(engine) => engine.to_path_buf(),
+            None => {
+                let engine = root.join("engine");
+                std::fs::create_dir(&engine).unwrap();
+                engine
+            }
+        };
         let owner = |args: &[&str]| git_in(&home, &repo, args);
         owner(&["init", "-q", "--template=", "-b", "main"]);
         owner(&["config", "user.name", "Repo Owner"]);
@@ -105,13 +120,13 @@ impl Case {
         }
     }
 
-    fn only(&self, now: u64) -> IdeChangeSet {
+    pub(in crate::ide::bridge) fn only(&self, now: u64) -> IdeChangeSet {
         let mut sets = change_sets(&self.db, &self.project, now).unwrap();
         assert_eq!(sets.len(), 1, "{sets:?}");
         sets.remove(0)
     }
 
-    fn owner_head(&self) -> String {
+    pub(in crate::ide::bridge) fn owner_head(&self) -> String {
         git_in(&self.home, &self.repo, &["rev-parse", "HEAD"])
             .trim()
             .to_owned()
