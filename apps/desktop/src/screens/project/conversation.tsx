@@ -43,6 +43,30 @@ function confirm(receipt: IntentReceipt) {
   if (state.kind === "unconfirmed") throw { code: "master_outcome_pending" };
 }
 
+export const QUEUED_LINE = "Opening the conversation. Your message sends once the master is ready.";
+export const QUEUE_FAILED = "Not sent: the conversation didn't open. Press Up to get your message back.";
+
+/** What Enter does with the owner's message now: send it, queue it while the conversation is
+ * still opening, or hold it in the prompt while the master can't take one (read only, not in
+ * this build, a reply still coming, a message already queued, a send in flight, or a
+ * conversation that failed to open). Input: the conversation's state. Output: the decision. */
+export function sendGate(state: { readOnly: boolean; ticket: string; openFailed: boolean; working: boolean; waiting: boolean; notReady: boolean; queued: boolean }): "send" | "queue" | "hold" {
+  if (state.readOnly || state.notReady || state.waiting || state.queued) return "hold";
+  if (!state.ticket) return state.openFailed ? "hold" : "queue";
+  return state.working ? "hold" : "send";
+}
+
+/** The console lines of a message queued while the conversation opens: the owner's words and
+ * a line saying it sends once the master is ready, or that it was not sent when the opening
+ * failed. Inputs: the queued text, if any, and whether the opening failed. Output: the lines. */
+export function queuedLines(queued: string | null, openFailed: boolean): ConsoleLine[] {
+  if (queued === null) return [];
+  return [
+    { id: "queued-owner", kind: "owner", text: queued },
+    openFailed ? { id: "queued-status", kind: "error", text: QUEUE_FAILED } : { id: "queued-status", kind: "engine", text: QUEUED_LINE },
+  ];
+}
+
 /** The console lines of the master conversation: each turn's opening (the owner's message as
  * this window sent it or as read back from the engine, the engine's line for a turn it asked
  * for, or a placeholder for a message whose text is not read yet), the reply or the turn's
@@ -92,6 +116,8 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const [note, setNote] = useState("");
   const [needsPool, setNeedsPool] = useState(false);
   const [notReady, setNotReady] = useState(false);
+  const [openFailed, setOpenFailed] = useState(false);
+  const [queued, setQueued] = useState<string | null>(null);
   const current = useRef(data.id);
   current.current = data.id;
   const [graph] = useTeamGraph(data.id);
@@ -146,18 +172,26 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   }
 
   useEffect(() => {
+    setTicket("");
     setMaster(undefined);
     setTurns([]);
     setHeld({});
     setSentState(sentByProject.get(data.id) ?? {});
     setProblem("");
     setNeedsPool(false);
+    setOpenFailed(false);
+    setQueued(null);
     const live = data.id;
     void act(async () => {
-      const opened = openedTicket(unwrap(await openMasterProject(live)), live);
-      if (current.current !== live) return;
-      setTicket(opened);
-      await refresh(opened);
+      try {
+        const opened = openedTicket(unwrap(await openMasterProject(live)), live);
+        if (current.current !== live) return;
+        setTicket(opened);
+        await refresh(opened);
+      } catch (failure) {
+        if (current.current === live) setOpenFailed(true);
+        throw failure;
+      }
     });
   }, [data.id]);
 
@@ -224,16 +258,24 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
-  const told = consoleLines(turns, sent, sentAtByProject.get(data.id), now, held);
+  const told = [...consoleLines(turns, sent, sentAtByProject.get(data.id), now, held), ...queuedLines(queued, openFailed && !ticket)];
   const lines: ConsoleLine[] = told.length > 0 ? told : [{ id: "empty", kind: "engine", text: readOnly
     ? "No earlier conversation. Messages sent to the master before it ran live stay here to read."
     : `No messages yet. Ask the master anything about ${data.name || "this project"}. It has read the brief, documents and research.` }];
   const agents = agentMentions(graph.shown?.kind === "ok" ? graph.shown.value.nodes : []);
+  const gate = sendGate({ readOnly, ticket, openFailed, working, waiting, notReady, queued: queued !== null });
   const offer = (text: string) => {
     const bytes = new TextEncoder().encode(text).length;
     if (bytes > MESSAGE_BYTES_MAX) return setProblem(`Too long: ${bytes} of ${MESSAGE_BYTES_MAX} bytes. Press Up to get it back and shorten it.`);
+    if (gate === "queue") return setQueued(text);
     void send(text);
   };
+
+  useEffect(() => {
+    if (queued === null || !ticket || working || waiting || notReady) return;
+    setQueued(null);
+    void send(queued);
+  }, [queued, ticket, working, waiting, notReady]);
 
   return <div className="pj-convo">
     {!readOnly && <div className="pj-convo-head">
@@ -258,7 +300,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
       {again !== null && <div className="pj-row"><button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button></div>}
     </>}
     <Console projectId={data.id} lines={lines} agents={agents} files={files} onTagQuery={setTag}
-      canSend={!readOnly && !blocked} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
+      canSend={gate !== "hold"} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
       onSend={offer} onStop={() => void stopReply()} onNavigate={(route) => data.navigate(formatRoute(route).slice(1))} />
   </div>;
 }
