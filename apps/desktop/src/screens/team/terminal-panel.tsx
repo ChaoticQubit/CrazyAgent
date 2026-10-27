@@ -5,7 +5,7 @@ import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, StatusBadge, keyLabel, shortcutKey } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeDetail, nodeStatus } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, terminalEvent, terminalSize } from "./terminal-io";
+import { encodeBinary, encodeTyped, endCopy, jobQueue, keyOverride, keyQueue, muteQueries, promptText, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -121,6 +121,11 @@ export function TerminalPanel({ node, harness, onClose }: {
       const run = jobQueue(() => end(STOPPED_TYPING));
       const type = keyQueue(run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok");
       const typed = terminal.onData((data) => { if (live) type(encodeTyped(data)); });
+      terminal.attachCustomKeyEventHandler((event) => {
+        const override = keyOverride(event);
+        if (live && override.typed !== null) type(encodeTyped(override.typed));
+        return override.xterm;
+      });
       prompt.current = (text) => {
         if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();

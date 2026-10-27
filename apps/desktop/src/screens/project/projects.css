@@ -177,3 +177,22 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-memory { display: grid; gap: 8px; }
 .pj-memory .markdown { max-width: none; }
 .pj-note-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.pj-master-live {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.pj-master-live > .tg-terminal {
+  flex: 1;
+  min-height: 60vh;
+}
+
+.pj-master-earlier {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
