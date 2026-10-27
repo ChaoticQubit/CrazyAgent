@@ -75,7 +75,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
   const [note, setNote] = useState("");
   const [deleting, setDeleting] = useState<MemoryItem | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
-  const [notes, reloadNotes] = useLoad(() => savedMemories(data.id, ""), [data.id]);
+  const [notes, reloadNotes] = useLoad(() => savedMemories(data.id, ""), [data.id], "project-memories");
   const [forgetting, setForgetting] = useState<SavedMemory | null>(null);
 
   useEffect(() => {

@@ -418,7 +418,7 @@ impl NativeOwner {
                 offset_minutes,
             } => SettingsEvent::Usage(match self.settings_controller() {
                 Ok(controller) => controller
-                    .usage_report(since_ms, offset_minutes)
+                    .usage_report(None, since_ms, offset_minutes)
                     .await
                     .map(Box::new)
                     .map_err(|error| problem(&error, lost)),

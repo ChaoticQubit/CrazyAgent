@@ -1758,11 +1758,14 @@ async fn desktop_restart_agent(
 async fn desktop_usage_report(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    project_id: Option<String>,
     since_ms: Option<i64>,
     offset_minutes: i32,
 ) -> Result<UsageReport, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.usage_report(since_ms, offset_minutes)?;
+    let call = lock(&state)
+        .await?
+        .usage_report(project_id, since_ms, offset_minutes)?;
     call.await
 }
 

@@ -531,3 +531,47 @@ fn a_finished_turn_counts_its_reported_usage_or_its_records_once_and_forgets_its
         Tokens::default()
     );
 }
+
+#[test]
+fn reported_turn_usage_adds_up_under_its_agent_and_a_bad_session_name_is_refused() {
+    let (_root, db) = store();
+    let mut piped = attribution(RunKind::Agent, Some("pool-a"));
+    piped.agent = "team-4".into();
+    let turn = Tokens {
+        input: 5,
+        output: 7,
+        cache_read: 100,
+        cache_write: 3,
+    };
+    count_reported(&db, &piped, turn, "headless", NOW).unwrap();
+    count_reported(&db, &piped, turn, "headless", NOW + 1000).unwrap();
+    count_reported(&db, &piped, Tokens::default(), "headless", NOW).unwrap();
+    let rows: Vec<(String, String, i64, i64, i64, i64)> = db
+        .prepare("SELECT agent,session,input,output,cache_read,cache_write FROM usage_tokens")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("team-4".into(), "headless".into(), 10, 14, 200, 6)]
+    );
+    for session in ["", &"s".repeat(129)] {
+        assert_eq!(
+            count_reported(&db, &piped, turn, session, NOW)
+                .unwrap_err()
+                .0,
+            "usage_attribution_invalid"
+        );
+    }
+}

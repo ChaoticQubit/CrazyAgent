@@ -1,0 +1,161 @@
+.ta-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.ta-split.with-terminal {
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 1fr);
+}
+
+.ta-main {
+  min-width: 0;
+}
+
+.ta-side {
+  position: relative;
+  min-width: 0;
+  min-height: 240px;
+}
+
+.ta-scroll {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.ta-split.with-terminal .ta-scroll > .tg-terminal {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 1000px) {
+  .ta-split,
+  .ta-split.with-terminal {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ta-side {
+    height: 360px;
+  }
+}
+
+.ta-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ta-head h3 {
+  margin: 0;
+}
+
+.ta-summary,
+.ta-stale {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.ta-stale {
+  margin: 0;
+}
+
+.ta-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.ta-empty p {
+  margin: 0;
+}
+
+.ta-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ta-row:hover {
+  border-color: var(--border-input);
+}
+
+.ta-row[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.ta-row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.ta-row.open {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.ta-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ta-name {
+  flex: 1;
+}
+
+.ta-row-head .tg-badge {
+  flex: none;
+}
+
+.ta-row-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.ta-since {
+  flex: none;
+  color: var(--text-3);
+}
+
+.ta-row-task {
+  color: var(--text-3);
+  font-size: 12px;
+}

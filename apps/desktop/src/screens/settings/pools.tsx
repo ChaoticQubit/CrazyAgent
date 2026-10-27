@@ -259,8 +259,8 @@ export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, on
  * Input: whether a new pool editor opens on arrival. */
 export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
-  const [pools, reload] = useLoad(poolSummaries);
-  const [accounts] = useLoad(listAccounts);
+  const [pools, reload] = useLoad(poolSummaries, [], "pool-summaries");
+  const [accounts] = useLoad(listAccounts, [], "accounts");
   const [editing, setEditing] = useState<{ id?: string; opened?: PoolBase } | undefined>(creating ? {} : undefined);
   const [draft, setDraft] = useState<string[]>([]);
   const [deleting, setDeleting] = useState<PoolSummary>();
