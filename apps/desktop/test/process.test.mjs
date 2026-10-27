@@ -157,3 +157,15 @@ test("every engine refusal a Process action can show has a plain sentence", () =
   }
   assert.equal(client.processMessage({ kind: "not_ready" }), "Instructions aren't ready in this build yet.");
 });
+
+test("a save a Claude master may refuse names what it takes and what agents now get, and the page shows it", () => {
+  const fits = "Instructions saved. Agents started from now on get them.";
+  assert.equal(client.savedMessage({ bytes: 24, claude_bytes_max: 28159 }), fits);
+  assert.equal(client.savedMessage({ bytes: 28159, claude_bytes_max: 28159 }), fits, "exactly the limit fits");
+  assert.equal(client.savedMessage({ bytes: 40000, claude_bytes_max: 28159 }),
+    "Instructions saved, but agents here now get 39.1 KB of app and project instructions and a Claude master takes only 27.5 KB. Shorten them before a Claude master's next turn.");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
+  assert.match(engine, /pub struct ProcessSaved \{\s*pub bytes: u32,\s*pub claude_bytes_max: u32,\s*\}/, "the engine sends the fields this page reads");
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /showToast\(savedMessage\(result\.value\)\)/, "the page shows the line for the save it made");
+});

@@ -587,12 +587,13 @@ fn home_cards_show_suggested_memories_beside_new_team_notifications() {
                 "the setup panel narrows the cards: {shown}"
             );
         }
-        for (notifications, memories) in [(2, "3 suggested memories"), (1, "1 suggested memory")]
-        {
+        for (notifications, memories) in [(2, "3 suggested memories"), (1, "1 suggested memory")] {
             let row = rows
                 .iter()
                 .find(|row| row.contains(memories))
-                .unwrap_or_else(|| panic!("{memories} shows on its card at {width}x{height}: {shown}"));
+                .unwrap_or_else(|| {
+                    panic!("{memories} shows on its card at {width}x{height}: {shown}")
+                });
             let notice = row
                 .find(&format!("{notifications} new team notification"))
                 .or_else(|| row.find(&format!("{notifications} notification")));
@@ -603,7 +604,10 @@ fn home_cards_show_suggested_memories_beside_new_team_notifications() {
         }
         assert!(!shown.contains("1 new team notifications"), "{shown}");
         assert!(!shown.contains("1 notifications"), "{shown}");
-        assert!(rows.iter().all(|row| row.chars().count() <= width as usize), "{shown}");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width as usize),
+            "{shown}"
+        );
     }
 }
 

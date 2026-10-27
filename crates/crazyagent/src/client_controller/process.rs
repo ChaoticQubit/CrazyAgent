@@ -15,12 +15,13 @@ impl OwnerController {
     }
 
     /// Saves the owner's instructions whole. Inputs: none for the app-wide text, or the
-    /// project, and the text. Output: unit, or a refusal such as `process_text_too_large`.
+    /// project, and the text. Output: what agents now receive beside what a Claude master is
+    /// sure to take, or a refusal such as `process_text_too_large`.
     pub async fn save_process_text(
         &self,
         project: Option<ProjectId>,
         text: String,
-    ) -> Result<(), EngineError> {
+    ) -> Result<crate::engine::owner::ProcessSaved, EngineError> {
         self.process_client()?
             .save_process_text(project, text)
             .await

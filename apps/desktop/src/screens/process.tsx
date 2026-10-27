@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess,
+  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess, savedMessage,
   skillSegments, textBytes, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
@@ -132,7 +132,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     const result = session.noteResult(await saveProcess(projectId, draft));
     setBusy(null);
     if (result.kind === "ok") {
-      session.showToast("Instructions saved. Agents started from now on get them.");
+      session.showToast(savedMessage(result.value));
       reload();
     } else fail(result);
   };

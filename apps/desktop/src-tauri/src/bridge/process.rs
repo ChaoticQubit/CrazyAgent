@@ -1,6 +1,6 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{AgentInstructions, OwnerClient, PROCESS_CODES};
+use crazyagent::engine::owner::{AgentInstructions, OwnerClient, PROCESS_CODES, ProcessSaved};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
@@ -50,12 +50,13 @@ impl NativeBridge {
     }
 
     /// Saves the owner's instructions whole, run without the bridge lock. Inputs: none for
-    /// the app-wide text, or the project id, and the text. Output: unit once stored.
+    /// the app-wide text, or the project id, and the text. Output: once stored, what agents
+    /// now get beside what a Claude master takes.
     pub fn save_process_text(
         &self,
         project_id: Option<String>,
         text: String,
-    ) -> Result<Unlocked<()>, BridgeError> {
+    ) -> Result<Unlocked<ProcessSaved>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {

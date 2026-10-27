@@ -479,9 +479,25 @@ impl ProcessPage {
             return;
         }
         self.pending = None;
+        if let (ProcessQuery::Save { text, .. }, Ok(ProcessReply::Saved(saved))) =
+            (&event.query, &event.result)
+        {
+            if let State::Ready { saved } = &mut self.state {
+                saved.clone_from(text);
+            }
+            self.problem = None;
+            ctx.say(match saved.claude_warning() {
+                None => Message::success(
+                    "Instructions saved.",
+                    "Agents started from now on get them.",
+                ),
+                Some(warning) => Message::warning("Instructions saved.", &warning),
+            });
+            return;
+        }
         let result = match &event.result {
             Ok(ProcessReply::Text(text)) => Ok(text),
-            Ok(ProcessReply::Agent(_)) => return,
+            Ok(ProcessReply::Saved(_) | ProcessReply::Agent(_)) => return,
             Err(code) => Err(code),
         };
         match (&event.query, result) {
@@ -492,16 +508,7 @@ impl ProcessPage {
                 };
             }
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
-            (ProcessQuery::Save { text, .. }, Ok(_)) => {
-                if let State::Ready { saved } = &mut self.state {
-                    saved.clone_from(text);
-                }
-                self.problem = None;
-                ctx.say(Message::success(
-                    "Instructions saved.",
-                    "Agents started from now on get them.",
-                ));
-            }
+            (ProcessQuery::Save { .. }, Ok(_)) => {}
             (ProcessQuery::Save { .. }, Err(code)) => self.problem = Some(message(code)),
             (ProcessQuery::ImportGlobal, Ok(text)) => self.open_preview(Seed::Import, text),
             (ProcessQuery::Default, Ok(text)) => self.open_preview(Seed::Default, text),

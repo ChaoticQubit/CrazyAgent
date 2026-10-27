@@ -187,6 +187,14 @@ impl OwnerRuntimeHandle {
     }
 }
 
+/// The most bytes of the owner's app and project instructions a Claude master is sure to
+/// take: the Claude host's prompt file limit less the largest project context and the line
+/// `master_prompt` puts between them.
+pub(super) const CLAUDE_PROCESS_BYTES_MAX: usize =
+    crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
+        - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+        - 1;
+
 /// Joins a Claude Code master's startup instruction with the owner's app and project
 /// instructions. Claude Code runs with setting sources off, which skips the `CLAUDE.md` in
 /// its home, so its prompt file carries the same text. Input: both texts. Output: the prompt.
@@ -1203,6 +1211,11 @@ mod tests {
             &"a".repeat(host_limit - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX - 1),
         );
         assert_eq!(fits.len(), host_limit);
+        assert_eq!(
+            host_limit - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX - 1,
+            CLAUDE_PROCESS_BYTES_MAX,
+            "the Process page warns at exactly the room the largest context leaves"
+        );
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
     }
 
