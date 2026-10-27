@@ -3667,13 +3667,14 @@ fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> St
     let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner, {}(question, options?, recommended?, context?) asks the owner one question and logs it, and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
             tool::ANSWER_TOOL,
             tool::STATUS_TOOL,
             tool::CHANGES_TOOL,
+            tool::ASK_TOOL,
             tool::ESCALATE_TOOL
         )
     } else {

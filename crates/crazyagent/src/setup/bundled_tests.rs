@@ -200,7 +200,9 @@ fn the_default_pack_bundles_the_grill_skill() {
         description.contains("one question at a time"),
         "{description}"
     );
-    assert!(text.contains("`ask` tool"));
+    assert!(text.contains(&format!("`{}` tool", crate::team::tool::ASK_TOOL)));
+    assert_eq!(crate::questions::OPTIONS_MAX, 4);
+    assert!(text.contains("at most 4 short one-line ones"));
     assert!(text.contains("`crazyagent-team`"));
     assert!(text.contains("`recommended`"));
     assert!(!text.contains('\u{2014}'));

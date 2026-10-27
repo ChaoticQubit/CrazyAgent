@@ -489,32 +489,16 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
 }
 
 #[test]
-fn master_and_agent_instructions_name_the_ask_tool() {
-    use crate::project_setup::HarnessSlot;
-    let rule =
-        "Ask the owner a question only with the `ask` tool of the `crazyagent-team` MCP server";
+fn the_live_master_alone_is_told_to_ask_the_owner_through_ask_owner() {
+    let rule = "Ask the owner a question only with the `ask_owner` tool of the `crazyagent-team` MCP server";
+    assert_eq!(crate::team::tool::ASK_TOOL, "ask_owner");
     let folder = tempfile::tempdir().unwrap();
-    let mut setup = stored(folder.path());
-
-    let master = master_tools_section(&setup, &["codex"]);
-    assert_eq!(master.matches(rule).count(), 1, "{master}");
-    assert!(master.contains("never in your reply text"));
-    assert!(master.contains("one question per call"));
-    assert!(master.contains("`options`"));
-    assert!(master.contains("`recommended`"));
-    setup.team.sub_harnesses = (0..200)
-        .map(|index| HarnessSlot {
-            harness: format!("{index}-{}", "h".repeat(250)),
-            agents: 1,
-            tools: true,
-        })
-        .collect();
-    let crowded = master_tools_section(&setup, &[]);
+    let setup = stored(folder.path());
+    let conversation = master_tools_section(&setup, &["codex"]);
     assert!(
-        crowded.contains(rule),
-        "a crowded team plan never pushes the rule out"
+        !conversation.contains("ask_owner"),
+        "the conversation master's delegate server has no ask_owner tool to name"
     );
-    assert!(crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -527,25 +511,29 @@ fn master_and_agent_instructions_name_the_ask_tool() {
         process: None,
     };
     let start = "# Project context from CrazyAgent\n";
-    assert!(
-        !fresh(start.into()).instructions().contains(rule),
-        "an agent without the team server has no ask tool to name"
-    );
-    for context in [
-        fresh(start.into()).with_team_tool(engine, &record).unwrap(),
-        fresh(start.into())
-            .with_live_team_tool(engine, &mailbox)
-            .unwrap(),
-    ] {
-        let told = context.instructions();
-        assert!(told.starts_with(start), "{told}");
-        assert_eq!(told.matches(rule).count(), 1, "{told}");
-        assert!(told.contains("one question per call"));
-    }
-    let taken = fresh(start.into()).with_team_tool(engine, &record).unwrap();
+    assert!(!fresh(start.into()).instructions().contains(rule));
+    let drop_file = fresh(start.into()).with_team_tool(engine, &record).unwrap();
     assert_eq!(
-        taken.with_team_tool(engine, &record).unwrap_err().0,
-        "launch_context_team_tool_taken"
+        drop_file.instructions(),
+        start,
+        "a team master on the delegate drop file has no ask_owner tool to name"
+    );
+
+    let live = fresh(start.into())
+        .with_live_team_tool(engine, &mailbox)
+        .unwrap();
+    let told = live.instructions();
+    assert!(told.starts_with(start), "{told}");
+    assert_eq!(told.matches(rule).count(), 1, "{told}");
+    assert!(told.contains("never in your reply text"));
+    assert!(told.contains("one question per call"));
+    assert!(told.contains("Put up to 4 choices in `options`"));
+    assert!(told.contains("`recommended`"));
+    assert!(told.contains("with only the question's `id` and their `answer` to record it"));
+    assert_eq!(
+        live.with_live_team_tool(engine, &mailbox).unwrap_err().0,
+        "launch_context_team_tool_taken",
+        "a second live server is refused before any text is added"
     );
 
     let full = fresh("x".repeat(INSTRUCTIONS_BYTES_MAX))

@@ -1099,6 +1099,12 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
     ] {
         assert!(text.contains(listed), "{text}");
     }
+    let tools = live_framing(&setup, true, &["codex"]);
+    assert!(
+        tools.contains("ask_owner(question, options?, recommended?, context?) asks the owner one question and logs it"),
+        "{tools}"
+    );
+    assert!(!live_framing(&setup, false, &["codex"]).contains("ask_owner"));
 }
 
 #[test]

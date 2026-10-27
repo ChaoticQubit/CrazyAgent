@@ -35,7 +35,6 @@ pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
 const ASK_RULE_BYTES_MAX: usize = 1024;
-const ASK_TOOL: &str = "ask";
 const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
@@ -190,8 +189,7 @@ pub fn for_master(
 
 /// Tells a conversation master whose tools are on what it can do and how it starts a
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
-/// to the team, it asks the owner only with the `ask` tool, and the team plan's sub-agents,
-/// or for an empty plan the harnesses it can use.
+/// to the team, and the team plan's sub-agents, or for an empty plan the harnesses it can use.
 /// Input: the project setup and the harnesses with an eligible account now.
 /// Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
 pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> String {
@@ -201,7 +199,6 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
         crate::team::tool::SERVER_NAME,
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
-    let rule = ask_rule();
     if setup.team.sub_harnesses.is_empty() {
         section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
@@ -214,7 +211,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
                 slot.agents,
                 if slot.tools { "on" } else { "off" }
             );
-            if left > 0 || section.len() + line.len() + rule.len() > TEAM_INDEX_BYTES_MAX {
+            if left > 0 || section.len() + line.len() > TEAM_INDEX_BYTES_MAX {
                 left += 1;
                 continue;
             }
@@ -224,7 +221,6 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
             section.push_str(&format!("- and {left} more\n"));
         }
     }
-    section.push_str(&rule);
     assert!(section.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     section
 }
@@ -303,15 +299,20 @@ impl AgentContext {
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
-    /// tools, answered by the engine at once through the mailbox folder. Input: the absolute
-    /// canonical engine executable and the absolute mailbox in the master's private temporary
-    /// folder. Output: the context, or a plain code as for [`Self::with_team_tool`].
+    /// tools, answered by the engine at once through the mailbox folder, and tells it to ask
+    /// the owner only with that server's ask tool. Input: the absolute canonical engine
+    /// executable and the absolute mailbox in the master's private temporary folder.
+    /// Output: the context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_live_team_tool(
         self,
         executable: &Path,
         mailbox: &Path,
     ) -> Result<Self, LaunchError> {
-        self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)
+        let mut context =
+            self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)?;
+        context.instructions.push_str(&ask_rule());
+        assert!(context.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        Ok(context)
     }
 
     fn with_team_server(
@@ -347,8 +348,6 @@ impl AgentContext {
             },
             secrets: Vec::new(),
         });
-        self.instructions.push_str(&ask_rule());
-        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(self)
     }
 
@@ -625,14 +624,17 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
     text
 }
 
-/// Tells an agent that holds the engine's team tools how it asks the owner: only with the
-/// `ask` tool, one question per call, with its options and a recommended answer, never in
-/// reply text or with its harness's own question tools. Output: at most
-/// `ASK_RULE_BYTES_MAX` bytes of markdown.
+/// Tells a live team master how it asks the owner: only with the live server's ask tool,
+/// one question per call, with its options and a recommended answer, never in reply text
+/// or with its harness's own question tools, and how it records an answer given in chat.
+/// Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
 pub(crate) fn ask_rule() -> String {
     let rule = format!(
-        "\n## Asking the owner\n\nAsk the owner a question only with the `{ASK_TOOL}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put the choices in `options` and your pick in `recommended`, and say why in `context`. Answer what you can from the code and the project's documents first. The owner answers in CrazyAgent, and the answer comes back to you once.\n",
-        crate::team::tool::SERVER_NAME
+        "\n## Asking the owner\n\nAsk the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the answer you recommend in `recommended` with the reason in a sentence, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. The owner's answer or dismissal comes to you once as a message from the owner. If the owner answers you here in chat instead, call `{}` with only the question's `id` and their `answer` to record it.\n",
+        crate::team::tool::ASK_TOOL,
+        crate::team::tool::SERVER_NAME,
+        crate::questions::OPTIONS_MAX,
+        crate::team::tool::ASK_TOOL
     );
     assert!(rule.len() <= ASK_RULE_BYTES_MAX);
     rule
