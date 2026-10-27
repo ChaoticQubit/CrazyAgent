@@ -43,6 +43,8 @@ pub struct TerminalSession {
     events: usize,
     ready: bool,
     turn: bool,
+    live: bool,
+    facts: VecDeque<TranscriptEvent>,
     exited: bool,
     stopped: bool,
     record: Option<PaneRecord>,
@@ -51,12 +53,28 @@ pub struct TerminalSession {
     _relay: Option<Relay>,
 }
 
-struct KeyFile(PathBuf);
+/// An account's key file, removed when the agent session holding it ends.
+pub(super) struct KeyFile(pub(super) PathBuf);
 
 impl Drop for KeyFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// Writes a routed launch's relay token to the 0600 key file in its account home, the only
+/// place its harness reads it from, so the token is in no argument or variable of any agent
+/// process. Input: the request after [`route`]. Output: the file's guard, none for a
+/// keyless launch, or a plain refusal code.
+pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>, LaunchError> {
+    request
+        .account
+        .key()
+        .map(|key| {
+            assert!(is_placeholder(key.reveal()));
+            interactive::write_key(request.account.home(), key).map(KeyFile)
+        })
+        .transpose()
 }
 
 fn host_failure(error: HostError) -> LaunchError {
@@ -107,18 +125,8 @@ impl TerminalSession {
             return Err(failure("launch_terminal_unsupported"));
         }
         let (request, relay) = route(request)?;
-        assert!(
-            request
-                .account
-                .key()
-                .is_none_or(|key| is_placeholder(key.reveal()))
-        );
         let home = request.account.home().to_path_buf();
-        let key = request
-            .account
-            .key()
-            .map(|key| interactive::write_key(&home, key).map(KeyFile))
-            .transpose()?;
+        let key = write_key_file(&request)?;
         let cwd = request
             .working_dir
             .canonicalize()
@@ -170,6 +178,8 @@ impl TerminalSession {
             events: 0,
             ready: false,
             turn: false,
+            live: false,
+            facts: VecDeque::new(),
             exited: false,
             stopped: false,
             record: PaneRecord::new(
@@ -267,6 +277,47 @@ impl TerminalSession {
         }
     }
 
+    /// Follows every turn in the pane from now on, the ones the owner types included, as a
+    /// live master needs: turn facts then come from [`Self::next_fact`] and `next_event`
+    /// reports nothing more. Takes the session. Returns nothing.
+    pub fn follow_every_turn(&mut self) {
+        self.live = true;
+        self.queue
+            .retain(|event| matches!(event, LaunchEvent::Ready { .. }));
+    }
+
+    /// Waits up to `wait` for the next turn fact of a session that follows every turn: a
+    /// turn started, said text, ended, hit an error, was interrupted or waits for an
+    /// answer. Tool use is not kept. Output: Some(fact), None on timeout, or an error once the
+    /// pane ended or past a limit, as for `next_event`.
+    pub fn next_fact(&mut self, wait: Duration) -> Result<Option<TranscriptEvent>, LaunchError> {
+        assert!(self.live);
+        let until = Instant::now() + wait;
+        loop {
+            if let Some(fact) = self.facts.pop_front() {
+                return Ok(Some(fact));
+            }
+            if self.exited {
+                return Err(failure("launch_closed"));
+            }
+            if Instant::now() >= self.deadline {
+                self.halt();
+                return Err(failure("launch_deadline"));
+            }
+            self.poll()?;
+            if !self.facts.is_empty() {
+                continue;
+            }
+            let left = until
+                .min(self.deadline)
+                .saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            std::thread::sleep(left.min(POLL));
+        }
+    }
+
     /// Ends the pane and every process in it, then removes the key file and the
     /// generated context. Output: none, since a pane reports no exit code.
     pub fn stop(mut self) -> Option<i32> {
@@ -333,6 +384,21 @@ impl TerminalSession {
             return Err(failure("launch_output_limit"));
         }
         for fact in facts {
+            if self.live {
+                match fact {
+                    TranscriptEvent::ToolUse { .. } => {}
+                    TranscriptEvent::TurnStarted => {
+                        self.turn = true;
+                        self.facts.push_back(fact);
+                    }
+                    TranscriptEvent::TurnFinished { .. } => {
+                        self.turn = false;
+                        self.facts.push_back(fact);
+                    }
+                    other => self.facts.push_back(other),
+                }
+                continue;
+            }
             if !self.turn {
                 continue;
             }

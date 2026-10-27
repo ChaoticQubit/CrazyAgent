@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
   PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess,
-  skillHref, skillSegments, textBytes, type SkillEntry,
+  skillSegments, textBytes, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, Dialog, LoadError, NotReady, Notice, Panel, Skeleton, TextArea } from "../ui";
+import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
 
 /** Where an instructions text applies: every project, or one project. */
@@ -23,15 +24,8 @@ export function TaggedText({ text, skills }: { text: string; skills: readonly Sk
   return <div className="process-text">
     {skillSegments(text, skills).map((segment, index) => segment.kind === "text"
       ? <span key={index}>{segment.text}</span>
-      : <SkillTag key={index} skill={segment} />)}
+      : <SkillTag key={index} name={segment.name} skills={[segment]} />)}
   </div>;
-}
-
-/** One catalog skill as a tag: hovering shows its one-line description and clicking opens it
- * in Settings. Input: the skill's id, name and description. */
-export function SkillTag({ skill }: { skill: SkillEntry }) {
-  return <a className="skill-tag" href={skillHref(skill.id)} title={skill.description || skill.name}
-    aria-label={skill.description ? `Skill ${skill.name}: ${skill.description}` : `Skill ${skill.name}`}>{skill.name}</a>;
 }
 
 /** Writes a byte count the way the Process pages show sizes. Input: bytes. Output: the words. */
@@ -105,7 +99,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
  * skills carry the engine's one-line description as `line` where the engine reports it.
  * Output: each skill's id, name and one-line description, empty while unread or failed. */
 export function catalogOf(skills: Loaded<{ id: string; name: string; description: string; line?: string }[]>): SkillEntry[] {
-  return skills.kind === "ok" ? skills.value.map(({ id, name, description, line }) => ({ id, name, description: line || description })) : [];
+  return skills.kind === "ok" ? skillEntries(skills.value) : [];
 }
 
 /** The Process page for one scope: reads the saved text and the skill catalog from the

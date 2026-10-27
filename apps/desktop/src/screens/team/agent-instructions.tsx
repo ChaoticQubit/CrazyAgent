@@ -2,24 +2,21 @@ import { listSkills, type Result } from "../../api";
 import { agentOf, loadAgentInstructions, processMessage, textBytes, type AgentInstructions as Received, type SkillEntry } from "../../api-process";
 import type { GraphNode } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
-import { SkillTag, TaggedText, byteSize, catalogOf } from "../process";
+import { TaggedText, byteSize, catalogOf } from "../process";
+import { SkillTag } from "../skill-tag";
 
 const FILES: Record<string, string> = { codex: "AGENTS.md", "claude-code": "CLAUDE.md" };
 
 function Given({ value, skills }: { value: Received; skills: readonly SkillEntry[] }) {
   if (!value.launched) return <p className="tg-instructions-note">This agent hasn't launched yet. What it receives shows here after its first launch.</p>;
-  const known = new Map<string, SkillEntry>();
-  for (const skill of skills) if (!known.has(skill.name)) known.set(skill.name, skill);
   return <>
     <p className="tg-instructions-note"><span className="tg-instructions-file">{FILES[value.harness] ?? "Instructions file"}</span>
       {value.text ? ` ${byteSize(textBytes(value.text))}` : ""}</p>
     {value.text ? <TaggedText text={value.text} skills={skills} />
       : <p className="tg-instructions-note">No app or project instructions were given at its last launch.</p>}
     <h4 className="tg-instructions-title">Skills</h4>
-    {value.skills.length > 0 ? <ul className="tg-instructions-skills" aria-label="Skills installed at its last launch">{value.skills.map((name) => {
-      const skill = known.get(name);
-      return <li key={name}>{skill ? <SkillTag skill={skill} /> : <span>{name}</span>}</li>;
-    })}</ul> : <p className="tg-instructions-note">No skills were installed at its last launch.</p>}
+    {value.skills.length > 0 ? <ul className="tg-instructions-skills" aria-label="Skills installed at its last launch">{value.skills.map((name) =>
+      <li key={name}><SkillTag name={name} skills={skills} /></li>)}</ul> : <p className="tg-instructions-note">No skills were installed at its last launch.</p>}
   </>;
 }
 

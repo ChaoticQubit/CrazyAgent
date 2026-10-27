@@ -348,7 +348,7 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
     .await;
     assert_eq!(
         session(&client, &project).await.phase,
-        MasterSessionPhase::Closed
+        MasterSessionPhase::Parked
     );
     drop(client);
     tokio::time::timeout(Duration::from_secs(5), service.shutdown())
@@ -379,7 +379,7 @@ async fn current_project_brief_reaches_master_prompt_after_restart() {
     assert_ne!(current_identity.engine_epoch(), identity.engine_epoch());
     let closed = session(&client, &project).await;
     assert_eq!(closed.session_id, opened.session_id);
-    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert_eq!(closed.phase, MasterSessionPhase::Parked);
     let reopened = open(&client, &project, "reopen-master-brief").await;
     assert_ne!(reopened.session_id, opened.session_id);
     assert_eq!(reopened.project_id, opened.project_id);

@@ -29,6 +29,7 @@ pub(in crate::tui) mod project_plugins;
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
+pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;
 pub mod settings_add_account;
@@ -179,6 +180,10 @@ pub enum Place {
         first_run: bool,
     },
     Team {
+        id: ProjectId,
+        name: String,
+    },
+    Master {
         id: ProjectId,
         name: String,
     },
@@ -343,6 +348,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::ProjectProcess { id, name } => {
             Box::new(process::ProcessPage::new(process::Scope::Project {
                 id: id.clone(),
