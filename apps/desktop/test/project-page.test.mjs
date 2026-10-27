@@ -599,7 +599,7 @@ test("the Team panel names each agent, its account and current task, and lists t
   assert.deepEqual(running.agents, [
     { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder" },
     { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2" },
-    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Waiting for work", folder: "" },
+    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "" },
   ]);
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
@@ -657,6 +657,20 @@ test("a team agent keeps the engine's name in every row, whatever its harness or
   assert.deepEqual(all.agents.map((row) => [row.name, row.harness]),
     [["Master", "Claude Code"], ["Sub-agent 2", "Codex"], ["Sub-agent 3", "Claude Code"], ["Sub-agent 4", "Codex"]]);
   assert.deepEqual(all.tasks.map((row) => row.to), ["Sub-agent 3", "Sub-agent 4"]);
+});
+
+test("every team agent row shows its current task or, between tasks, its last one", () => {
+  const status = {
+    agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "idle"), teamAgent(4, "stopped"), teamAgent(5, "idle")],
+    tasks: [
+      teamTask(9, "done", { agent: 4, prompt: "Old work" }),
+      teamTask(10, "running", { agent: 2, prompt: "Build the login screen" }),
+      teamTask(11, "done", { agent: 4, prompt: "Fix the header\nand the footer" }),
+      teamTask(12, "failed", { agent: 3, prompt: "Write the tests" }),
+    ],
+  };
+  assert.deepEqual(research.teamPanel(status, [], (id) => id, "all", 0).agents.map((row) => row.task),
+    ["Build the login screen", "Last task: Write the tests", "Last task: Fix the header", "Waiting for work"]);
 });
 
 test("team tasks waiting for a pool ask the owner for one, with the engine's reason", () => {

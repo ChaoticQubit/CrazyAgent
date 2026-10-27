@@ -261,6 +261,15 @@ impl TeamView {
             .find(|task| task.id == id)
     }
 
+    fn last_task(&self, agent: &TeamAgent) -> Option<&TeamTask> {
+        self.status
+            .as_ref()?
+            .tasks
+            .iter()
+            .filter(|task| task.agent == Some(agent.id))
+            .max_by_key(|task| task.id)
+    }
+
     fn clamp(&mut self) {
         let agents = self.agents().len();
         let tasks = self.tasks().len();
@@ -591,6 +600,7 @@ impl TeamView {
         let first = window(self.agent_cursor, agents.len(), agent_rows);
         for (index, agent) in agents.iter().enumerate().skip(first).take(agent_rows) {
             let current = agent.task.and_then(|id| self.task(id));
+            let last = current.is_none().then(|| self.last_task(agent)).flatten();
             let mut cells = vec![
                 Row::of(agent.label.clone(), look.fg),
                 Row::of(harness_name(&agent.harness, None), look.fg),
@@ -601,7 +611,7 @@ impl TeamView {
                     look.fg,
                 ));
             }
-            cells.push(agent_status(agent, current, look));
+            cells.push(agent_status(agent, current, last, look));
             lines.push(list_row(
                 columns(&agent_widths, cells),
                 content,
@@ -719,10 +729,16 @@ impl TeamView {
                     account_name(agent.account.as_deref(), accounts),
                 ));
                 rows.push(entry("Tools", tools_word(agent.tools).into()));
-                match (agent.task.and_then(|id| self.task(id)), &agent.worktree) {
-                    (Some(task), _) => rows.push(entry("Task", title(&task.prompt))),
-                    (None, Some(path)) => rows.push(entry("Working copy", short_path(path))),
-                    (None, None) => {}
+                match agent.task.and_then(|id| self.task(id)) {
+                    Some(task) => rows.push(entry("Task", title(&task.prompt))),
+                    None => {
+                        if let Some(last) = self.last_task(agent) {
+                            rows.push(entry("Last task", title(&last.prompt)));
+                        }
+                        if let Some(path) = &agent.worktree {
+                            rows.push(entry("Working copy", short_path(path)));
+                        }
+                    }
                 }
                 if let Some(problem) = &agent.problem {
                     rows.extend(
@@ -988,7 +1004,12 @@ fn short_path(path: &str) -> String {
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
-fn agent_status(agent: &TeamAgent, task: Option<&TeamTask>, look: &Look) -> Row {
+fn agent_status(
+    agent: &TeamAgent,
+    task: Option<&TeamTask>,
+    last: Option<&TeamTask>,
+    look: &Look,
+) -> Row {
     let (glyph, style) = match agent.status {
         AgentStatus::Working => ("\u{25b8}", look.running),
         AgentStatus::Starting | AgentStatus::Idle => ("\u{25cc}", look.muted),
@@ -999,9 +1020,10 @@ fn agent_status(agent: &TeamAgent, task: Option<&TeamTask>, look: &Look) -> Row 
         format!("{} {}", look.glyph(glyph), agent.status.label()),
         style,
     );
-    match task.filter(|_| agent.status == AgentStatus::Working) {
-        Some(task) => row.push(format!("  {}", title(&task.prompt)), look.fg),
-        None => row,
+    match (task.filter(|_| agent.status == AgentStatus::Working), last) {
+        (Some(task), _) => row.push(format!("  {}", title(&task.prompt)), look.fg),
+        (None, Some(last)) => row.push(format!("  Last task: {}", title(&last.prompt)), look.muted),
+        (None, None) => row,
     }
 }
 

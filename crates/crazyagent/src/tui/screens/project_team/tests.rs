@@ -299,6 +299,32 @@ fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
 }
 
 #[test]
+fn every_sub_agent_row_shows_its_current_task_or_its_last_one() {
+    let mut status = team();
+    status.tasks[0].agent = Some(4);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Sub-agent 2").contains("Working  Build the charts component"));
+    assert!(
+        find(&rows, "Sub-agent 4").contains("Stopped  Last task: Set up the project"),
+        "{}",
+        rows.join("\n")
+    );
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.agent_cursor, 2);
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Last task     Set up the project")),
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn the_panel_follows_the_focused_task() {
     let mut view = loaded();
     assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
