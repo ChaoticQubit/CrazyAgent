@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
@@ -14,6 +14,7 @@ const STATE_FILE: &str = "build-state.json";
 const STATE_BYTES_MAX: u64 = 64 * 1024;
 const PROGRESS_BYTES: u64 = 1024 * 1024;
 const ENTRIES_MAX: usize = 200_000;
+const BUILDS_SCAN_MAX: usize = 64;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Where the engine's IDE build stands, as the IDE tab shows it.
@@ -135,7 +136,8 @@ pub fn state(runtime: &Path) -> BuildState {
 }
 
 /// Starts fetching the pinned IDE build for this platform in the background unless it is
-/// ready or already being fetched; a platform with no build records Failed.
+/// ready under the current hiding revision or already being fetched; a platform with no
+/// build records Failed.
 /// Input: the engine root. Output: true when this call started a fetch.
 pub fn ensure(runtime: &Path) -> bool {
     match crate::update::target()
@@ -166,8 +168,12 @@ pub fn on_engine_start(runtime: &Path) -> bool {
 
 fn ensure_with(runtime: &Path, build: Build) -> bool {
     assert!(manifest::version_valid(&build.version));
-    if matches!(state(runtime), BuildState::Ready { ref version, .. } if *version == build.version)
+    let folder = installed(&build);
+    if let BuildState::Ready { version, root } = state(runtime)
+        && version == build.version
+        && root.file_name() == Some(std::ffi::OsStr::new(&folder))
     {
+        prune(&runtime.join(IDE_FOLDER).join("builds"), &folder);
         return false;
     }
     if !ACTIVE
@@ -195,7 +201,8 @@ fn ensure_with(runtime: &Path, build: Build) -> bool {
         .is_ok()
 }
 
-/// Downloads, verifies and extracts one build, then records and returns where it ended.
+/// Downloads, verifies, extracts and hides one build's removed parts, then records and
+/// returns where it ended.
 /// Inputs: the engine root and the build. Output: Ready or Failed with its code.
 fn fetch(runtime: &Path, build: &Build) -> BuildState {
     let finished = match install(runtime, build) {
@@ -209,6 +216,13 @@ fn fetch(runtime: &Path, build: &Build) -> BuildState {
         Ok(()) => finished,
         Err(error) => BuildState::Failed { code: error.0 },
     }
+}
+
+/// The folder a build installs under: its version and the [`super::hide::REVISION`] it was
+/// hidden with, so a build installed under another revision is fetched again.
+/// Input: the build. Output: the folder name.
+fn installed(build: &Build) -> String {
+    format!("{}-{}", build.version, super::hide::REVISION)
 }
 
 fn install(runtime: &Path, build: &Build) -> Result<PathBuf, EngineError> {
@@ -231,12 +245,43 @@ fn install(runtime: &Path, build: &Build) -> Result<PathBuf, EngineError> {
     }
     extract(&archive, &staging)?;
     check_tree(&staging)?;
-    let root = builds.join(&build.version);
+    super::hide::apply(&staging)?;
+    let root = builds.join(installed(build));
     if root.exists() {
         std::fs::remove_dir_all(&root).map_err(storage)?;
     }
     std::fs::rename(&staging, &root).map_err(storage)?;
+    prune(&builds, &installed(build));
     Ok(root)
+}
+
+/// Removes every entry of the engine's builds folder but the ready build: an older version,
+/// a build hidden under an earlier revision, or a staging leftover. It runs once the new
+/// build is in place and before its state is recorded, or at engine start when the build is
+/// already ready, so no IDE server runs from what it removes. Nothing is removed unless the
+/// kept build is a folder there. A link is removed, never followed, and a failure leaves
+/// that entry for the next start. Inputs: the builds folder and the kept build's name.
+fn prune(builds: &Path, kept: &str) {
+    if !builds.join(kept).is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(builds) else {
+        return;
+    };
+    for entry in entries.take(BUILDS_SCAN_MAX).flatten() {
+        if entry.file_name() == kept {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(error) => Err(error),
+        };
+        if removed.is_err() {
+            eprintln!("ide_build_prune_failed");
+        }
+    }
 }
 
 fn download(runtime: &Path, build: &Build, archive: &Path) -> Result<String, EngineError> {
@@ -313,32 +358,15 @@ fn extract(archive: &Path, staging: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Tells whether a link target as written, read from a link `depth` folders below the root,
-/// stays inside the root, so it still does once the root is renamed. Inputs: the depth and
-/// the target. Output: the answer.
-fn link_inside(depth: usize, target: &Path) -> bool {
-    let mut depth = depth;
-    for part in target.components() {
-        match part {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir if depth > 0 => depth -= 1,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
-        }
-    }
-    true
-}
-
-/// Walks the extracted tree without following links and refuses a link that leaves it as
-/// written or once followed on disk, a dangling or looping link, a hard link shared with a
-/// file outside it, or anything but files, folders and links.
-/// Input: the staging folder. Output: Ok, or `ide_build_archive_invalid`.
+/// Walks the extracted tree without following links and refuses any link, since the pinned
+/// builds hold none and a chain of links can resolve outside the tree, a hard link shared
+/// with a file outside it, or anything but files and folders. Input: the staging folder.
+/// Output: Ok, or `ide_build_archive_invalid`.
 fn check_tree(staging: &Path) -> Result<(), EngineError> {
-    let base = std::fs::canonicalize(staging).map_err(invalid)?;
-    let mut folders = vec![(staging.to_path_buf(), 0_usize)];
+    let mut folders = vec![staging.to_path_buf()];
     let mut shared: BTreeMap<(u64, u64), (u64, u64)> = BTreeMap::new();
     let mut count = 0_usize;
-    while let Some((folder, depth)) = folders.pop() {
+    while let Some(folder) = folders.pop() {
         for entry in std::fs::read_dir(&folder).map_err(invalid)? {
             count += 1;
             if count > ENTRIES_MAX {
@@ -347,14 +375,8 @@ fn check_tree(staging: &Path) -> Result<(), EngineError> {
             let path = entry.map_err(invalid)?.path();
             let metadata = std::fs::symlink_metadata(&path).map_err(invalid)?;
             let kind = metadata.file_type();
-            if kind.is_symlink() {
-                if !link_inside(depth, &std::fs::read_link(&path).map_err(invalid)?)
-                    || !std::fs::canonicalize(&path).is_ok_and(|end| end.starts_with(&base))
-                {
-                    return Err(failure("ide_build_archive_invalid"));
-                }
-            } else if kind.is_dir() {
-                folders.push((path, depth + 1));
+            if kind.is_dir() {
+                folders.push(path);
             } else if kind.is_file() {
                 note_links(&metadata, &mut shared);
             } else {

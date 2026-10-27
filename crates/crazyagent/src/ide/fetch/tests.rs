@@ -137,10 +137,20 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// A small real server tree: a start script and a product file.
+/// The folder a build of [`VERSION`] installs under.
+fn installed_folder() -> String {
+    format!("{VERSION}-{}", crate::ide::hide::REVISION)
+}
+
+/// A small real server tree: a start script, a product file and a workbench bundle holding
+/// the pinned build's removed parts.
 fn server_tree(root: &Path) -> PathBuf {
     let source = root.join("source");
     write(&source.join("bin/codium-server"), "#!/bin/sh\necho ok\n");
+    write(
+        &source.join(crate::ide::hide::BUNDLE),
+        crate::ide::hide::tests::SHIPPED,
+    );
     write(
         &source.join("product.json"),
         "{\"nameShort\":\"VSCodium\"}\n",
@@ -392,12 +402,12 @@ fn extract_refuses_entries_outside_the_target() {
     link("L/..", &through.join("M"), true);
     let through_archive = root.join("through.tar.gz");
     pack(&through, &through_archive);
-    let chained = root.join("chained");
-    write(&chained.join("product.json"), "{}\n");
-    link(".", &chained.join("a"), true);
-    link("a/../product.json", &chained.join("b"), false);
-    let chained_archive = root.join("chained.tar.gz");
-    pack(&chained, &chained_archive);
+    let dotted = root.join("dotted");
+    write(&dotted.join("product.json"), "{}\n");
+    link(".", &dotted.join("a"), true);
+    link("a/../product.json", &dotted.join("b"), false);
+    let dotted_archive = root.join("dotted.tar.gz");
+    pack(&dotted, &dotted_archive);
     let dangling = root.join("dangling");
     write(&dangling.join("product.json"), "{}\n");
     link("missing.json", &dangling.join("gone.json"), false);
@@ -409,15 +419,41 @@ fn extract_refuses_entries_outside_the_target() {
     link("first", &looping.join("second"), false);
     let looping_archive = root.join("looping.tar.gz");
     pack(&looping, &looping_archive);
+    let inside = root.join("inside");
+    write(&inside.join("product.json"), "{}\n");
+    std::fs::create_dir(inside.join("bin")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("../product.json", inside.join("bin/product")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("..\\product.json", inside.join("bin/product")).unwrap();
+    let inside_archive = root.join("inside.tar.gz");
+    pack(&inside, &inside_archive);
+    let chained = root.join("chained");
+    write(&chained.join("product.json"), "{}\n");
+    std::fs::create_dir(chained.join("d")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("..", chained.join("d/a")).unwrap();
+        std::os::unix::fs::symlink("d/a/../outside", chained.join("x")).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir("..", chained.join("d/a")).unwrap();
+        std::os::windows::fs::symlink_file("d\\a\\..\\outside", chained.join("x")).unwrap();
+    }
+    let chained_archive = root.join("chained.tar.gz");
+    pack(&chained, &chained_archive);
     for (case, archive) in [
         ("absolute", &absolute_archive),
         ("dots", &dots_archive),
         ("link", &link_archive),
         ("rooted", &rooted_archive),
         ("through", &through_archive),
-        ("chained", &chained_archive),
+        ("dotted", &dotted_archive),
         ("dangling", &dangling_archive),
         ("looping", &looping_archive),
+        ("inside", &inside_archive),
+        ("chained", &chained_archive),
     ] {
         let place = root.join(format!("case-{case}"));
         std::fs::create_dir(&place).unwrap();
@@ -449,18 +485,10 @@ fn extract_refuses_entries_outside_the_target() {
 fn verified_archive_extracts_atomically_and_reports_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let runtime = runtime(tmp.path());
-    let source = server_tree(tmp.path());
-    std::fs::create_dir(source.join("resources")).unwrap();
-    link(
-        "../product.json",
-        &source.join("resources/product.json"),
-        false,
-    );
-    link("bin", &source.join("current"), true);
-    let bytes = pack(&source, &tmp.path().join("build.tar.gz"));
+    let bytes = pack(&server_tree(tmp.path()), &tmp.path().join("build.tar.gz"));
     let server = Server::start(bytes.clone(), false);
     let finished = fetch(&runtime, &build(&server.url, &bytes));
-    let root = runtime.join("ide/builds").join(VERSION);
+    let root = runtime.join("ide/builds").join(installed_folder());
     assert_eq!(
         finished,
         BuildState::Ready {
@@ -478,18 +506,8 @@ fn verified_archive_extracts_atomically_and_reports_ready() {
         "{\"nameShort\":\"VSCodium\"}\n"
     );
     assert_eq!(
-        std::fs::read_to_string(root.join("resources/product.json")).unwrap(),
-        "{\"nameShort\":\"VSCodium\"}\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join("current/codium-server")).unwrap(),
-        "#!/bin/sh\necho ok\n"
-    );
-    assert!(
-        std::fs::symlink_metadata(root.join("current"))
-            .unwrap()
-            .file_type()
-            .is_symlink()
+        std::fs::read_to_string(root.join(crate::ide::hide::BUNDLE)).unwrap(),
+        crate::ide::hide::tests::HIDDEN
     );
     #[cfg(unix)]
     {
@@ -500,7 +518,7 @@ fn verified_archive_extracts_atomically_and_reports_ready() {
             .mode();
         assert_eq!(mode & 0o111, 0o111);
     }
-    assert_eq!(files_in(&runtime.join("ide/builds")), [VERSION.to_owned()]);
+    assert_eq!(files_in(&runtime.join("ide/builds")), [installed_folder()]);
     assert!(files_in(&runtime.join("ide/downloads")).is_empty());
     std::fs::remove_dir_all(&root).unwrap();
     assert_eq!(state(&runtime), BuildState::Missing);
@@ -534,10 +552,90 @@ fn ensure_twice_starts_one_download() {
         ready,
         BuildState::Ready {
             version: VERSION.into(),
-            root: runtime.join("ide/builds").join(VERSION)
+            root: runtime.join("ide/builds").join(installed_folder())
         }
     );
     assert!(!ensure_with(&runtime, build(&server.url, &bytes)));
+    assert_eq!(server.hits(), 1);
+}
+
+#[test]
+fn a_build_whose_removed_parts_cannot_be_hidden_never_installs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(tmp.path());
+    let source = server_tree(tmp.path());
+    write(
+        &source.join(crate::ide::hide::BUNDLE),
+        &crate::ide::hide::tests::SHIPPED.replace("\"Manage Accounts\")", "\"Accounts\")"),
+    );
+    let bytes = pack(&source, &tmp.path().join("build.tar.gz"));
+    let server = Server::start(bytes.clone(), false);
+    let finished = fetch(&runtime, &build(&server.url, &bytes));
+    assert_eq!(
+        finished,
+        BuildState::Failed {
+            code: "ide_build_patch_failed".into()
+        }
+    );
+    assert_eq!(state(&runtime), finished);
+    assert!(files_in(&runtime.join("ide/builds")).is_empty());
+    assert!(files_in(&runtime.join("ide/downloads")).is_empty());
+}
+
+#[test]
+fn a_ready_build_installed_before_hiding_is_fetched_again_and_then_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(tmp.path());
+    let old = runtime.join("ide/builds").join(VERSION);
+    write(&old.join("product.json"), "{}\n");
+    write_state(
+        &runtime,
+        &BuildState::Ready {
+            version: VERSION.into(),
+            root: old.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(state(&runtime), BuildState::Ready { .. }));
+    let bytes = pack(&server_tree(tmp.path()), &tmp.path().join("build.tar.gz"));
+    let server = Server::start(bytes.clone(), false);
+    assert!(ensure_with(&runtime, build(&server.url, &bytes)));
+    let root = runtime.join("ide/builds").join(installed_folder());
+    let ready = wait_for(
+        &runtime,
+        |now| matches!(now, BuildState::Ready { root: at, .. } if *at == root),
+    );
+    assert_eq!(
+        ready,
+        BuildState::Ready {
+            version: VERSION.into(),
+            root: root.clone()
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(crate::ide::hide::BUNDLE)).unwrap(),
+        crate::ide::hide::tests::HIDDEN
+    );
+    assert!(!old.exists());
+    assert_eq!(files_in(&runtime.join("ide/builds")), [installed_folder()]);
+
+    let builds = runtime.join("ide/builds");
+    write(&builds.join("0.9.0-h1/product.json"), "{}\n");
+    write(
+        &builds.join(format!(".staging-{VERSION}/product.json")),
+        "{}\n",
+    );
+    let outside = tmp.path().join("outside");
+    write(&outside.join("keep.txt"), "keep\n");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, builds.join("linked")).unwrap();
+    assert!(!ensure_with(&runtime, build(&server.url, &bytes)));
+    assert_eq!(files_in(&builds), [installed_folder()]);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(root.join(crate::ide::hide::BUNDLE).is_file());
     assert_eq!(server.hits(), 1);
 }
 
