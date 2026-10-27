@@ -593,6 +593,7 @@ pub struct Agents {
     hosts: Mutex<Vec<String>>,
     holds: Holds,
     next_hold: AtomicU64,
+    typing: crate::team::master::OwnerTyping,
 }
 
 impl Agents {
@@ -635,6 +636,7 @@ impl Agents {
             hosts: Mutex::new(Vec::new()),
             holds: Arc::default(),
             next_hold: AtomicU64::new(0),
+            typing: crate::team::master::OwnerTyping::new(root.join("engine.db")),
         };
         agents.recover()?;
         agents.prune()?;
@@ -647,6 +649,12 @@ impl Agents {
     #[cfg(not(unix))]
     pub fn open(_root: &Path) -> Result<Self, LaunchError> {
         Err(failure("agent_root_unavailable"))
+    }
+
+    /// The owner typing signal of this engine's team agent terminals: the terminal viewer
+    /// records the owner's keys in it and live master input reads it. Output: the signal.
+    pub fn typing(&self) -> &crate::team::master::OwnerTyping {
+        &self.typing
     }
 
     fn db(&self) -> Result<MutexGuard<'_, Connection>, LaunchError> {

@@ -389,7 +389,8 @@ fn role_handle(text: &str) -> Result<Option<String>, ()> {
     names::handle(text).map(Some).ok_or(())
 }
 
-/// Writes one call into the mailbox and waits for the engine's answer. A call still in the
+/// Writes one call into the mailbox under a part name and renames it into place, so the
+/// engine never takes half a call, then waits for the engine's answer. A call still in the
 /// mailbox at the deadline is withdrawn, so the engine never runs it; one the engine has
 /// claimed is reported as taken but unanswered. Takes the mailbox, the call and the wait.
 /// Returns the answer text and whether it is an error.
@@ -405,12 +406,14 @@ fn ask(mailbox: &Path, call: &Call, wait: std::time::Duration) -> (String, bool)
         return (UNSENT.into(), true);
     };
     line.push(b'\n');
+    let part = mailbox.join(format!("{id}{PART_SUFFIX}"));
     let request = mailbox.join(format!("{id}{CALL_SUFFIX}"));
-    if create_private(&request)
+    if create_private(&part)
         .and_then(|mut file| file.write_all(&line))
+        .and_then(|()| std::fs::rename(&part, &request))
         .is_err()
     {
-        let _ = std::fs::remove_file(&request);
+        let _ = std::fs::remove_file(&part);
         return (UNSENT.into(), true);
     }
     let answered = mailbox.join(format!("{id}{REPLY_SUFFIX}"));

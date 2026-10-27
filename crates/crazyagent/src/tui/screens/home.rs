@@ -503,12 +503,20 @@ impl Home {
             "Pool: {}",
             card.pool.clone().unwrap_or_else(|| "none".into())
         );
-        let corner = match card.activity.suggestions {
-            0 => styled(created, Role::Muted, theme),
-            count => styled(
+        let corner = match (card.activity.notifications, card.activity.suggestions) {
+            (0, 0) => styled(created, Role::Muted, theme),
+            (0, count) => styled(
                 format!(
                     "{count} suggested memor{}",
                     if count == 1 { "y" } else { "ies" }
+                ),
+                Role::Warning,
+                theme,
+            ),
+            (count, _) => styled(
+                format!(
+                    "{count} new team notification{}",
+                    if count == 1 { "" } else { "s" }
                 ),
                 Role::Warning,
                 theme,

@@ -110,6 +110,8 @@ test("@ completes the master and every sub-agent by its handle, and files when a
   assert.equal(files.length, model.FILES_MAX);
   assert.deepEqual(files.slice(0, 2).map((mention) => [mention.handle, mention.kind]), [["src/main.rs", "file"], ["README.md", "file"]],
     "a path with a space cannot be one tag, so it is left out");
+  assert.deepEqual(model.fileMentions(["src/\u202etxt.exe", "a\u2067b.rs", "c\u200fd.rs", "ok.rs"]).map((mention) => mention.handle), ["ok.rs"],
+    "a path holding a direction character would show reordered once inserted, so it is left out");
 });
 
 test("@ opens only at a word start, matches handles and labels, and inserts the tag with a space", () => {
