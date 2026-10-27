@@ -774,7 +774,8 @@ pub(super) fn discard(
 /// Brings a discarded change set back as pending and puts its head back in the agent's
 /// worktree. Inputs: the store, the change set and the time now. Output: Ok once
 /// pending; refused once the restore window passed, while the worktree has another
-/// open change set, or while it holds unrecorded work.
+/// open change set, or while it holds unrecorded work or a HEAD other than the commit
+/// the worktree's next change set would open above, so commits made since are kept.
 pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(), EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -794,7 +795,9 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     let current = repo
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;
-    if !holds_only(&repo, &current)? {
+    if store::base_of(db, worktree)?.as_deref() != Some(current.as_str())
+        || !holds_only(&repo, &current)?
+    {
         return Err(failure("changes_agent_busy"));
     }
     let shared = shared(&record.repository)?;

@@ -10,7 +10,8 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const NOW_MS: u64 = 1_800_000_000_000;
 
 /// One owner repository with one agent worktree added from it, an owner home holding
-/// no global git config, and an engine root holding the change set store.
+/// no global git config that engine git in the test reads in place of HOME, and an
+/// engine root holding the change set store.
 struct Case {
     _tmp: tempfile::TempDir,
     repo: PathBuf,
@@ -58,6 +59,7 @@ impl Case {
         for folder in [&repo, &home, &engine] {
             std::fs::create_dir(folder).unwrap();
         }
+        git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
         git_in(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
         git_in(&home, &repo, &["config", "user.name", "Repo Owner"]);
         git_in(
@@ -597,6 +599,45 @@ fn discard_keeps_the_work_restorable_for_seven_days_and_restore_brings_it_back()
         refused(restore(&case.db, &id, NOW_MS)),
         "changes_agent_has_pending"
     );
+}
+
+#[test]
+fn restore_refuses_while_the_worktree_holds_commits_made_after_its_turn_and_keeps_them() {
+    for before_discard in [false, true] {
+        let case = Case::new();
+        case.edit("src/new.rs", "fn main() {}\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        if before_discard {
+            case.edit("later.txt", "made before the discard\n");
+            case.agent_commit("Work before the discard");
+        }
+        discard(&case.db, &id, &head, NOW_MS).unwrap();
+        if !before_discard {
+            assert_eq!(case.agent_head(), case.tip());
+            case.edit("later.txt", "made after the discard\n");
+            case.agent_commit("Work after the discard");
+        }
+        let kept = case.agent_head();
+        let text = std::fs::read_to_string(case.workspace.worktree.join("later.txt")).unwrap();
+        assert_eq!(
+            refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+            "changes_agent_busy",
+            "before the discard: {before_discard}"
+        );
+        assert_eq!(case.agent_head(), kept);
+        assert_eq!(
+            std::fs::read_to_string(case.workspace.worktree.join("later.txt")).unwrap(),
+            text
+        );
+        assert_eq!(case.view(&id).state, ChangeState::Discarded);
+        let reference = format!("refs/crazyagent/discarded/{}", id.as_str());
+        assert_eq!(case.owner(&["rev-parse", &reference]).trim(), head);
+        assert_eq!(
+            case.owner(&["for-each-ref", "refs/crazyagent/pending/"]),
+            ""
+        );
+    }
 }
 
 #[test]
@@ -1282,6 +1323,109 @@ fn agent_history_within_the_bounds_lands_with_an_ignored_file_the_owner_tracks()
         std::fs::read_to_string(case.repo.join("keep.log")).unwrap(),
         "kept\nand more\n"
     );
+}
+
+#[test]
+fn the_owners_ignore_file_is_the_global_setting_else_the_default_and_only_a_real_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, xdg) = (root.join("home"), root.join("xdg"));
+    std::fs::create_dir(&home).unwrap();
+    assert_eq!(git::owner_excludes(&home, None), None);
+    write(&home.join(".config/git/ignore"), "secret.env\n");
+    assert_eq!(
+        git::owner_excludes(&home, None),
+        Some(home.join(".config/git/ignore"))
+    );
+    assert_eq!(git::owner_excludes(&home, Some(xdg.as_path())), None);
+    write(&xdg.join("git/ignore"), "secret.env\n");
+    assert_eq!(
+        git::owner_excludes(&home, Some(xdg.as_path())),
+        Some(xdg.join("git/ignore"))
+    );
+    assert_eq!(
+        git::owner_excludes(&home, Some(Path::new("xdg"))),
+        Some(home.join(".config/git/ignore"))
+    );
+    assert_eq!(git::owner_excludes(Path::new("home"), None), None);
+    write(
+        &home.join(".gitconfig"),
+        "[core]\n\texcludesFile = ~/ignores/global\n",
+    );
+    assert_eq!(git::owner_excludes(&home, None), None);
+    write(&home.join("ignores/real"), "secret.env\n");
+    std::os::unix::fs::symlink(home.join("ignores/real"), home.join("ignores/global")).unwrap();
+    assert_eq!(
+        git::owner_excludes(&home, None),
+        Some(home.join("ignores/real"))
+    );
+    std::fs::remove_file(home.join("ignores/global")).unwrap();
+    std::fs::create_dir(home.join("ignores/global")).unwrap();
+    assert_eq!(git::owner_excludes(&home, None), None);
+    write(
+        &home.join(".gitconfig"),
+        "[core]\n\texcludesFile = relative/ignore\n",
+    );
+    write(&home.join("relative/ignore"), "secret.env\n");
+    assert_eq!(git::owner_excludes(&home, None), None);
+}
+
+#[test]
+fn files_the_owners_global_ignore_file_excludes_stay_out_of_change_sets() {
+    let configured: [(&str, Option<&str>); 2] = [
+        (".config/git/ignore", None),
+        (
+            "ignores/global",
+            Some("[core]\n\texcludesFile = ~/ignores/global\n"),
+        ),
+    ];
+    for (file, config) in configured {
+        let case = Case::new();
+        write(&case.home.join(file), "secret.env\n");
+        if let Some(config) = config {
+            write(&case.home.join(".gitconfig"), config);
+        }
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        case.edit("secret.env", "TOKEN=x\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let view = case.view(&id);
+        assert_eq!(view.files, 1, "{file}");
+        assert_eq!(
+            case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
+            "README\n",
+            "{file}"
+        );
+        assert_eq!(case.agent(&["ls-files", "--", "secret.env"]), "", "{file}");
+        discard(&case.db, &id, &view.head, NOW_MS).unwrap();
+        assert_eq!(case.agent_head(), case.tip(), "{file}");
+        assert_eq!(
+            std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(case.workspace.worktree.join("secret.env")).unwrap(),
+            "TOKEN=x\n"
+        );
+        case.agent(&["add", "-f", "secret.env"]);
+        let head = case.agent_head();
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: "turn-2".into(),
+            prompt_line: "Add the env file".into(),
+        };
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_ignored_files",
+            "{file}"
+        );
+        assert_eq!(case.agent_head(), head, "{file}");
+        assert_eq!(case.view(&id).state, ChangeState::Discarded, "{file}");
+        assert_eq!(
+            list(&case.db, &case.workspace.project).unwrap().len(),
+            1,
+            "{file}"
+        );
+    }
 }
 
 #[test]
