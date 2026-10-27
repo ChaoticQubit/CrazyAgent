@@ -10,7 +10,8 @@ pub(super) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
 const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Every code a Changes request can answer an owner client with: the landing engine's
-/// refusals, this protocol's own, and the owner connection's it travels on.
+/// refusals, this protocol's own, the owner connection's it travels on, and the team's
+/// refusals of the resolve work an Update hands a team agent.
 pub const CHANGES_CODES: &[&str] = &[
     "changes_agent_busy",
     "changes_agent_has_pending",
@@ -51,6 +52,9 @@ pub const CHANGES_CODES: &[&str] = &[
     "owner_socket_replaced",
     "owner_socket_unsafe",
     "peer_owner_mismatch",
+    "team_agent_not_found",
+    "team_conversation_full",
+    "team_task_invalid",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
