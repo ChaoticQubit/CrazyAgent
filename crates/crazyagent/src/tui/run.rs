@@ -18,6 +18,7 @@ use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -93,16 +94,22 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
 }
 
 /// Runs the rebuilt TUI until the owner quits or a signal arrives.
-/// Inputs: the unbound engine client and the stop flag set by signals.
+/// Inputs: the unbound engine client, the stop flag set by signals and the
+/// editor-running flag the signal listener reads.
 /// Output: Ok after a clean exit, or the terminal or connection error.
-pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
+pub fn run(
+    client: Client,
+    stopped: &AtomicBool,
+    editor_running: Arc<AtomicBool>,
+) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
         .map_err(|error| TuiError(error.to_string()))?;
-    let ctx = context(
+    let mut ctx = context(
         |name| std::env::var(name).ok(),
         socket.display().to_string(),
     )?;
+    ctx.editor_running = editor_running;
     let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;

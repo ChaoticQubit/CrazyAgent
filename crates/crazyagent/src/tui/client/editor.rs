@@ -9,6 +9,7 @@ use crossterm::terminal::{
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::Ordering;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -52,10 +53,11 @@ pub(in crate::tui) fn ask(ctx: &mut Ctx, file: PathBuf, note: Option<&'static st
     ctx.editing = Some(Edit { file, note });
 }
 
-/// Opens the file waiting for the owner's editor, if any, and says how it ended.
-/// Takes the context and the terminal writer. Returns whether the editor ran, so the
-/// caller redraws the whole screen, or the error of a terminal that could not be handed
-/// over or taken back.
+/// Opens the file waiting for the owner's editor, if any, and says how it ended. Marks
+/// the editor running meanwhile, so the TUI ignores the Ctrl-C a waiting GUI editor's
+/// terminal sends. Takes the context and the terminal writer. Returns whether the editor
+/// ran, so the caller redraws the whole screen, or the error of a terminal that could
+/// not be handed over or taken back.
 pub(in crate::tui) fn open_waiting(ctx: &mut Ctx, out: &mut impl Write) -> std::io::Result<bool> {
     let Some(edit) = ctx.editing.take() else {
         return Ok(false);
@@ -64,7 +66,13 @@ pub(in crate::tui) fn open_waiting(ctx: &mut Ctx, out: &mut impl Write) -> std::
         .editor
         .clone()
         .expect("a file waits for the editor only while EDITOR is set");
-    match run(out, &mut command(&editor, &edit.file))? {
+    assert!(
+        !ctx.editor_running.swap(true, Ordering::Relaxed),
+        "one editor runs at a time"
+    );
+    let ran = run(out, &mut command(&editor, &edit.file));
+    ctx.editor_running.store(false, Ordering::Relaxed);
+    match ran? {
         Ok(()) => {
             if let Some(note) = edit.note {
                 ctx.say(Message::success(note, ""));
