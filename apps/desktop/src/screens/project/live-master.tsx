@@ -60,6 +60,14 @@ export function wantSettled(want: Want | null, readAt: number): boolean {
   return want !== null && readAt > want.after;
 }
 
+/** The toast for a live master stop the engine refused. It names the project, since the owner
+ * may be on another page by the time the refusal arrives. Inputs: the project name and why
+ * the stop failed. Output: the text. */
+export function stopFailedNote(name: string, failed: Live): string {
+  const why = failed.kind === "refused" ? failed.copy : "It isn't in this build.";
+  return `Couldn't stop the live master of ${displayText(name || "this project")}. ${why}`;
+}
+
 /** The project's master area. A Codex or Claude Code master is its own app in a live
  * terminal filling the area, where Enter sends and Shift+Enter starts a new line; the first
  * open of a project whose switch was never set turns it on, and the header stops and starts
@@ -77,8 +85,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const [live, setLive] = useState<Live>({ kind: "starting" });
   const [want, setWant] = useState<Want | null>(null);
   const asked = useRef(false);
-  const current = useRef(data.id);
-  current.current = data.id;
+  const mounted = useRef(true);
   const engine = liveSwitch(data.team.result, data.id);
   const on = want?.on ?? engine?.on;
 
@@ -88,19 +95,24 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     setWant({ on: next, after: Infinity });
     setLive(next ? { kind: "starting" } : { kind: "stopped", problem: null });
     const turned = await setLiveMaster(id, next);
-    if (current.current !== id) return;
     const state = turned.kind === "ok" ? receiptState(turned.value) : null;
     const failed: Live | null = turned.kind === "not_ready" ? { kind: "not_ready" }
       : turned.kind !== "ok" ? { kind: "refused", code: turned.code, copy: failureCopy(turned) }
       : state?.kind === "rejected" ? { kind: "refused", code: state.code, copy: failureCopy(state) }
       : null;
+    if (failed && !next) data.notify(stopFailedNote(data.name, failed));
+    if (!mounted.current) return;
     if (failed) {
       setWant(null);
       if (next) setLive(failed);
-      else data.notify(`Couldn't stop the live master. ${failed.kind === "refused" ? failed.copy : "It isn't in this build."}`);
     } else setWant({ on: next, after: Date.now() });
     data.reloadTeam();
   };
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     if (wantSettled(want, data.team.at)) setWant(null);
@@ -116,7 +128,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     let stopped = false;
     const read = async () => {
       const graph = await loadTeamGraph(id);
-      if (stopped || current.current !== id) return;
+      if (stopped) return;
       if (graph.kind === "not_ready") return setLive({ kind: "not_ready" });
       if (graph.kind !== "ok") return;
       const node = masterNode(graph.value.nodes);
