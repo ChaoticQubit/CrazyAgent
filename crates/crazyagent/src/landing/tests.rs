@@ -743,6 +743,46 @@ fn engine_head_moves_never_follow_a_reflog_link_in_the_agent_admin_folder() {
 }
 
 #[test]
+fn engine_refs_are_moved_and_deleted_without_following_a_symbolic_ref_or_reflog_link() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let tip = case.tip();
+    let config = case.repo.join(".git/config");
+    let before = std::fs::read(&config).unwrap();
+    let pending = format!("refs/crazyagent/pending/{}", id.as_str());
+    let discarded = format!("refs/crazyagent/discarded/{}", id.as_str());
+    let log = case.repo.join(".git/logs").join(&discarded);
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&config, &log).unwrap();
+    assert_eq!(
+        refused(discard(&case.db, &id, &head, NOW_MS)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    std::fs::remove_file(&log).unwrap();
+    case.owner(&["symbolic-ref", &pending, "refs/heads/main"]);
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(case.tip(), tip);
+    assert_eq!(case.owner(&["rev-parse", &discarded]).trim(), head);
+    case.owner(&["symbolic-ref", &discarded, "refs/heads/main"]);
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    assert_eq!(case.tip(), tip);
+    assert_eq!(case.owner(&["rev-parse", &pending]).trim(), head);
+    assert_eq!(
+        case.owner(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/crazyagent/discarded/"
+        ]),
+        ""
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+}
+
+#[test]
 fn a_discarded_change_set_ref_is_pruned_after_seven_days() {
     let case = Case::new();
     case.edit("src/new.rs", "fn main() {}\n");

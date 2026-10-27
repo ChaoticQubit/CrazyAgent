@@ -256,6 +256,25 @@ pub(super) fn discarded_ref(id: &ChangeSetId) -> String {
     format!("refs/crazyagent/discarded/{}", id.as_str())
 }
 
+/// Points one of the engine's own refs at a commit, or deletes it, in the owner's shared
+/// repository, never through a symbolic ref or a reflog link that anyone able to write
+/// the repository's refs left there. Inputs: the shared repository, its root, the ref and
+/// the commit, none to delete. Output: Ok once done.
+pub(super) fn set_engine_ref(
+    shared: &Repo,
+    repository: &Path,
+    reference: &str,
+    commit: Option<&str>,
+) -> Result<(), EngineError> {
+    assert!(reference.starts_with("refs/crazyagent/"));
+    plain_log(&repository.join(".git"), reference)?;
+    match commit {
+        Some(commit) => shared.run(&["update-ref", "--no-deref", reference, commit])?,
+        None => shared.run(&["update-ref", "--no-deref", "-d", reference])?,
+    };
+    Ok(())
+}
+
 /// Opens the owner repository's shared git folder for object and ref work.
 pub(super) fn shared(record_repository: &Path) -> Result<Repo, EngineError> {
     Repo::open(&record_repository.join(".git"), None)
@@ -854,7 +873,12 @@ pub(super) fn record(
     record.updated_ms = now;
     store::save(db, &record)?;
     let shared = shared(&workspace.repository)?;
-    shared.run(&["update-ref", &pending_ref(&record.id), &current])?;
+    set_engine_ref(
+        &shared,
+        &workspace.repository,
+        &pending_ref(&record.id),
+        Some(&current),
+    )?;
     if let Some(commit) = committed {
         agent.move_head(Some(&head), &commit, "CrazyAgent: turn end")?;
     }
@@ -926,7 +950,12 @@ pub(super) fn discard(
     let target = shared
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;
-    shared.run(&["update-ref", &discarded_ref(id), &record.head])?;
+    set_engine_ref(
+        &shared,
+        &record.repository,
+        &discarded_ref(id),
+        Some(&record.head),
+    )?;
     let until = now
         .checked_add(RESTORE_WINDOW_MS)
         .ok_or_else(|| failure("changes_unavailable"))?;
@@ -936,7 +965,7 @@ pub(super) fn discard(
     record.conflicts.clear();
     record.updated_ms = now;
     store::save(db, &record)?;
-    shared.run(&["update-ref", "-d", &pending_ref(id)])?;
+    set_engine_ref(&shared, &record.repository, &pending_ref(id), None)?;
     let head = record.head.clone();
     reset_if_quiet(db, &mut record, &head, &target)?;
     Ok(until)
@@ -970,7 +999,12 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         return Err(failure("changes_agent_busy"));
     }
     let shared = shared(&record.repository)?;
-    shared.run(&["update-ref", &pending_ref(id), &record.head])?;
+    set_engine_ref(
+        &shared,
+        &record.repository,
+        &pending_ref(id),
+        Some(&record.head),
+    )?;
     record.state = ChangeState::Pending;
     record.restorable_until_ms = None;
     record.updated_ms = now;
@@ -981,7 +1015,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     reset_agent(&agent, &record.head)?;
     record.intent = None;
     store::save(db, &record)?;
-    shared.run(&["update-ref", "-d", &discarded_ref(id)])?;
+    set_engine_ref(&shared, &record.repository, &discarded_ref(id), None)?;
     Ok(())
 }
 
@@ -1015,7 +1049,12 @@ fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
         return Ok(false);
     }
     if std::fs::symlink_metadata(record.repository.join(".git")).is_ok_and(|found| found.is_dir()) {
-        shared(&record.repository)?.run(&["update-ref", "-d", &discarded_ref(&record.id)])?;
+        set_engine_ref(
+            &shared(&record.repository)?,
+            &record.repository,
+            &discarded_ref(&record.id),
+            None,
+        )?;
     }
     record.pruned = true;
     store::save(db, &record)?;

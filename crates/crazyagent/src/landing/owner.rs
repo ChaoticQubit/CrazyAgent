@@ -234,7 +234,12 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
-    shared(&record.repository)?.run(&["update-ref", "-d", &pending_ref(&record.id)])?;
+    flow::set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &pending_ref(&record.id),
+        None,
+    )?;
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
 }
@@ -387,7 +392,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let stats = diff::stats(&owner, &record.base, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
-    owner.run(&["update-ref", &pending_ref(id), &merged])?;
+    flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });
