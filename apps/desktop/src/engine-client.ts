@@ -746,9 +746,14 @@ export interface TeamMessage {
   created_ms: number;
 }
 
+/** What the live master does with the conversation when the master harness changes: carry it
+ * over to the new harness, or start the new harness fresh. */
+export type SwitchMode = "carry" | "fresh";
+
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  on_harness_switch?: SwitchMode;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
@@ -855,6 +860,10 @@ export function teamCancel(id: string, task: number | null, generation: number):
 
 export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
 }
 
 /** Turns the project's live master on or off. Inputs: the project id, the switch and a

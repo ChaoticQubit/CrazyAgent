@@ -322,6 +322,41 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+/// The most stopped masters of one project the last-master lookup reads.
+const LAST_MASTERS_READ: i64 = 64;
+
+/// Finds the project's newest stopped or failed master on a harness with its worktree still
+/// recorded, so it starts again in its own worktree and home. The harness matches by catalog
+/// entry, so a master recorded under an alias ("claude") serves a plan that names the entry
+/// ("claude-code"). Takes the database, project and harness. Returns the agent, or None.
+fn last_master(
+    connection: &Connection,
+    project: &ProjectId,
+    harness: &str,
+) -> Result<Option<i64>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT a.id,CASE WHEN length(a.harness)<=64 THEN a.harness END FROM team_agents a
+             JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
+             WHERE a.project=?1 AND a.role='master' AND a.status IN ('stopped','failed')
+             ORDER BY a.id DESC LIMIT ?2",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(params![project.as_str(), LAST_MASTERS_READ], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= LAST_MASTERS_READ as usize);
+    Ok(rows.into_iter().find_map(|(id, stored)| {
+        stored
+            .is_some_and(|stored| crate::harnesses::same(&stored, harness))
+            .then_some(id)
+    }))
+}
+
 /// Refuses team state where no 0700 directory can be made or checked.
 /// Takes the path, unused. Returns `team_state_unavailable`.
 #[cfg(not(unix))]
@@ -548,7 +583,7 @@ impl TeamRuntime {
         }
         let in_plan = match role {
             AgentRole::Master => {
-                stored.team.master == harness
+                crate::harnesses::same(&stored.team.master, &harness)
                     && stored.team.master_tools == tools
                     && self.master(&project).is_none()
             }
@@ -1622,9 +1657,12 @@ impl TeamRuntime {
     /// resuming that conversation; otherwise the project's last master on this harness
     /// starts again in its own worktree and home, so nothing it left there is lost, or a new
     /// one starts. A session with earlier turns that cannot continue gets a fresh harness
-    /// conversation seeded with them, and its note says so. Takes the setup, the master
-    /// harness, the account and the live session. Returns the agent id with the note to
-    /// show, or the plain reason it could not start.
+    /// conversation seeded with them, and its note says so. A session whose conversation ran
+    /// on another harness follows the owner's On harness switch setting: Carry over seeds
+    /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
+    /// note marks the switch. Takes the setup, the master harness, the account and the live
+    /// session. Returns the agent id with the note to show, or the plain reason it could not
+    /// start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
@@ -1636,15 +1674,49 @@ impl TeamRuntime {
         let tools = stored.team.master_tools;
         let launch = launch_harness(harness).unwrap_or(harness);
         let session = session.map(SessionId::new).transpose().map_err(error)?;
-        let mut plan = match &session {
-            Some(session) => crate::master_sessions::resume_harness(
+        let switched = match &session {
+            Some(session) => {
+                crate::master_sessions::switched_from(&self.connection, project, session, launch)?
+            }
+            None => None,
+        };
+        let mut switch_note = None;
+        let mut plan = match (&session, switched) {
+            (Some(session), Some(from)) => {
+                let to = crate::master_sessions::harness_label(launch);
+                let mode = super::on_harness_switch(&self.connection, project)?;
+                match mode {
+                    super::SwitchMode::Carry => {
+                        let kept = super::master::session_conversation(
+                            &self.connection,
+                            project,
+                            session.as_str(),
+                        )?;
+                        ResumePlan::Fresh {
+                            seed: crate::master_sessions::handoff(
+                                &self.connection,
+                                project,
+                                session,
+                                kept.as_ref(),
+                                crate::master_sessions::harness_label(&from),
+                            )?,
+                            note: crate::master_sessions::switched_note(to, mode),
+                        }
+                    }
+                    super::SwitchMode::Fresh => {
+                        switch_note = Some(crate::master_sessions::switched_note(to, mode));
+                        ResumePlan::New
+                    }
+                }
+            }
+            (Some(session), None) => crate::master_sessions::resume_harness(
                 &self.connection,
                 project,
                 session,
                 launch,
                 account.connection.as_str(),
             )?,
-            None => ResumePlan::New,
+            (None, _) => ResumePlan::New,
         };
         if let ResumePlan::Resume {
             agent,
@@ -1678,26 +1750,27 @@ impl TeamRuntime {
             ResumePlan::New => None,
             ResumePlan::Resume { .. } => unreachable!("a resume plan was handled above"),
         };
-        let last: Option<i64> = self
-            .connection
-            .query_row(
-                "SELECT a.id FROM team_agents a JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
-                 WHERE a.project=?1 AND a.role='master' AND a.harness=?2 AND a.status IN ('stopped','failed')
-                 ORDER BY a.id DESC LIMIT 1",
-                params![project.as_str(), harness],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(error)?;
-        if let Some(last) = last
-            && let Ok(id) = self.revive(stored, last, AgentRole::Master, harness, tools, account)?
-        {
-            assert_eq!(id, last);
-            return Ok(Ok(self.seat_session(id, session.as_ref(), seeded)));
-        }
-        Ok(self
-            .spawn(stored, AgentRole::Master, harness, tools, account)?
-            .map(|id| self.seat_session(id, session.as_ref(), seeded)))
+        let last = last_master(&self.connection, project, harness)?;
+        let started = match last {
+            Some(last) => {
+                match self.revive(stored, last, AgentRole::Master, harness, tools, account)? {
+                    Ok(id) => {
+                        assert_eq!(id, last);
+                        Some(id)
+                    }
+                    Err(_) => None,
+                }
+            }
+            None => None,
+        };
+        let started = match started {
+            Some(id) => Ok(id),
+            None => self.spawn(stored, AgentRole::Master, harness, tools, account)?,
+        };
+        Ok(started.map(|id| {
+            let (id, note) = self.seat_session(id, session.as_ref(), seeded);
+            (id, note.or(switch_note))
+        }))
     }
 
     /// Binds a live master that just started to the session it runs, with the seed its

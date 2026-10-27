@@ -62,6 +62,7 @@ fn status() -> TeamStatus {
     TeamStatus {
         project_id: ProjectId::new("tidepool").unwrap(),
         keep_warm: false,
+        on_harness_switch: crate::team::SwitchMode::Carry,
         paused: false,
         live_master: None,
         live_problem: None,

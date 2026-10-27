@@ -2700,3 +2700,280 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
 }
+
+const RESUMING_CLAUDE: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+id=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --resume|--session-id) id="$a" ;; esac
+  prev="$a"
+done
+[ -n "$id" ] || { echo "no session id"; exit 4; }
+d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' | /usr/bin/tr -d '\n')"
+/bin/mkdir -p "$d" || exit 1
+f="$d/$id.jsonl"
+case " $* " in *" --resume "*) [ -f "$f" ] || { echo "no conversation $id"; exit 4; } ;; esac
+printf '\033[?2004hClaude stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed" ;;
+    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue; } ;;
+  esac
+  printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}\n' >> "$f"
+done
+"#;
+
+/// A live runtime with Codex and Claude Code stand-ins that keep and resume conversations,
+/// and a local endpoint account each harness can use. Takes the fixture and host. Returns
+/// the runtime.
+fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, RESUMING_CLAUDE).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut access = fixture.access.clone();
+    let mut endpoint = access.connections[0].clone();
+    endpoint.id = reference("local-claude");
+    endpoint.harness = reference("claude");
+    endpoint.protocol = reference("anthropic-messages");
+    access.connections.push(endpoint);
+    access.pools[0].members.push(reference("local-claude"));
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex), ("claude-code", claude)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap()
+}
+
+/// Names the project's master harness in its stored team plan, as the owner's Settings
+/// save does. Takes the fixture and the harness name.
+fn set_master(fixture: &Fixture, harness: &str) {
+    let mut setup = fixture.setup.clone();
+    setup.team.master = harness.into();
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+}
+
+/// Turns the live master off and waits until every master of the project is stopped.
+fn stop_live(fixture: &Fixture, team: &mut TeamRuntime) {
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, false).unwrap();
+    fixture.until(team, "the live master stops", |f| {
+        let stopped: i64 = f
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND role='master' AND status IN ('stopped','failed')",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        stopped == masters(&f.connection).len() as i64
+    });
+}
+
+/// What the engine typed into one agent's pasted inputs, from its stand-in's log.
+fn typed(fixture: &Fixture, agent: i64) -> String {
+    std::fs::read_to_string(
+        fixture
+            .base
+            .join("team/agents")
+            .join(format!("agent-{agent}"))
+            .join("home/typed"),
+    )
+    .unwrap_or_default()
+}
+
+/// A plan that names the master harness by its alias ("claude") and then by its catalog id
+/// ("claude-code") names one harness: the next start revives the same master in its own
+/// worktree and home, never a second master. On 2026-10-27 the owner's switch from "Claude"
+/// to "Claude Code" spawned a second master with a new conversation, because the stopped
+/// master was looked up by the stored text.
+#[cfg(target_os = "macos")]
+#[test]
+fn renaming_the_master_harness_to_its_catalog_id_keeps_the_same_master() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    set_master(&fixture, "claude");
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the master on the alias is briefed", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    stop_live(&fixture, &mut team);
+    fixture
+        .connection
+        .execute(
+            "DELETE FROM team_master_conversations WHERE session='s-one'",
+            [],
+        )
+        .unwrap();
+
+    set_master(&fixture, "claude-code");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the master starts again under the catalog id",
+        |f| launches(f, master).len() == 2 && host.alive().unwrap() == names(&[master]),
+    );
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "one master, revived"
+    );
+}
+
+/// With Carry over, the default, a session whose master harness changed keeps one
+/// conversation: the same session goes on, the conversation shows one "Switched to" note,
+/// and the new harness's first input is the handoff of the earlier turns, newest first.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_harness_switch_carries_the_conversation_over_by_default() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Codex master is briefed and kept", |f| {
+        live_turns(&f.connection) == (1, false)
+            && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let first = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(first).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    stop_live(&fixture, &mut team);
+    assert_eq!(
+        fixture.status().on_harness_switch,
+        crate::team::SwitchMode::Carry
+    );
+
+    set_master(&fixture, "claude-code");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(&mut team, "the Claude Code master gets the handoff", |f| {
+        let all = masters(&f.connection);
+        noted(f, &note) == 1 && all.len() == 2 && typed(f, all[1]).contains("newest first")
+    });
+    let second = masters(&fixture.connection)[1];
+    let handed = typed(&fixture, second);
+    assert!(
+        handed.contains(
+            "The owner switched this conversation's master from Codex to you. Its earlier turns, newest first:"
+        ),
+        "{handed}"
+    );
+    assert!(handed.contains("You: Done."), "{handed}");
+    assert_eq!(
+        crate::master_sessions::live_session(&fixture.connection, &project)
+            .unwrap()
+            .as_deref(),
+        Some("s-one"),
+        "the same session goes on"
+    );
+    let sessions: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM master_sessions WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sessions, 1);
+}
+
+/// With Start fresh, a session whose master harness changed starts the new harness without
+/// its earlier conversation, and the conversation's note says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::OnHarnessSwitch {
+                project_id: project.clone(),
+                mode: crate::team::SwitchMode::Fresh,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        fixture.status().on_harness_switch,
+        crate::team::SwitchMode::Fresh
+    );
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Codex master is briefed and kept", |f| {
+        live_turns(&f.connection) == (1, false)
+            && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let first = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(first).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    stop_live(&fixture, &mut team);
+
+    set_master(&fixture, "claude-code");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Fresh);
+    let kept_by = |f: &Fixture, agent: i64| {
+        kept_conversation(&f.connection, "s-one").is_some_and(|(_, record)| {
+            record.starts_with(f.base.join("team/agents").join(format!("agent-{agent}")))
+        })
+    };
+    fixture.until(
+        &mut team,
+        "the Claude Code master starts fresh and the session keeps its conversation",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1
+                && all.len() == 2
+                && !typed(f, all[1]).is_empty()
+                && kept_by(f, all[1])
+        },
+    );
+    let second = masters(&fixture.connection)[1];
+    let briefed = typed(&fixture, second);
+    assert!(!briefed.contains("The owner switched"), "{briefed}");
+    assert!(!briefed.contains("You: Done."), "{briefed}");
+    assert_eq!(
+        masters(&fixture.connection),
+        [first, second],
+        "a new master on the new harness"
+    );
+}

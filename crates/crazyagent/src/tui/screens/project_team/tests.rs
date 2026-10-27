@@ -126,6 +126,7 @@ fn team() -> TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
+        on_harness_switch: crate::team::SwitchMode::Carry,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -1316,4 +1317,52 @@ async fn a_real_engine_keeps_the_wake_rules_the_owner_sets_at_each_level() {
     );
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(view.wake.is_none());
+}
+
+#[test]
+fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('h'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Carry over"));
+    let reply = view.key(press(KeyCode::Char('h')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::OnHarnessSwitch {
+            project_id: project(),
+            mode: crate::team::SwitchMode::Fresh,
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "When the master harness changes, the new harness starts fresh."
+        ))
+    );
+    let mut fresh = team();
+    fresh.on_harness_switch = crate::team::SwitchMode::Fresh;
+    let query = view.next_query(NOW + 10).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(fresh))));
+    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Start fresh"));
+    assert_eq!(
+        view.key(press(KeyCode::Char('h'))),
+        TeamReply::Change(TeamAction::OnHarnessSwitch {
+            project_id: project(),
+            mode: crate::team::SwitchMode::Carry,
+        })
+    );
 }

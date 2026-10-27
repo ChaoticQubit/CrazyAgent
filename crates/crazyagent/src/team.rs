@@ -338,6 +338,34 @@ pub fn delegation_path(harness: &str, tools: bool) -> DelegationPath {
     }
 }
 
+/// The owner's setting for a master harness switch: `Carry` continues the session's
+/// conversation on the new harness with a bounded handoff of its earlier turns and open
+/// tasks, `Fresh` starts the new harness's conversation without them. Carry is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchMode {
+    #[default]
+    Carry,
+    Fresh,
+}
+
+impl SwitchMode {
+    /// The stored name of the mode. Output: `carry` or `fresh`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Carry => "carry",
+            Self::Fresh => "fresh",
+        }
+    }
+
+    /// Reads a stored mode name. Input: the name. Output: the mode, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Carry, Self::Fresh]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum TeamAction {
@@ -357,6 +385,10 @@ pub enum TeamAction {
     KeepWarm {
         project_id: ProjectId,
         on: bool,
+    },
+    OnHarnessSwitch {
+        project_id: ProjectId,
+        mode: SwitchMode,
     },
     LiveMaster {
         project_id: ProjectId,
@@ -444,6 +476,7 @@ impl TeamAction {
                 Ok(())
             }
             Self::KeepWarm { .. }
+            | Self::OnHarnessSwitch { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
@@ -459,6 +492,7 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::OnHarnessSwitch { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -752,6 +786,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_settings (
                 project TEXT PRIMARY KEY,
                 keep_warm INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_master_switch (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
             );
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
@@ -1387,6 +1425,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::OnHarnessSwitch { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_master_switch(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -1610,6 +1657,8 @@ pub struct PlanStep {
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    #[serde(default)]
+    pub on_harness_switch: SwitchMode,
     pub paused: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
@@ -1719,6 +1768,27 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
         .optional()
         .map(|value| value.unwrap_or(false))
         .map_err(error)
+}
+
+/// What the project's live master does with a session's conversation when the master
+/// harness changed since the session's last master ran: the owner's choice, carry over by
+/// default. Takes a connection and the project. Returns the mode.
+pub fn on_harness_switch(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<SwitchMode, EngineError> {
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_master_switch WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode.as_deref() {
+        None => Ok(SwitchMode::default()),
+        Some(name) => SwitchMode::named(name).ok_or_else(|| error("team_switch_mode_invalid")),
+    }
 }
 
 /// Tells whether the owner paused the project's whole team.
@@ -1935,6 +2005,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        on_harness_switch: on_harness_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,
         live_problem,

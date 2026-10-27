@@ -811,6 +811,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
     let status = TeamStatus {
         project_id: project(),
         keep_warm: false,
+        on_harness_switch: crate::team::SwitchMode::Carry,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -1162,6 +1163,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
     let status = crate::team::TeamStatus {
         project_id: project(),
         keep_warm: false,
+        on_harness_switch: crate::team::SwitchMode::Carry,
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),

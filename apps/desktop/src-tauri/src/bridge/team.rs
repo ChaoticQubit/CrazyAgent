@@ -2,7 +2,7 @@ use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
-use crazyagent::team::{TeamAction, TeamStatus};
+use crazyagent::team::{SwitchMode, TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
@@ -129,6 +129,22 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::KeepWarm { project_id, on }, generation)
+            .await
+    }
+
+    /// Sets what the live master does with the conversation when the master harness changes:
+    /// `carry` hands the new harness the earlier turns and open tasks, `fresh` starts it
+    /// without them. Takes the project id, the mode and the client generation. Returns the
+    /// actual commit receipt, or `team_action_invalid` for any other mode.
+    pub async fn team_on_harness_switch(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = SwitchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::OnHarnessSwitch { project_id, mode }, generation)
             .await
     }
 
