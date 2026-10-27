@@ -795,7 +795,7 @@ export type WakeRuleTarget =
 export interface TeamNotification {
   id: number;
   project_id: string;
-  kind: "escalation" | "wake_paused" | "queue_full";
+  kind: "escalation" | "wake_paused" | "queue_full" | "question";
   text: string;
   created_ms: number;
   seen_ms: number | null;
