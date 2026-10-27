@@ -2387,6 +2387,11 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         );
         assert!(agent.account.is_some(), "{agent:?}");
     }
+    let labels: std::collections::HashMap<i64, String> = live
+        .agents
+        .iter()
+        .map(|agent| (agent.id, agent.label.clone()))
+        .collect();
 
     let shape = [ids[0], ids[1], ids[2], ids[3], ids[2]];
     for (index, agent) in shape.iter().enumerate() {
@@ -2417,7 +2422,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         .collect();
     assert_eq!(nodes.len(), 4, "{live:#?}");
     for (node, id) in nodes.iter().zip(&ids) {
-        assert_eq!(node.label, format!("Sub-agent {id}"));
+        assert_eq!(node.label, labels[id]);
         assert!(node.status.is_some_and(AgentStatus::live), "{node:?}");
         assert_eq!(
             node.terminal,
@@ -2456,7 +2461,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         "stopped sub-agents stay listed: {stopped:#?}"
     );
     for (node, id) in nodes.iter().zip(&ids) {
-        assert_eq!(node.label, format!("Sub-agent {id}"));
+        assert_eq!(node.label, labels[id]);
         assert_eq!(node.status, Some(AgentStatus::Stopped));
         assert_eq!(node.status_label.as_deref(), Some("Stopped"));
         assert_eq!(node.terminal, None);
