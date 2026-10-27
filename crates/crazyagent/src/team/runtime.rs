@@ -316,6 +316,7 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
+    settled: bool,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -425,6 +426,7 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             live_starts: BTreeMap::new(),
             resuming: None,
+            settled: false,
         })
     }
 
@@ -698,11 +700,13 @@ impl TeamRuntime {
         Ok(self)
     }
 
-    /// Runs one step for every project with team work: applies agent reports and the
-    /// owner's stop and restart from the agent register, sends pending messages to the
-    /// master, delivers finished results, starts or reuses sub-agents within the plan's
-    /// limits, stops idle or cancelled agents and ends team panes no agent owns.
+    /// Runs one step for every project with team work: settles the runs the last engine
+    /// stop cut short, applies agent reports and the owner's stop and restart from the agent
+    /// register, sends pending messages to the master, delivers finished results, starts or
+    /// reuses sub-agents within the plan's limits, stops idle or cancelled agents and ends
+    /// team panes no agent owns.
     pub fn tick(&mut self) -> Result<(), EngineError> {
+        self.settle()?;
         self.collect()?;
         self.owner_controls()?;
         let access = (self.access)().unwrap_or_default();
@@ -715,6 +719,19 @@ impl TeamRuntime {
         self.note_conversations()?;
         self.watch_questions()?;
         self.sweep()
+    }
+
+    /// Settles the runs the last engine stop cut short once, on the first tick after the
+    /// runtime adopted the panes it could, and on each later tick until that succeeds. Until
+    /// then the tick does nothing else, so no report, owner restart or dispatch changes which
+    /// agents run again, and no task or message such a run holds starts fresh.
+    /// Returns `recovery_unavailable` while the store cannot be written.
+    fn settle(&mut self) -> Result<(), EngineError> {
+        if !self.settled {
+            crate::recovery::settle(&self.connection)?;
+            self.settled = true;
+        }
+        Ok(())
     }
 
     /// Reads each busy sub-agent's terminal for a question it waits on, at most once each
@@ -1434,7 +1451,7 @@ impl TeamRuntime {
             .query_row(
                 "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' AND id NOT IN (
                      SELECT message FROM recovery_runs WHERE message IS NOT NULL
-                     AND state IN ('interrupted','resuming','failed'))
+                     AND state IN ('stopped','interrupted','resuming','failed'))
                  ORDER BY id LIMIT 1",
                 [project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1830,7 +1847,7 @@ impl TeamRuntime {
             .query_row(
                 "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' AND id NOT IN (
                      SELECT message FROM recovery_runs WHERE message IS NOT NULL
-                     AND state IN ('interrupted','resuming','failed'))
+                     AND state IN ('stopped','interrupted','resuming','failed'))
                  ORDER BY id LIMIT 1",
                 [project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -2025,7 +2042,7 @@ impl TeamRuntime {
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
                      WHERE t.project=?1 AND t.status='queued' AND t.id NOT IN (
                          SELECT task FROM recovery_runs WHERE task IS NOT NULL
-                         AND state IN ('interrupted','resuming','failed'))
+                         AND state IN ('stopped','interrupted','resuming','failed'))
                      ORDER BY t.id LIMIT 64",
                 )
                 .map_err(error)?;
@@ -4639,12 +4656,6 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
-    let root = state
-        .parent()
-        .expect("the team state is in the runtime folder");
-    if let Err(problem) = crate::recovery::scan(root) {
-        eprintln!("recovery: {}", bound_text(&problem.0, 300));
-    }
     let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
