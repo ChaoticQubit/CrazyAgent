@@ -5,6 +5,7 @@ use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::sessions::{Sessions, SessionsAction, SessionsReply};
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
@@ -503,6 +504,7 @@ pub(in crate::tui) enum ProjectReply {
     Master,
     Process,
     Usage,
+    Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
 }
 
@@ -554,6 +556,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
+    pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
     jobs_read_ms: Option<i64>,
@@ -573,6 +576,7 @@ impl ProjectScreen {
         Self {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
+            sessions: Sessions::default(),
             project,
             name,
             tab: Tab::Overview,
@@ -1424,6 +1428,15 @@ impl ProjectScreen {
 
     fn conversation_key(&mut self, key: KeyEvent) -> ProjectReply {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let running = matches!(
+            self.transcript.as_ref().map(|t| &t.status),
+            Some(MasterStatus::Thinking { .. })
+        );
+        match self.sessions.key(key, self.master_usable(), running) {
+            SessionsReply::Ignored => {}
+            SessionsReply::Handled => return ProjectReply::Handled,
+            SessionsReply::Act(action) => return ProjectReply::Session(action),
+        }
         match key.code {
             KeyCode::Char('s') if !self.pool.as_ref().is_some_and(|p| p.assigned) => {
                 self.open(Tab::Settings);

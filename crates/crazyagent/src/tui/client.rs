@@ -1118,6 +1118,8 @@ impl NativeOwner {
             master_session::Job::Read {
                 context,
                 confirmation,
+                sessions,
+                known,
             } => {
                 let result = match self.master_controller(&context.identity) {
                     Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
@@ -1128,6 +1130,8 @@ impl NativeOwner {
                                 &mut *controller,
                                 &context,
                                 confirmation.as_deref(),
+                                sessions,
+                                &known,
                             )
                             .await
                             {

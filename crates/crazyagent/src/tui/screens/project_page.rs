@@ -284,6 +284,8 @@ impl ProjectPage {
 
     fn sync_master(&mut self, ctx: &mut Ctx) {
         self.select_master(ctx);
+        self.master
+            .show_sessions(self.screen.tab == Tab::Conversation);
         if self.master_sent.len() < MASTER_SENT_MAX
             && let Some(job) = self.master.request(self.screen.tab == Tab::Conversation)
         {
@@ -291,14 +293,17 @@ impl ProjectPage {
             ctx.request(Request::Master(Box::new(job)));
         }
         self.screen.transcript = self.transcript();
+        if let Some(listed) = self.master.sessions() {
+            self.screen.sessions.set(super::sessions::rows_of(listed));
+        }
     }
 
     fn transcript(&self) -> Option<Transcript> {
-        let (session, turns, input) = self.master.transcript()?;
+        let (session, turns, _) = self.master.transcript()?;
         let read = MasterRead {
             session: session.map(|session| session.phase),
             turns,
-            inputs: input.map_or(&[][..], std::slice::from_ref),
+            inputs: self.master.inputs(),
         };
         let harness = match session {
             Some(session) => backend_name(session.selection.backend),
@@ -452,6 +457,11 @@ impl ProjectPage {
         let MasterEvent::Mutation { submission, .. } = event else {
             return;
         };
+        if code == "master_turn_running"
+            && self.screen.sessions.turn_was_running(&submission.action)
+        {
+            return;
+        }
         let lead = match &submission.action {
             MasterOwnerAction::Submit { text, .. } => {
                 if self.screen.input.value().is_empty() {
@@ -459,9 +469,10 @@ impl ProjectPage {
                 }
                 "The master did not take that message."
             }
-            MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
-                "The master could not start."
-            }
+            MasterOwnerAction::Open { .. }
+            | MasterOwnerAction::NewSession { .. }
+            | MasterOwnerAction::RegisterRcliProfile { .. } => "The master could not start.",
+            MasterOwnerAction::Resume { .. } => "The session did not resume.",
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
             MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
@@ -829,6 +840,12 @@ impl ProjectPage {
             }
             ProjectReply::EndConversation => {
                 self.end_master(ctx);
+                Flow::Handled
+            }
+            ProjectReply::Session(action) => {
+                if let Err(problem) = super::sessions::act(&mut self.master, &action) {
+                    ctx.say(Message::error("The session did not switch.", &problem));
+                }
                 Flow::Handled
             }
             ProjectReply::Retry => {

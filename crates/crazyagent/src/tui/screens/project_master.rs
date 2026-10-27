@@ -3,7 +3,7 @@ use super::project_time::clock;
 use crate::conversation::ConversationEntry;
 use crate::master_session::{MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView};
 
-const TURNS_SHOWN_MAX: usize = 200;
+pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
 
 /// The engine's master conversation for one project, as read through the owner connection.
 /// Holds the session phase (none before the master is opened), its turns in order and the owner's messages.
@@ -92,9 +92,14 @@ pub(in crate::tui) fn transcript_from(
     assert!(messages.len() <= turns.len() * 4 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
     let status = match (read.session, turns.last()) {
         (None, _) => MasterStatus::NotReady,
-        (Some(MasterSessionPhase::Closing | MasterSessionPhase::Closed), _) => {
-            MasterStatus::Stopped
-        }
+        (
+            Some(
+                MasterSessionPhase::Parked
+                | MasterSessionPhase::Closing
+                | MasterSessionPhase::Closed,
+            ),
+            _,
+        ) => MasterStatus::Stopped,
         (Some(MasterSessionPhase::Configured), None) => MasterStatus::Ready,
         (Some(MasterSessionPhase::Configured), Some(turn)) => status(turn),
     };
@@ -102,10 +107,15 @@ pub(in crate::tui) fn transcript_from(
         .session
         .is_some_and(|phase| phase != MasterSessionPhase::Configured)
     {
+        let text = if read.session == Some(MasterSessionPhase::Parked) {
+            "This session is parked. Resume it from Sessions to continue it."
+        } else {
+            "The master conversation is closed."
+        };
         messages.push(Message {
             speaker: Speaker::Notice,
             time: None,
-            text: "The master conversation is closed.".into(),
+            text: text.into(),
             error: false,
         });
     }

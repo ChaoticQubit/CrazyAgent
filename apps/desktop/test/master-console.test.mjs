@@ -25,6 +25,20 @@ test("master turns become console lines: the owner's words, replies, engine and 
   assert.equal(lines[6].text, "Your message 3 (its text stays in the window that sent it)");
 });
 
+test("a resumed session's turns show the owner's words read back from the engine, and this window's text wins", () => {
+  const turns = [
+    turn({ id: "t1", input_cursor: "c1", reply: { text: "Parked work picked up." } }),
+    turn({ id: "t2", ordinal: 2, input_cursor: "c2", reply: { text: "Done." } }),
+    turn({ id: "t3", ordinal: 3, input_cursor: "c3", reply: { text: "Later." } }),
+  ];
+  const lines = consoleLines(turns, { t2: "Sent here" }, {}, 0, { c1: "Plan the @page header", c2: "Read back" });
+  assert.deepEqual(lines.filter((line) => line.id.endsWith("-owner")).map((line) => [line.kind, line.text]), [
+    ["owner", "Plan the @page header"],
+    ["owner", "Sent here"],
+    ["engine", "Your message 3 (its text stays in the window that sent it)"],
+  ]);
+});
+
 test("a message this window sent shows with a thinking line until its turn arrives", () => {
   const lines = consoleLines([], { op9: "Plan the page" }, { op9: 1000 }, 4000);
   assert.deepEqual(lines.map((line) => [line.id, line.kind]), [["op9-owner", "owner"], ["op9-status", "engine"]]);

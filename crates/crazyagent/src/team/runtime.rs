@@ -299,8 +299,8 @@ pub struct TeamRuntime {
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     swept: Option<Instant>,
-    watch: super::events::Watch,
     events: Option<super::master::TeamEvents>,
+    watch: super::events::Watch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
 }
 
@@ -406,8 +406,8 @@ impl TeamRuntime {
             agents: None,
             terminal: None,
             swept: None,
-            watch: super::events::Watch::default(),
             events: None,
+            watch: super::events::Watch::default(),
             live_starts: BTreeMap::new(),
         })
     }
@@ -1000,7 +1000,8 @@ impl TeamRuntime {
             .connection
             .prepare(
                 "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled'))
+                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
                  UNION SELECT project FROM team_settings WHERE keep_warm=1
                  UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
                  UNION SELECT project FROM team_live_masters WHERE live=1",
@@ -1847,19 +1848,21 @@ impl TeamRuntime {
             return Ok(());
         }
         type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+        let live = crate::master_sessions::live_session(&self.connection, project)?;
         let ready: Vec<ReadyTask> = {
             let mut statement = self
                 .connection
                 .prepare(
                     "SELECT t.id,t.harness,t.status,t.result,t.error FROM team_tasks t
                      WHERE t.project=?1 AND t.delivered=0 AND t.source='master' AND t.status IN ('done','failed','cancelled')
+                     AND (t.session IS NULL OR t.session IS ?2)
                      AND NOT EXISTS (SELECT 1 FROM team_tasks o WHERE o.project=t.project AND o.turn IS t.turn AND t.turn IS NOT NULL
                                      AND o.status IN ('queued','needs_pool','running'))
                      ORDER BY t.id LIMIT 16",
                 )
                 .map_err(error)?;
             statement
-                .query_map([project.as_str()], |row| {
+                .query_map(params![project.as_str(), live], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -2074,6 +2077,12 @@ impl TeamRuntime {
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
+                )
+                .map_err(error)?;
+            self.connection
+                .execute(
+                    "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
+                    params![task, agent],
                 )
                 .map_err(error)?;
             names::assign_task_role(&self.connection, project, agent, task)?;
@@ -2926,6 +2935,7 @@ impl TeamRuntime {
                 self.land_turn(
                     id,
                     &project,
+                    None,
                     format!("live-{turn}"),
                     format!("Master turn {turn}"),
                     "the live master's turn",
@@ -3043,6 +3053,10 @@ impl TeamRuntime {
                 .map(Option::unwrap_or_default)
                 .map_err(error)
         };
+        let task = match busy {
+            Busy::Task(task) => Some(task),
+            Busy::Message(_) => None,
+        };
         let (turn, line, what) = match busy {
             Busy::Task(task) => (
                 format!("task-{task}"),
@@ -3055,16 +3069,18 @@ impl TeamRuntime {
                 "the team master's turn".to_owned(),
             ),
         };
-        self.land_turn(id, project, turn, line, &what, end)
+        self.land_turn(id, project, task, turn, line, &what, end)
     }
 
     /// Lands one ended turn of an agent under its change-set turn key, as `land` does.
-    /// Inputs: the agent, its project, the turn key, the prompt line, what ended for the
-    /// note and how it ended. Output: any SQLite failure writing the note.
+    /// Inputs: the agent, its project, the task the turn worked on, the turn key, the prompt
+    /// line, what ended for the note and how it ended. Output: any SQLite failure writing the note.
+    #[allow(clippy::too_many_arguments)]
     fn land_turn(
         &mut self,
         id: i64,
         project: &ProjectId,
+        task: Option<i64>,
         turn: String,
         line: String,
         what: &str,
@@ -3448,19 +3464,20 @@ fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> St
     let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team and {}() lists the change sets waiting for the owner. Name sub-agents by their @role handle.\n",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
             tool::ANSWER_TOOL,
             tool::STATUS_TOOL,
-            tool::CHANGES_TOOL
+            tool::CHANGES_TOOL,
+            tool::ESCALATE_TOOL
         )
     } else {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
+        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
         stored.name,
         team,
         master_brief(stored)
@@ -4171,6 +4188,7 @@ fn run_code(error: &RunError) -> &str {
         RunError::Jobs(_) => "research_jobs_failed",
         RunError::Busy => "account_busy",
         RunError::Uncertain(code) => code,
+        RunError::Setup(code) => code,
     }
 }
 
@@ -4347,7 +4365,8 @@ pub fn start_for_engine(
         access,
         TeamLimits::default(),
     )
-    .map_err(|e| e.0)?;
+    .map_err(|e| e.0)?
+    .with_events(super::master::EVENTS);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,

@@ -30,6 +30,7 @@ pub(in crate::tui) mod project_plugins;
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
+pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;
 pub mod settings_add_account;

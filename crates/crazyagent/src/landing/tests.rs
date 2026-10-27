@@ -1,6 +1,8 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Command, Stdio};
 
@@ -145,6 +147,67 @@ impl Case {
             "-m",
             message,
         ]);
+        self.agent_head()
+    }
+
+    /// Commits one file the way an agent can with a private index, leaving the
+    /// worktree's own index and files at the commit before, so only the committed
+    /// history holds the file. Inputs: the path bytes and the text. Output: the new HEAD.
+    fn agent_plumbing_commit(&self, path: &[u8], text: &str) -> String {
+        let scratch = self.home.join("plumbing");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let (content, index) = (scratch.join("blob"), scratch.join("index"));
+        std::fs::write(&content, text).unwrap();
+        let _ = std::fs::remove_file(&index);
+        let git = |args: &[&OsStr]| -> String {
+            let output = crate::spawn_gate::output(
+                Command::new("/usr/bin/git")
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", &self.home)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_INDEX_FILE", &index)
+                    .env("LC_ALL", "C")
+                    .arg("-C")
+                    .arg(&self.workspace.worktree)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let os = OsStr::new;
+        let blob = git(&[os("hash-object"), os("-w"), content.as_os_str()]);
+        git(&[os("read-tree"), os("HEAD")]);
+        git(&[
+            os("update-index"),
+            os("--add"),
+            os("--cacheinfo"),
+            os("100644"),
+            os(&blob),
+            OsStr::from_bytes(path),
+        ]);
+        let tree = git(&[os("write-tree")]);
+        let commit = git(&[
+            os("-c"),
+            os("user.name=Agent"),
+            os("-c"),
+            os("user.email=agent@example.invalid"),
+            os("commit-tree"),
+            os(&tree),
+            os("-p"),
+            os("HEAD"),
+            os("-m"),
+            os("Add through plumbing"),
+        ]);
+        git(&[os("update-ref"), os("HEAD"), os(&commit)]);
         self.agent_head()
     }
 
@@ -980,6 +1043,157 @@ fn commits_the_agent_made_past_the_file_bound_are_refused_and_change_nothing() {
     );
     assert_eq!(case.agent_head(), head);
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+}
+
+#[test]
+fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_changes_nothing() {
+    let bounds = crate::worktrees::TreeBounds {
+        files: 3,
+        bytes: 64,
+        components: 3,
+    };
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Past the bounds".into(),
+    };
+    let long = "x".repeat(1025);
+    let skip_worktree_env = |case: &Case| {
+        case.agent(&["update-index", "--skip-worktree", ".gitignore"]);
+        case.edit(".gitignore", "");
+        case.edit("secret.env", "TOKEN=x\n");
+    };
+    let cases: Vec<(&str, &str, Box<dyn Fn(&Case) + '_>, &str)> = vec![
+        (
+            "a committed blob past the byte bound",
+            "",
+            Box::new(|case| {
+                case.edit("large.txt", &"x".repeat(65));
+                case.agent_commit("Add a large file");
+            }),
+            "changes_too_large",
+        ),
+        (
+            "a committed path past the depth bound",
+            "",
+            Box::new(|case| {
+                case.edit("one/two/three/deep.txt", "x");
+                case.agent_commit("Add a deep file");
+            }),
+            "changes_too_large",
+        ),
+        (
+            "a committed path past the length bound",
+            "",
+            Box::new(|case| {
+                case.agent_plumbing_commit(long.as_bytes(), "x");
+            }),
+            "changes_too_large",
+        ),
+        (
+            "a committed path that is not UTF-8",
+            "",
+            Box::new(|case| {
+                case.agent_plumbing_commit(b"bad-\xff.txt", "x");
+            }),
+            "changes_git_unsupported",
+        ),
+        (
+            "a committed file the owner's ignore rules exclude",
+            "secret.env\n",
+            Box::new(|case| {
+                case.edit("secret.env", "TOKEN=x\n");
+                case.agent(&["add", "-f", "secret.env"]);
+                case.agent_commit("Add the env file");
+            }),
+            "changes_ignored_files",
+        ),
+        (
+            "a committed file named like pathspec magic the owner's ignore rules exclude",
+            ":*\n",
+            Box::new(|case| {
+                case.edit(":(top)keep.txt", "x");
+                case.agent(&["add", "-f", ":(literal):(top)keep.txt"]);
+                case.agent_commit("Add a file named like magic");
+            }),
+            "changes_ignored_files",
+        ),
+        (
+            "a staged file the owner's ignore rules exclude",
+            "secret.env\n",
+            Box::new(|case| {
+                case.edit("secret.env", "TOKEN=x\n");
+                case.agent(&["add", "-f", "secret.env"]);
+            }),
+            "changes_ignored_files",
+        ),
+        (
+            "a file the agent un-ignored behind a skip-worktree .gitignore",
+            "secret.env\n",
+            Box::new(skip_worktree_env),
+            "changes_ignored_files",
+        ),
+        (
+            "a committed file the agent un-ignored behind a skip-worktree .gitignore",
+            "secret.env\n",
+            Box::new(|case| {
+                skip_worktree_env(case);
+                case.agent_commit("Add the env file");
+            }),
+            "changes_ignored_files",
+        ),
+    ];
+    for (what, rules, make, code) in cases {
+        let case = Case::new();
+        if !rules.is_empty() {
+            case.owner_commit(".gitignore", rules, "Ignore files");
+            case.agent(&["checkout", "-q", "--detach", "main"]);
+        }
+        case.start();
+        make(&case);
+        let head = case.agent_head();
+        assert_eq!(
+            refused(flow::record(
+                &case.db,
+                &case.workspace,
+                &turn,
+                &bounds,
+                NOW_MS
+            )),
+            code,
+            "{what}"
+        );
+        assert_eq!(case.agent_head(), head, "{what}");
+        assert!(
+            list(&case.db, &case.workspace.project).unwrap().is_empty(),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn agent_history_within_the_bounds_lands_with_an_ignored_file_the_owner_tracks() {
+    let case = Case::new();
+    write(&case.repo.join(".gitignore"), "*.log\n");
+    write(&case.repo.join("keep.log"), "kept\n");
+    case.owner(&["add", ".gitignore"]);
+    case.owner(&["add", "-f", "keep.log"]);
+    case.owner(&["commit", "-q", "-m", "Track one log"]);
+    case.agent(&["checkout", "-q", "--detach", "main"]);
+    case.start();
+    case.edit("keep.log", "kept\nand more\n");
+    case.edit("notes.txt", "notes\n");
+    case.agent_commit("Edit the log and add notes");
+    case.edit("later.txt", "later\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).files, 3);
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("keep.log")).unwrap(),
+        "kept\nand more\n"
+    );
 }
 
 #[test]

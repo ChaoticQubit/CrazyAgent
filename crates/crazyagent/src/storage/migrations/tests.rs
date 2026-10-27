@@ -226,10 +226,11 @@ fn refused<T>(result: Result<T, EngineError>) -> String {
 }
 
 fn probe(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    tx.execute_batch(
+    tx.execute_batch(&format!(
         "CREATE TABLE migration_probe (step INTEGER PRIMARY KEY); \
-         INSERT INTO migration_probe VALUES (3);",
-    )
+         INSERT INTO migration_probe VALUES ({});",
+        latest(STEPS) + 1
+    ))
     .map_err(error)
 }
 
@@ -413,11 +414,12 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
             .unwrap()
     };
 
-    let probe_step = latest(STEPS) + 1;
+    let newest = latest(STEPS);
+    let probe_step = newest + 1;
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
 
     assert_eq!(version(&db).unwrap(), probe_step);
-    assert_eq!(probed(&db), vec![3]);
+    assert_eq!(probed(&db), vec![probe_step]);
     let mut after = rows(&db);
     assert_eq!(after.remove("migration_probe").unwrap().len(), 1);
     assert_eq!(after, before);
@@ -434,13 +436,12 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     assert_eq!(root.backups().len(), 1, "nothing is pending, so no backup");
 
     db.execute_batch(&format!(
-        "DROP TABLE migration_probe; PRAGMA user_version = {}",
-        latest(STEPS)
+        "DROP TABLE migration_probe; PRAGMA user_version = {newest}"
     ))
     .unwrap();
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
     assert_eq!(version(&db).unwrap(), probe_step);
-    assert_eq!(probed(&db), vec![3]);
+    assert_eq!(probed(&db), vec![probe_step]);
     let names: Vec<String> = root
         .backups()
         .iter()
@@ -451,7 +452,7 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     assert!(
         names
             .iter()
-            .any(|name| name.starts_with(&format!("{}-to-{probe_step}-", latest(STEPS)))),
+            .any(|name| name.starts_with(&format!("{newest}-to-{probe_step}-"))),
         "{names:?}"
     );
 }
