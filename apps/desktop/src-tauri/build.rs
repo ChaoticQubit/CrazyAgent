@@ -27,6 +27,7 @@ fn main() {
         "desktop_team_delegate",
         "desktop_team_cancel",
         "desktop_team_keep_warm",
+        "desktop_team_live_master",
         "desktop_team_pause",
         "desktop_team_hand_off",
         "desktop_team_rename",
