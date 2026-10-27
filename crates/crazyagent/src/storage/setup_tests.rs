@@ -259,6 +259,98 @@ fn stale_pack_write_is_refused() {
 }
 
 #[test]
+fn a_pack_change_and_a_plugin_screen_change_refuse_each_others_stale_saves() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    let shown = skills(&mut connection, root).remove(0);
+    let pack = status_of(&mut connection, root).version;
+
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: pack,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    let Err(stale_skill) = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: shown.id.clone(),
+            enabled: true,
+            version: shown.version,
+        },
+    ) else {
+        panic!("a refusal required");
+    };
+    assert_eq!(stale_skill.0, "stale_revision");
+    let listed = skills(&mut connection, root);
+    assert!(
+        !listed[0].enabled,
+        "the stale plugin screen changed nothing"
+    );
+    assert_eq!(listed[0].version, shown.version + 1);
+    assert_eq!(status_of(&mut connection, root).version, pack + 1);
+
+    let on = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: shown.id.clone(),
+            enabled: true,
+            version: listed[0].version,
+        },
+    );
+    assert!(on.is_ok());
+    assert_eq!(
+        status_of(&mut connection, root).version,
+        pack + 2,
+        "a plugin-screen change of a pack skill moves the pack version"
+    );
+    let stale_pack = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: pack + 1,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_pack)),
+        "stale_revision"
+    );
+    assert!(skills(&mut connection, root)[0].enabled);
+
+    let owned_elsewhere = owner_skill(&mut connection, root, work.path(), "beta");
+    let version = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.id == owned_elsewhere)
+        .unwrap()
+        .version;
+    let unrelated = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: owned_elsewhere,
+            enabled: false,
+            version,
+        },
+    );
+    assert!(unrelated.is_ok());
+    assert_eq!(
+        status_of(&mut connection, root).version,
+        pack + 2,
+        "a skill no pack entry holds leaves the pack version alone"
+    );
+}
+
+#[test]
 fn removing_an_entry_removes_its_items_and_the_sweep_deletes_their_folders() {
     let (dir, mut connection) = database();
     let root = dir.path();

@@ -2225,8 +2225,10 @@ fn set_read_paths(
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops; its read folders, the versions of those and of its instructions, and
-/// its agents' own instructions go too. Returns `invalid_project` for an unknown project.
+/// running one stops; its read folders and its agents' own instructions go too. The versions
+/// of its read folders and instructions stay, so a project added again under the same id
+/// refuses a save from a screen read before the removal. Returns `invalid_project` for an
+/// unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2252,12 +2254,6 @@ fn remove(
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
-    for item in [
-        crate::storage::versioned::process_text_item(Some(project_id)),
-        crate::storage::versioned::read_paths_item(project_id),
-    ] {
-        crate::storage::versioned::forget(tx, &item)?;
-    }
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

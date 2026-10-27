@@ -1424,12 +1424,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[serde(rename_all = "camelCase")]
             struct Args {
                 id: String,
+                version: u64,
             }
-            let Args { id } = match parse(args) {
+            let Args { id, version } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.remove_skill(id).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state).await?.remove_skill(id, version).await }.await;
             routed(result)
         }
         "desktop_add_mcp_server" => {
@@ -1497,12 +1498,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[serde(rename_all = "camelCase")]
             struct Args {
                 id: String,
+                version: u64,
             }
-            let Args { id } = match parse(args) {
+            let Args { id, version } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.remove_mcp_server(id).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state).await?.remove_mcp_server(id, version).await }.await;
             routed(result)
         }
         "desktop_switch_plugin" => {

@@ -1739,9 +1739,10 @@ async fn desktop_remove_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_skill(id).await
+    lock(&state).await?.remove_skill(id, version).await
 }
 
 #[tauri::command]
@@ -1806,9 +1807,10 @@ async fn desktop_remove_mcp_server(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_mcp_server(id).await
+    lock(&state).await?.remove_mcp_server(id, version).await
 }
 
 #[tauri::command]

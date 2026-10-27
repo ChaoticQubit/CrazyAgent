@@ -402,14 +402,14 @@ impl Plugins {
             Some(Picked::Skill(index)) => {
                 let skill = &self.skills[index];
                 let done = format!("Removed {}.", skill.name);
-                let id = skill.id.clone();
-                self.change(PluginChange::RemoveSkill { id }, done, ctx);
+                let (id, version) = (skill.id.clone(), skill.version);
+                self.change(PluginChange::RemoveSkill { id, version }, done, ctx);
             }
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let done = format!("Removed {} and its secrets.", server.name);
-                let id = server.id.clone();
-                self.change(PluginChange::RemoveServer { id }, done, ctx);
+                let (id, version) = (server.id.clone(), server.version);
+                self.change(PluginChange::RemoveServer { id, version }, done, ctx);
             }
             None => {}
         }

@@ -45,6 +45,7 @@ pub(crate) enum Command {
     },
     RemoveSkill {
         id: String,
+        version: u64,
     },
     AddServer {
         scope: Scope,
@@ -67,6 +68,7 @@ pub(crate) enum Command {
     },
     RemoveServer {
         id: String,
+        version: u64,
     },
     Switch {
         project: ProjectId,
@@ -526,7 +528,7 @@ fn on_here(scope: &Scope, id: &str, project: Option<&ProjectId>, off: &[String])
 }
 
 /// Reads one plugin's version, 0 for a plugin the owner never changed.
-fn plugin_version(connection: &Connection, id: &str) -> Result<u64, EngineError> {
+pub(super) fn plugin_version(connection: &Connection, id: &str) -> Result<u64, EngineError> {
     Ok(versioned::current(connection, &versioned::plugin_item(id)?)?.version)
 }
 
@@ -949,6 +951,14 @@ pub(crate) fn execute(
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
+    if let Command::SetSkill { id, .. }
+    | Command::RemoveSkill { id, .. }
+    | Command::UpdateServer { id, .. }
+    | Command::SetServer { id, .. }
+    | Command::RemoveServer { id, .. } = &command
+    {
+        super::setup::plugin_changed(&tx, id)?;
+    }
     let value = run(&tx, root, command)?;
     let committed = tx.commit().map_err(error);
     match (&value, committed) {
@@ -1016,8 +1026,9 @@ pub(super) fn run(
                 added: false,
             }))
         }
-        Command::RemoveSkill { id } => {
+        Command::RemoveSkill { id, version } => {
             let record: SkillRecord = load(tx, "skill", &id)?;
+            owner_change(tx, &id, version)?;
             versioned::forget(tx, &versioned::plugin_item(&id)?)?;
             tx.execute("DELETE FROM plugin_items WHERE id=?1", [&id])
                 .map_err(error)?;
@@ -1061,8 +1072,9 @@ pub(super) fn run(
             put_server(tx, &record)?;
             ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
-        Command::RemoveServer { id } => {
+        Command::RemoveServer { id, version } => {
             let record: ServerRecord = load(tx, "server", &id)?;
+            owner_change(tx, &id, version)?;
             versioned::forget(tx, &versioned::plugin_item(&id)?)?;
             tx.execute("DELETE FROM plugin_items WHERE id=?1", [&id])
                 .map_err(error)?;

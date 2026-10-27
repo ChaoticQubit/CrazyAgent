@@ -661,8 +661,8 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     if (!removing) return;
     const item = removing;
     setRemoving(undefined);
-    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id), () => "Skill removed.", reloadSkills);
-    else void act(item.server.id, () => removeMcpServer(item.server.id), () => "Server removed.", reloadServers);
+    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id, item.skill.version), () => "Skill removed.", reloadSkills);
+    else void act(item.server.id, () => removeMcpServer(item.server.id, item.server.version), () => "Server removed.", reloadServers);
   };
 
   return <div className="stack">

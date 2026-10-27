@@ -150,6 +150,30 @@ fn taken(problem: EngineError) -> EngineError {
     }
 }
 
+/// Writes the next default-pack version when an installed entry holds this plugin, so a
+/// change made on the plugin screen refuses a pack screen opened before it. Inputs: the
+/// transaction and the plugin id. Output: Ok, or a store failure.
+pub(super) fn plugin_changed(tx: &Transaction<'_>, id: &str) -> Result<(), EngineError> {
+    let manifest = manifest()?;
+    for entry in &manifest.entries {
+        let record = match load_pack(tx, &entry.id)? {
+            Some(record) => Some(record),
+            None => present(tx, entry)?,
+        };
+        let held = record.is_some_and(|record| {
+            record.skills.iter().any(|skill| skill == id) || record.server.as_deref() == Some(id)
+        });
+        if held {
+            let item = versioned::default_pack_item();
+            let current = versioned::current(tx, &item)?.version;
+            let written = versioned::owner_write(tx, &item, current)?;
+            assert_eq!(written.ok(), Some(current + 1));
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 fn missing(problem: &EngineError) -> bool {
     matches!(problem.0.as_str(), "skill_not_found" | "server_not_found")
 }
@@ -165,7 +189,11 @@ fn remove_items(
     moved: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), EngineError> {
     for id in &record.skills {
-        match plugins::run(tx, root, plugins::Command::RemoveSkill { id: id.clone() }) {
+        let command = plugins::Command::RemoveSkill {
+            id: id.clone(),
+            version: plugins::plugin_version(tx, id)?,
+        };
+        match plugins::run(tx, root, command) {
             Ok(plugins::ResultValue::SkillRemoved(folder)) => {
                 if std::fs::symlink_metadata(&folder).is_ok() {
                     let parent = folder
@@ -183,7 +211,11 @@ fn remove_items(
         }
     }
     if let Some(id) = &record.server {
-        match plugins::run(tx, root, plugins::Command::RemoveServer { id: id.clone() }) {
+        let command = plugins::Command::RemoveServer {
+            id: id.clone(),
+            version: plugins::plugin_version(tx, id)?,
+        };
+        match plugins::run(tx, root, command) {
             Ok(plugins::ResultValue::Removed(references)) => {
                 for reference in references {
                     tx.execute(
@@ -299,6 +331,7 @@ fn set(
         let command = plugins::Command::SetSkill {
             id: skill.clone(),
             enabled: on,
+            version: plugins::plugin_version(tx, skill)?,
         };
         match plugins::run(tx, root, command) {
             Ok(_) => {}
@@ -310,6 +343,7 @@ fn set(
         let command = plugins::Command::SetServer {
             id: server.clone(),
             enabled: on,
+            version: plugins::plugin_version(tx, server)?,
         };
         match plugins::run(tx, root, command) {
             Ok(_) => {}

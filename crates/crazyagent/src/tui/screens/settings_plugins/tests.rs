@@ -223,7 +223,7 @@ fn remove_asks_first() {
     screen.key(&Key::Enter, &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id }) if id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id, version: 2 }) if id == "skill-frontend-design")
         ),
         other => panic!("a remove expected, got {other:?}"),
     }

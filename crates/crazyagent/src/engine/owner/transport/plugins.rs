@@ -49,6 +49,7 @@ enum Action {
     },
     RemoveSkill {
         id: String,
+        version: u64,
     },
     AddServer {
         scope: Scope,
@@ -71,6 +72,7 @@ enum Action {
     },
     RemoveServer {
         id: String,
+        version: u64,
     },
     Switch {
         project: ProjectId,
@@ -172,11 +174,11 @@ impl Action {
             Self::Server { id }
             | Self::SkillDetail { id, .. }
             | Self::SetSkill { id, .. }
-            | Self::RemoveSkill { id }
+            | Self::RemoveSkill { id, .. }
             | Self::UpdateServer { id, .. }
             | Self::Approve { id, .. }
             | Self::SetServer { id, .. }
-            | Self::RemoveServer { id }
+            | Self::RemoveServer { id, .. }
             | Self::Switch { id, .. }
             | Self::SetSecret { id, .. }
             | Self::RemoveSecret { id, .. }
@@ -334,9 +336,10 @@ impl OwnerClient {
         .await
     }
 
-    /// Removes a skill and its stored folder copy. Input: the skill id.
-    pub async fn remove_skill(&self, id: String) -> Result<(), EngineError> {
-        self.done_reply(Action::RemoveSkill { id }).await
+    /// Removes a skill and its stored folder copy. Inputs: the skill id and the version the
+    /// screen showed. Output: done, or `stale_revision` after another change.
+    pub async fn remove_skill(&self, id: String, version: u64) -> Result<(), EngineError> {
+        self.done_reply(Action::RemoveSkill { id, version }).await
     }
 
     /// Adds an MCP server that waits for approval. Inputs: scope, a plain name and the
@@ -393,9 +396,10 @@ impl OwnerClient {
         .await
     }
 
-    /// Removes an MCP server and deletes its saved secrets. Input: the server id.
-    pub async fn remove_mcp_server(&self, id: String) -> Result<(), EngineError> {
-        self.done_reply(Action::RemoveServer { id }).await
+    /// Removes an MCP server and deletes its saved secrets. Inputs: the server id and the
+    /// version the screen showed. Output: done, or `stale_revision` after another change.
+    pub async fn remove_mcp_server(&self, id: String, version: u64) -> Result<(), EngineError> {
+        self.done_reply(Action::RemoveServer { id, version }).await
     }
 
     /// Switches a global skill or MCP server on or off for one project.
@@ -804,8 +808,8 @@ async fn handle(
             };
             Reply::Skill { skill: skill.view }
         }
-        Action::RemoveSkill { id } => {
-            actor(engine, Command::RemoveSkill { id }).await?;
+        Action::RemoveSkill { id, version } => {
+            actor(engine, Command::RemoveSkill { id, version }).await?;
             Reply::Done
         }
         Action::AddServer { scope, name, spec } => {
@@ -832,9 +836,15 @@ async fn handle(
             )
             .await?,
         )?,
-        Action::RemoveServer { id } => {
-            let ResultValue::Removed(references) =
-                actor(engine, Command::RemoveServer { id: id.clone() }).await?
+        Action::RemoveServer { id, version } => {
+            let ResultValue::Removed(references) = actor(
+                engine,
+                Command::RemoveServer {
+                    id: id.clone(),
+                    version,
+                },
+            )
+            .await?
             else {
                 return Err(unknown());
             };

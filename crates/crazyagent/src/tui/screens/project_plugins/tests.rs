@@ -499,7 +499,7 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     let change = sent(view.key(press(KeyCode::Char('y'))));
     assert!(matches!(
         change,
-        PluginChange::RemoveSkill { ref id } if id == "pl0xtidepool-style"
+        PluginChange::RemoveSkill { ref id, version: 2 } if id == "pl0xtidepool-style"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(view.notice, Some(Notice::plain("Removed tidepool-style.")));
@@ -517,7 +517,7 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     let change = sent(view.key(press(KeyCode::Char('y'))));
     assert!(matches!(
         change,
-        PluginChange::RemoveServer { ref id } if id == "pl0xpostgres"
+        PluginChange::RemoveServer { ref id, version: 2 } if id == "pl0xpostgres"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(

@@ -1515,10 +1515,44 @@ async fn stale_read_paths_write_is_refused() {
     let removed = owner.remove_project(project.clone(), 7).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
-        engine.rows("SELECT count(*) FROM versioned_items WHERE item='read-paths:setup-pooled'"),
-        0,
-        "a removed project's folders forget their version"
+        engine.rows("SELECT version FROM versioned_items WHERE item='read-paths:setup-pooled'"),
+        2,
+        "a removed project's folders keep their version"
     );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![],
+            version: 2
+        },
+        "the project added again under the same id starts with no folders"
+    );
+    for (version, generation) in [(0, 9), (1, 10)] {
+        let refused = owner
+            .set_project_read_paths(project.clone(), version, vec![text(&assets)], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save read before the removal at version {version} is refused"
+        );
+    }
+    let fresh = owner
+        .set_project_read_paths(project.clone(), 2, vec![text(&assets)], 11)
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
     drop(owner);
     engine.stop().await;
 }

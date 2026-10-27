@@ -256,7 +256,11 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
     assert_eq!(effective.skills.len(), 1);
     assert_eq!(effective.skills[0].name, "app-style");
 
-    controller.remove_skill(release.id.clone()).await.unwrap();
+    let version = shown_version(&controller, &release.id, None).await;
+    controller
+        .remove_skill(release.id.clone(), version)
+        .await
+        .unwrap();
     assert!(!stored.exists());
     drop(controller);
     case.restart().await;
@@ -508,8 +512,9 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
         "plugin_switch_global_only"
     );
 
+    let version = shown_version(&controller, &server.id, None).await;
     controller
-        .remove_mcp_server(server.id.clone())
+        .remove_mcp_server(server.id.clone(), version)
         .await
         .unwrap();
     assert_eq!(files_under(&root.join("plugins/secrets")).len(), 1);
@@ -530,7 +535,11 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
             ("remote".into(), "Approved".into()),
         ]
     );
-    controller.remove_mcp_server(remote.id).await.unwrap();
+    let version = shown_version(&controller, &remote.id, Some(project.clone())).await;
+    controller
+        .remove_mcp_server(remote.id, version)
+        .await
+        .unwrap();
     assert!(files_under(&root.join("plugins/secrets")).is_empty());
     drop(controller);
     case.close().await;
@@ -657,8 +666,9 @@ async fn a_server_check_cannot_write_outside_or_read_another_servers_secret() {
     assert_eq!(checked.problem, None);
     let folder = root.join("mcp-checks").join(&server.id);
     assert!(folder.join("home").is_dir());
+    let version = shown_version(&controller, &server.id, None).await;
     controller
-        .remove_mcp_server(server.id.clone())
+        .remove_mcp_server(server.id.clone(), version)
         .await
         .unwrap();
     assert!(
@@ -741,6 +751,22 @@ fn stored_version(root: &Path, id: &str) -> Option<i64> {
     .unwrap()
 }
 
+/// Returns the version the plugin screens show for one skill or server.
+/// Inputs: the controller, the item id and the project whose view lists it, none for global.
+/// Output: the item's current version.
+async fn shown_version(controller: &OwnerController, id: &str, project: Option<ProjectId>) -> u64 {
+    let skills = controller.plugin_skills(project.clone()).await.unwrap();
+    if let Some(skill) = skills.iter().find(|skill| skill.id == id) {
+        return skill.version;
+    }
+    let servers = controller.plugin_servers(project).await.unwrap();
+    servers
+        .iter()
+        .find(|server| server.id == id)
+        .expect("a listed plugin")
+        .version
+}
+
 #[tokio::test]
 async fn stale_skill_write_is_refused() {
     let case = Case::new().await;
@@ -814,7 +840,16 @@ async fn stale_skill_write_is_refused() {
     assert!(on.enabled);
     assert_eq!(on.version, 3);
 
-    controller.remove_skill(skill.id.clone()).await.unwrap();
+    let stale_remove = controller
+        .remove_skill(skill.id.clone(), 2)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_remove.0, "stale_revision");
+    let kept = controller.plugin_skills(None).await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert!(Path::new(&kept[0].folder).join("SKILL.md").is_file());
+    assert_eq!(stored_version(&root, &skill.id), Some(3));
+    controller.remove_skill(skill.id.clone(), 3).await.unwrap();
     assert_eq!(stored_version(&root, &skill.id), None);
     drop(controller);
     case.close().await;
@@ -899,8 +934,15 @@ async fn stale_mcp_server_write_is_refused() {
     assert_eq!(off.version, 2);
     assert_eq!(stored_version(&root, &server.id), Some(2));
 
+    let stale_remove = controller
+        .remove_mcp_server(server.id.clone(), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_remove.0, "stale_revision");
+    assert_eq!(controller.plugin_servers(None).await.unwrap().len(), 1);
+    assert_eq!(stored_version(&root, &server.id), Some(2));
     controller
-        .remove_mcp_server(server.id.clone())
+        .remove_mcp_server(server.id.clone(), 2)
         .await
         .unwrap();
     assert_eq!(stored_version(&root, &server.id), None);

@@ -143,9 +143,10 @@ impl OwnerController {
             .await
     }
 
-    /// Removes a skill and the engine's copy of its folder. Input: the skill id.
-    pub async fn remove_skill(&self, id: String) -> Result<(), EngineError> {
-        self.plugins_client()?.remove_skill(id).await
+    /// Removes a skill and the engine's copy of its folder. Inputs: the skill id and the
+    /// version the screen showed. Output: done, or `stale_revision` after another change.
+    pub async fn remove_skill(&self, id: String, version: u64) -> Result<(), EngineError> {
+        self.plugins_client()?.remove_skill(id, version).await
     }
 
     /// Adds an MCP server, then saves each secret through its own private frame.
@@ -179,7 +180,9 @@ impl OwnerController {
             {
                 Ok(saved) => server = saved,
                 Err(problem) => {
-                    let _ = client.remove_mcp_server(server.id.clone()).await;
+                    let _ = client
+                        .remove_mcp_server(server.id.clone(), server.version)
+                        .await;
                     return Err(problem);
                 }
             }
@@ -222,9 +225,10 @@ impl OwnerController {
             .await
     }
 
-    /// Removes an MCP server and its saved secrets. Input: the server id.
-    pub async fn remove_mcp_server(&self, id: String) -> Result<(), EngineError> {
-        self.plugins_client()?.remove_mcp_server(id).await
+    /// Removes an MCP server and its saved secrets. Inputs: the server id and the version
+    /// the screen showed. Output: done, or `stale_revision` after another change.
+    pub async fn remove_mcp_server(&self, id: String, version: u64) -> Result<(), EngineError> {
+        self.plugins_client()?.remove_mcp_server(id, version).await
     }
 
     /// Switches a global skill or MCP server on or off for one project. Inputs: the project,

@@ -102,6 +102,7 @@ pub(in crate::tui) enum PluginChange {
     },
     RemoveSkill {
         id: String,
+        version: u64,
     },
     AddServer {
         scope: Scope,
@@ -120,6 +121,7 @@ pub(in crate::tui) enum PluginChange {
     },
     RemoveServer {
         id: String,
+        version: u64,
     },
     CheckServer {
         id: String,
@@ -595,7 +597,9 @@ impl NativeOwner {
                 .set_skill_enabled(id, enabled, version)
                 .await
                 .map(|_| None),
-            PluginChange::RemoveSkill { id } => controller.remove_skill(id).await.map(|()| None),
+            PluginChange::RemoveSkill { id, version } => {
+                controller.remove_skill(id, version).await.map(|()| None)
+            }
             PluginChange::AddServer {
                 scope,
                 name,
@@ -616,9 +620,10 @@ impl NativeOwner {
                 .set_mcp_server_enabled(id, enabled, version)
                 .await
                 .map(Some),
-            PluginChange::RemoveServer { id } => {
-                controller.remove_mcp_server(id).await.map(|()| None)
-            }
+            PluginChange::RemoveServer { id, version } => controller
+                .remove_mcp_server(id, version)
+                .await
+                .map(|()| None),
             PluginChange::CheckServer { id } => controller.check_mcp_server(id).await.map(Some),
             PluginChange::Update { id, spec, version } => controller
                 .update_mcp_server(id, spec, version)

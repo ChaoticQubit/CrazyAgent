@@ -710,8 +710,8 @@ export function setSkillEnabled(id: string, enabled: boolean, version: number): 
 }
 
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
-export function removeSkill(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill for its detail view: the skill with the project's switch when a project
@@ -759,8 +759,8 @@ export function setMcpServerEnabled(id: string, enabled: boolean, version: numbe
 }
 
 /** Removes an MCP server and its saved secrets. Input: server id. */
-export function removeMcpServer(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_mcp_server", { id, version });
 }
 
 /** Saves or replaces one secret for an MCP server; the value is sent once and not kept here.

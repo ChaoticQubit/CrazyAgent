@@ -123,11 +123,12 @@ impl NativeBridge {
         result.map_err(|code| plugin_failure(EngineError(code)))
     }
 
-    /// Removes a skill and the engine's copy of its folder.
-    pub async fn remove_skill(&mut self, id: String) -> Result<(), BridgeError> {
+    /// Removes a skill and the engine's copy of its folder, when the screen showed the
+    /// skill's current version.
+    pub async fn remove_skill(&mut self, id: String, version: u64) -> Result<(), BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .remove_skill(id)
+            .remove_skill(id, version)
             .await
             .map_err(plugin_failure)
     }
@@ -197,11 +198,12 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Removes an MCP server and its saved secrets.
-    pub async fn remove_mcp_server(&mut self, id: String) -> Result<(), BridgeError> {
+    /// Removes an MCP server and its saved secrets, when the screen showed the server's
+    /// current version.
+    pub async fn remove_mcp_server(&mut self, id: String, version: u64) -> Result<(), BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .remove_mcp_server(id)
+            .remove_mcp_server(id, version)
             .await
             .map_err(plugin_failure)
     }

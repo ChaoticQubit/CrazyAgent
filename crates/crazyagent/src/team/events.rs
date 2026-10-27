@@ -1611,7 +1611,8 @@ pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64,
 }
 
 /// Sets or clears the wake rule at one level when the owner's screen showed its current
-/// version; clearing returns that level to the level above it and to version 0. Takes the
+/// version; clearing returns that level to the level above it and still moves its version
+/// on, so a screen read before the clear cannot save over a newer rule. Takes the
 /// transaction, the level, the rule or none and the version the screen showed.
 /// Returns Ok, or `team_wake_cap_invalid`, `team_agent_not_found` or `stale_revision`.
 pub fn set_rule(
@@ -1645,13 +1646,10 @@ pub fn set_rule(
         return Ok(Err(versioned::STALE_CODE));
     }
     match rule {
-        None => {
-            versioned::forget(tx, &item)?;
-            tx.execute(
-                "DELETE FROM team_wake_rules WHERE project=?1 AND agent=?2",
-                params![project, agent],
-            )
-        }
+        None => tx.execute(
+            "DELETE FROM team_wake_rules WHERE project=?1 AND agent=?2",
+            params![project, agent],
+        ),
         Some(rule) => tx.execute(
             "INSERT INTO team_wake_rules(project,agent,question,finished,failed,change_set_ready,progress,hourly_cap)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)

@@ -192,19 +192,20 @@ impl ProjectPlugins {
 
     fn removed(&self) -> Option<(&str, bool)> {
         self.local(self.removing.as_deref()?)
+            .map(|(name, skill, _)| (name, skill))
     }
 
-    fn local(&self, id: &str) -> Option<(&str, bool)> {
+    fn local(&self, id: &str) -> Option<(&str, bool, u64)> {
         let local = |scope: &Scope| *scope != Scope::Global;
         self.skills
             .iter()
             .find(|skill| skill.id == id && local(&skill.scope))
-            .map(|skill| (skill.name.as_str(), true))
+            .map(|skill| (skill.name.as_str(), true, skill.version))
             .or_else(|| {
                 self.servers
                     .iter()
                     .find(|server| server.id == id && local(&server.scope))
-                    .map(|server| (server.name.as_str(), false))
+                    .map(|server| (server.name.as_str(), false, server.version))
             })
     }
 
@@ -386,16 +387,21 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let Some((name, skill)) = self.local(id).map(|(name, skill)| (name.to_owned(), skill))
+        let Some((name, skill, version)) = self
+            .local(id)
+            .map(|(name, skill, version)| (name.to_owned(), skill, version))
         else {
             return PluginsReply::Handled;
         };
         let id = id.to_owned();
         let (change, done) = if skill {
-            (PluginChange::RemoveSkill { id }, format!("Removed {name}."))
+            (
+                PluginChange::RemoveSkill { id, version },
+                format!("Removed {name}."),
+            )
         } else {
             (
-                PluginChange::RemoveServer { id },
+                PluginChange::RemoveServer { id, version },
                 format!("Removed {name} and its secrets."),
             )
         };

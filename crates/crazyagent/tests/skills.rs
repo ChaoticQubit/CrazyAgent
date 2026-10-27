@@ -282,7 +282,16 @@ async fn a_skill_detail_reads_the_whole_skill_md_its_files_and_the_project_switc
         .await
         .unwrap_err();
     assert_eq!(global_view.0, "skill_not_found");
-    controller.remove_skill(big.id.clone()).await.unwrap();
+    let shown = controller.plugin_skills(None).await.unwrap();
+    let version = shown
+        .iter()
+        .find(|skill| skill.id == big.id)
+        .expect("the listed skill")
+        .version;
+    controller
+        .remove_skill(big.id.clone(), version)
+        .await
+        .unwrap();
     let removed = controller
         .skill_detail(big.id.clone(), None)
         .await

@@ -1850,15 +1850,30 @@ fn stale_team_rule_write_is_refused() {
     assert!(view(connection, &project()).unwrap().wake.agents.is_empty());
     assert_eq!(
         rule_version(connection, &mine).unwrap(),
-        0,
-        "a level with no rule of its own is at version 0 again"
+        2,
+        "a cleared level keeps moving its version"
+    );
+    for version in [0, 1] {
+        assert_eq!(
+            write_rule(connection, &mine, Some(&loud), version),
+            Err("stale_revision"),
+            "a window that saw version {version} before the clear re-reads"
+        );
+    }
+    assert_eq!(write_rule(connection, &mine, Some(&loud), 2), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&quiet), 1),
+        Err("stale_revision"),
+        "a save read before the clear never replaces the rule set after it"
     );
     assert_eq!(
-        write_rule(connection, &mine, Some(&loud), 1),
-        Err("stale_revision"),
-        "a window that saw the cleared rule's version re-reads"
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
     );
-    assert_eq!(write_rule(connection, &mine, Some(&loud), 0), Ok(()));
 
     assert_eq!(
         write_rule(connection, &RuleTarget::App, Some(&quiet), 0),

@@ -1526,8 +1526,8 @@ export function setSkillEnabled(id: string, enabled: boolean, version: number): 
 }
 
 /** Removes a skill and the engine's copy of its folder. */
-export function removeSkill(id: string): Promise<void> {
-  return invoke<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<void> {
+  return invoke<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
@@ -1566,8 +1566,8 @@ export function setMcpServerEnabled(id: string, enabled: boolean, version: numbe
 }
 
 /** Removes an MCP server and its saved secrets. */
-export function removeMcpServer(id: string): Promise<void> {
-  return invoke<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<void> {
+  return invoke<void>("desktop_remove_mcp_server", { id, version });
 }
 
 /** Switches a global skill or MCP server on or off for one project, from the version the list showed. */
