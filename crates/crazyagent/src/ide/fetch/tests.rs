@@ -137,10 +137,20 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// A small real server tree: a start script and a product file.
+/// The folder a build of [`VERSION`] installs under.
+fn installed_folder() -> String {
+    format!("{VERSION}-{}", crate::ide::hide::REVISION)
+}
+
+/// A small real server tree: a start script, a product file and a workbench bundle holding
+/// the pinned build's removed parts.
 fn server_tree(root: &Path) -> PathBuf {
     let source = root.join("source");
     write(&source.join("bin/codium-server"), "#!/bin/sh\necho ok\n");
+    write(
+        &source.join(crate::ide::hide::BUNDLE),
+        crate::ide::hide::tests::SHIPPED,
+    );
     write(
         &source.join("product.json"),
         "{\"nameShort\":\"VSCodium\"}\n",
@@ -407,7 +417,7 @@ fn verified_archive_extracts_atomically_and_reports_ready() {
     let bytes = pack(&server_tree(tmp.path()), &tmp.path().join("build.tar.gz"));
     let server = Server::start(bytes.clone(), false);
     let finished = fetch(&runtime, &build(&server.url, &bytes));
-    let root = runtime.join("ide/builds").join(VERSION);
+    let root = runtime.join("ide/builds").join(installed_folder());
     assert_eq!(
         finished,
         BuildState::Ready {
@@ -424,6 +434,10 @@ fn verified_archive_extracts_atomically_and_reports_ready() {
         std::fs::read_to_string(root.join("product.json")).unwrap(),
         "{\"nameShort\":\"VSCodium\"}\n"
     );
+    assert_eq!(
+        std::fs::read_to_string(root.join(crate::ide::hide::BUNDLE)).unwrap(),
+        crate::ide::hide::tests::HIDDEN
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -433,7 +447,7 @@ fn verified_archive_extracts_atomically_and_reports_ready() {
             .mode();
         assert_eq!(mode & 0o111, 0o111);
     }
-    assert_eq!(files_in(&runtime.join("ide/builds")), [VERSION.to_owned()]);
+    assert_eq!(files_in(&runtime.join("ide/builds")), [installed_folder()]);
     assert!(files_in(&runtime.join("ide/downloads")).is_empty());
     std::fs::remove_dir_all(&root).unwrap();
     assert_eq!(state(&runtime), BuildState::Missing);
@@ -467,8 +481,69 @@ fn ensure_twice_starts_one_download() {
         ready,
         BuildState::Ready {
             version: VERSION.into(),
-            root: runtime.join("ide/builds").join(VERSION)
+            root: runtime.join("ide/builds").join(installed_folder())
         }
+    );
+    assert!(!ensure_with(&runtime, build(&server.url, &bytes)));
+    assert_eq!(server.hits(), 1);
+}
+
+#[test]
+fn a_build_whose_removed_parts_cannot_be_hidden_never_installs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(tmp.path());
+    let source = server_tree(tmp.path());
+    write(
+        &source.join(crate::ide::hide::BUNDLE),
+        &crate::ide::hide::tests::SHIPPED.replace("\"Manage Accounts\")", "\"Accounts\")"),
+    );
+    let bytes = pack(&source, &tmp.path().join("build.tar.gz"));
+    let server = Server::start(bytes.clone(), false);
+    let finished = fetch(&runtime, &build(&server.url, &bytes));
+    assert_eq!(
+        finished,
+        BuildState::Failed {
+            code: "ide_build_patch_failed".into()
+        }
+    );
+    assert_eq!(state(&runtime), finished);
+    assert!(files_in(&runtime.join("ide/builds")).is_empty());
+    assert!(files_in(&runtime.join("ide/downloads")).is_empty());
+}
+
+#[test]
+fn a_ready_build_installed_before_hiding_is_fetched_again_and_then_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(tmp.path());
+    let old = runtime.join("ide/builds").join(VERSION);
+    write(&old.join("product.json"), "{}\n");
+    write_state(
+        &runtime,
+        &BuildState::Ready {
+            version: VERSION.into(),
+            root: old.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(state(&runtime), BuildState::Ready { .. }));
+    let bytes = pack(&server_tree(tmp.path()), &tmp.path().join("build.tar.gz"));
+    let server = Server::start(bytes.clone(), false);
+    assert!(ensure_with(&runtime, build(&server.url, &bytes)));
+    let root = runtime.join("ide/builds").join(installed_folder());
+    let ready = wait_for(
+        &runtime,
+        |now| matches!(now, BuildState::Ready { root: at, .. } if *at == root),
+    );
+    assert_eq!(
+        ready,
+        BuildState::Ready {
+            version: VERSION.into(),
+            root: root.clone()
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(crate::ide::hide::BUNDLE)).unwrap(),
+        crate::ide::hide::tests::HIDDEN
     );
     assert!(!ensure_with(&runtime, build(&server.url, &bytes)));
     assert_eq!(server.hits(), 1);

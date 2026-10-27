@@ -135,7 +135,8 @@ pub fn state(runtime: &Path) -> BuildState {
 }
 
 /// Starts fetching the pinned IDE build for this platform in the background unless it is
-/// ready or already being fetched; a platform with no build records Failed.
+/// ready under the current hiding revision or already being fetched; a platform with no
+/// build records Failed.
 /// Input: the engine root. Output: true when this call started a fetch.
 pub fn ensure(runtime: &Path) -> bool {
     match crate::update::target()
@@ -166,7 +167,10 @@ pub fn on_engine_start(runtime: &Path) -> bool {
 
 fn ensure_with(runtime: &Path, build: Build) -> bool {
     assert!(manifest::version_valid(&build.version));
-    if matches!(state(runtime), BuildState::Ready { ref version, .. } if *version == build.version)
+    let folder = installed(&build);
+    if let BuildState::Ready { version, root } = state(runtime)
+        && version == build.version
+        && root.file_name() == Some(std::ffi::OsStr::new(&folder))
     {
         return false;
     }
@@ -195,7 +199,8 @@ fn ensure_with(runtime: &Path, build: Build) -> bool {
         .is_ok()
 }
 
-/// Downloads, verifies and extracts one build, then records and returns where it ended.
+/// Downloads, verifies, extracts and hides one build's removed parts, then records and
+/// returns where it ended.
 /// Inputs: the engine root and the build. Output: Ready or Failed with its code.
 fn fetch(runtime: &Path, build: &Build) -> BuildState {
     let finished = match install(runtime, build) {
@@ -209,6 +214,13 @@ fn fetch(runtime: &Path, build: &Build) -> BuildState {
         Ok(()) => finished,
         Err(error) => BuildState::Failed { code: error.0 },
     }
+}
+
+/// The folder a build installs under: its version and the [`super::hide::REVISION`] it was
+/// hidden with, so a build installed under another revision is fetched again.
+/// Input: the build. Output: the folder name.
+fn installed(build: &Build) -> String {
+    format!("{}-{}", build.version, super::hide::REVISION)
 }
 
 fn install(runtime: &Path, build: &Build) -> Result<PathBuf, EngineError> {
@@ -231,7 +243,8 @@ fn install(runtime: &Path, build: &Build) -> Result<PathBuf, EngineError> {
     }
     extract(&archive, &staging)?;
     check_tree(&staging)?;
-    let root = builds.join(&build.version);
+    super::hide::apply(&staging)?;
+    let root = builds.join(installed(build));
     if root.exists() {
         std::fs::remove_dir_all(&root).map_err(storage)?;
     }
