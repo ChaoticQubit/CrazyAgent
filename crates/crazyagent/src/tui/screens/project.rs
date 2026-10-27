@@ -12,6 +12,8 @@ use crate::project_setup::{
     ResearchStatus, SetupAction, SetupQuery, SetupView, StoredSetup,
 };
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::team::TeamGraph;
+use crate::tui::ctx::Load;
 use crate::tui::seam::PoolScope;
 use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -495,6 +497,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub pool_choices: Vec<PoolChoice>,
     pub pool_picker: Option<usize>,
     pub transcript: Option<Transcript>,
+    pub team: Load<Box<TeamGraph>>,
     pub input: TextInput,
     pub typing: bool,
     pub transcript_scroll: usize,
@@ -551,6 +554,7 @@ impl ProjectScreen {
             pool_choices: Vec::new(),
             pool_picker: None,
             transcript: None,
+            team: Load::Idle,
             input: TextInput::multi(MESSAGE_BYTES_MAX),
             typing: false,
             transcript_scroll: 0,
@@ -1231,6 +1235,7 @@ impl ProjectScreen {
                 ProjectReply::Retry
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
                 ProjectReply::EndConversation
             }
