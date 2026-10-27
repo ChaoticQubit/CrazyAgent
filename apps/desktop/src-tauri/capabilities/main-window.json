@@ -115,6 +115,7 @@
     "allow-desktop-add-skill",
     "allow-desktop-set-skill-enabled",
     "allow-desktop-remove-skill",
+    "allow-desktop-skill-detail",
     "allow-desktop-add-mcp-server",
     "allow-desktop-update-mcp-server",
     "allow-desktop-approve-mcp-server",

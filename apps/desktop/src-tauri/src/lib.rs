@@ -1452,6 +1452,17 @@ async fn desktop_set_skill_enabled(
 }
 
 #[tauri::command]
+async fn desktop_skill_detail(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<crazyagent::skills::SkillDetail, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.skill_detail(id, project_id).await
+}
+
+#[tauri::command]
 async fn desktop_remove_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2104,6 +2115,7 @@ pub fn run() {
             desktop_add_skill,
             desktop_set_skill_enabled,
             desktop_remove_skill,
+            desktop_skill_detail,
             desktop_add_mcp_server,
             desktop_update_mcp_server,
             desktop_approve_mcp_server,

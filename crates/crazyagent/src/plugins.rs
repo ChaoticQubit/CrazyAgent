@@ -202,6 +202,7 @@ pub struct SkillView {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub line: String,
     pub scope: Scope,
     pub scope_label: String,
     pub enabled: bool,
@@ -361,6 +362,14 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("skill_limit", "You can add up to 100 skills here."),
     ("skill_not_found", "This skill was removed."),
+    (
+        "skill_text_too_large",
+        "This SKILL.md is too large to show here.",
+    ),
+    (
+        "skill_page_invalid",
+        "This skill changed while it was read. Open it again.",
+    ),
     (
         "server_name_invalid",
         "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
