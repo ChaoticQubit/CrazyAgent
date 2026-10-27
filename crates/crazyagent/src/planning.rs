@@ -47,6 +47,13 @@ const RELEASE_FILE: &str = "release-process.md";
 const ROADMAP_HEADING: &str = "# Roadmap";
 const RELEASE_HEADING: &str = "# Release process";
 const OPEN_HEADING: &str = "# Open questions";
+const OPEN_QUESTIONS_HEADING: &str = "## Open questions";
+const ENGINE_SECTIONS: [&str; 4] = [
+    "roadmap",
+    "release process",
+    "open questions",
+    "owner answers",
+];
 
 /// A planning agent's reply split into its parts: the roadmap body, the release process body
 /// and every open point in order, each as the agent wrote it.
@@ -157,28 +164,105 @@ fn bullet(line: &str) -> Option<&str> {
 /// Renders the two documents: the roadmap with every open point under "Open questions",
 /// and the release process, each headed by its provenance (engine-written from an agent's
 /// reply, its sources, not reviewed by the owner), with hidden characters shown escaped so no
-/// agent reading the context sees text the owner cannot.
+/// agent reading the context sees text the owner cannot, and every agent line that could pass
+/// for engine text escaped by `inert`.
 /// Takes the plan, the harness label, the date and the research report paths the plan was made
 /// from. Returns the roadmap and release process.
 pub fn render(plan: &Plan, harness: &str, date: &str, sources: &[String]) -> (String, String) {
     let visible = crate::memory::visible_text;
+    let body = |text: &str| inert(&visible(text));
     let provenance = provenance(harness, date, sources);
     let mut roadmap = format!(
-        "{ROADMAP_HEADING}\n\n{provenance}\n\n{}\n\n## Open questions\n\n",
-        visible(&plan.roadmap)
+        "{ROADMAP_HEADING}\n\n{provenance}\n\n{}\n\n{OPEN_QUESTIONS_HEADING}\n\n",
+        body(&plan.roadmap)
     );
     if plan.open_points.is_empty() {
         roadmap.push_str("None.\n");
     }
     for point in &plan.open_points {
-        roadmap.push_str(&format!("- {}\n", visible(point)));
+        roadmap.push_str(&format!("- {}\n", body(point)));
     }
     let release = format!(
         "{RELEASE_HEADING}\n\n{provenance}\n\n{}\n",
-        visible(&plan.release_process)
+        body(&plan.release_process)
     );
     assert!(roadmap.starts_with(ROADMAP_HEADING) && release.starts_with(RELEASE_HEADING));
     (roadmap, release)
+}
+
+/// Escapes every line of an agent-written body that could pass for engine text: a heading,
+/// ATX or setext at any level, named like an engine section; a line naming the engine as its
+/// writer; and a listed `Question <n>:` answer marker. A backslash goes before the line's
+/// first mark, so the engine finds its own sections by structure and a reader sees plain text.
+/// Takes the body with hidden characters already escaped. Returns the body.
+fn inert(body: &str) -> String {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let mut out = Vec::with_capacity(lines.len());
+    for (at, line) in lines.iter().enumerate() {
+        let underlined = at > 0 && engine_section(lines[at - 1].trim()) && underline(line);
+        if engine_like(line) || underlined {
+            let text = line.trim_start();
+            out.push(format!("{}\\{text}", &line[..line.len() - text.len()]));
+        } else {
+            out.push((*line).to_owned());
+        }
+    }
+    let body = out.join("\n");
+    assert!(body.split('\n').all(|line| !engine_like(line)));
+    body
+}
+
+/// Whether a line could pass for engine text: an ATX heading named like an engine section,
+/// a line opening with the provenance mark, quoted or not, or a listed `Question <n>:` marker.
+/// Takes the line. Returns true when it must be escaped.
+fn engine_like(line: &str) -> bool {
+    let text = line.trim_start();
+    let hashes = text.bytes().take_while(|byte| *byte == b'#').count();
+    if hashes > 0 && engine_section(text[hashes..].trim().trim_end_matches('#').trim()) {
+        return true;
+    }
+    let said = text.trim_start_matches(['>', ' ', '\t']);
+    if said
+        .get(..PROVENANCE_MARK.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(PROVENANCE_MARK))
+    {
+        return true;
+    }
+    let listed = text
+        .strip_prefix(['-', '*', '+'])
+        .or_else(|| {
+            let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+            (digits > 0)
+                .then_some(&text[digits..])
+                .and_then(|rest| rest.strip_prefix(['.', ')']))
+        })
+        .map(str::trim_start);
+    listed.is_some_and(|item| {
+        let Some(rest) = item
+            .get(.."question ".len())
+            .filter(|start| start.eq_ignore_ascii_case("question "))
+            .map(|start| &item[start.len()..])
+        else {
+            return false;
+        };
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0 && rest[digits..].trim_start().starts_with(':')
+    })
+}
+
+/// Whether a heading text, without its marks, names an engine section, ignoring case.
+/// Takes the text. Returns true for a reserved name.
+fn engine_section(text: &str) -> bool {
+    ENGINE_SECTIONS
+        .iter()
+        .any(|name| text.eq_ignore_ascii_case(name))
+}
+
+/// Whether a line is a setext heading underline: only `=` or only `-` marks.
+/// Takes the line. Returns true for an underline.
+fn underline(line: &str) -> bool {
+    let text = line.trim();
+    !text.is_empty() && (text.bytes().all(|b| b == b'=') || text.bytes().all(|b| b == b'-'))
 }
 
 /// The note heading both planning documents: written by the engine from which agent's reply
@@ -294,10 +378,7 @@ fn record_project(db: &Connection, project: &ProjectId) -> Result<usize, EngineE
         let lines: Vec<String> = taken
             .iter()
             .map(|item| {
-                let question = asked
-                    .iter()
-                    .find(|question| question.id == item.id)
-                    .map(|question| question.question.as_str());
+                let question = asked.iter().find(|question| question.id == item.id);
                 answer_line(item.id, question, item.answer.as_deref())
             })
             .collect();
@@ -310,44 +391,80 @@ fn record_project(db: &Connection, project: &ProjectId) -> Result<usize, EngineE
     Ok(taken.len())
 }
 
-/// One answer as the roadmap lists it: the question id and text on one line, then the owner's
-/// answer or that the owner dismissed it, line breaks folded and hidden characters escaped.
-/// Inputs: the id, the question text when still listed and the answer. Output: the entry.
-fn answer_line(id: i64, question: Option<&str>, answer: Option<&str>) -> String {
+/// One answer as the roadmap lists it: the question id and text on one line, then the answer
+/// labelled by who gave it, or that the owner dismissed it, line breaks folded and hidden
+/// characters escaped. Inputs: the id, the question as listed before it was taken, and the
+/// answer, none when dismissed. Output: the entry.
+fn answer_line(
+    id: i64,
+    question: Option<&crate::questions::Question>,
+    answer: Option<&str>,
+) -> String {
+    use crate::questions::AnsweredBy;
     let flat = |text: &str| {
         crate::memory::visible_text(&text.split_whitespace().collect::<Vec<_>>().join(" "))
     };
-    let question = question.map_or_else(String::new, |text| format!(" {}", flat(text)));
-    let outcome = answer.map_or_else(
-        || "The owner dismissed it.".to_owned(),
-        |answer| format!("Owner: {}", flat(answer)),
-    );
-    format!("- Question {id}:{question}\n  {outcome}\n")
+    let asked = question.map_or_else(String::new, |asked| format!(" {}", flat(&asked.question)));
+    let outcome = match (answer, question.and_then(|asked| asked.answered_by)) {
+        (None, _) => "The owner dismissed it.".to_owned(),
+        (Some(answer), Some(AnsweredBy::Owner)) => format!("Owner: {}", flat(answer)),
+        (Some(answer), Some(AnsweredBy::Master)) => {
+            format!("Recorded by the master from chat: {}", flat(answer))
+        }
+        (Some(answer), Some(AnsweredBy::Terminal)) => {
+            format!("Answered in the master's terminal: {}", flat(answer))
+        }
+        (Some(answer), None) => format!("Answer: {}", flat(answer)),
+    };
+    format!("- Question {id}:{asked}\n  {outcome}\n")
 }
 
-/// Adds answer entries to a roadmap under `ANSWERS_HEADING`, adding the heading once and
-/// skipping an entry whose question id the roadmap already lists, so a retried write never
-/// repeats one. Inputs: the roadmap, none when missing, and the entries. Output: the new text.
+/// Adds answer entries to the engine's answers section of a roadmap: the first
+/// `ANSWERS_HEADING` line after the engine's last `## Open questions` line, added at the end
+/// when there is none, so a heading the agent's text holds is never taken for it. An entry
+/// whose `Question <n>:` marker the section already lists is skipped, so a retried write
+/// never repeats one. Inputs: the roadmap, none when missing, and the entries. Output: the text.
 fn with_answers(roadmap: Option<&str>, entries: &[String]) -> String {
-    let mut text = roadmap.unwrap_or("# Roadmap\n").to_owned();
-    if !text.lines().any(|line| line == ANSWERS_HEADING) {
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(&format!("\n{ANSWERS_HEADING}\n\n"));
+    let mut text = roadmap.unwrap_or(ROADMAP_HEADING).to_owned();
+    if !text.ends_with('\n') {
+        text.push('\n');
     }
-    let answers = text.find(&format!("\n{ANSWERS_HEADING}\n")).unwrap_or(0);
+    let lines = lines_at(&text);
+    let open = lines
+        .iter()
+        .rfind(|(_, line)| *line == OPEN_QUESTIONS_HEADING)
+        .map_or(0, |(at, _)| *at);
+    let found = lines
+        .iter()
+        .find(|(at, line)| *at >= open && *line == ANSWERS_HEADING)
+        .map(|(at, _)| *at);
+    let answers = found.unwrap_or_else(|| {
+        text.push('\n');
+        let at = text.len();
+        text.push_str(&format!("{ANSWERS_HEADING}\n\n"));
+        at
+    });
     for entry in entries {
-        let marker = entry.split(':').next().unwrap_or(entry);
-        let listed = text[answers..]
-            .lines()
-            .any(|line| line.split(':').next() == Some(marker));
-        if !listed {
+        let marker = entry.split_inclusive(':').next().unwrap_or(entry);
+        if !text[answers..].lines().any(|line| line.starts_with(marker)) {
             text.push_str(entry);
         }
     }
-    assert!(text.lines().any(|line| line == ANSWERS_HEADING));
+    assert!(answers >= open && text[answers..].starts_with(ANSWERS_HEADING));
     text
+}
+
+/// Each line of a text with the byte offset it starts at, its line break left off.
+/// Takes the text. Returns the offsets and lines in order.
+fn lines_at(text: &str) -> Vec<(usize, &str)> {
+    let mut at = 0;
+    text.split_inclusive('\n')
+        .map(|line| {
+            let start = at;
+            at += line.len();
+            (start, line.trim_end_matches('\n'))
+        })
+        .collect()
 }
 
 fn now_ms() -> i64 {
