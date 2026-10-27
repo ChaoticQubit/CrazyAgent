@@ -447,8 +447,8 @@ fn start_diagnostic(kind: Kind, cause: &str) -> String {
 }
 
 /// The short cause code of a runner error: which refusal or failure stopped the
-/// start, never the error text, which can name paths. Takes the error. Returns
-/// lowercase letters, digits and `_` only.
+/// start, never the error text, which can name paths; a setup code that is not plain
+/// is withheld. Takes the error. Returns lowercase letters, digits and `_` only.
 fn start_cause(error: &RunError) -> String {
     let cause = match error {
         RunError::Invalid(reason) if reason == RUN_NAME_USED => "run_name_used".to_owned(),
@@ -463,7 +463,7 @@ fn start_cause(error: &RunError) -> String {
         RunError::Account(_) => "account_unavailable".to_owned(),
         RunError::Busy => "account_busy".to_owned(),
         RunError::Uncertain(_) => "cleanup_uncertain".to_owned(),
-        RunError::Setup(code) => (*code).to_owned(),
+        RunError::Setup(code) => crate::protocol::plain_code(code).to_owned(),
         RunError::Io(error) => io_cause("io", error),
     };
     assert!(
