@@ -361,6 +361,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Runs one upkeep step so that a panic inside it ends only that step: its transaction
+/// rolls back as it unwinds and the thread steps again at the next scan. Input: the step.
+/// Output: its problem code, `usage_step_panicked` for a panic, none when it succeeded.
+fn guarded(step: impl FnOnce() -> Result<(), EngineError>) -> Option<String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)) {
+        Ok(Ok(())) => None,
+        Ok(Err(problem)) => Some(problem.0),
+        Err(_) => Some("usage_step_panicked".to_owned()),
+    }
+}
+
 /// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, reading the
 /// pools live from the engine's settings files. Inputs: the runtime folder, both settings
 /// files and the harness executables by harness id. Output: the service, or a reason.
@@ -394,7 +405,7 @@ pub fn start_for_engine(
         .spawn(move || {
             let mut last = None;
             while !flag.load(Ordering::SeqCst) {
-                let problem = usage.step(now_ms()).err().map(|e| e.0);
+                let problem = guarded(|| usage.step(now_ms()));
                 if problem.is_some() && problem != last {
                     eprintln!("usage: {}", problem.as_deref().unwrap_or_default());
                 }
