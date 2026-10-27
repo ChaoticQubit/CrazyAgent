@@ -152,7 +152,7 @@ export function AppView({ session, route, alerts }: { session: Session; route: R
   }
   const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
     const unseen = alerts?.get(project.id) ?? 0;
-    return { id: project.id, name: project.name, flag: unseen > 0 ? String(unseen) : undefined };
+    return { id: project.id, name: displayText(project.name), flag: unseen > 0 ? String(unseen) : undefined };
   }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} />}

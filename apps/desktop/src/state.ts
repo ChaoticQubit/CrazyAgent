@@ -1016,6 +1016,7 @@ export interface Session {
   profileCheck: { busy: boolean } | null;
   profile: Loaded<OwnerProfile | null>;
   projects: Loaded<ProjectRow[]>;
+  projectsMore: boolean;
   toast: string;
   revision: number;
   retry: () => void;
@@ -1041,6 +1042,7 @@ export function useSession(): Session {
   const profileTracking = useRef(false);
   const [profile, setProfile] = useState<Loaded<OwnerProfile | null>>({ kind: "loading" });
   const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
+  const [projectsMore, setProjectsMore] = useState(false);
   const [toast, setToast] = useState("");
   const [revision, setRevision] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -1126,7 +1128,9 @@ export function useSession(): Session {
   }
 
   async function refreshProjects() {
-    setProjects(noteResult(await api.listProjects()));
+    const result = noteResult(await api.listProjects());
+    setProjectsMore(result.kind === "ok" && result.value.more);
+    setProjects(result.kind === "ok" ? { kind: "ok", value: result.value.items } : result);
   }
 
   async function start() {
@@ -1148,7 +1152,7 @@ export function useSession(): Session {
   }, []);
 
   return {
-    engine, unconfirmed, profileCheck, profile, projects, toast, revision,
+    engine, unconfirmed, profileCheck, profile, projects, projectsMore, toast, revision,
     retry: () => { void start(); },
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },

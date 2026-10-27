@@ -925,10 +925,38 @@ export function dismissSuggestion(suggestion: Suggestion): Promise<Result<void>>
   return change("desktop_review_memory", { id: suggestion.project_id, memory: suggestion.id, version: suggestion.version, decision: { decision: "Reject" }, generation: nextGeneration() });
 }
 
-/** Reads the first page of projects for Home and the sidebar. Output: projects. */
-export async function listProjects(): Promise<Result<ProjectPage["items"]>> {
-  const result = await call<ProjectPage>("desktop_projects", { next: false });
-  return result.kind === "ok" ? { kind: "ok", value: result.value.items } : result;
+/** The most projects Home, the sidebar and Go to list, the terminal app's bound. */
+export const PROJECT_LIST_MAX = 200;
+
+/** The projects Home, the sidebar and Go to list, in engine order, and whether the engine
+ * holds more than they show. */
+export interface ProjectList {
+  items: ProjectPage["items"];
+  more: boolean;
+}
+
+/** Cuts the projects read so far to the list bound. Inputs: the projects read in engine order
+ * and whether the engine reported another page. Output: at most PROJECT_LIST_MAX projects and
+ * whether any were left out. */
+export function projectList(items: ProjectPage["items"], hasMore: boolean): ProjectList {
+  return { items: items.slice(0, PROJECT_LIST_MAX), more: hasMore || items.length > PROJECT_LIST_MAX };
+}
+
+/** Reads the projects for Home, the sidebar and Go to, page by page, up to PROJECT_LIST_MAX;
+ * at most PROJECT_LIST_MAX + 1 pages, so an engine that keeps sending empty pages still ends.
+ * Input: none. Output: the projects in engine order and whether more exist, or the first failed
+ * page's error. */
+export async function listProjects(): Promise<Result<ProjectList>> {
+  const items: ProjectPage["items"] = [];
+  let result = await call<ProjectPage>("desktop_projects", { next: false });
+  for (let pages = 1; result.kind === "ok"; pages += 1) {
+    items.push(...result.value.items);
+    if (!result.value.has_more || items.length >= PROJECT_LIST_MAX || pages > PROJECT_LIST_MAX) {
+      return { kind: "ok", value: projectList(items, result.value.has_more) };
+    }
+    result = await call<ProjectPage>("desktop_projects", { next: true });
+  }
+  return result;
 }
 
 /** Reads one project's team graph: master, harness groups, agents and task edges.
