@@ -8,7 +8,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
 pub fn safe_text(text: &str, limit: usize) -> String {
     let mut output = String::with_capacity(text.len().min(limit));
     for character in text.chars() {
-        if character.is_control() && character != '\n' && character != '\t' {
+        if (character.is_control() && character != '\n' && character != '\t')
+            || super::frame::bidi_control(character)
+        {
             continue;
         }
         if output.len() + character.len_utf8() > limit {

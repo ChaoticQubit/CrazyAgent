@@ -222,7 +222,7 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
           onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
           onKeyDown={onKeyDown} />
       </div>
-      <p className="cs-status" role="status">{hint}</p>
+      <p className="cs-status" role="status">{displayText(hint)}</p>
     </div>
   </section>;
 }
