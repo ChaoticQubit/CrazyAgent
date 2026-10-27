@@ -527,6 +527,40 @@ fn committed(tx: &Transaction<'_>, provenance: &OwnerProvenance) -> Result<(), E
     Ok(())
 }
 
+/// Whether the owner request recorded for a session is the one that started it: an Open
+/// or a New session, with or without cancelling a running turn. Every check of a
+/// session's start uses this one list. Input: the session. Output: true when one of those
+/// requests, rebuilt from the session, has the recorded hash.
+pub(super) fn opened_by_owner(session: &MasterSessionView) -> Result<bool, EngineError> {
+    let open = MasterOwnerAction::Open {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+    };
+    let renew = |cancel_running| MasterOwnerAction::NewSession {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+        cancel_running,
+    };
+    for action in [open, renew(false), renew(true)] {
+        let original = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: session.owner.operation_id.clone(),
+            expected_revision: session.owner.revision_before.clone(),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster { action },
+            },
+        };
+        if original.mutation_hash()? == session.owner.request_hash {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn decode_session(
     tx: &Transaction<'_>,
     row: &Row<'_>,
@@ -558,36 +592,7 @@ fn decode_session(
         return Err(error("master_session_record"));
     }
     committed(tx, &session.owner)?;
-    let opened_by = |action: MasterOwnerAction| -> Result<bool, EngineError> {
-        let original = OwnerRequest {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: session.owner.operation_id.clone(),
-            expected_revision: session.owner.revision_before.clone(),
-            operation: OwnerOperation::Apply {
-                mutation: OwnerMutation::ProjectMaster { action },
-            },
-        };
-        Ok(original.mutation_hash()? == session.owner.request_hash)
-    };
-    let opened = opened_by(MasterOwnerAction::Open {
-        project_id: session.project_id.clone(),
-        expected_config_id: session.config_id.clone(),
-        expected_source_hash: session.source_hash.clone(),
-        selection: Box::new(session.selection.clone()),
-    })?;
-    let mut renewed = false;
-    for cancel_running in [false, true] {
-        renewed = renewed
-            || (!opened
-                && opened_by(MasterOwnerAction::NewSession {
-                    project_id: session.project_id.clone(),
-                    expected_config_id: session.config_id.clone(),
-                    expected_source_hash: session.source_hash.clone(),
-                    selection: Box::new(session.selection.clone()),
-                    cancel_running,
-                })?);
-    }
-    if !opened && !renewed {
+    if !opened_by_owner(&session)? {
         return Err(error("master_open_provenance"));
     }
     let mut statement = tx
@@ -5533,6 +5538,72 @@ fallback_allowed = false
         assert_eq!(prepared.repository, case.repository);
         assert_eq!(prepared.lease.state, LeaseState::Ready);
         assert!(prepared.cwd.join(".git").is_file());
+        case.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_new_conversation_prepares_its_first_turn_on_its_own_worktree() {
+        let mut case = Fixture::new(true).await;
+        let project = case.session.project_id.clone();
+        let previous = case.session.session_id.clone();
+        owner_apply(
+            &case.storage,
+            &case.started,
+            "new-conversation",
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::NewSession {
+                    project_id: project.clone(),
+                    expected_config_id: case.session.config_id.clone(),
+                    expected_source_hash: case.session.source_hash.clone(),
+                    selection: Box::new(case.session.selection.clone()),
+                    cancel_running: true,
+                },
+            },
+        )
+        .await;
+        let state = owner_read(
+            &case.storage,
+            &case.started,
+            OwnerRead::ProjectMaster {
+                project_id: project.clone(),
+            },
+        )
+        .await;
+        let OwnerData::ProjectMaster {
+            session: Some(session),
+        } = state.data
+        else {
+            panic!("actual new master session missing");
+        };
+        assert_ne!(session.session_id, previous);
+        case.session = *session;
+        owner_apply(
+            &case.storage,
+            &case.started,
+            "submit-new-conversation",
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Submit {
+                    project_id: project,
+                    session_id: case.session.session_id.clone(),
+                    text: PROMPT.into(),
+                },
+            },
+        )
+        .await;
+        let (session, turns) = case.view().await;
+        assert_eq!(turns.len(), 1);
+        case.session = session;
+        case.turn = turns.into_iter().next().unwrap();
+        assert_eq!(case.turn.phase, MasterTurnPhase::Queued);
+        case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a new conversation must prepare its first turn"),
+            Err(failure) => panic!("a new conversation must reach its first turn: {failure:?}"),
+        };
+        assert_eq!(prepared.session.session_id, case.session.session_id);
+        assert_eq!(prepared.lease.owner_session, case.session.session_id);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
         case.close().await;
     }
 
