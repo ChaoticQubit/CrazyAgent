@@ -61,6 +61,8 @@ mod native_auth_dispatch_lifetime_tests;
 #[cfg(all(test, unix))]
 mod native_auth_restart_tests;
 #[cfg(all(test, unix))]
+mod owner_deadline_tests;
+#[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
@@ -1985,6 +1987,9 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Plugins if plugins::imports(body) => {
+                return Ok(Some(Deferred::SkillImport(a)));
+            }
             Protocol::Plugins => {
                 return plugins::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -1992,20 +1997,8 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
-            Protocol::Cleanup => {
-                let served = cleanup::serve(stream, engine, authority, auth, &a, body);
-                return tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served)
-                    .await
-                    .map_err(|_| failure("cleanup_outcome_unknown"))?
-                    .map(|()| None);
-            }
-            Protocol::Usage => {
-                let served = usage::serve(stream, engine, authority, auth, &a, body);
-                return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
-                    .await
-                    .map_err(|_| failure("usage_outcome_unknown"))?
-                    .map(|()| None);
-            }
+            Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
+            Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2152,6 +2145,18 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::Cleanup(a) => {
+            let served = cleanup::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+        }
+        Deferred::SkillImport(a) => {
+            let served = plugins::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
+        }
+        Deferred::Usage(a) => {
+            let served = usage::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2194,15 +2199,20 @@ struct Tasks {
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
-/// agent's process group or its host to end it, and Changes requests, which run git on
-/// the owner's checkout. Each carries the admission, and the projects home its validated
-/// request; the others read the request frame.
+/// agent's process group or its host to end it, Changes requests, which run git on the
+/// owner's checkout, Cleanup requests, which size and remove finished agents' worktrees
+/// and folders, skill import scans and imports, which copy skill folders, and Usage
+/// requests, which read and write the usage store. Each carries the admission, and the
+/// projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    Cleanup(Admission),
+    SkillImport(Admission),
+    Usage(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply

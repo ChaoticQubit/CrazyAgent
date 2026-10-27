@@ -10,7 +10,7 @@ const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
 const CHECK_FOLDER: &str = "mcp-checks";
-const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
 
@@ -575,6 +575,19 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// Tells whether a Plugins request is a skill import scan or import, which copies skill
+/// folders and is served past the owner exchange deadline within `IMPORT_TIMEOUT`.
+/// Input: the request body. Output: true for those two; false for any other or an
+/// unreadable request, which the inline path refuses.
+pub(super) fn imports(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Envelope>(bytes).is_ok_and(|envelope| {
+        matches!(
+            envelope.plugins,
+            Action::ImportScan | Action::ImportSkill { .. }
+        )
+    })
+}
+
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -735,14 +748,17 @@ async fn handle(
             Reply::ImportScan { list }
         }
         Action::ImportSkill { folder, replace } => {
-            let ResultValue::Imported(skill, skipped, total) = actor(
-                engine,
-                Command::ImportSkill {
-                    source: folder,
-                    replace,
-                },
-            )
-            .await?
+            let ResultValue::Imported(skill, skipped, total) = engine
+                .storage_job_within(IMPORT_TIMEOUT, |reply| {
+                    Job::Plugins(
+                        Command::ImportSkill {
+                            source: folder,
+                            replace,
+                        },
+                        reply,
+                    )
+                })
+                .await?
             else {
                 return Err(unknown());
             };
