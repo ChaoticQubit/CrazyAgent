@@ -66,7 +66,7 @@ test("Settings and a project each have a Process tab, and a skill link keeps its
     assert.equal(formatRoute(route), hash);
   }
   assert.deepEqual(parseRoute("#/settings/process?skill=tdd"), { name: "settings", tab: "process" });
-  for (const skill of ["", "bad%20name", "-lead", "a".repeat(129)]) {
+  for (const skill of ["", "bad%20name", "Upper", "a".repeat(65)]) {
     assert.deepEqual(parseRoute(`#/settings/plugins?skill=${skill}`), { name: "settings", tab: "plugins" }, skill);
   }
 });

@@ -177,3 +177,6 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-memory { display: grid; gap: 8px; }
 .pj-memory .markdown { max-width: none; }
 .pj-note-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pj-paths { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.pj-paths li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.pj-paths .pj-mono { min-width: 0; overflow-wrap: anywhere; }

@@ -35,7 +35,7 @@ test("the app hears about every reply that leaves a change unconfirmed until it 
 test("the banner names the change that is still unconfirmed, not a generic busy line", () => {
   assert.equal(api.unconfirmedLine(intent("setup_project"), null), "We couldn't confirm saving the project setup. Other changes wait until it's checked.");
   assert.equal(api.unconfirmedLine(intent("model_access", { model_access: { kind: "create_pool", pool: {} } }), "unknown"), "We couldn't confirm creating a pool. Other changes wait until it's checked.");
-  assert.equal(api.unconfirmedLine(intent("owner_profile"), "not_recorded_at_barrier"), "Saving your profile hasn't reached the engine. Retry sends the same change again.");
+  assert.equal(api.unconfirmedLine(intent("owner_profile"), "not_recorded_at_barrier"), "Saving your profile never reached the engine. Retry sends it again, or Dismiss drops it.");
   for (const kind of ["message", "brief", "approve_baseline", "revoke_baseline", "model_access", "create_project", "setup_project", "research_memory", "project_documents",
     "project_context_delete", "memory_review", "memory_add", "memory_promote", "memory_delete", "memory_forget", "memory_remember", "memory_selection", "master",
     "owner_profile", "projects_home", "move_projects_home", "add_existing_folder", "start_onboarding", "run_setup", "pack_set", "pack_remove"]) {
@@ -66,6 +66,12 @@ test("a refusal because a change is pending points at the banner instead of sayi
   assert.doesNotMatch(projects.failureCopy("pending_intent"), /still being saved/);
 });
 
+test("dismissing goes through the bridge and a refused dismissal says why in plain words", () => {
+  const source = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(source, /export function dropUnconfirmed\(\): Promise<Result<ConnectionStatus>> \{\s*return call<ConnectionStatus>\("desktop_drop_intent"\);/);
+  assert.equal(api.plainError("change_may_be_recorded"), "This change may still go through, so it can't be dismissed. Use Check again.");
+});
+
 test("automatic checks are few, spaced out and end within a minute", () => {
   assert.ok(api.UNCONFIRMED_CHECKS_MS.length >= 3 && api.UNCONFIRMED_CHECKS_MS.length <= 6);
   assert.ok(api.UNCONFIRMED_CHECKS_MS.every((pause, index, all) => pause >= 1000 && (index === 0 || pause >= all[index - 1])));
@@ -84,14 +90,14 @@ test("every change the bridge can keep names itself in the banner and the toast"
     assert.ok(union.includes(`"${kind}"`), `${kind} missing from PendingIntent`);
     const label = api.changeLabel(intent(kind));
     assert.match(label, /^[a-z][a-z' ]+[a-z]$/, kind);
-    assert.equal(api.unconfirmedLine(intent(kind), "not_recorded_at_barrier"), `${label.charAt(0).toUpperCase()}${label.slice(1)} hasn't reached the engine. Retry sends the same change again.`);
+    assert.equal(api.unconfirmedLine(intent(kind), "not_recorded_at_barrier"), `${label.charAt(0).toUpperCase()}${label.slice(1)} never reached the engine. Retry sends it again, or Dismiss drops it.`);
     assert.equal(api.settledLine(receipt(kind, "applied", false)), `${label.charAt(0).toUpperCase()}${label.slice(1)} went through.`);
   }
   assert.equal(api.unconfirmedLine(intent("project_remove"), "unknown"), "We couldn't confirm removing the project. Other changes wait until it's checked.");
 });
 
 test("a change kind the window does not know still gets a plain banner and toast", () => {
-  assert.equal(api.unconfirmedLine(intent("a_future_change"), "not_recorded_at_barrier"), "Your change hasn't reached the engine. Retry sends the same change again.");
+  assert.equal(api.unconfirmedLine(intent("a_future_change"), "not_recorded_at_barrier"), "Your change never reached the engine. Retry sends it again, or Dismiss drops it.");
   assert.equal(api.unconfirmedLine(intent("a_future_change"), null), "We couldn't confirm your change. Other changes wait until it's checked.");
   assert.equal(api.settledLine(receipt("a_future_change", "applied", false)), "Your change went through.");
   assert.equal(api.changeLabel(intent("model_access", { model_access: { kind: "add_connected_account", connection: {} } })), "changing accounts and pools");

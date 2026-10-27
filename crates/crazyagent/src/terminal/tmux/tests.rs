@@ -94,7 +94,7 @@ fn the_attach_screen_first_turns_on_the_input_modes_the_app_set() {
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).unwrap();
+    let found = located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -112,10 +112,60 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
             cursor_keys: false
         }
     );
+    assert_eq!(found.history, 312);
+    let full = format!("%2 @2 8 0 80 24 1 0 {}", u64::from(SCROLLBACK_LINES) * 3);
+    assert_eq!(
+        located(&[full.into_bytes()]).unwrap().history,
+        HISTORY_ROWS_MAX,
+        "history past what the capture asks for is clamped to it"
+    );
     assert!(located(&[b"%2 @2 8 0 80 24".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 x".to_vec()]).is_none());
-    assert!(located(&[b"  0 0 80 24 0 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4".to_vec()]).is_none());
+    assert!(located(&[b"  0 0 80 24 0 0 0".to_vec()]).is_none());
     assert!(located(&[]).is_none());
+}
+
+#[test]
+fn the_attach_history_fills_a_fresh_view_scrollback_and_leaves_the_screen_to_redraw() {
+    assert!(scrollback(&[], 24).is_empty());
+    let history = scrollback(&[b"one".to_vec(), b"\x1b[1mtwo".to_vec()], 3);
+    assert_eq!(
+        history,
+        b"\x1b[0m\x1b[H\x1b[2Jone\r\n\x1b[1mtwo\r\n\x1b[0m\n\n".to_vec()
+    );
+    for count in [1_usize, 2, 3, 4, 40] {
+        let lines: Vec<Vec<u8>> = (1..=count)
+            .map(|line| format!("old {line}").into_bytes())
+            .collect();
+        let screen = render(
+            &[b"now 1".to_vec(), b"now 2".to_vec(), b"now 3".to_vec()],
+            20,
+            3,
+            (5, 2),
+            Modes::default(),
+        );
+        let mut parser = vt100::Parser::new(3, 20, 100);
+        parser.process(&scrollback(&lines, 3));
+        parser.process(&screen);
+        let shown: Vec<String> = parser.screen().rows(0, 20).collect();
+        assert_eq!(shown, ["now 1", "now 2", "now 3"], "{count} history rows");
+        parser.set_scrollback(usize::MAX);
+        assert_eq!(
+            parser.screen().scrollback(),
+            count,
+            "every history row and nothing else is in the scrollback"
+        );
+        let window = count.min(3);
+        parser.set_scrollback(window);
+        let top = format!("old {}", count - window + 1);
+        assert_eq!(
+            parser.screen().rows(0, 20).next().unwrap(),
+            top,
+            "{count} history rows"
+        );
+    }
 }
 
 #[test]
@@ -282,4 +332,70 @@ fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
         vec![HOLDER, "team-1"]
     );
     assert_eq!(host.alive().unwrap(), vec![agent]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "/usr/bin/seq 1 300; exec /bin/sleep 30".into(),
+        ],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let stream = loop {
+        let stream = host.attach(&agent).unwrap();
+        if String::from_utf8_lossy(&stream.screen).contains("300") {
+            break stream;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane printed its lines in time"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (cols, rows) = (stream.cols, stream.rows);
+    let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK_LINES as usize);
+    parser.process(&stream.history);
+    parser.process(&stream.screen);
+    let shown: Vec<String> = parser.screen().rows(0, cols).collect();
+    let last = usize::from(rows) - 2;
+    assert_eq!(shown[last], "300", "the screen ends with the newest line");
+    assert_eq!(shown[0], (301 - usize::from(rows) + 1).to_string());
+    let history = 301 - usize::from(rows);
+    parser.set_scrollback(usize::MAX);
+    assert_eq!(parser.screen().scrollback(), history);
+    parser.set_scrollback(usize::from(rows));
+    let window: Vec<String> = parser.screen().rows(0, cols).collect();
+    let expected: Vec<String> = (history - usize::from(rows) + 1..=history)
+        .map(|line| line.to_string())
+        .collect();
+    assert_eq!(
+        window, expected,
+        "the scrollback ends where the screen begins"
+    );
+    assert!(
+        stream
+            .history
+            .starts_with(b"\x1b[0m\x1b[H\x1b[2J1\r\n2\r\n3\r\n"),
+        "the history starts at the pane's first line"
+    );
 }

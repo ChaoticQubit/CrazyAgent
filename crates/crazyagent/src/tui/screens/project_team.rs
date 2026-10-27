@@ -261,6 +261,15 @@ impl TeamView {
             .find(|task| task.id == id)
     }
 
+    fn last_task(&self, agent: &TeamAgent) -> Option<&TeamTask> {
+        self.status
+            .as_ref()?
+            .tasks
+            .iter()
+            .filter(|task| task.agent == Some(agent.id))
+            .max_by_key(|task| task.id)
+    }
+
     fn clamp(&mut self) {
         let agents = self.agents().len();
         let tasks = self.tasks().len();
@@ -591,8 +600,9 @@ impl TeamView {
         let first = window(self.agent_cursor, agents.len(), agent_rows);
         for (index, agent) in agents.iter().enumerate().skip(first).take(agent_rows) {
             let current = agent.task.and_then(|id| self.task(id));
+            let last = current.is_none().then(|| self.last_task(agent)).flatten();
             let mut cells = vec![
-                Row::of(self.agent_name(agent), look.fg),
+                Row::of(agent.label.clone(), look.fg),
                 Row::of(harness_name(&agent.harness, None), look.fg),
             ];
             if wide {
@@ -601,7 +611,7 @@ impl TeamView {
                     look.fg,
                 ));
             }
-            cells.push(agent_status(agent, current, look));
+            cells.push(agent_status(agent, current, last, look));
             lines.push(list_row(
                 columns(&agent_widths, cells),
                 content,
@@ -692,19 +702,6 @@ impl TeamView {
         spread(content, left, right)
     }
 
-    fn agent_name(&self, agent: &TeamAgent) -> String {
-        if agent.role == AgentRole::Master {
-            return "Master".into();
-        }
-        let before = self
-            .status
-            .iter()
-            .flat_map(|status| status.agents.iter())
-            .filter(|other| other.role == AgentRole::Sub && other.id < agent.id)
-            .count();
-        format!("Sub-agent {}", before + 1)
-    }
-
     fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
         let entry =
             |label: &str, value: String| Row::of(label, look.muted).pad(14).push(value, look.fg);
@@ -724,7 +721,10 @@ impl TeamView {
                 };
                 rows.push(spread(
                     content,
-                    Row::of(self.agent_name(agent), look.heading),
+                    Row::of(
+                        crate::team::names::line(&agent.label, &agent.harness, &agent.status_label),
+                        look.heading,
+                    ),
                     Row::of(when, look.muted),
                 ));
                 rows.push(entry(
@@ -732,10 +732,16 @@ impl TeamView {
                     account_name(agent.account.as_deref(), accounts),
                 ));
                 rows.push(entry("Tools", tools_word(agent.tools).into()));
-                match (agent.task.and_then(|id| self.task(id)), &agent.worktree) {
-                    (Some(task), _) => rows.push(entry("Task", title(&task.prompt))),
-                    (None, Some(path)) => rows.push(entry("Working copy", short_path(path))),
-                    (None, None) => {}
+                match agent.task.and_then(|id| self.task(id)) {
+                    Some(task) => rows.push(entry("Task", title(&task.prompt))),
+                    None => {
+                        if let Some(last) = self.last_task(agent) {
+                            rows.push(entry("Last task", title(&last.prompt)));
+                        }
+                        if let Some(path) = &agent.worktree {
+                            rows.push(entry("Working copy", short_path(path)));
+                        }
+                    }
                 }
                 if let Some(problem) = &agent.problem {
                     rows.extend(
@@ -778,7 +784,7 @@ impl TeamView {
                     .agent
                     .and_then(|id| self.agents().into_iter().find(|agent| agent.id == id))
                 {
-                    rows.push(entry("Agent", self.agent_name(agent)));
+                    rows.push(entry("Agent", agent.label.clone()));
                 }
                 if task.attempts > 1 {
                     rows.push(entry("Tries", task.attempts.to_string()));
@@ -968,7 +974,10 @@ fn agents_word(count: usize) -> String {
     }
 }
 
-fn account_name(id: Option<&str>, accounts: &[AccountRow]) -> String {
+/// Names an agent's account as the owner sees it in Accounts, never by its id.
+/// Takes the account id, if the agent has one, and the owner's account rows.
+/// Returns the account name, "A pool account" for an id not listed, or "-" for none.
+pub(in crate::tui) fn account_name(id: Option<&str>, accounts: &[AccountRow]) -> String {
     match id {
         None => "-".into(),
         Some(id) => accounts
@@ -1001,7 +1010,12 @@ fn short_path(path: &str) -> String {
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
-fn agent_status(agent: &TeamAgent, task: Option<&TeamTask>, look: &Look) -> Row {
+fn agent_status(
+    agent: &TeamAgent,
+    task: Option<&TeamTask>,
+    last: Option<&TeamTask>,
+    look: &Look,
+) -> Row {
     let (glyph, style) = match agent.status {
         AgentStatus::Working => ("\u{25b8}", look.running),
         AgentStatus::Starting | AgentStatus::Idle => ("\u{25cc}", look.muted),
@@ -1012,9 +1026,10 @@ fn agent_status(agent: &TeamAgent, task: Option<&TeamTask>, look: &Look) -> Row 
         format!("{} {}", look.glyph(glyph), agent.status.label()),
         style,
     );
-    match task.filter(|_| agent.status == AgentStatus::Working) {
-        Some(task) => row.push(format!("  {}", title(&task.prompt)), look.fg),
-        None => row,
+    match (task.filter(|_| agent.status == AgentStatus::Working), last) {
+        (Some(task), _) => row.push(format!("  {}", title(&task.prompt)), look.fg),
+        (None, Some(last)) => row.push(format!("  Last task: {}", title(&last.prompt)), look.muted),
+        (None, None) => row,
     }
 }
 

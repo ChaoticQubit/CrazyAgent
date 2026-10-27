@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 
-export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "pack", "home", "github", "memory", "profile", "updates"] as const;
+export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "pack", "home", "github", "memory", "usage", "profile", "updates"] as const;
 export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "context", "process", "settings"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new", "sign_in"] as const;
 export const ADD_PROJECT_WAYS = ["clone", "folder"] as const;
 const PROJECT_ID_MAX = 256;
 const ACCOUNT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
-const SKILL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const SKILL_ID = /^[a-z0-9-]{1,64}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
 export type ProjectTab = typeof PROJECT_TABS[number];
@@ -30,8 +30,8 @@ function pick<T extends string>(choices: readonly T[], value: string | null | un
 
 /** Reads the app's hash route. Unknown or malformed routes go Home; a missing tab or step
  * goes to the first one; Sign in again keeps its account only on Accounts and only when the id
- * has the engine's account id shape; a skill tag keeps its skill only on Plugins and only when
- * it has a skill id's shape. Input: a location hash such as "#/settings/pools".
+ * has the engine's account id shape; an open skill stays only on Plugins and skills and only with
+ * the engine's skill id shape. Input: a location hash such as "#/settings/pools".
  * Output: a route. */
 export function parseRoute(hash: string): Route {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
@@ -40,9 +40,9 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === "welcome" && parts.length === 1) return { name: "welcome" };
   if (parts[0] === "settings" && parts.length <= 2) {
     const tab = pick(SETTINGS_TABS, parts[1], "accounts");
-    const skill = params.get("skill") ?? "";
-    if (tab === "plugins" && SKILL_ID.test(skill)) return { name: "settings", tab, skill };
     const action = SETTINGS_ACTIONS.find((choice) => choice === params.get("action"));
+    const skill = params.get("skill") ?? "";
+    if (!action && tab === "plugins" && SKILL_ID.test(skill)) return { name: "settings", tab, skill };
     if (action !== "sign_in") return action ? { name: "settings", tab, action } : { name: "settings", tab };
     const account = params.get("account") ?? "";
     return tab === "accounts" && ACCOUNT_ID.test(account) ? { name: "settings", tab, action, account } : { name: "settings", tab };
@@ -75,8 +75,8 @@ export function formatRoute(route: Route): string {
     case "add-project": return `#/projects/add/${route.way}`;
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
     case "settings": {
-      if (route.skill) return `#/settings/${route.tab}?skill=${encodeURIComponent(route.skill)}`;
       const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
+      if (!route.action && route.tab === "plugins" && route.skill) return `#/settings/plugins?skill=${encodeURIComponent(route.skill)}`;
       return `#/settings/${route.tab}${route.action ? `?action=${route.action}${account}` : ""}`;
     }
   }

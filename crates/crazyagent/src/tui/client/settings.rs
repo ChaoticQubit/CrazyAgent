@@ -15,6 +15,7 @@ use crate::memory::library::{
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
 use crate::protocol::CredentialRef;
+use crate::usage::report::UsageReport;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -33,6 +34,11 @@ pub(in crate::tui) enum SettingsJob {
     Accounts(AccountsRequest),
     AllAccounts,
     Harnesses,
+    Usage {
+        since_ms: Option<i64>,
+        offset_minutes: i32,
+    },
+    RefreshUsage,
     SignIn(SignInJob),
     JoinPools {
         account: CredentialRef,
@@ -61,6 +67,9 @@ pub(in crate::tui) enum SettingsJob {
     Plugins,
     ProjectPlugins {
         project: ProjectId,
+    },
+    SkillDetail {
+        id: String,
     },
     Plugin(PluginChange),
     AppSetup(AppSetupJob),
@@ -127,6 +136,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::Accounts(_) => "Accounts",
             Self::AllAccounts => "AllAccounts",
             Self::Harnesses => "Harnesses",
+            Self::Usage { .. } => "Usage",
+            Self::RefreshUsage => "RefreshUsage",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
@@ -136,6 +147,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
             Self::ProjectPlugins { .. } => "ProjectPlugins",
+            Self::SkillDetail { .. } => "SkillDetail",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
         })
@@ -223,6 +235,8 @@ pub(in crate::tui) enum SettingsEvent {
     Accounts(Result<AccountsReply, String>),
     AllAccounts(Result<Vec<AccountView>, String>),
     Harnesses(Result<Vec<HarnessEntry>, String>),
+    Usage(Result<Box<UsageReport>, String>),
+    UsageRefreshed(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
@@ -232,6 +246,7 @@ pub(in crate::tui) enum SettingsEvent {
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
+    SkillDetail(Result<crate::skills::SkillDetail, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
 }
@@ -245,6 +260,8 @@ impl SettingsEvent {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
             SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
+            SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
+            SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
@@ -258,6 +275,7 @@ impl SettingsEvent {
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
+            SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
         }
@@ -366,6 +384,26 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::Usage {
+                since_ms,
+                offset_minutes,
+            } => SettingsEvent::Usage(match self.settings_controller() {
+                Ok(controller) => controller
+                    .usage_report(since_ms, offset_minutes)
+                    .await
+                    .map(Box::new)
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::RefreshUsage => {
+                SettingsEvent::UsageRefreshed(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_refresh()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::SignIn(job) => SettingsEvent::SignIn(self.sign_in(job, lost).await),
             SettingsJob::JoinPools { account, pools } => {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
@@ -378,6 +416,15 @@ impl NativeOwner {
                 project.clone(),
                 self.plugins(Some(project), lost).await,
             ),
+            SettingsJob::SkillDetail { id } => {
+                SettingsEvent::SkillDetail(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .skill_detail(id, None)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
@@ -1512,6 +1559,22 @@ mod tests {
         };
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].on_here, None, "Settings shows no project switch");
+        assert_eq!(skills[0].line, "Teaches release notes.");
+        match native
+            .settings(SettingsJob::SkillDetail {
+                id: skills[0].id.clone(),
+            })
+            .await
+        {
+            SettingsEvent::SkillDetail(Ok(detail)) => {
+                assert_eq!(detail.skill.id, skills[0].id);
+                assert!(detail.text.ends_with("\n\nSteps.\n"), "{}", detail.text);
+                let files: Vec<&str> = detail.files.iter().map(|file| file.path.as_str()).collect();
+                assert_eq!(files, vec!["SKILL.md"]);
+            }
+            SettingsEvent::SkillDetail(Err(code)) => panic!("skill detail failed: {code}"),
+            _ => panic!("a skill detail reply required"),
+        }
 
         let switched = native
             .settings(SettingsJob::Plugin(PluginChange::Switch {

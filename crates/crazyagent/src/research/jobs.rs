@@ -481,6 +481,15 @@ impl ResearchJobs {
         crate::launch_context::for_project(&self.connection, project)
     }
 
+    /// Reads the extra read-only folders the owner saved for a project's agents, see
+    /// [`crate::sandbox::extra_paths::load`]. Takes the project. Returns the folders.
+    pub fn read_paths(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
+        crate::sandbox::extra_paths::load(&self.connection, project.as_str())
+    }
+
     /// Proves a managed connection is signed in for the running engine, with
     /// the check every master and team turn uses, on the engine database this
     /// queue lives in. Returns the engine host and the sign-in, or a plain code

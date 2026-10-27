@@ -35,6 +35,24 @@ async fn flow(root: &Path) -> Result<(), String> {
         "skill_missing_skill_md"
     );
     assert_eq!(bridge.plugin_skills(None).await.map_err(code)?.len(), 1);
+    let detail = bridge
+        .skill_detail(skill.id.clone(), None)
+        .await
+        .map_err(code)?;
+    assert_eq!(
+        detail.text,
+        "---\nname: release-notes\ndescription: Writes release notes.\n---\n"
+    );
+    assert_eq!(detail.skill.line, "Writes release notes.");
+    assert_eq!(detail.files[0].path, "SKILL.md");
+    assert_eq!(
+        bridge
+            .skill_detail("Not An Id".into(), None)
+            .await
+            .unwrap_err()
+            .code,
+        "plugin_not_found"
+    );
     assert!(
         !bridge
             .set_skill_enabled(skill.id.clone(), false)
@@ -146,6 +164,7 @@ fn plugins_commands_use_the_local_main_window_acl() {
         "desktop_remove_mcp_secret",
         "desktop_check_mcp_server",
         "desktop_project_plugins",
+        "desktop_skill_detail",
     ] {
         assert!(
             authority

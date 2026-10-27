@@ -122,7 +122,7 @@ function Launching() {
 export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
-    case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} />;
+    case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
@@ -155,6 +155,8 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
         <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+        {session.unconfirmed.outcome === "not_recorded_at_barrier" &&
+          <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.dropUnconfirmed()}>Dismiss</Button>}
       </span>}>
         {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}

@@ -45,6 +45,7 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         id: format!("pl0x{name}"),
         name: name.into(),
         description: format!("How to do {name} work."),
+        line: format!("How to do {name} work."),
         scope_label: scope.label().into(),
         scope,
         enabled,

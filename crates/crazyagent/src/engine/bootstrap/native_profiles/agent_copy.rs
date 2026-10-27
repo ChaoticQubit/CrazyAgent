@@ -176,6 +176,42 @@ impl NativeProfileUse {
         Ok(credential)
     }
 
+    /// Reads this account's OAuth access token for one usage poll by the engine itself,
+    /// first renewing it through the harness when it lapses within a minute, as an agent
+    /// handoff does. The token is read from the same refresh-free copy an agent gets and
+    /// never leaves the returned value. Input: the harness executable. Output: the token,
+    /// the ChatGPT account id Codex sends with it and the plan Claude Code recorded;
+    /// `native_profile_renewal_failed` or the unavailable refusal.
+    pub(crate) fn usage_credential(
+        &self,
+        executable: &Path,
+    ) -> Result<crate::usage::poll::PollCredential, EngineError> {
+        self.revalidate_retained()?;
+        if self.configured.is_some() {
+            return Err(unavailable());
+        }
+        let harness = match crate::harnesses::spec(self.binding.connection.harness.as_str())
+            .map(|spec| spec.id)
+        {
+            Some("codex") => Harness::Codex,
+            Some("claude-code") => Harness::Claude,
+            _ => return Err(unavailable()),
+        };
+        let path = self.profile_path()?;
+        let mut record = account_record(harness, &self.home.file, &path)?;
+        if record.expires <= since_epoch()? + USABLE_MIN {
+            let renewal = self.renewal(harness, executable)?;
+            record = off_worker(|| renewal.renew(record.expires))?;
+            if record.expires <= since_epoch()? + USABLE_MIN {
+                record.copy.fill(0);
+                return Err(renewal_failed());
+            }
+        }
+        let credential = poll_credential(harness, &record.copy);
+        record.copy.fill(0);
+        credential
+    }
+
     /// When this Claude Code account's access token lapses, read from the record exactly as
     /// the agent handoff reads it, for the sign-in check to renew a lapsing token first.
     /// Input: none. Output: the expiry since the epoch; `native_profile_sign_in_revoked`
@@ -309,6 +345,43 @@ fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let copy = serde_json::to_vec(&copy).map_err(|_| unavailable())?;
     assert!(!copy.is_empty());
     Ok(Record { copy, expires })
+}
+
+/// Takes what a usage poll sends from an agent's copy of the account's credential: the
+/// access token, the ChatGPT account id for Codex, and the plan for Claude Code.
+/// Inputs: the harness and the copy. Output: the poll credential, or unavailable.
+fn poll_credential(
+    harness: Harness,
+    copy: &[u8],
+) -> Result<crate::usage::poll::PollCredential, EngineError> {
+    let record: Value = serde_json::from_slice(copy).map_err(|_| unavailable())?;
+    let (token, account_id, plan) = match harness {
+        Harness::Codex => {
+            let tokens = &record["tokens"];
+            (
+                tokens["access_token"].as_str(),
+                tokens["account_id"].as_str(),
+                None,
+            )
+        }
+        Harness::Claude => {
+            let oauth = &record["claudeAiOauth"];
+            (
+                oauth["accessToken"].as_str(),
+                None,
+                oauth["subscriptionType"].as_str(),
+            )
+        }
+    };
+    let token = token
+        .filter(|token| !token.is_empty())
+        .ok_or_else(unavailable)?;
+    Ok(crate::usage::poll::PollCredential {
+        token: crate::credentials::SecretString::new(token.as_bytes().to_vec())
+            .map_err(|_| unavailable())?,
+        account_id: account_id.map(str::to_owned),
+        plan: plan.map(str::to_owned),
+    })
 }
 
 /// Reads the `exp` claim of a ChatGPT access token without checking its signature, which

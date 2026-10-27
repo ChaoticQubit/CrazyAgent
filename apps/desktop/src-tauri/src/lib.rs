@@ -39,6 +39,7 @@ use crazyagent::protocol::ProjectSpec;
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
+use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -578,6 +579,31 @@ async fn desktop_remember_research(
 }
 
 #[tauri::command]
+async fn desktop_project_read_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_read_paths(&id).await
+}
+
+#[tauri::command]
+async fn desktop_set_project_read_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paths: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_read_paths(&id, paths, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_delete_project_context(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -688,6 +714,22 @@ async fn desktop_team_hand_off(
     lock(&state)
         .await?
         .team_hand_off(&id, reply, step, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_rename(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    handle: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_rename(&id, agent, handle, generation)
         .await
 }
 
@@ -1218,6 +1260,15 @@ async fn desktop_retry_intent(
 }
 
 #[tauri::command]
+async fn desktop_drop_intent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<ConnectionStatus, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.drop_intent()
+}
+
+#[tauri::command]
 async fn desktop_prepare_managed_account(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1442,6 +1493,17 @@ async fn desktop_set_skill_enabled(
 }
 
 #[tauri::command]
+async fn desktop_skill_detail(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<crazyagent::skills::SkillDetail, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.skill_detail(id, project_id).await
+}
+
+#[tauri::command]
 async fn desktop_remove_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1640,6 +1702,43 @@ async fn desktop_restart_agent(
 }
 
 #[tauri::command]
+async fn desktop_usage_report(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    since_ms: Option<i64>,
+    offset_minutes: i32,
+) -> Result<UsageReport, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.usage_report(since_ms, offset_minutes)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_refresh(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.usage_refresh()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_set_reset(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    account: String,
+    window_kind: String,
+    at_ms: Option<i64>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .usage_set_reset(account, window_kind, at_ms)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_changes(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1668,9 +1767,12 @@ async fn desktop_accept_change(
     state: State<'_, NativeState>,
     id: String,
     expected_head: String,
+    message: Option<String>,
 ) -> Result<AcceptOutcome, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.accept_change(id, expected_head)?;
+    let call = lock(&state)
+        .await?
+        .accept_change(id, expected_head, message)?;
     call.await
 }
 
@@ -2007,6 +2109,8 @@ pub fn run() {
             desktop_save_research_to_memory,
             desktop_add_project_documents,
             desktop_delete_project_context,
+            desktop_project_read_paths,
+            desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,
@@ -2014,6 +2118,7 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_pause,
             desktop_team_hand_off,
+            desktop_team_rename,
             desktop_team_graph,
             desktop_terminal_attach,
             desktop_terminal_input,
@@ -2068,6 +2173,7 @@ pub fn run() {
             desktop_pending_intent,
             desktop_reconcile_intent,
             desktop_retry_intent,
+            desktop_drop_intent,
             desktop_prepare_managed_account,
             desktop_prepare_configured_account,
             desktop_account_auth_capabilities,
@@ -2096,6 +2202,7 @@ pub fn run() {
             desktop_add_skill,
             desktop_set_skill_enabled,
             desktop_remove_skill,
+            desktop_skill_detail,
             desktop_add_mcp_server,
             desktop_update_mcp_server,
             desktop_approve_mcp_server,
@@ -2122,6 +2229,9 @@ pub fn run() {
             desktop_save_process_text,
             desktop_import_global_instructions,
             desktop_default_process,
+            desktop_usage_report,
+            desktop_usage_refresh,
+            desktop_usage_set_reset,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,

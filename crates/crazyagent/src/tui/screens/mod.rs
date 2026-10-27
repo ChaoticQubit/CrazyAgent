@@ -36,6 +36,7 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod usage;
 pub mod welcome;
 
 #[cfg(all(test, unix))]
@@ -190,6 +191,7 @@ pub enum Place {
     AddProject,
     AddFolder,
     CloneRepo,
+    Usage,
     Onboarding {
         path: String,
         name: String,
@@ -350,6 +352,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
+        Place::Usage => Box::new(usage::UsagePage::new()),
         Place::Onboarding {
             path,
             name,

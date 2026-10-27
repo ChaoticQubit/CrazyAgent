@@ -4,6 +4,7 @@ use crate::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView}
 use crate::protocol::ProjectId;
 
 const PAGES_MAX: usize = 64;
+const DETAIL_PAGES_MAX: usize = 320;
 
 impl OwnerController {
     fn plugins_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -31,6 +32,49 @@ impl OwnerController {
             }
         }
         Err(EngineError("plugins_page_invalid".into()))
+    }
+
+    /// Reads one skill's whole detail for its detail view, following the engine's pages of
+    /// SKILL.md. Inputs: the skill id and the project whose switch to show, or none for
+    /// global settings. Output: the skill, its full SKILL.md text and its files, or
+    /// `skill_page_invalid` when the pages do not join up.
+    pub async fn skill_detail(
+        &self,
+        id: String,
+        project: Option<ProjectId>,
+    ) -> Result<crate::skills::SkillDetail, EngineError> {
+        let client = self.plugins_client()?;
+        let invalid = || EngineError("skill_page_invalid".into());
+        let first = client.skill_page(id.clone(), project.clone(), 0).await?;
+        let mut next = first.next;
+        let mut detail = crate::skills::SkillDetail {
+            skill: first.skill,
+            text: first.text,
+            files: first.files,
+            files_more: first.files_more,
+        };
+        for _ in 0..DETAIL_PAGES_MAX {
+            let Some(offset) = next else {
+                assert!(detail.text.len() <= crate::skills::TEXT_BYTES_MAX);
+                return Ok(detail);
+            };
+            if offset as usize != detail.text.len() {
+                return Err(invalid());
+            }
+            let page = client
+                .skill_page(id.clone(), project.clone(), offset)
+                .await?;
+            if page.skill.id != detail.skill.id
+                || page.text.is_empty()
+                || !page.files.is_empty()
+                || detail.text.len() + page.text.len() > crate::skills::TEXT_BYTES_MAX
+            {
+                return Err(invalid());
+            }
+            detail.text.push_str(&page.text);
+            next = page.next;
+        }
+        Err(invalid())
     }
 
     /// Lists every MCP server for global settings or one project's settings.

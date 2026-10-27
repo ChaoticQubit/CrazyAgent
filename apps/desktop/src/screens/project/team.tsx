@@ -1,8 +1,7 @@
-import { listAccounts, nextGeneration } from "../../api";
+import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
-import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState } from "../../api-projects";
-import { useLoad } from "../../state";
+import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent } from "../../api-projects";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
@@ -37,17 +36,31 @@ export function useTeam(id: string): [TeamRead, () => void] {
 
 /** Team panel for the project page: each agent's role, working folder, harness, account, status and current task,
  * then the tasks the master or the owner handed to sub-agents with status and a result summary.
- * Inputs: the project data, the latest team read, the filter, the harness catalog and a reload.
+ * Inputs: the project data, the latest team read, the filter, the harness catalog, the owner's
+ * account names and a reload.
  * Output: the panel, or a loading, Not ready yet or error line. */
-export function TeamPanel({ data, team, filter, harnesses, reload }: {
-  data: ProjectData; team: TeamRead; filter: TeamFilter; harnesses: HarnessEntry[] | null; reload: () => void;
+export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
+  data: ProjectData; team: TeamRead; filter: TeamFilter; harnesses: HarnessEntry[] | null;
+  accounts: { id: string; name: string }[]; reload: () => void;
 }) {
-  const [accounts] = useLoad(listAccounts, []);
   const [stopping, setStopping] = useState<TeamTaskRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [shown, setShown] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [renaming, setRenaming] = useState<{ agent: number; text: string } | null>(null);
   const openLink = useLinkOpener(data.notify);
+
+  async function rename() {
+    if (!renaming) return;
+    setBusy(true);
+    const result = await renameTeamAgent(data.id, renaming.agent, renaming.text.trim(), nextGeneration());
+    setBusy(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: renaming agents isn't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind === "applied") setRenaming(null);
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
+    reload();
+  }
 
   async function stop(row: TeamTaskRow) {
     if (!row.stop) return;
@@ -65,7 +78,7 @@ export function TeamPanel({ data, team, filter, harnesses, reload }: {
   if (team.result.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
   if (team.result.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>;
   const status = team.result.value;
-  const panel = teamPanel(status, accounts.kind === "ok" ? accounts.value : [], (id) => harnessName(harnesses, id), filter, team.at);
+  const panel = teamPanel(status, accounts, (id) => harnessName(harnesses, id), filter, team.at);
   const working = status.agents.filter((agent) => agent.status === "working").length;
   return <section className="pj-stack-s" aria-labelledby="pj-team-title">
     <div className="pj-row between">
@@ -77,7 +90,18 @@ export function TeamPanel({ data, team, filter, harnesses, reload }: {
       <caption className="pj-sr">Team agents</caption>
       <thead><tr><th scope="col">Agent</th><th scope="col">Harness</th><th scope="col">Account</th><th scope="col">Status</th><th scope="col">Current task</th></tr></thead>
       <tbody>{panel.agents.map((row) => <tr key={row.key}>
-        <th scope="row"><span className="pj-kind"><Icon name={row.role === "Master" ? "sparkles" : "bot"} size={16} />{displayText(row.name)}</span>
+        <th scope="row">{renaming && row.rename?.agent === renaming.agent
+          ? <form className="pj-row" onSubmit={(event) => { event.preventDefault(); void rename(); }}>
+            <label htmlFor={`pj-rename-${row.key}`} className="pj-sr">New @name for {displayText(row.name)}</label>
+            <span aria-hidden="true">@</span>
+            <input id={`pj-rename-${row.key}`} className="pj-input" value={renaming.text} maxLength={33} spellCheck={false}
+              onChange={(event) => setRenaming({ agent: renaming.agent, text: event.target.value })} />
+            <button type="submit" className="btn primary small" disabled={busy || renaming.text.trim() === ""}>Save</button>
+            <button type="button" className="btn quiet small" onClick={() => setRenaming(null)}>Cancel</button>
+          </form>
+          : <span className="pj-kind"><Icon name={row.role === "Master" ? "sparkles" : "bot"} size={16} />{displayText(row.name)}
+            {row.rename && <button type="button" className="btn quiet small" aria-label={`Rename ${displayText(row.name)}`}
+              onClick={() => { const target = row.rename; if (target) setRenaming({ agent: target.agent, text: target.handle }); }}>Rename</button>}</span>}
           {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}
           {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}</th>
         <td>{displayText(row.harness)}</td>
