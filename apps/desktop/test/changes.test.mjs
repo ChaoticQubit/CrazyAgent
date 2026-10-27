@@ -101,6 +101,9 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
   assert.equal(client.changesRefusal({ code: "changes_workspace_invalid" }), "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.");
+  assert.equal(client.changesRefusal({ code: "changes_master_tools_off" }), "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.");
+  assert.equal(client.changesRefusal({ code: "changes_master_closed" }), "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.");
+  assert.equal(client.changesRefusal({ code: "changes_master_not_started" }), "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends.");
   assert.equal(client.changesRefusal({ code: "made_up_code" }), "Something went wrong. Try again. (made_up_code)");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/changes.rs", import.meta.url), "utf8");
   const codes = engine.slice(engine.indexOf("pub const CHANGES_CODES"), engine.indexOf("];", engine.indexOf("pub const CHANGES_CODES")));
