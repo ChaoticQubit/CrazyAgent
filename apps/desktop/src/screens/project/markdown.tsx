@@ -24,7 +24,9 @@ const INLINE_DEPTH_MAX = 4;
 const TABLE_COLUMNS_MAX = 32;
 const URL_CHARS_MAX = 2048;
 const PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-const SHOWN_HOST = /(?<![\p{L}\p{N}.。-])(?:https?:\/\/)?((?:[\p{L}\p{N}-]+[.。])+[\p{L}\p{N}-]{2,}(?::\d+)?)(?:[/?#]\S*)?/giu;
+const URL_PIECE = /\[[0-9a-f:.]+\](?::\d+)?|[\p{L}\p{N}](?:(?:[^\s\p{P}\p{S}]|[.:/?#%_~+=&。-])*[\p{L}\p{N}])?/giu;
+const URL_AUTHORITY = /^(?:[a-z][a-z\d+.-]*:\/\/)?(\[[^\]]*\]|[^:/?#]*)(:\d+)?/iu;
+const HOST_LABEL = /^[\p{L}\p{N}\p{M}\p{Cf}-]+$/u;
 export const SHOWN_HOSTS_MAX = 64;
 
 /** Accepts only absolute http and https links without spaces or control characters.
@@ -41,22 +43,38 @@ export function safeHref(url: string): string | null {
 }
 
 /** Names the target host when a link's visible text names any host other than the target's,
- * alone or among other words, as in [see docs.example](https://other.example). The text is
- * read after NFKC, so full-width forms count; a leading www. is ignored; a named host that does
- * not parse, or more than SHOWN_HOSTS_MAX of them, names the target too. Inputs: the visible
- * text and the target. Output: the target host, or null when no other host is named or the
- * target is not a URL. */
+ * alone or among other words, as in [see docs.example](https://other.example). The NFKC text
+ * is cut into URL-shaped pieces; a piece names a host when its host, as written, is shown by
+ * namesHost, and the URL parser then reads that host for the comparison (leading www. and a
+ * trailing dot ignored). A named host the parser refuses, or more than SHOWN_HOSTS_MAX of them,
+ * names the target too. Inputs: the visible text and the target. Output: the target host, or
+ * null when no other host is named or the target is not a URL. */
 export function linkTargetHost(text: string, href: string): string | null {
   const target = urlHost(href);
   if (target === null) return null;
-  const bare = (host: string) => host.replace(/^www\./u, "");
+  const bare = (host: string) => host.replace(/^www\./u, "").replace(/\.$/u, "");
   let named = 0;
-  for (const [, shown] of text.normalize("NFKC").matchAll(SHOWN_HOST)) {
+  for (const [piece] of text.normalize("NFKC").matchAll(URL_PIECE)) {
+    const [whole, host, port] = URL_AUTHORITY.exec(piece) ?? ["", "", undefined];
+    if (!namesHost(host, whole.includes("://") || port !== undefined)) continue;
     named += 1;
-    const seen = urlHost(`https://${shown}`);
+    const seen = urlHost(`https://${host}${port ?? ""}`);
     if (named > SHOWN_HOSTS_MAX || seen === null || bare(seen) !== bare(target)) return target;
   }
   return null;
+}
+
+/** Whether a host written in link text reads as a host: an IPv6 literal in brackets, an IPv4
+ * address of four numbers, localhost, a name given with a scheme or port, or a dotted name
+ * whose last label has two or more characters and is not a number.
+ * Inputs: the host as written and whether a scheme or port came with it. Output: true or false. */
+function namesHost(host: string, explicit: boolean): boolean {
+  if (host.startsWith("[") || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(host)) return true;
+  const labels = host.split(/[.。]/u);
+  const last = labels[labels.length - 1];
+  if (!labels.every((label) => HOST_LABEL.test(label)) || /^\d+$/u.test(last)) return false;
+  if (labels.length === 1) return explicit || last.toLowerCase() === "localhost";
+  return [...last].length >= 2;
 }
 
 function urlHost(url: string): string | null {

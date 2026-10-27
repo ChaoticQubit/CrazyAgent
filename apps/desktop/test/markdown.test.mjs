@@ -249,6 +249,20 @@ test("link text that names a host among other words asks when any named host dif
   assert.equal(md.linkTargetHost(many(md.SHOWN_HOSTS_MAX + 1), "https://acme.dev/"), "acme.dev", "text naming more hosts than are checked asks");
 });
 
+test("link text naming a local host or an IP address asks like any other host", () => {
+  const evil = "https://evil.example/login";
+  for (const text of ["localhost", "localhost:3000", "Open the app at http://localhost:3000", "http://intranet/wiki", "1.2.3.4", "http://127.0.0.1:8080",
+    "[::1]", "http://[::1]:8080", "see [::1] here", "[docs.example]", "256.1.1.1"]) {
+    assert.equal(md.linkTargetHost(text, evil), "evil.example", text);
+  }
+  assert.equal(md.linkTargetHost("http://localhost:3000", "http://localhost:5173/"), null);
+  assert.equal(md.linkTargetHost("[0:0::1]", "http://[::1]:8080/"), null, "hosts compare as the URL parser reads them");
+  assert.equal(md.linkTargetHost("1.2.3.4", "https://1.2.3.4/"), null);
+  for (const text of ["meet at 10:30", "ratio 3:1", "step 2", "see below:", "note: done", "intranet", "2130706433"]) {
+    assert.equal(md.linkTargetHost(text, evil), null, text);
+  }
+});
+
 test("every link shows its target on hover", () => {
   const markup = render("[https://docs.example](https://other.example/x) and [docs](https://acme.dev/a)");
   assert.match(markup, /<a href="https:\/\/other.example\/x" title="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a>/);
