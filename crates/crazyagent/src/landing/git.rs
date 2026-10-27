@@ -10,6 +10,15 @@ const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
 const VERSION_MIN: (u32, u32) = (2, 40);
+const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// The owner home a landing test stands in for the process's HOME, so engine git in
+    /// that test reads that home's global ignore rules. None keeps the process's HOME.
+    pub(super) static OWNER_HOME: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// The settings every engine git call carries on top of the research runner's
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
@@ -45,28 +54,111 @@ pub(super) struct Output {
     pub(super) overflow: bool,
 }
 
+/// The owner's home and XDG config folder as the engine process sees them, or the home
+/// a landing test set in their place. Takes nothing. Returns the home and the XDG
+/// config folder, each none when unset.
+#[cfg(unix)]
+fn owner_folders() -> (Option<PathBuf>, Option<PathBuf>) {
+    #[cfg(test)]
+    if let Some(home) = OWNER_HOME.with(|home| home.borrow().clone()) {
+        return (Some(home), None);
+    }
+    (
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+    )
+}
+
+/// Finds the ignore file the owner's own git applies in every repository: the global
+/// `core.excludesFile`, read by a git that sees only the owner's home and runs nothing,
+/// else git's default `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`.
+/// Inputs: the owner's home and XDG config folder. Output: the file's real path when it
+/// is a regular file owned by the engine's user or root, such as a store-managed link.
+#[cfg(unix)]
+pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    if !home.is_absolute() {
+        return None;
+    }
+    let xdg = xdg.filter(|xdg| xdg.is_absolute());
+    let mut command = Command::new(GIT);
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("HOME", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args([
+            "config",
+            "--global",
+            "--type=path",
+            "--get",
+            "core.excludesFile",
+        ])
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(xdg) = xdg {
+        command.env("XDG_CONFIG_HOME", xdg);
+    }
+    let output = crate::spawn_gate::output(&mut command).ok()?;
+    let named = match output.status.code() {
+        Some(0) => PathBuf::from(String::from_utf8(output.stdout).ok()?.strip_suffix('\n')?),
+        Some(1) => xdg
+            .map_or_else(|| home.join(".config"), Path::to_path_buf)
+            .join("git")
+            .join("ignore"),
+        _ => return None,
+    };
+    if !named.is_absolute() {
+        return None;
+    }
+    let real = std::fs::canonicalize(&named).ok()?;
+    let metadata = std::fs::metadata(&real).ok()?;
+    let owner = metadata.uid();
+    let text = real.to_str()?;
+    let fits = text.len() <= EXCLUDES_PATH_BYTES_MAX && !text.chars().any(char::is_control);
+    (metadata.is_file() && (owner == rustix::process::getuid().as_raw() || owner == 0) && fits)
+        .then_some(real)
+}
+
 /// A repository the engine runs git on through a git folder and work tree it computed
 /// itself, never a `.git` file in the work tree. Every call runs the host git with a
 /// cleared environment, no system or global config, no system attributes, hooks,
 /// fsmonitor, pager, submodule recursion, protocols or upkeep, and with every filter
-/// driver the repository's own config names blanked.
+/// driver the repository's own config names blanked. A work tree also honours the
+/// owner's global ignore file, so what the owner's git ignores the engine never stages.
 pub(super) struct Repo {
     git_dir: PathBuf,
     work_tree: Option<PathBuf>,
     overrides: Vec<String>,
+    excludes: Option<String>,
 }
 
 impl Repo {
-    /// Opens a repository for engine git calls and lists the filter drivers to blank.
-    /// Inputs: the git folder and the work tree, none for object and ref work only.
-    /// Output: the repository, or `changes_git_unsupported` for a git older than 2.40
-    /// or a filter name a `-c` cannot carry.
+    /// Opens a repository for engine git calls, lists the filter drivers to blank and,
+    /// for a work tree, finds the owner's global ignore file. Inputs: the git folder and
+    /// the work tree, none for object and ref work only. Output: the repository, or
+    /// `changes_git_unsupported` for a git older than 2.40 or a filter name a `-c`
+    /// cannot carry.
     #[cfg(unix)]
     pub(super) fn open(git_dir: &Path, work_tree: Option<&Path>) -> Result<Self, EngineError> {
+        let excludes = work_tree
+            .and_then(|_| {
+                let (home, xdg) = owner_folders();
+                owner_excludes(&home?, xdg.as_deref())
+            })
+            .and_then(|path| {
+                path.to_str()
+                    .map(|path| format!("core.excludesFile={path}"))
+            });
         let mut repo = Self {
             git_dir: git_dir.to_path_buf(),
             work_tree: work_tree.map(Path::to_path_buf),
             overrides: Vec::new(),
+            excludes,
         };
         repo.check_version()?;
         let listing = repo.capture(
@@ -118,9 +210,11 @@ impl Repo {
             .arg("--no-optional-locks")
             .args(crate::research::runner::GIT_SAFE)
             .args(ENGINE_SETTINGS)
-            .args(&self.overrides)
-            .arg("--git-dir")
-            .arg(&self.git_dir);
+            .args(&self.overrides);
+        if let Some(excludes) = &self.excludes {
+            command.arg("-c").arg(excludes);
+        }
+        command.arg("--git-dir").arg(&self.git_dir);
         if let Some(work_tree) = &self.work_tree {
             command
                 .arg("--work-tree")
