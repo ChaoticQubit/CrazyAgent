@@ -394,6 +394,25 @@ pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineEr
     }
 }
 
+/// The folder under the engine root where an MCP server check keeps what it wrote, one
+/// folder per server id.
+pub(crate) const CHECK_FOLDER: &str = "mcp-checks";
+
+/// Deletes one removed MCP server's check folder with everything in it, for the start sweep.
+/// Inputs: the engine root and the server id. Output: Ok when the folder is gone, including
+/// when it was already missing; `plugin_check_folder_invalid` for a name that is not one
+/// plain folder name.
+pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineError> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(error("plugin_check_folder_invalid"));
+    }
+    match std::fs::remove_dir_all(root.join(CHECK_FOLDER).join(id)) {
+        Ok(()) => Ok(()),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(error("plugin_check_folder_not_removed")),
+    }
+}
+
 /// Deletes every listed MCP server secret file, going on past one that fails so an
 /// earlier failure leaves none of the others behind. Inputs: the engine root and the
 /// references. Output: Ok when every file is gone, else the first failure.
@@ -1028,6 +1047,10 @@ pub(super) fn run(
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
+            for secret in &record.secrets {
+                super::trash::put(tx, super::trash::MCP_SECRET, &secret.reference)?;
+            }
+            super::trash::put(tx, super::trash::MCP_CHECKS, &id)?;
             ResultValue::Removed(record.secrets.into_iter().map(|s| s.reference).collect())
         }
         Command::Switch { project, id, on } => {
@@ -1078,6 +1101,9 @@ pub(super) fn run(
                 }
             };
             put_server(tx, &record)?;
+            if let Some(old) = &replaced {
+                super::trash::put(tx, super::trash::MCP_SECRET, old)?;
+            }
             ResultValue::Secret(Box::new(server_view(&record, root, None)), replaced)
         }
         Command::DetachSecret { id, name } => {
@@ -1089,6 +1115,7 @@ pub(super) fn run(
                 .ok_or_else(|| error("server_secret_not_found"))?;
             let removed = record.secrets.remove(index);
             put_server(tx, &record)?;
+            super::trash::put(tx, super::trash::MCP_SECRET, &removed.reference)?;
             ResultValue::Secret(
                 Box::new(server_view(&record, root, None)),
                 Some(removed.reference),
