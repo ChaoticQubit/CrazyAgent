@@ -30,6 +30,10 @@ const HEARTBEAT_MS: i64 = 5_000;
 const DATABASE_WAIT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const ENGINE_TICK: Duration = Duration::from_secs(2);
+/// How long after its last check a mapping that waits out an account pause asks for
+/// its account again before the pause ends, so a pool member added or freed early
+/// takes effect while the claim still lets newer projects go first.
+const PAUSE_RECHECK_MS: i64 = 10_000;
 const RUN_NAME_BYTES_MAX: usize = 96;
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
@@ -237,8 +241,9 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 
 /// Claims the oldest waiting step: a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
-/// setup and no account pause it waits on is still running. Marks it running
-/// under `claimer` and counts the attempt. Returns `None` when nothing waits.
+/// setup and no account pause it waits on is still running, or that pause was
+/// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
+/// and counts the attempt. Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -248,11 +253,16 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
             "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms FROM onboarding o
              WHERE claimer IS NULL AND (graph_state='waiting'
                 OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
-                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2)
+                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
+                        OR updated_ms<=?3)
                     AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
                         AND json_extract(s.body,'$.revision')>?1)))
              ORDER BY created_ms,project LIMIT 1",
-            params![crate::project_setup::FIRST_REVISION as i64, now],
+            params![
+                crate::project_setup::FIRST_REVISION as i64,
+                now,
+                now - PAUSE_RECHECK_MS
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

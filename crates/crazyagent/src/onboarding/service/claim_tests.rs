@@ -83,6 +83,21 @@ fn a_paused_mapping_lets_newer_projects_go_first_until_its_pause_ends() {
 }
 
 #[test]
+fn a_mapping_paused_with_no_end_in_sight_asks_for_its_account_again_after_a_while() {
+    let database = database();
+    waiting_to_map(&database, "shop", 1);
+    pause(&database, "shop", i64::MAX);
+    assert_eq!(claimed(&database), None);
+    database
+        .execute(
+            "UPDATE onboarding SET updated_ms=?1 WHERE project='shop'",
+            [now_ms() - PAUSE_RECHECK_MS],
+        )
+        .unwrap();
+    assert_eq!(claimed(&database).as_deref(), Some("shop"));
+}
+
+#[test]
 fn run_names_differ_between_onboardings_of_one_project_id_and_stay_in_bound() {
     let database = database();
     waiting_to_map(&database, "shop", 1_761_400_000_000);
