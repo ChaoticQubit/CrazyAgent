@@ -5,6 +5,7 @@ import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { ChangesTab } from "../changes";
+import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
 import { MasterArea } from "./live-master";
@@ -168,6 +169,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       actions={<ProjectMenu data={data} />} />
     <Tabs label="Project" current={active}
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
+    {active !== "changes" && <WaitingChanges projectId={projectId} />}
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
