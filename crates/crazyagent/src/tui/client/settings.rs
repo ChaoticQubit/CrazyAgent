@@ -272,7 +272,7 @@ pub(in crate::tui) enum SettingsEvent {
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
-    ScheduleSet(Result<(), String>),
+    ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
 }
 
@@ -306,7 +306,9 @@ impl SettingsEvent {
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
-            SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
+            SettingsJob::SetSchedule { generation, .. } => {
+                Self::ScheduleSet(*generation, Err(problem))
+            }
             SettingsJob::Ranking => Self::Ranking(Err(problem)),
         }
     }
@@ -498,16 +500,17 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
-            SettingsJob::SetSchedule { change, generation } => {
-                SettingsEvent::ScheduleSet(match self.settings_controller() {
+            SettingsJob::SetSchedule { change, generation } => SettingsEvent::ScheduleSet(
+                generation,
+                match self.settings_controller() {
                     Ok(controller) => applied(
                         controller.set_account_schedule(change, generation).await,
                         "account_schedule_outcome_unknown",
                         lost,
                     ),
                     Err(error) => Err(error),
-                })
-            }
+                },
+            ),
             SettingsJob::AddMemory {
                 scope,
                 text,
