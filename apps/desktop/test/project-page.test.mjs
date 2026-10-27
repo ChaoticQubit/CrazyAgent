@@ -808,3 +808,80 @@ test("a master turn whose edits wait in Changes shows the engine's note, and a t
   assert.equal(research.changesLine({ id: "t3", ordinal: 3, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
   assert.equal(research.changesLine({ id: "t4", ordinal: 4, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: "  " }), null);
 });
+
+const ideView = (build, platform = "macos", unqualified = null) => ({ state: { build, unqualified }, platform });
+
+test("the IDE tab replaces Context and Changes only on a qualified platform with a Ready, Downloading or Verifying build", async () => {
+  const page = await import("../src/screens/project/index.tsx");
+  const client = await import("../src/api-ide.ts");
+  const ids = (view) => page.projectTabs(view).map((tab) => tab.id);
+  const fixed = ["overview", "conversation", "agents", "changes", "context", "process", "settings"];
+  const swapped = ["overview", "conversation", "agents", "ide", "process", "settings"];
+  assert.deepEqual(ids(undefined), fixed, "until the engine answers, the page keeps Context and Changes and names no IDE");
+  assert.equal(client.ideUnavailable(undefined), null);
+  for (const build of [
+    { state: "ready", version: "1.143.17183", root: "/data/ide/build" },
+    { state: "downloading", bytes: 1, total: 2 },
+    { state: "verifying" },
+  ]) {
+    assert.deepEqual(ids(ideView(build)), swapped, build.state);
+    assert.equal(page.projectTabs(ideView(build)).find((tab) => tab.id === "ide").label, "IDE");
+    assert.equal(client.ideUnavailable(ideView(build)), null, build.state);
+  }
+  const unavailable = [
+    [ideView({ state: "ready", version: "1.143.17183", root: "/x" }, "linux", "linux"),
+      "IDE unavailable on Linux: The IDE isn't supported on this platform yet.", null],
+    [ideView({ state: "missing" }, "windows", "windows"),
+      "IDE unavailable on Windows: The IDE isn't supported on this platform yet.", null],
+    [ideView({ state: "failed", code: "ide_build_hash_mismatch" }),
+      "IDE unavailable on macOS: The IDE download didn't match its published checksum, so it was deleted and never run.", "retry"],
+    [ideView({ state: "failed", code: "ide_build_unsupported_platform" }),
+      "IDE unavailable on macOS: This CrazyAgent version has no IDE build for this platform.", null],
+    [ideView({ state: "missing" }),
+      "IDE unavailable on macOS: The IDE isn't downloaded yet.", "download"],
+  ];
+  for (const [view, line, action] of unavailable) {
+    assert.deepEqual(ids(view), fixed, line);
+    assert.deepEqual(client.ideUnavailable(view), { line, action }, line);
+  }
+});
+
+test("routes to a replaced tab land on the IDE, and the IDE route lands on Changes where the IDE is unavailable", async () => {
+  const page = await import("../src/screens/project/index.tsx");
+  const withIde = page.projectTabs(ideView({ state: "ready", version: "1.143.17183", root: "/x" }));
+  const without = page.projectTabs(ideView({ state: "failed", code: "ide_build_download_failed" }));
+  assert.equal(page.routedTab("changes", withIde), "ide");
+  assert.equal(page.routedTab("context", withIde), "ide", "Overview's Review and Open report links still reach a tab");
+  assert.equal(page.routedTab("ide", withIde), "ide");
+  assert.equal(page.routedTab("process", withIde), "process");
+  assert.equal(page.routedTab("ide", without), "changes");
+  assert.equal(page.routedTab("context", without), "context");
+  assert.equal(page.routedTab("nowhere", withIde), "overview");
+  assert.equal(page.routedTab("nowhere", without), "overview");
+});
+
+test("the unavailable line names the platform and reason and offers the build's one action", async () => {
+  const ide = await import("../src/screens/project/ide.tsx");
+  const draw = (view) => renderToStaticMarkup(createElement(ide.IdeUnavailable, { view, onAction: () => {} }));
+  const missing = draw(ideView({ state: "missing" }));
+  assert.match(missing, /role="status"/);
+  assert.ok(missing.includes("IDE unavailable on macOS: The IDE isn&#x27;t downloaded yet."), missing);
+  assert.match(missing, />Download</);
+  const failed = draw(ideView({ state: "failed", code: "ide_build_storage" }));
+  assert.match(failed, />Retry</);
+  const linux = draw(ideView({ state: "ready", version: "1.143.17183", root: "/x" }, "linux", "linux"));
+  assert.ok(linux.includes("IDE unavailable on Linux: The IDE isn&#x27;t supported on this platform yet."), linux);
+  assert.doesNotMatch(linux, /<button/);
+  assert.equal(draw(ideView({ state: "ready", version: "1.143.17183", root: "/x" })), "", "a shown IDE needs no line");
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  assert.match(index, /<IdeUnavailable /, "the project page shows the line above its tabs");
+  assert.match(index, /onView=\{/, "the IDE tab reports each state it reads, so a failed download brings Context and Changes back");
+});
+
+test("the ide_tab flag is gone: the desktop always asks the engine and names its own platform", () => {
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge/ide.rs", import.meta.url), "utf8");
+  assert.doesNotMatch(bridge, /CRAZYAGENT_IDE_TAB|IDE_TAB_FLAG|ide_tab_on|IdeView::Off/);
+  assert.match(bridge, /platform: std::env::consts::OS/);
+  const client = readFileSync(new URL("../src/api-ide.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(client, /ide_tab_off|tab: "off"/);
+});

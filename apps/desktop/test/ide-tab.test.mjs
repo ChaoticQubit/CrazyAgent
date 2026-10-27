@@ -12,6 +12,7 @@ const page = await import("../src/screens/project/index.tsx");
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const state = (build, unqualified = null) => ({ build, unqualified });
 const shown = (ideState) => renderToStaticMarkup(createElement(view.IdeStatus, { state: ideState, busy: false, onAction: () => {} }));
+const escaped = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;").replaceAll("'", "&#x27;");
 
 test("each build state renders its plain line, and only Missing and Failed offer an action", () => {
   const cases = [
@@ -27,7 +28,7 @@ test("each build state renders its plain line, and only Missing and Failed offer
     assert.equal(status.action, action, build.state);
     assert.equal(status.ready, build.state === "ready", build.state);
     const markup = shown(state(build));
-    assert.ok(markup.includes(line), `${build.state}: ${markup}`);
+    assert.ok(markup.includes(escaped(line)), `${build.state}: ${markup}`);
     assert.equal(markup.includes(">Retry<"), action === "retry", `${build.state} Retry: ${markup}`);
     assert.equal(markup.includes(">Download<"), action === "download", `${build.state} Download: ${markup}`);
   }
@@ -51,17 +52,17 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   assert.equal(client.openFailure("ide_build_not_ready"), "The IDE isn't ready yet. Wait for the download to finish.");
 });
 
-test("the tab is absent when ide_tab is off and last when it is on", () => {
+test("the IDE tab takes the place of Changes and Context once the engine's IDE can open", () => {
   const ids = (tabs) => tabs.map((tab) => tab.id);
   const base = ids(page.TABS);
   assert.ok(!base.includes("ide"));
-  assert.deepEqual(ids(page.projectTabs(undefined)), base, "while the flag is unread, no IDE tab");
-  assert.deepEqual(ids(page.projectTabs({ tab: "off" })), base);
-  assert.deepEqual(ids(page.projectTabs({ tab: "on", state: state({ state: "missing" }) })), [...base, "ide"]);
-  assert.equal(page.projectTabs({ tab: "on", state: state({ state: "missing" }) }).at(-1).label, "IDE");
+  assert.deepEqual(ids(page.projectTabs(undefined)), base, "until the engine answers, no IDE tab");
+  const ready = page.projectTabs({ state: state({ state: "ready", version: "1.143.17183", root: "/x" }), platform: "macos" });
+  assert.equal(ids(ready).indexOf("ide"), base.indexOf("changes"));
+  assert.ok(!ids(ready).includes("changes") && !ids(ready).includes("context"));
+  assert.equal(ready.find((tab) => tab.id === "ide").label, "IDE");
   const lib = read("src-tauri/src/bridge/ide.rs");
-  assert.match(lib, /IDE_TAB_FLAG: &str = "CRAZYAGENT_IDE_TAB"/, "the flag is the desktop's own switch until IDE-15");
-  assert.match(lib, /return Ok\(Box::pin\(async \{ Ok\(IdeView::Off\) \}\)\);/, "with the flag off the engine is never asked");
+  assert.doesNotMatch(lib, /IDE_TAB_FLAG|CRAZYAGENT_IDE_TAB/, "IDE-15 removed the desktop's own switch");
 });
 
 test("the app menu the IDE tab uses owns none of Cmd+Z, W, N, P, F or comma", () => {

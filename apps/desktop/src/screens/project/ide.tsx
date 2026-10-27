@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, bounds, hideIde, ideStatus, ideView, openFailure, openIde, placeIde, touchIde } from "../../api-ide";
-import type { IdeTabState } from "../../api-ide";
+import { HEARTBEAT_MS, bounds, hideIde, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, touchIde } from "../../api-ide";
+import type { IdeTabState, IdeView } from "../../api-ide";
+import { Button } from "../../ui";
 import "./ide.css";
 
 const POLL_MS = 1_000;
@@ -22,11 +23,24 @@ export function IdeStatus({ state, busy, onAction }: { state: IdeTabState; busy:
   </div>;
 }
 
+/** The project page's line while the IDE can't open and Context and Changes stay: the
+ * platform, the reason and the build's one action, Download or Retry. Inputs: the view, whether
+ * the action runs, and its handler. Output: the line, or nothing when the IDE opens. */
+export function IdeUnavailable({ view, busy = false, onAction }: { view: IdeView | undefined; busy?: boolean; onAction: () => void }) {
+  const unavailable = ideUnavailable(view);
+  if (unavailable === null) return null;
+  return <div className="row pj-ide-unavailable" role="status">
+    <span className="secondary">{unavailable.line}</span>
+    {unavailable.action && <Button size="small" pending={busy} disabled={busy} onClick={onAction}>{unavailable.action === "retry" ? "Retry" : "Download"}</Button>}
+  </div>;
+}
+
 /** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
  * native webview over the panel. The webview follows the panel's bounds, hides when the tab
- * is left, and the engine hears every minute that the owner still uses it.
- * Input: the project id. Output: the tab. */
-export function IdeTab({ projectId }: { projectId: string }) {
+ * is left, and the engine hears every minute that the owner still uses it. Every state it
+ * reads goes to `onView`, so the page swaps Context and Changes back when the build fails.
+ * Inputs: the project id and the view handler. Output: the tab. */
+export function IdeTab({ projectId, onView }: { projectId: string; onView: (view: IdeView) => void }) {
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<IdeTabState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -42,9 +56,10 @@ export function IdeTab({ projectId }: { projectId: string }) {
       const result = await ideView();
       if (!live) return;
       if (result.kind !== "ok") setProblem(failureLine(result));
-      else if (result.value.tab === "on") {
+      else {
         setProblem(null);
         setState(result.value.state);
+        onView(result.value);
       }
     };
     void read();
@@ -100,9 +115,10 @@ export function IdeTab({ projectId }: { projectId: string }) {
     const result = await ideView(true);
     setBusy(false);
     if (result.kind !== "ok") setProblem(failureLine(result));
-    else if (result.value.tab === "on") {
+    else {
       setProblem(null);
       setState(result.value.state);
+      onView(result.value);
     }
   };
 

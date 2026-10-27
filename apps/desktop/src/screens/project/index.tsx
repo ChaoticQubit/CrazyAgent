@@ -4,12 +4,12 @@ import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, load
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
-import { closeIde, ideView } from "../../api-ide";
+import { closeIde, ideReplacesTabs, ideView } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
-import { IdeTab } from "./ide";
+import { IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { IdeConfirm } from "./ide-confirm";
@@ -38,10 +38,25 @@ const IDE_TAB = { id: "ide", label: "IDE", icon: "file-code" } as const satisfie
 
 export type TabId = typeof TABS[number]["id"] | typeof IDE_TAB.id;
 
-/** The project page's tabs: the fixed ones, plus the IDE tab last while the `ide_tab` flag is
- * on. Input: the IDE view, undefined until it is read. Output: the tabs in order. */
+const REPLACED: readonly TabId[] = ["changes", "context"];
+
+/** The project page's tabs: the fixed ones, with the IDE in place of Changes and Context
+ * once the engine's IDE can open. Input: the IDE view, undefined until it is read. Output:
+ * the tabs in order. */
 export function projectTabs(view: IdeView | undefined): readonly { id: TabId; label: string; icon: IconName }[] {
-  return view?.tab === "on" ? [...TABS, IDE_TAB] : TABS;
+  if (!ideReplacesTabs(view)) return TABS;
+  return TABS.flatMap<{ id: TabId; label: string; icon: IconName }>((item) => item.id === "changes" ? [IDE_TAB] : REPLACED.includes(item.id) ? [] : [item]);
+}
+
+/** The tab a route shows: itself when listed; Changes or Context lead to the IDE that
+ * replaced them, and the IDE to Changes where it can't open; anything else to Overview.
+ * Inputs: the route's tab and the listed tabs. Output: the tab to show. */
+export function routedTab(tab: string, tabs: readonly { id: TabId }[]): TabId {
+  const listed = (id: string) => tabs.some((item) => item.id === id);
+  if (listed(tab)) return tab as TabId;
+  if (REPLACED.includes(tab as TabId) && listed("ide")) return "ide";
+  if (tab === "ide" && listed("changes")) return "changes";
+  return "overview";
 }
 
 function shown<T>(read: Loaded<T>): Result<T> | undefined {
@@ -158,20 +173,28 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
 }) {
   const { data, toast, session } = useProject(projectId, navigate, name);
   const [ide, setIde] = useState<IdeView>();
+  const [fetching, setFetching] = useState(false);
   const tabs = projectTabs(ide);
-  const active: TabId = tabs.some((item) => item.id === tab) ? tab as TabId : "overview";
+  const active = routedTab(tab, tabs);
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
   const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
+  useEffect(() => () => void closeIde(projectId), [projectId]);
+
   useEffect(() => {
     let live = true;
     void ideView().then((result) => { if (live && result.kind === "ok") setIde(result.value); });
-    return () => {
-      live = false;
-      void closeIde(projectId);
-    };
-  }, [projectId]);
+    return () => { live = false; };
+  }, [projectId, session?.revision]);
+
+  async function fetchIde() {
+    setFetching(true);
+    const result = await ideView(true);
+    setFetching(false);
+    if (result.kind === "ok") setIde(result.value);
+    else data.notify(result.kind === "error" ? `The IDE couldn't be fetched. ${failureCopy(result)}` : "CrazyAgent's engine isn't ready yet. Try again in a moment.");
+  }
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -191,6 +214,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       description={setup?.about ? <span className="pj-truncate" title={setup.about}>{displayText(setup.about.split("\n")[0])}</span> : undefined}
       actions={<ProjectMenu data={data} />} />
     <RecoveryBanner key={projectId} project={projectId} />
+    <IdeUnavailable view={ide} busy={fetching} onAction={() => void fetchIde()} />
     <Tabs label="Project" current={active}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
@@ -201,7 +225,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
-      {active === "ide" && <IdeTab key={data.id} projectId={projectId} />}
+      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={setIde} />}
     </div>
     <IdeConfirm data={data} />
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
