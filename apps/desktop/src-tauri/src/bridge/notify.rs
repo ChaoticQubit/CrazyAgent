@@ -72,7 +72,7 @@ pub fn asker_label(asker: &str) -> String {
         ("master", _) => "Master".into(),
         ("agent", id) if !id.is_empty() => format!("Agent {}", plain_line(id, TITLE_CHARS_MAX)),
         ("terminal", agent) if !agent.is_empty() => format!(
-            "Asked in the terminal of {}",
+            "Asked in the terminal of agent {}",
             plain_line(agent, TITLE_CHARS_MAX)
         ),
         ("engine", "mapping") => "Project mapping".into(),
@@ -342,6 +342,15 @@ mod tests {
             )
             .body,
             "Research: market research: Q"
+        );
+        assert_eq!(
+            notice(None, &question("terminal:7", "Ship it?")).body,
+            "Asked in the terminal of agent 7: Ship it?",
+            "the same words as the window's Questions tab"
+        );
+        assert_eq!(
+            notice(None, &question("engine:planning", "Which provider?")).body,
+            "Roadmap planning: Which provider?"
         );
         let long = notice(
             Some(&"n".repeat(500)),
