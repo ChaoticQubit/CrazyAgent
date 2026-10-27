@@ -14,7 +14,7 @@ const SHIFT = 8;
 
 const graphNode = (id, label) => ({ id, kind: "agent", parent: "g", label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: null });
 
-test("the console draws a terminal transcript: > owner lines with tags, plain replies, dim engine lines and prefixed tool and delegate lines", () => {
+test("the console draws a terminal transcript: > owner lines with tags, Markdown replies, dim engine lines and prefixed tool and delegate lines", () => {
   const html = renderToStaticMarkup(createElement(Console, {
     projectId: "p-1",
     lines: [
@@ -30,7 +30,7 @@ test("the console draws a terminal transcript: > owner lines with tags, plain re
   }));
   assert.match(html, /<section class="cs" aria-label="Master console">/);
   assert.match(html, /<p class="cs-line cs-owner"><span class="cs-mark" aria-hidden="true">&gt; <\/span>Ask <span class="cs-tag">@onboarding-fix<\/span> and @nobody &lt;b&gt;now&lt;\/b&gt;<\/p>/);
-  assert.match(html, /<p class="cs-line cs-reply">Done\.\nTwo lines\.<\/p>/);
+  assert.match(html, /<div class="cs-line cs-reply"><div class="markdown"><p>Done\.\nTwo lines\.<\/p><\/div><\/div>/);
   assert.match(html, /<p class="cs-line cs-engine">The master started\.<\/p>/);
   assert.match(html, /<p class="cs-line cs-tool"><span class="cs-mark" aria-hidden="true">\$ <\/span>cargo test<\/p>/);
   assert.match(html, /<p class="cs-line cs-delegate"><span class="cs-mark" aria-hidden="true">→ <\/span>Ada \(<span class="cs-tag">@onboarding-fix<\/span>\): Fix the login<\/p>/);
@@ -41,6 +41,37 @@ test("the console draws a terminal transcript: > owner lines with tags, plain re
   assert.doesNotMatch(html, /cs-menu/);
   assert.match(html, /<p class="cs-status" role="status">Thinking\.\.\.<\/p>/);
   assert.doesNotMatch(html, /pj-msg|bubble|card/, "no chat bubbles or cards");
+});
+
+test("a master reply's Markdown is formatted terminal-style, and HTML or images in it stay plain text", () => {
+  const reply = [
+    "## Plan",
+    "",
+    "- **Add** the `cart` route",
+    "- Test it _twice_",
+    "",
+    "1. Build",
+    "2. Ship",
+    "",
+    "```ts",
+    "const tag = '<b>x</b>';",
+    "```",
+    "",
+    "See [the docs](https://example.com/docs) or [bad](javascript:alert(1)).",
+    "<script>alert(1)</script> <img src=x onerror=alert(1)> ![cat](https://example.com/cat.png)",
+  ].join("\n");
+  const html = renderToStaticMarkup(createElement(Console, {
+    projectId: "p-1", lines: [{ id: "1", kind: "reply", text: reply }], agents: [], files: null,
+    onSend() {}, onStop() {}, onNavigate() {},
+  }));
+  assert.match(html, /<div class="markdown-heading"><h3>Plan<\/h3><\/div>/, "a heading is a bold line");
+  assert.match(html, /<ul><li><strong>Add<\/strong> the <code>cart<\/code> route<\/li><li>Test it <em>twice<\/em><\/li><\/ul>/);
+  assert.match(html, /<ol><li>Build<\/li><li>Ship<\/li><\/ol>/);
+  assert.match(html, /<pre><code>const tag = &#x27;&lt;b&gt;x&lt;\/b&gt;&#x27;;<\/code><\/pre>/, "a fenced block keeps its text in a monospace box");
+  assert.match(html, /<a href="https:\/\/example\.com\/docs" title="https:\/\/example\.com\/docs" target="_blank" rel="noopener noreferrer">the docs<\/a>/);
+  assert.doesNotMatch(html, /href="javascript/i, "only http and https links become links");
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &lt;img src=x onerror=alert\(1\)&gt;/, "raw HTML shows as text");
+  assert.doesNotMatch(html, /<script|<img/i, "no element comes from the reply's HTML or image syntax");
 });
 
 async function key(send, keyName, code, vk, modifiers = 0, text) {
@@ -85,8 +116,10 @@ test("in a real page: @ inserts a tag, Shift+Enter and Ctrl+J add lines, IME Ent
   });
   assert.deepEqual(seen.menu.options, ["@masterMaster", "@onboarding-fixAda (@onboarding-fix)", "@graceGrace"]);
   assert.equal(seen.menu.expanded, "true");
-  assert.equal(seen.menu.status, "@ completes agents only: this build has no project file list.");
+  assert.equal(seen.menu.status, "@ completes agents only: this project's file list is not available.");
+  assert.deepEqual(seen.menu.queries, [null, ""], "the parent hears the tag text so it can read matching files");
   assert.equal(seen.tagged.value, "ask @onboarding-fix ");
+  assert.equal(seen.tagged.queries.at(-1), null, "a finished tag ends the query");
   assert.deepEqual(seen.tagged.options, []);
   assert.equal(seen.lines.value, "ask @onboarding-fix now\nsecond\nthird");
   assert.equal(seen.lines.rows, 3, "the prompt grows with its lines");

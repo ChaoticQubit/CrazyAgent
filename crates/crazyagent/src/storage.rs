@@ -679,6 +679,8 @@ impl Storage {
                                 &query,
                                 OwnerRead::ProjectMaster { .. }
                                     | OwnerRead::ProjectMasterTurns { .. }
+                                    | OwnerRead::ProjectMasterSessions { .. }
+                                    | OwnerRead::ProjectMasterInputs { .. }
                             ) {
                                 let _ = reply.send(master_session::read(
                                     &mut connection,
@@ -940,6 +942,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
+    crate::master_sessions::initialize(connection)?;
     native_auth::initialize(connection)?;
     master_bootstrap::initialize(connection)?;
     harness_groups::initialize(connection)
@@ -2409,6 +2412,9 @@ fn owner_read(
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
+        },
+        OwnerRead::TeamEvents => OwnerData::TeamEvents {
+            events: Box::new(crate::team::events::app(&tx)?),
         },
         OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
             graph: Box::new(crate::team::graph(&crate::team::status(

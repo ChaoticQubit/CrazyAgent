@@ -442,22 +442,248 @@ fn admission_follows_the_team_plan_and_the_pool() {
         .unwrap(),
         Err("team_queue_full")
     );
-    let none = stored("team-solo", vec![]);
+    let codex_only = stored(
+        "team-codex-only",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: true,
+        }],
+    );
     assert_eq!(
         admit(
             &tx,
-            &with_pool,
-            &none,
-            None,
-            "Alone",
-            TaskSource::Owner,
+            &access("team-codex-only", &["local-a", "anthropic-local"]),
+            &codex_only,
+            Some("claude-code"),
+            "Outside the plan",
+            TaskSource::Master,
             None,
             16
         )
         .unwrap(),
-        Err("team_has_no_sub_agents")
+        Err("team_harness_not_in_plan"),
+        "a runnable harness with an account is still refused outside a chosen plan"
     );
     tx.commit().unwrap();
+}
+
+#[test]
+fn an_empty_plan_hands_work_to_any_runnable_harness_with_an_account() {
+    let (_directory, mut connection) = database();
+    let mut any = stored("team-any", vec![]);
+    any.team.master_tools = true;
+    any.team.max_agents = crate::project_setup::TEAM_AGENTS_MAX;
+    assert!(any.team.validate().is_ok());
+    let both = access("team-any", &["local-a", "anthropic-local"]);
+    let tx = connection.transaction().unwrap();
+    let hand = |access: &ModelAccess, setup: &StoredSetup, harness: Option<&str>| {
+        admit(
+            &tx,
+            access,
+            setup,
+            harness,
+            "Do the work",
+            TaskSource::Master,
+            None,
+            20,
+        )
+        .unwrap()
+    };
+    let named_codex = hand(&both, &any, Some("codex")).unwrap();
+    let named_claude = hand(&both, &any, Some("claude")).unwrap();
+    let tie = hand(&both, &any, None).unwrap();
+    let lighter = hand(&both, &any, None).unwrap();
+    assert_eq!(
+        hand(&both, &any, Some("gemini-cli")),
+        Err("team_harness_cannot_run")
+    );
+    assert_eq!(
+        hand(&both, &any, Some("no-such-harness")),
+        Err("team_harness_not_in_plan")
+    );
+
+    let mut codex_pool = any.clone();
+    codex_pool.project_id = ProjectId::new("team-any-codex").unwrap();
+    let codex_access = access("team-any-codex", &["local-a"]);
+    assert_eq!(
+        hand(&codex_access, &codex_pool, Some("claude-code")),
+        Err("team_harness_cannot_run"),
+        "Claude Code has no account in this pool while Codex has one"
+    );
+    let only_codex = hand(&codex_access, &codex_pool, None).unwrap();
+
+    let mut parked = any.clone();
+    parked.project_id = ProjectId::new("team-any-parked").unwrap();
+    let no_pool = ModelAccess::default();
+    let parked_default = hand(&no_pool, &parked, None).unwrap();
+    let parked_named = hand(&no_pool, &parked, Some("claude-code")).unwrap();
+
+    let rows: Vec<(i64, String, bool, String)> = tx
+        .prepare("SELECT id,harness,tools,status FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let queued = |id: i64, harness: &str| (id, harness.to_owned(), true, "queued".to_owned());
+    let waiting = |id: i64, harness: &str| (id, harness.to_owned(), true, "needs_pool".to_owned());
+    assert_eq!(
+        rows,
+        [
+            queued(named_codex, "codex"),
+            queued(named_claude, "claude-code"),
+            queued(tie, "codex"),
+            queued(lighter, "claude-code"),
+            queued(only_codex, "codex"),
+            waiting(parked_default, "codex"),
+            waiting(parked_named, "claude-code"),
+        ],
+        "tools follow the master; a tie goes to the master's harness, then the least loaded wins"
+    );
+    tx.commit().unwrap();
+
+    let team = status(&connection, &any).unwrap();
+    assert_eq!(
+        team.harnesses
+            .iter()
+            .map(|h| (
+                h.harness.as_str(),
+                h.role,
+                h.agents_max,
+                h.tools,
+                h.runnable
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("codex", AgentRole::Master, 1, true, true),
+            ("codex", AgentRole::Sub, 63, true, true),
+            ("claude-code", AgentRole::Sub, 63, true, true),
+        ],
+        "an empty plan lists every runnable harness under the team maximum"
+    );
+
+    let mut solo = any.clone();
+    solo.project_id = ProjectId::new("team-any-solo").unwrap();
+    solo.team.max_agents = 1;
+    let solo_access = access("team-any-solo", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    for harness in [None, Some("codex")] {
+        assert_eq!(
+            admit(
+                &tx,
+                &solo_access,
+                &solo,
+                harness,
+                "Alone",
+                TaskSource::Owner,
+                None,
+                30
+            )
+            .unwrap(),
+            Err("team_has_no_sub_agents"),
+            "a team maximum of one agent leaves room for the master only"
+        );
+    }
+    tx.commit().unwrap();
+    assert_eq!(
+        status(&connection, &solo)
+            .unwrap()
+            .harnesses
+            .iter()
+            .map(|h| h.role)
+            .collect::<Vec<_>>(),
+        [AgentRole::Master]
+    );
+}
+
+#[test]
+fn an_empty_plan_runs_more_than_one_sub_agent_at_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored("team-any-run", vec![]);
+    setup.team.max_agents = crate::project_setup::TEAM_AGENTS_MAX;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-any-run", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    for prompt in ["Write a.md", "Write b.md"] {
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::Delegate {
+                    project_id: setup.project_id.clone(),
+                    harness: None,
+                    prompt: prompt.into(),
+                }
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+    }
+    tx.commit().unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 30\n");
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let subs = |team: &TeamStatus| {
+        team.agents
+            .iter()
+            .filter(|a| a.role == AgentRole::Sub && a.status.live())
+            .count()
+    };
+    loop {
+        team.tick().unwrap();
+        let now = status(&connection, &setup).unwrap();
+        if subs(&now) >= 2 {
+            assert!(
+                now.tasks.iter().all(|t| t.status == TaskStatus::Running),
+                "{now:#?}"
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{now:#?}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    team.shutdown().unwrap();
 }
 
 #[test]
@@ -2081,7 +2307,10 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         ),
         ("conversation-alone", vec![]),
     ] {
-        let setup = stored(project, sub);
+        let mut setup = stored(project, sub);
+        if setup.team.sub_harnesses.is_empty() {
+            setup.team.max_agents = 1;
+        }
         connection
             .execute(
                 "INSERT INTO project_setups VALUES (?1,?2)",

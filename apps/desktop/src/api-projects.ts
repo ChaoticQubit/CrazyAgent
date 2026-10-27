@@ -1,10 +1,11 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, masterState, modelAccessPage,
-  openMaster, openProject, projects, submitMaster,
+  allMasterTurns, closeMaster, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  newMasterSession, openMaster, openProject, projects, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, IntentReceipt, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
@@ -169,6 +170,9 @@ const copy: Record<string, string> = {
   team_agent_count_invalid: "Each harness runs 1 to 15 agents.",
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
   team_task_missing: "That task is gone already.",
+  team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
+  team_agent_not_found: "That agent is no longer part of this team.",
+  team_notification_missing: "There is no such notification to mark as seen.",
   team_engine_not_ready: "The engine is still starting. Try again in a moment.",
   team_account_left_pool: "That account left the pool. Another one takes over.",
   team_harness_cannot_run: "This harness cannot run yet.",
@@ -208,6 +212,9 @@ const copy: Record<string, string> = {
   master_session_missing: "This conversation is gone. Send again to start a new one.",
   master_session_not_active: "This conversation has ended. Send again to start a new one.",
   master_turn_outstanding: "The master is still answering your last message. Wait for it or stop it, then send.",
+  master_turn_running: "The master is still answering. Stop that reply to switch sessions.",
+  master_session_live: "That session is already the live one.",
+  master_session_closed: "That session ended with its project and can't be resumed.",
   master_turn_capacity: "This conversation is full. End it from the conversation menu, then send again.",
   master_turn_not_current: "That reply already finished.",
   master_input_too_large: "This conversation is too long for the master. End it from the conversation menu, then send again.",
@@ -319,6 +326,32 @@ export function saveResearchToMemory(id: string, research: ResearchKind, section
 }
 
 export type { TeamAgent, TeamAgentStatus, TeamStatus, TeamTask, TeamTaskStatus } from "./engine-client";
+export type { AppTeamEvents, TeamEvent, TeamEventKind, TeamNotification, WakeRule, WakeRuleLevel, WakeRuleTarget } from "./engine-client";
+
+/** Reads the app's own wake rule and the newest owner notifications of every project, with
+ * the unseen count. Output: the view, not ready, or a plain error. */
+export function loadTeamEvents(): Promise<Result<AppTeamEvents>> {
+  return call<AppTeamEvents>("desktop_team_events", {});
+}
+
+/** Sets the wake rule of the app, a project or one agent, or clears it with null so the level
+ * above applies. Inputs: the level, the rule or null and a generation. Output: the receipt. */
+export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, generation });
+}
+
+/** Marks a project's owner notifications up to one id as seen. Inputs: the project id, the
+ * newest seen id and a generation. Output: the receipt. */
+export function markTeamSeen(id: string, upto: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_seen", { id, upto, generation });
+}
+
+/** Shows the unseen count on the app icon and asks for the owner's attention once when a new
+ * notification arrived. Inputs: the unseen count and whether one is new. Output: ok, or a
+ * failure where the platform has no app badge. */
+export function teamAttention(unseen: number, alert: boolean): Promise<Result<void>> {
+  return call<void>("desktop_team_attention", { unseen, alert });
+}
 
 /** Reads the project's live team: its agents and the tasks the master or owner handed out.
  * Input: the project id. Output: the team status. */
@@ -400,6 +433,13 @@ export function promoteProjectMemory(id: string, memory: string, version: number
  * Input: project id. Output: the folders in saved order. */
 export function loadReadPaths(id: string): Promise<Result<string[]>> {
   return call<string[]>("desktop_project_read_paths", { id });
+}
+
+/** Lists this project's files for `@` tags: tracked and untracked, not ignored paths
+ * relative to its folder that contain the query, at most 200. Inputs: project id and query.
+ * Output: the paths in git's order. */
+export function loadProjectFiles(id: string, query: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_files", { id, query });
 }
 
 /** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
@@ -533,6 +573,29 @@ export function startMaster(ticket: string, generation: number): Promise<Result<
 
 export function endMaster(ticket: string, session: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => closeMaster(ticket, session, generation));
+}
+
+/** Lists the selected project's master sessions. Input: the master ticket. Output: the list. */
+export function readSessions(ticket: string): Promise<Result<MasterSessions>> {
+  return wrap(() => masterSessions(ticket));
+}
+
+/** Reads the owner messages behind some turns of a session. Inputs: the master ticket, the
+ * session id and at most 32 turn input cursors. Output: the lines the engine found. */
+export function readOwnerLines(ticket: string, session: string, cursors: string[]): Promise<Result<MasterInputs>> {
+  return wrap(() => masterInputs(ticket, session, cursors));
+}
+
+/** Parks the live session and opens a fresh one. Inputs: the master ticket, whether the owner
+ * confirmed stopping a running reply, and a draft generation. Output: the receipt. */
+export function startNewSession(ticket: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => newMasterSession(ticket, cancelRunning, generation));
+}
+
+/** Makes a parked session live again. Inputs: the master ticket, the session id, whether the
+ * owner confirmed stopping a running reply, and a draft generation. Output: the receipt. */
+export function resumeSession(ticket: string, session: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => resumeMasterSession(ticket, session, cancelRunning, generation));
 }
 
 /** Asks the engine to stop the master's reply in progress.

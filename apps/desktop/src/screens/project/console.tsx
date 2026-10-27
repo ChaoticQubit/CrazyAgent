@@ -1,10 +1,12 @@
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Route } from "../../ui";
 import { displayText } from "../conversation";
 import {
   CONSOLE_COMMANDS, commandRoute, consoleKey, fileMentions, filterCommands, helpLines, insertMention, matchMentions,
   mentionAt, moveChoice, promptRows, recall, remember, submitted, tagSegments, unknownLine, type ConsoleCommand, type Mention,
 } from "./console-model";
+import { useLinkOpener } from "./links";
+import { MarkdownView } from "./markdown";
 import "./console.css";
 
 /** What a transcript line is: the owner's message, the master's reply, an engine note, a tool
@@ -19,8 +21,9 @@ export interface ConsoleLine {
 }
 
 /** The console's inputs: the project, its transcript, the `@` agents (see agentMentions) and
- * files (null when no file list exists), whether Enter may send now, a status line, and the
- * send, stop and navigate actions. */
+ * files (null when no file list is available; see useProjectFiles), whether Enter may send
+ * now, a status line, the send, stop and navigate actions, and a listener told the tag text
+ * after `@` as it is typed (null when no tag is being typed). */
 export interface ConsoleProps {
   projectId: string;
   lines: readonly ConsoleLine[];
@@ -31,10 +34,11 @@ export interface ConsoleProps {
   onSend: (text: string) => void;
   onStop: () => void;
   onNavigate: (route: Route) => void;
+  onTagQuery?: (query: string | null) => void;
 }
 
 export const CONSOLE_HINT = "Enter to send, Shift+Enter for a new line, / for commands, @ to tag.";
-export const AGENTS_ONLY = "@ completes agents only: this build has no project file list.";
+export const AGENTS_ONLY = "@ completes agents only: this project's file list is not available.";
 export const HELD = "The master can't take a message right now. Your text stays here.";
 
 const MARKS: Record<ConsoleLineKind, string> = { owner: "> ", reply: "", engine: "", tool: "$ ", delegate: "→ ", error: "! " };
@@ -70,11 +74,12 @@ function tagged(text: string, known: ReadonlySet<string>): ReactNode[] {
   return tagSegments(displayText(text), known).map((segment, index) => segment.tag ? <span key={index} className="cs-tag">{segment.text}</span> : segment.text);
 }
 
-/** The master console: a terminal-style transcript that scrolls on its own and one `> ` prompt
- * growing to eight lines. Enter sends, Shift+Enter or Ctrl+J adds a line, Up and Down recall
+/** The master console: a terminal-style transcript that scrolls on its own, with the master's
+ * replies formatted from Markdown (raw HTML stays text, links open through the link opener),
+ * and one `> ` prompt growing to eight lines. Enter sends, Shift+Enter or Ctrl+J adds a line, Up and Down recall
  * sent lines on an empty prompt, Esc clears; `/` at the start opens the command menu and `@`
  * completes agent handles and files. Input: ConsoleProps. Output: the console. */
-export function Console({ projectId, lines, agents, files = null, canSend = true, status, onSend, onStop, onNavigate }: ConsoleProps) {
+export function Console({ projectId, lines, agents, files = null, canSend = true, status, onSend, onStop, onNavigate, onTagQuery }: ConsoleProps) {
   const [text, setTextState] = useState("");
   const [caret, setCaret] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
@@ -102,6 +107,11 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
   const picked = open ? Math.min(choice, choices.length - 1) : 0;
   const entries = shown(lines, notes, cleared);
   const lastEntry = entries.at(-1);
+  const tagQuery = mention?.query ?? null;
+
+  useEffect(() => {
+    onTagQuery?.(tagQuery);
+  }, [tagQuery, onTagQuery]);
 
   useLayoutEffect(() => {
     if (pending.current === null || !field.current) return;
@@ -127,6 +137,7 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
     noteId.current += 1;
     return { id: noteId.current, after: lastLineId(), text: value };
   })]);
+  const openLink = useLinkOpener((message) => note([message]));
 
   const run = (command: ConsoleCommand) => {
     const action = command.action;
@@ -185,10 +196,12 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
   return <section className="cs" aria-label="Master console">
     <div className="cs-scroll" ref={scroller} role="log" aria-live="polite"
       onScroll={(event) => { const box = event.currentTarget; stick.current = box.scrollHeight - box.scrollTop - box.clientHeight < STICK_PX; }}>
-      {entries.map((entry) => <p key={entry.key} className={`cs-line cs-${entry.kind}`}>
-        {MARKS[entry.kind] ? <span className="cs-mark" aria-hidden="true">{MARKS[entry.kind]}</span> : null}
-        {entry.kind === "owner" || entry.kind === "delegate" ? tagged(entry.text, known) : displayText(entry.text)}
-      </p>)}
+      {entries.map((entry) => entry.kind === "reply"
+        ? <div key={entry.key} className="cs-line cs-reply"><MarkdownView source={entry.text} onOpenLink={openLink} /></div>
+        : <p key={entry.key} className={`cs-line cs-${entry.kind}`}>
+          {MARKS[entry.kind] ? <span className="cs-mark" aria-hidden="true">{MARKS[entry.kind]}</span> : null}
+          {entry.kind === "owner" || entry.kind === "delegate" ? tagged(entry.text, known) : displayText(entry.text)}
+        </p>)}
     </div>
     <div className="cs-entry">
       {open && <ul className="cs-menu" id={menuId} role="listbox" aria-label={mention ? "Tags" : "Commands"}>

@@ -82,6 +82,30 @@ impl OwnerController {
         }
     }
 
+    /// Lists a set-up project's files for `@` tags: the tracked and the untracked, not
+    /// ignored paths relative to its folder that contain the query in any case.
+    /// Takes the project id, the query (at most 256 bytes) and the limit (1 to 200).
+    /// Returns the paths in git's order, or the engine's plain refusal code.
+    pub async fn project_files(
+        &mut self,
+        project_id: ProjectId,
+        query: String,
+        limit: u16,
+    ) -> Result<Vec<String>, EngineError> {
+        let read = OwnerRead::ProjectFiles {
+            project_id: project_id.clone(),
+            query,
+            limit,
+        };
+        match self.read(read).await?.data {
+            OwnerData::ProjectFiles {
+                project_id: listed,
+                paths,
+            } if listed == project_id => Ok(paths),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Lists a project's research jobs with plain status labels.
     /// Takes the project id.
     /// Returns the jobs in creation order.

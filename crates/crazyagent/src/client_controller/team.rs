@@ -25,6 +25,16 @@ impl OwnerController {
         }
     }
 
+    /// Reads what the app shows across projects: the app wake rule and every project's
+    /// newest owner notifications with the unseen count for the badge.
+    /// Returns the view, or the engine's plain rejection code.
+    pub async fn team_events(&mut self) -> Result<crate::team::events::AppEvents, EngineError> {
+        match self.read(OwnerRead::TeamEvents).await?.data {
+            OwnerData::TeamEvents { events } => Ok(*events),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Opens a live view of one agent's terminal, such as a graph node's `terminal`.
     /// Takes the terminal name.
     /// Returns the session with the screen, live output and controls, or a plain code.
@@ -49,7 +59,9 @@ impl OwnerController {
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         action.validate()?;
-        self.team_status(action.project().clone()).await?;
+        if let Some(project) = action.project() {
+            self.team_status(project.clone()).await?;
+        }
         self.begin_mutation(OwnerMutation::Team { action }, generation)?;
         self.send_pending().await
     }

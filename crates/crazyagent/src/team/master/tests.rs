@@ -558,3 +558,49 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
         .unwrap();
     assert_eq!(tasks, 0);
 }
+
+#[test]
+fn a_live_master_s_escalations_stop_at_the_hourly_cap() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let project = fixture.setup.project_id.clone();
+    for n in 1..ESCALATIONS_PER_HOUR_MAX {
+        super::super::events::escalate(
+            &fixture.connection,
+            &project,
+            &format!("Earlier question {n}"),
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+    }
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(
+                1,
+                tool::ESCALATE_TOOL,
+                json!({"text": "May Ada delete the release branch?"}),
+            ),
+            tool_call(
+                2,
+                tool::ESCALATE_TOOL,
+                json!({"text": "May Ada push to main?"}),
+            ),
+        ],
+    );
+    assert_eq!(text(&answers[0]), (ESCALATED, false));
+    assert_eq!(text(&answers[1]), (ESCALATIONS_FULL, true));
+    let escalations: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='escalation'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(escalations, ESCALATIONS_PER_HOUR_MAX);
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
