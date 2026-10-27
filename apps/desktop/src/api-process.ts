@@ -70,7 +70,8 @@ export function loadProcess(projectId: string | null): Promise<Result<string>> {
 }
 
 /** What a save comes to: the bytes of app and project instructions the project's agents now
- * get (the app text alone after an app save) and the most a Claude master is sure to take. */
+ * get (the largest across set-up projects after an app save) and the most a Claude master is
+ * sure to take. */
 export type ProcessSaved = { bytes: number; claude_bytes_max: number };
 
 /** Saves the owner's instructions whole. Inputs: null for app-wide, or the project id,
@@ -84,7 +85,7 @@ export function saveProcess(projectId: string | null, text: string): Promise<Res
 export function savedMessage(saved: ProcessSaved): string {
   if (saved.bytes <= saved.claude_bytes_max) return "Instructions saved. Agents started from now on get them.";
   const size = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
-  return `Instructions saved, but agents here now get ${size(saved.bytes)} of app and project instructions and a Claude master takes only ${size(saved.claude_bytes_max)}. Shorten them before a Claude master's next turn.`;
+  return `Instructions saved, but a project's agents now get ${size(saved.bytes)} of app and project instructions and a Claude master takes only ${size(saved.claude_bytes_max)}. Shorten them before a Claude master's next turn.`;
 }
 
 /** Reads the owner's ~/.claude/CLAUDE.md for a preview. Only the owner's Import click calls
