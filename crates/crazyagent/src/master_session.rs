@@ -422,6 +422,19 @@ pub struct MasterTurnView {
     pub tasks: Vec<MasterTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_request: Option<MasterEngineRequest>,
+}
+
+/// What the engine asked the master in a turn the owner started with Ask agent to update
+/// (DEC-095): the change set, the plain line the owner sees in the chat and the text the
+/// master receives. The engine writes it from the change set store; no client supplies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterEngineRequest {
+    pub change_set: crate::landing::ChangeSetId,
+    pub line: String,
+    pub text: String,
 }
 
 /// One task a master turn handed to the project's team, with the engine's note on how it
@@ -504,6 +517,11 @@ pub enum MasterOwnerAction {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    Resolve {
+        project_id: ProjectId,
+        session_id: SessionId,
+        change_set: crate::landing::ChangeSetId,
+    },
     RegisterRcliProfile {
         registration: Box<RcliProfileRegistration>,
     },
@@ -551,6 +569,7 @@ pub(crate) fn validate_action(action: &MasterOwnerAction) -> Result<(), EngineEr
         }
         MasterOwnerAction::Cancel { .. }
         | MasterOwnerAction::Close { .. }
+        | MasterOwnerAction::Resolve { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {}
     }
     Ok(())

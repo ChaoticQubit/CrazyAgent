@@ -134,7 +134,7 @@ impl NativeBridge {
             | MasterOwnerAction::Submit { project_id, .. }
             | MasterOwnerAction::Cancel { project_id, .. }
             | MasterOwnerAction::Close { project_id, .. } => project_id,
-            MasterOwnerAction::RegisterRcliProfile { .. } => {
+            MasterOwnerAction::Resolve { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
                 return Err(failure("master_bridge_unavailable"));
             }
         };

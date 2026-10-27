@@ -375,6 +375,13 @@ export function changesLine(turn: MasterTurn): string | null {
   return turn.changes?.trim() ? turn.changes : null;
 }
 
+/** The engine's line for a turn it asked the master for after Ask agent to update, shown
+ * where the owner's message would be. Input: the turn. Output: the line, or null for a turn
+ * the owner started. */
+export function engineLine(turn: MasterTurn): string | null {
+  return turn.engine_request?.line.trim() ? turn.engine_request.line : null;
+}
+
 /** Tells whether a task some turn handed to the team has not ended yet, so the conversation
  * keeps reading until its note arrives. Input: the turns. Output: true while one is open. */
 export function delegating(turns: MasterTurn[]): boolean {

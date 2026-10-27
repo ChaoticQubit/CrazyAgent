@@ -569,7 +569,8 @@ impl NativeBridge {
                 | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
                     ("master", Some(project_id.as_str().to_owned()), None)
                 }
-                crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
+                crazyagent::master_session::MasterOwnerAction::Resolve { .. }
+                | crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
                     return Err(failure("unexpected_pending_intent"));
                 }
             },

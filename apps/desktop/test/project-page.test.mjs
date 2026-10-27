@@ -771,6 +771,27 @@ test("Cmd+Enter and the Send button follow one rule", () => {
   assert.equal(research.canSend("é".repeat(4097), false), false);
 });
 
+test("a turn the engine asked for shows the engine's line where the owner's message would be, as plain text", async () => {
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const line = "CrazyAgent asked the master to resolve the conflicts in README.md.";
+  const asked = { id: "t1", ordinal: 1, phase: "running", reason: null, reply: null, engine_request: { change_set: "c".repeat(32), line, text: "Resolve the conflicts." } };
+  assert.equal(research.engineLine(asked), line);
+  assert.equal(research.engineLine({ ...asked, engine_request: null }), null);
+  assert.equal(research.engineLine({ id: "t2", ordinal: 2, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
+  const html = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: asked, sent: undefined }));
+  assert.match(html, /data-testid="master-engine-request"/);
+  assert.ok(html.includes(line.replace("'", "&#x27;")), html);
+  assert.doesNotMatch(html, /Your message 1/);
+  assert.doesNotMatch(html, /Resolve the conflicts\./);
+  const tricky = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: { ...asked, engine_request: { ...asked.engine_request, line: "<b>x</b>\u001b[31m" } }, sent: undefined }));
+  assert.ok(tricky.includes("&lt;b&gt;x&lt;/b&gt;\\u001b[31m"), tricky);
+  const owner = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: { ...asked, engine_request: undefined }, sent: undefined }));
+  assert.match(owner, /Your message 1/);
+  const typed = renderToStaticMarkup(createElement(conversation.TurnOpening, { turn: asked, sent: "Fix it" }));
+  assert.match(typed, /Fix it/);
+  assert.doesNotMatch(typed, /master-engine-request/);
+});
+
 test("a master turn whose edits wait in Changes shows the engine's note, and a turn without one shows nothing", () => {
   const waiting = "The edits from this turn are waiting for you in Changes.";
   assert.equal(research.changesLine({ id: "t1", ordinal: 1, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: waiting }), waiting);

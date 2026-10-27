@@ -1486,6 +1486,15 @@ export interface MasterTurn {
   cause?: string | null;
   tasks?: MasterTask[];
   changes?: string | null;
+  engine_request?: MasterEngineRequest | null;
+}
+
+/** What the engine asked the master in a turn Ask agent to update started: the change set,
+ * the plain line shown in the chat and the text the master receives. */
+export interface MasterEngineRequest {
+  change_set: string;
+  line: string;
+  text: string;
 }
 
 /** One task a master turn handed to the project's team, with the engine's note once it ended. */

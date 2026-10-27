@@ -1333,6 +1333,20 @@ impl View {
                     && session.phase == MasterSessionPhase::Closed
                     && session.current_turn.is_none()
             }
+            MasterOwnerAction::Resolve {
+                session_id,
+                change_set,
+                ..
+            } => {
+                session.session_id == *session_id
+                    && self.turns.iter().any(|turn| {
+                        turn.id == receipt.operation_id
+                            && turn
+                                .engine_request
+                                .as_ref()
+                                .is_some_and(|request| request.change_set == *change_set)
+                    })
+            }
             MasterOwnerAction::RegisterRcliProfile { registration } => {
                 session == &registration.expected_session
                     && session.phase == MasterSessionPhase::Configured
@@ -1719,7 +1733,8 @@ pub(super) fn action_project(action: &MasterOwnerAction) -> &ProjectId {
         MasterOwnerAction::Open { project_id, .. }
         | MasterOwnerAction::Submit { project_id, .. }
         | MasterOwnerAction::Cancel { project_id, .. }
-        | MasterOwnerAction::Close { project_id, .. } => project_id,
+        | MasterOwnerAction::Close { project_id, .. }
+        | MasterOwnerAction::Resolve { project_id, .. } => project_id,
         MasterOwnerAction::RegisterRcliProfile { registration } => {
             &registration.expected_session.project_id
         }
@@ -2686,6 +2701,7 @@ mod turn_line_tests {
             accounts: Vec::new(),
             tasks: Vec::new(),
             changes: None,
+            engine_request: None,
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -2734,6 +2750,7 @@ mod turn_line_tests {
             accounts: Vec::new(),
             tasks: Vec::new(),
             changes: None,
+            engine_request: None,
         };
         for (reason, cause, expected) in [
             (
@@ -2768,6 +2785,7 @@ mod turn_line_tests {
             accounts: Vec::new(),
             tasks: Vec::new(),
             changes: None,
+            engine_request: None,
             detail: None,
             cause: None,
         };
@@ -2845,6 +2863,7 @@ mod turn_line_tests {
             accounts: Vec::new(),
             tasks: Vec::new(),
             changes: None,
+            engine_request: None,
             detail: None,
             cause: None,
         };

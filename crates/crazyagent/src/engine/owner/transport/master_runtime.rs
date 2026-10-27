@@ -210,7 +210,7 @@ mod routing_tests;
 /// Runs one master turn step again while another engine connection holds the database
 /// write lock past the storage wait, which rolls the step's write back (LB-28). Input: the
 /// step. Output: its result, or `storage_busy` when the lock never freed.
-async fn when_storage_frees<T, F, Fut>(mut step: F) -> Result<T, EngineError>
+pub(super) async fn when_storage_frees<T, F, Fut>(mut step: F) -> Result<T, EngineError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, EngineError>>,
@@ -234,7 +234,7 @@ impl OwnerRuntimeHandle {
     /// conversation worktree checks it out on a blocking thread without the owner barrier,
     /// so owner reads and the database keep serving, then stores it and prepares again
     /// (LB-28). Input: the command. Output: the storage result, never a checkout.
-    async fn master_runtime_command(
+    pub(super) async fn master_runtime_command(
         &self,
         command: MasterRuntimeCommand,
     ) -> Result<MasterRuntimeResult, EngineError> {
@@ -575,7 +575,9 @@ impl OwnerRuntimeHandle {
         {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
-            MasterRuntimeResult::Profile(_) | MasterRuntimeResult::Checkout(_) => {
+            MasterRuntimeResult::Profile(_)
+            | MasterRuntimeResult::Checkout(_)
+            | MasterRuntimeResult::Waiting => {
                 return Err(failure("master_runtime_result"));
             }
             #[cfg(all(test, unix))]

@@ -15,7 +15,8 @@ use crate::engine::owner::{
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::master_session::{
     METADATA_BYTES_MAX, MasterAccountState, MasterBackend, MasterBinding, MasterBootstrapAuth,
-    MasterCursor, MasterOwnerAction, MasterReason, MasterReply, MasterRuntimeView,
+    MasterCursor, MasterEngineRequest, MasterOwnerAction, MasterReason, MasterReply,
+    MasterRuntimeView,
     MasterSessionPhase, MasterSessionView, MasterTurnPage, MasterTurnPhase, MasterTurnView,
     PAGE_BYTES_MAX, REBINDS_MAX, REPLY_BYTES_MAX, RcliConfiguredProfileProof,
     RcliProfileRegistration, RcliProfileRegistrationMetadata, SESSIONS_MAX, TURNS_MAX, cause_code,
@@ -119,6 +120,11 @@ pub(crate) enum MasterRuntimeCommand {
         turn_id: RequestId,
         note: String,
     },
+    StartWaiting {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+    },
     Checked {
         provisioned: Box<crate::worktrees::Provisioned>,
         prepare: Box<MasterRuntimeCommand>,
@@ -175,6 +181,7 @@ pub(crate) enum MasterRuntimeResult {
     Turn(Box<MasterTurnView>),
     Profile(Box<NativeProfileUse>),
     Checkout(Box<MasterCheckout>),
+    Waiting,
 }
 
 /// A conversation worktree reserved by a turn's preparation, to be checked out away from
@@ -578,6 +585,11 @@ fn decode_turn(
     {
         return Err(error("master_turn_record"));
     }
+    if let Some(request) = &turn.engine_request {
+        resolve_provenance(tx, session, &turn, request)?;
+        validate_runtime_record(tx, session, &turn)?;
+        return Ok(turn);
+    }
     let input_owner: Option<(String, String)> = tx.query_row("SELECT CASE WHEN length(o.owner_id)=64 THEN o.owner_id END,CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END FROM conversation_entries c JOIN owner_operations o ON o.event_cursor=c.event_cursor AND o.origin='native_owner' WHERE c.project=?1 AND c.event_cursor=?2 AND c.kind='message' AND c.brief_version=0 AND o.operation_id=?3", params![session.project_id.as_str(), signed(input)?, turn.id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(error)?;
     let (owner, text) = input_owner.ok_or_else(|| error("master_input_provenance"))?;
     ConversationMutation::AppendMessage {
@@ -613,6 +625,64 @@ fn decode_turn(
     }
     validate_runtime_record(tx, session, &turn)?;
     Ok(turn)
+}
+
+/// Checks that a turn the engine asked for was started by the owner's Resolve operation:
+/// the operation recorded at the turn's input revision with the turn's id, applied, whose
+/// request hash is that of Resolve for this session and the turn's change set, and a
+/// request whose line and text fit their bounds. Inputs: the transaction, session, turn
+/// and its request. Output: Ok, or `master_input_provenance`.
+fn resolve_provenance(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+    request: &MasterEngineRequest,
+) -> Result<(), EngineError> {
+    let refused = || error("master_input_provenance");
+    if request.line.trim().is_empty()
+        || request.line.len() > crate::team::NOTE_BYTES_MAX
+        || request.text.trim().is_empty()
+        || request.text.len() > crate::team::TASK_PROMPT_BYTES_MAX
+    {
+        return Err(refused());
+    }
+    let input = signed(turn.input_cursor.value())?;
+    let owner: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
+            params![turn.id.as_str(), input],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let owner = owner.flatten().ok_or_else(refused)?;
+    let (provenance, result) =
+        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
+    if provenance.event_cursor != Some(turn.input_cursor.clone())
+        || provenance.revision_after != turn.input_cursor
+        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
+        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
+    {
+        return Err(refused());
+    }
+    let original = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: turn.id.clone(),
+        expected_revision: provenance.revision_before,
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Resolve {
+                    project_id: session.project_id.clone(),
+                    session_id: session.session_id.clone(),
+                    change_set: request.change_set.clone(),
+                },
+            },
+        },
+    };
+    if original.mutation_hash()? != provenance.request_hash {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 fn load_turn(
@@ -2025,6 +2095,9 @@ fn turn_message(
     session: &MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
+    if let Some(request) = &turn.engine_request {
+        return Ok(request.text.clone());
+    }
     tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)
 }
 
@@ -2064,10 +2137,13 @@ fn prior_turns(
         ) {
             continue;
         }
-        let message = turn_message(tx, session, &earlier)?;
+        let asked = match &earlier.engine_request {
+            Some(request) => format!("Engine: {}", request.line),
+            None => format!("Owner: {}", turn_message(tx, session, &earlier)?),
+        };
         let mut entry = match &earlier.reply {
-            Some(reply) => format!("Owner: {message}\nYou: {}", reply.text),
-            None => format!("Owner: {message}\n(No reply was received.)"),
+            Some(reply) => format!("{asked}\nYou: {}", reply.text),
+            None => format!("{asked}\n(No reply was received.)"),
         };
         for task in turn_tasks(tx, &session.session_id, &earlier.id)? {
             entry.push_str("\nEngine: ");
@@ -2154,7 +2230,7 @@ fn prompt(
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
     let message = turn_message(tx, session, turn)?;
-    let context = with_resolve(tx, session, prompt_context(tx, session)?)?;
+    let context = prompt_context(tx, session)?;
     let entries = prior_turns(tx, session, turn)?;
     let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
         + HISTORY_HEADER.len()
@@ -2206,6 +2282,27 @@ fn preflight_turn(
     }
 }
 
+/// Whether the owner may ask this conversation's master to resolve an update: its session
+/// is open and its turns run with file tools. Checked before the merge, so a refusal
+/// changes nothing. Inputs: the engine database and the session. Output: Ok, or the plain
+/// code `changes_master_closed` or `changes_master_tools_off`.
+pub(crate) fn master_resolve_ready(
+    db: &Connection,
+    session: &SessionId,
+) -> Result<Result<(), &'static str>, EngineError> {
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(error)?;
+    let revision = owner_revision(&tx)?;
+    let Some(session) = load_session(&tx, session, revision)?
+        .filter(|session| session.phase == MasterSessionPhase::Configured)
+    else {
+        return Ok(Err("changes_master_closed"));
+    };
+    if !turn_tools(&tx, &session)? {
+        return Ok(Err("changes_master_tools_off"));
+    }
+    Ok(Ok(()))
+}
+
 /// Whether this session's master turns run with file tools: a Claude or Codex master in a
 /// project whose launch context turns them on. Inputs: the transaction and the session.
 /// Output: the flag.
@@ -2215,30 +2312,6 @@ fn turn_tools(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<bool,
         MasterBackend::Claude | MasterBackend::Codex
     ) && crate::launch_context::master_tools(tx, &session.project_id)
         .map_err(|problem| EngineError(problem.0))?)
-}
-
-/// Puts the resolve prompt an Ask agent to update left for this master after the context
-/// of its next tools-on turn, so that turn resolves the merge (DEC-095). Inputs: the
-/// transaction, the session and the context. Output: the context with the resolve prompt
-/// after it when one waits, else the context unchanged.
-fn with_resolve(
-    tx: &Transaction<'_>,
-    session: &MasterSessionView,
-    context: Option<String>,
-) -> Result<Option<String>, EngineError> {
-    if !turn_tools(tx, session)? {
-        return Ok(context);
-    }
-    let resolve = crate::landing_turns::resolve_prompt_for(
-        tx,
-        &session.project_id,
-        crate::landing::AgentKind::Master,
-        session.session_id.as_str(),
-    )?;
-    Ok(match (context, resolve) {
-        (Some(context), Some(resolve)) => Some(format!("{context}\n\n{resolve}")),
-        (context, resolve) => context.or(resolve),
-    })
 }
 
 fn bundle(
@@ -3426,6 +3499,23 @@ pub(super) fn runtime(
             db, config, sources, custody, host, project_id, session_id,
         )?;
     }
+    if let MasterRuntimeCommand::StartWaiting {
+        host,
+        project_id,
+        session_id,
+    } = &command
+    {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        check_owner_host(&tx, host)?;
+        let started = start_waiting(&tx, config, project_id, session_id)?;
+        tx.commit().map_err(error)?;
+        return Ok(match started {
+            Some(turn) => MasterRuntimeResult::Turn(Box::new(turn)),
+            None => MasterRuntimeResult::Waiting,
+        });
+    }
     if let Some(provisioning) = provision_bootstrap(db, config, sources, custody, path, &command)? {
         return Ok(MasterRuntimeResult::Checkout(Box::new(MasterCheckout {
             provisioning,
@@ -3436,7 +3526,9 @@ pub(super) fn runtime(
     let (host, project_id, session_id, turn_id) = match &command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
-        MasterRuntimeCommand::Checked { .. } => unreachable!(),
+        MasterRuntimeCommand::Checked { .. } | MasterRuntimeCommand::StartWaiting { .. } => {
+            unreachable!()
+        }
         MasterRuntimeCommand::Route {
             host,
             project_id,
@@ -3495,7 +3587,9 @@ pub(super) fn runtime(
     match command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
-        MasterRuntimeCommand::Checked { .. } => unreachable!(),
+        MasterRuntimeCommand::Checked { .. } | MasterRuntimeCommand::StartWaiting { .. } => {
+            unreachable!()
+        }
         MasterRuntimeCommand::Route { ref host, .. } => {
             if let Err(failure) = current_scope(&tx, config, sources, host, &session, &turn) {
                 if turn.phase != MasterTurnPhase::Queued
@@ -3715,6 +3809,169 @@ fn rebind(
     Ok(true)
 }
 
+/// The ordinal the session's next turn takes, or None once it holds `TURNS_MAX` turns.
+/// Inputs: the transaction and the session. Output: the ordinal, or `master_turn_order`
+/// when the stored ordinals are not 1 to n.
+fn next_ordinal(tx: &Transaction<'_>, session: &SessionId) -> Result<Option<u64>, EngineError> {
+    let (count, maximum): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(MAX(ordinal),0) FROM (SELECT ordinal FROM master_turns WHERE session=?1 ORDER BY ordinal LIMIT 1025)", [session.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?;
+    if count != maximum || count < 0 {
+        return Err(error("master_turn_order"));
+    }
+    if count >= i64::try_from(TURNS_MAX).map_err(error)? {
+        return Ok(None);
+    }
+    Ok(Some(unsigned(
+        count
+            .checked_add(1)
+            .ok_or_else(|| error("master_integer_bounds"))?,
+    )?))
+}
+
+/// Stores a queued turn and makes it the session's current turn. Inputs: the transaction,
+/// session, turn id, ordinal, input cursor and, for a turn the engine asked for, its
+/// request. Output: Ok once stored; the caller saves the session.
+fn queue_turn(
+    tx: &Transaction<'_>,
+    session: &mut MasterSessionView,
+    id: RequestId,
+    ordinal: u64,
+    input: Cursor,
+    engine_request: Option<MasterEngineRequest>,
+) -> Result<(), EngineError> {
+    let turn = MasterTurnView {
+        id,
+        session_id: session.session_id.clone(),
+        ordinal,
+        input_cursor: input,
+        phase: MasterTurnPhase::Queued,
+        reason: None,
+        attempt: None,
+        runtime: None,
+        reply: None,
+        accounts: Vec::new(),
+        tasks: Vec::new(),
+        changes: None,
+        engine_request,
+        detail: None,
+        cause: None,
+    };
+    let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![session.session_id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(turn.input_cursor.value())?, encode(&turn)?]).map_err(error)?;
+    assert_eq!(changed, 1);
+    session.current_turn = Some(turn.id);
+    Ok(())
+}
+
+const WAITING_RESOLVES: &str = "CREATE TABLE IF NOT EXISTS master_waiting_resolves (
+    session TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    input INTEGER NOT NULL CHECK(input > 0),
+    body TEXT NOT NULL
+)";
+
+/// Keeps a Resolve the owner asked for while the master's turn was outstanding, so the
+/// engine starts it as soon as that turn ends; a newer Resolve for the session replaces
+/// it. Inputs: the transaction, session, operation id, its revision and the request.
+/// Output: Ok once kept.
+fn wait_resolve(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    operation: &RequestId,
+    input: u64,
+    request: &MasterEngineRequest,
+) -> Result<(), EngineError> {
+    tx.execute_batch(WAITING_RESOLVES).map_err(error)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO master_waiting_resolves(session,project,operation,input,body) VALUES (?1,?2,?3,?4,?5)",
+        params![
+            session.session_id.as_str(),
+            session.project_id.as_str(),
+            operation.as_str(),
+            signed(input)?,
+            serde_json::to_string(request).map_err(error)?
+        ],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+/// Starts the Resolve the owner asked for while this session's turn was outstanding, once
+/// no turn is outstanding: the turn takes the Resolve operation's id and revision as its
+/// input, so its provenance is that operation. A Resolve whose session closed is dropped.
+/// Inputs: the transaction, the project and the session. Output: the queued turn, or
+/// None when nothing waits or a turn is still outstanding.
+fn start_waiting(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project: &ProjectId,
+    session_id: &SessionId,
+) -> Result<Option<MasterTurnView>, EngineError> {
+    tx.execute_batch(WAITING_RESOLVES).map_err(error)?;
+    let waiting: Option<(String, i64, Option<String>)> = tx
+        .query_row(
+            "SELECT operation,input,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM master_waiting_resolves WHERE session=?1 AND project=?2",
+            params![session_id.as_str(), project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((operation, input, body)) = waiting else {
+        return Ok(None);
+    };
+    let revision = owner_revision(tx)?;
+    let session = load_session(tx, session_id, revision)?;
+    let Some(mut session) = session.filter(|session| {
+        &session.project_id == project && session.phase == MasterSessionPhase::Configured
+    }) else {
+        tx.execute(
+            "DELETE FROM master_waiting_resolves WHERE session=?1",
+            [session_id.as_str()],
+        )
+        .map_err(error)?;
+        return Ok(None);
+    };
+    if let Some(current) = &session.current_turn {
+        let turn = load_turn(tx, &session, current, revision)?
+            .ok_or_else(|| error("master_current_turn_record"))?;
+        if turn.phase.outstanding() {
+            return Ok(None);
+        }
+    }
+    tx.execute(
+        "DELETE FROM master_waiting_resolves WHERE session=?1",
+        [session_id.as_str()],
+    )
+    .map_err(error)?;
+    let Some(ordinal) = next_ordinal(tx, session_id)? else {
+        return Ok(None);
+    };
+    let request: MasterEngineRequest =
+        serde_json::from_str(&body.ok_or_else(|| error("master_turn_bounds"))?).map_err(error)?;
+    let id = RequestId::new(operation).map_err(error)?;
+    queue_turn(
+        tx,
+        &mut session,
+        id.clone(),
+        ordinal,
+        Cursor::new(unsigned(input)?),
+        Some(request),
+    )?;
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| error("master_integer_bounds"))?;
+    session.version = Cursor::new(next);
+    save_session(tx, &session)?;
+    persist_event_ids(
+        tx,
+        config,
+        &id,
+        &ClientId::new("master-runtime").map_err(error)?,
+        next,
+    )?;
+    let turn = load_turn(tx, &session, &id, next)?.ok_or_else(|| error("master_turn_missing"))?;
+    Ok(Some(turn))
+}
+
 fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -3793,6 +4050,11 @@ fn execute(
         | MasterOwnerAction::Close {
             project_id,
             session_id,
+        }
+        | MasterOwnerAction::Resolve {
+            project_id,
+            session_id,
+            ..
         } => (project_id, session_id),
         MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
@@ -3838,13 +4100,9 @@ fn execute(
             if moved && !super::master_bootstrap::requalify(tx, &session)? {
                 return Ok(reject("master_source_conflict"));
             }
-            let (count, maximum): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(MAX(ordinal),0) FROM (SELECT ordinal FROM master_turns WHERE session=?1 ORDER BY ordinal LIMIT 1025)", [id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(error)?;
-            if count != maximum || count < 0 {
-                return Err(error("master_turn_order"));
-            }
-            if count >= i64::try_from(TURNS_MAX).map_err(error)? {
+            let Some(ordinal) = next_ordinal(tx, id)? else {
                 return Ok(reject("master_turn_capacity"));
-            }
+            };
             if session.selection.backend == MasterBackend::Rcli
                 && let Err(failure) = current_prompt(tx, &session, &provenance.operation_id, text)
             {
@@ -3865,29 +4123,30 @@ fn execute(
                 cancel_turn(tx, turn)?;
                 session.current_turn = None;
             }
-            let turn = MasterTurnView {
-                id: provenance.operation_id.clone(),
-                session_id: id.clone(),
-                ordinal: unsigned(
-                    count
-                        .checked_add(1)
-                        .ok_or_else(|| error("master_integer_bounds"))?,
-                )?,
-                input_cursor: Cursor::new(next),
-                phase: MasterTurnPhase::Queued,
-                reason: None,
-                attempt: None,
-                runtime: None,
-                reply: None,
-                accounts: Vec::new(),
-                tasks: Vec::new(),
-                changes: None,
-                detail: None,
-                cause: None,
+            queue_turn(
+                tx,
+                &mut session,
+                provenance.operation_id.clone(),
+                ordinal,
+                Cursor::new(next),
+                None,
+            )?;
+        }
+        MasterOwnerAction::Resolve { change_set, .. } => {
+            if !turn_tools(tx, &session)? {
+                return Ok(reject("changes_master_tools_off"));
+            }
+            let Some((line, text)) =
+                crate::landing_turns::master_resolve(tx, project, id, change_set)?
+            else {
+                return Ok(reject("changes_stale"));
             };
-            let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(next)?, encode(&turn)?]).map_err(error)?;
-            assert_eq!(changed, 1);
-            session.current_turn = Some(turn.id);
+            let request = MasterEngineRequest {
+                change_set: change_set.clone(),
+                line,
+                text,
+            };
+            wait_resolve(tx, &session, &provenance.operation_id, next, &request)?;
         }
         MasterOwnerAction::Cancel { turn_id, .. } => {
             if session.current_turn.as_ref() != Some(turn_id) {

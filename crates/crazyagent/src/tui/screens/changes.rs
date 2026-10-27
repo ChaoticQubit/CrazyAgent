@@ -813,6 +813,15 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_owner_identity_missing" => {
             "Git doesn't know your name and email yet. Set user.name and user.email, then accept again."
         }
+        "changes_master_tools_off" => {
+            "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard."
+        }
+        "changes_master_closed" => {
+            "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation."
+        }
+        "changes_master_not_started" => {
+            "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends."
+        }
         "changes_unavailable" => return format!("{NOT_READY} {NOT_READY_LINE}"),
         other => return plain_problem(other),
     }
