@@ -24,8 +24,8 @@ const INLINE_DEPTH_MAX = 4;
 const TABLE_COLUMNS_MAX = 32;
 const URL_CHARS_MAX = 2048;
 const PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-const URL_LIKE = /^(?:https?:\/\/)?(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]{2,}(?::\d+)?(?:[/?#]\S*)?$/iu;
-const URL_EDGE = /^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu;
+const SHOWN_HOST = /(?<![\p{L}\p{N}.。-])(?:https?:\/\/)?((?:[\p{L}\p{N}-]+[.。])+[\p{L}\p{N}-]{2,}(?::\d+)?)(?:[/?#]\S*)?/giu;
+export const SHOWN_HOSTS_MAX = 64;
 
 /** Accepts only absolute http and https links without spaces or control characters.
  * Input: a link target from untrusted Markdown. Output: the same target, or null. */
@@ -40,19 +40,23 @@ export function safeHref(url: string): string | null {
   }
 }
 
-/** Names the target host when a link's visible text looks like a URL on a different host, as
- * in [https://docs.example](https://other.example). Brackets, quotes and punctuation around the
- * text and a leading www. are ignored; long text is judged by its first URL_CHARS_MAX characters;
- * URL-like text that does not parse names the target too. Inputs: the visible text and the
- * target. Output: the target host, or null when the target is not a URL. */
+/** Names the target host when a link's visible text names any host other than the target's,
+ * alone or among other words, as in [see docs.example](https://other.example). The text is
+ * read after NFKC, so full-width forms count; a leading www. is ignored; a named host that does
+ * not parse, or more than SHOWN_HOSTS_MAX of them, names the target too. Inputs: the visible
+ * text and the target. Output: the target host, or null when no other host is named or the
+ * target is not a URL. */
 export function linkTargetHost(text: string, href: string): string | null {
-  const shown = text.slice(0, URL_CHARS_MAX).replace(URL_EDGE, "");
-  if (!URL_LIKE.test(shown)) return null;
   const target = urlHost(href);
   if (target === null) return null;
-  const seen = urlHost(/^https?:\/\//iu.test(shown) ? shown : `https://${shown}`);
   const bare = (host: string) => host.replace(/^www\./u, "");
-  return seen !== null && bare(seen) === bare(target) ? null : target;
+  let named = 0;
+  for (const [, shown] of text.normalize("NFKC").matchAll(SHOWN_HOST)) {
+    named += 1;
+    const seen = urlHost(`https://${shown}`);
+    if (named > SHOWN_HOSTS_MAX || seen === null || bare(seen) !== bare(target)) return target;
+  }
+  return null;
 }
 
 function urlHost(url: string): string | null {

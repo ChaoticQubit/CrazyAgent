@@ -231,6 +231,24 @@ test("URL text in brackets, quotes or before punctuation still names another hos
   assert.equal(md.linkTargetHost("github.com", "not a url"), null, "a target that is not a URL has no host to name");
 });
 
+test("link text that names a host among other words asks when any named host differs from the target", () => {
+  assert.equal(md.linkTargetHost("see example.com for details", "https://other.example/"), "other.example");
+  assert.equal(md.linkTargetHost("the https://github.com/login page", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("docs at acme.dev, mirror at evil.example", "https://acme.dev/"), "acme.dev", "every named host must match");
+  assert.equal(md.linkTargetHost("github.com,evil.example", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("github.com@evil.example", "https://github.com/"), "github.com");
+  assert.equal(md.linkTargetHost("open https://github.com:99999 now", "https://github.com/"), "github.com");
+  assert.equal(md.linkTargetHost("ｇｉｔｈｕｂ．ｃｏｍ", "https://evil.example/"), "evil.example", "full-width text names a host too");
+  assert.equal(md.linkTargetHost("github。com", "https://evil.example/"), "evil.example", "an ideographic full stop is a dot in a host");
+  assert.equal(md.linkTargetHost("github。com", "https://github.com/"), null);
+  assert.equal(md.linkTargetHost("see github.com for details", "https://github.com/x"), null);
+  assert.equal(md.linkTargetHost("read https://acme.dev/docs/index.html first", "https://www.acme.dev/docs"), null, "a file name in a URL path is not a host");
+  assert.equal(md.linkTargetHost("read the guide, then e.g. section 1.2", "https://other.example/"), null);
+  const many = (count) => Array.from({ length: count }, () => "acme.dev").join(" ");
+  assert.equal(md.linkTargetHost(many(md.SHOWN_HOSTS_MAX), "https://acme.dev/"), null);
+  assert.equal(md.linkTargetHost(many(md.SHOWN_HOSTS_MAX + 1), "https://acme.dev/"), "acme.dev", "text naming more hosts than are checked asks");
+});
+
 test("every link shows its target on hover", () => {
   const markup = render("[https://docs.example](https://other.example/x) and [docs](https://acme.dev/a)");
   assert.match(markup, /<a href="https:\/\/other.example\/x" title="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a>/);
