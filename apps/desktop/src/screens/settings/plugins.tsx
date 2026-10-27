@@ -236,7 +236,7 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   const toggle = async (skill: SkillView, on: boolean) => {
     setFailure("");
     const target = pluginSwitch(skill, projectId);
-    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on) : await setSkillEnabled(skill.id, on));
+    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on, skill.version) : await setSkillEnabled(skill.id, on, skill.version));
     if (result.kind === "ok") { session.showToast(on ? "Skill turned on." : "Skill turned off."); reload(); onChanged(); }
     else setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
   };
@@ -649,20 +649,20 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   const toggleSkill = (skill: SkillView, on: boolean) => {
     const target = pluginSwitch(skill, projectId);
-    void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on) : setSkillEnabled(skill.id, on),
+    void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on, skill.version) : setSkillEnabled(skill.id, on, skill.version),
       () => on ? "Skill turned on." : "Skill turned off.", reloadSkills);
   };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
-    void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on) : setMcpServerEnabled(server.id, on),
+    void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on, server.version) : setMcpServerEnabled(server.id, on, server.version),
       () => on ? "Server turned on." : "Server turned off.", reloadServers);
   };
   const confirmRemove = () => {
     if (!removing) return;
     const item = removing;
     setRemoving(undefined);
-    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id), () => "Skill removed.", reloadSkills);
-    else void act(item.server.id, () => removeMcpServer(item.server.id), () => "Server removed.", reloadServers);
+    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id, item.skill.version), () => "Skill removed.", reloadSkills);
+    else void act(item.server.id, () => removeMcpServer(item.server.id, item.server.version), () => "Server removed.", reloadServers);
   };
 
   return <div className="stack">

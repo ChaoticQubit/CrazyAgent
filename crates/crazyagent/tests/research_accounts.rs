@@ -487,7 +487,9 @@ fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
             connection: CredentialRef::new(id).unwrap(),
             plan,
         };
-        crazyagent::scheduling::apply(&tx, &access, &change).unwrap();
+        let version = crazyagent::scheduling::load(&tx).unwrap().version;
+        let outcome = crazyagent::scheduling::apply(&tx, &access, &change, version).unwrap();
+        assert_eq!(outcome, crazyagent::protocol::Outcome::Applied);
         tx.commit().unwrap();
     };
     let picked = |choice: &Choice| match pick_scheduled(

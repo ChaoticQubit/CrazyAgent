@@ -1908,7 +1908,10 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     );
     screen.apply(
         &read,
-        Ok(SetupView::ReadPaths(vec!["/Users/owner/shared".into()])),
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec!["/Users/owner/shared".into()],
+            version: 3,
+        })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
@@ -1928,6 +1931,7 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert_eq!(screen.paste(" : relative : "), ProjectReply::Handled);
     let save = SetupAction::SetReadPaths {
         project_id: project.clone(),
+        version: 3,
         paths: vec!["/Users/owner/shared".into(), "relative".into()],
     };
     assert_eq!(
@@ -1959,6 +1963,7 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     screen.folders.as_mut().unwrap().input.set("");
     let clear = SetupAction::SetReadPaths {
         project_id: project.clone(),
+        version: 3,
         paths: vec![],
     };
     assert_eq!(
@@ -1975,7 +1980,10 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert!(screen.folders.is_none());
     assert_eq!(screen.read_paths, None);
 
-    screen.read_paths = Some(vec![]);
+    screen.read_paths = Some(crate::project_setup::ReadPaths {
+        paths: vec![],
+        version: 4,
+    });
     screen.key(key(KeyCode::Char('f')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);

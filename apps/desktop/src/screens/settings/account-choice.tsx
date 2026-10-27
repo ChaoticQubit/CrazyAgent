@@ -220,11 +220,11 @@ export function AccountChoice({ pools, accounts }: { pools: Loaded<PoolSummary[]
   const [ranking, rerank] = useLoad(accountRanking, [], "account-ranking");
   const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
   return <AccountChoiceView schedule={schedule} pools={pools} names={names} ranking={ranking} nowMs={Date.now()} onRetry={reload} onChange={async (change) => {
-    const result = session.noteResult(await setAccountSchedule(change));
+    const result = session.noteResult(await setAccountSchedule(change, schedule.kind === "ok" ? schedule.value.version : 0));
     if (result.kind === "ok") {
       reload();
       rerank();
-    }
+    } else if (result.kind === "error" && result.code === "stale_revision") reload();
     return result;
   }} />;
 }
@@ -255,8 +255,8 @@ export function ProjectAccountOrder({ project, pool }: { project: string; pool: 
   const session = useAppSession();
   const [schedule, reload] = useLoad(accountSchedule, [project], "account-schedule");
   return <ProjectAccountOrderView schedule={schedule} project={project} pool={pool} onChange={async (change) => {
-    const result = session.noteResult(await setAccountSchedule(change));
-    if (result.kind === "ok") reload();
+    const result = session.noteResult(await setAccountSchedule(change, schedule.kind === "ok" ? schedule.value.version : 0));
+    if (result.kind === "ok" || (result.kind === "error" && result.code === "stale_revision")) reload();
     return result;
   }} />;
 }

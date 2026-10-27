@@ -677,12 +677,12 @@ export function deleteProjectContext(id: string, path: string, generation: numbe
   return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
-export function projectReadPaths(id: string): Promise<string[]> {
-  return invoke<string[]>("desktop_project_read_paths", { id });
+export function projectReadPaths(id: string): Promise<{ paths: string[]; version: number }> {
+  return invoke<{ paths: string[]; version: number }>("desktop_project_read_paths", { id });
 }
 
-export function setProjectReadPaths(id: string, paths: string[], generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+export function setProjectReadPaths(id: string, paths: string[], version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
 }
 
 export type TeamRole = "master" | "sub";
@@ -813,8 +813,10 @@ export interface TeamEventsView {
   questions: { agent: number; count: number }[];
   wake: {
     app: WakeRule | null;
+    app_version: number;
     project: WakeRule | null;
-    agents: { agent: number; rule: WakeRule }[];
+    project_version: number;
+    agents: { agent: number; rule: WakeRule; version: number }[];
     effective: WakeRule;
     level: WakeRuleLevel;
   };
@@ -822,6 +824,7 @@ export interface TeamEventsView {
 
 export interface AppTeamEvents {
   rule: WakeRule | null;
+  rule_version: number;
   effective: WakeRule;
   notifications: TeamNotification[];
   unseen: number;
@@ -1064,6 +1067,7 @@ export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
   running: boolean;
+  version: number;
 }
 
 /** Reads the projects home folder and whether the engine watches it. Output: the home. */
@@ -1127,14 +1131,16 @@ export function runSetup(pack: string[], generation: number): Promise<SetupStatu
   return invoke<SetupStatus>("desktop_run_setup", { pack, generation });
 }
 
-/** Switches one installed pack entry on or off. Inputs: its id, the state and a generation. */
-export function setPackEntry(id: string, on: boolean, generation: number): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on, generation });
+/** Switches one installed pack entry on or off. Inputs: its id, the state, the pack
+ * version shown and a generation. */
+export function setPackEntry(id: string, on: boolean, version: number, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on, version, generation });
 }
 
-/** Removes one installed pack entry and what it added. Inputs: its id and a generation. */
-export function removePackEntry(id: string, generation: number): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_remove_pack_entry", { id, generation });
+/** Removes one installed pack entry and what it added. Inputs: its id, the pack version
+ * shown and a generation. */
+export function removePackEntry(id: string, version: number, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_remove_pack_entry", { id, version, generation });
 }
 
 /** What one node of a project's team graph stands for: the master, one harness with its
@@ -1436,6 +1442,7 @@ export interface SkillView {
   scope_label: string;
   enabled: boolean;
   on_here: boolean | null;
+  version: number;
   source: string;
   folder: string;
 }
@@ -1494,6 +1501,7 @@ export interface McpServerView {
   checks: number;
   secrets: { name: string; saved: boolean }[];
   on_here: boolean | null;
+  version: number;
 }
 
 export interface EffectivePlugins {
@@ -1516,14 +1524,14 @@ export function addSkill(scope: PluginScope, folder: string): Promise<SkillView>
   return invoke<SkillView>("desktop_add_skill", { scope, folder });
 }
 
-/** Turns a skill on or off where it was added. */
-export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView> {
-  return invoke<SkillView>("desktop_set_skill_enabled", { id, enabled });
+/** Turns a skill on or off where it was added, from the version the list showed. */
+export function setSkillEnabled(id: string, enabled: boolean, version: number): Promise<SkillView> {
+  return invoke<SkillView>("desktop_set_skill_enabled", { id, enabled, version });
 }
 
 /** Removes a skill and the engine's copy of its folder. */
-export function removeSkill(id: string): Promise<void> {
-  return invoke<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<void> {
+  return invoke<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
@@ -1547,8 +1555,8 @@ export function addMcpServer(scope: PluginScope, name: string, spec: McpServerSp
 }
 
 /** Changes how an MCP server runs; it then waits for approval again. */
-export function updateMcpServer(id: string, spec: McpServerSpec): Promise<McpServerView> {
-  return invoke<McpServerView>("desktop_update_mcp_server", { id, spec });
+export function updateMcpServer(id: string, spec: McpServerSpec, version: number): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_update_mcp_server", { id, spec, version });
 }
 
 /** Approves an MCP server exactly as shown; a server that changed since is refused. */
@@ -1556,19 +1564,19 @@ export function approveMcpServer(id: string, spec: McpServerSpec): Promise<McpSe
   return invoke<McpServerView>("desktop_approve_mcp_server", { id, spec });
 }
 
-/** Turns an MCP server on or off where it was added. */
-export function setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerView> {
-  return invoke<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+/** Turns an MCP server on or off where it was added, from the version the list showed. */
+export function setMcpServerEnabled(id: string, enabled: boolean, version: number): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled, version });
 }
 
 /** Removes an MCP server and its saved secrets. */
-export function removeMcpServer(id: string): Promise<void> {
-  return invoke<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<void> {
+  return invoke<void>("desktop_remove_mcp_server", { id, version });
 }
 
-/** Switches a global skill or MCP server on or off for one project. */
-export function switchPlugin(projectId: string, id: string, on: boolean): Promise<void> {
-  return invoke<void>("desktop_switch_plugin", { projectId, id, on });
+/** Switches a global skill or MCP server on or off for one project, from the version the list showed. */
+export function switchPlugin(projectId: string, id: string, on: boolean, version: number): Promise<void> {
+  return invoke<void>("desktop_switch_plugin", { projectId, id, on, version });
 }
 
 /** Saves or replaces one MCP server secret. */

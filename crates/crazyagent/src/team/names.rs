@@ -1,8 +1,9 @@
 use super::{AgentRole, error, failure};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::terminal::PANES_PER_PROJECT_MAX;
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::storage::versioned;
+use crate::terminal::{AgentId, PANES_PER_PROJECT_MAX};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -318,29 +319,75 @@ pub fn assign_role(
 }
 
 /// Keeps the role the master gave a task when it delegated it, for the agent that later
-/// takes the task; roles of tasks that no longer exist are dropped. Takes the connection,
-/// project, task id and role text. Returns any SQLite failure.
+/// takes the task, when the role's version is the one the master read: 0 for a task it has
+/// just created. Roles of tasks that no longer exist are dropped with their versions. The
+/// writer is the project's newest team master, or the owner whose message started the turn
+/// when no master agent is recorded. Takes the transaction, project, task id, role text and
+/// that version. Returns the role's new version, the stale refusal, or any SQLite failure.
 pub fn set_task_role(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     project: &ProjectId,
     task: i64,
     role: &str,
-) -> Result<(), EngineError> {
+    expected: u64,
+) -> Result<Result<u64, versioned::Stale>, EngineError> {
     assert!(task > 0);
-    connection
-        .execute(
-            "DELETE FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks)",
+    let gone: Vec<i64> = tx
+        .prepare(
+            "SELECT task FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks)",
+        )
+        .map_err(error)?
+        .query_map([project.as_str()], |row| row.get(0))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    for old in &gone {
+        versioned::forget(tx, &versioned::task_role_item(*old))?;
+    }
+    tx.execute(
+        "DELETE FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    let writer = master_writer(tx, project)?;
+    let version = match versioned::write_if(tx, &versioned::task_role_item(task), expected, &writer)
+    {
+        Ok(version) => version,
+        Err(versioned::Refusal::Stale(stale)) => return Ok(Err(stale)),
+        Err(versioned::Refusal::Failed(failed)) => return Err(failed),
+    };
+    tx.execute(
+        "INSERT INTO team_task_roles(task,project,role) VALUES (?1,?2,?3)
+         ON CONFLICT(task) DO UPDATE SET role=excluded.role",
+        params![task, project.as_str(), role],
+    )
+    .map_err(error)?;
+    assert!(version > expected);
+    Ok(Ok(version))
+}
+
+/// Names who writes a task role for a project: its newest team master agent, or the owner
+/// when no master agent is recorded. Takes the connection and project.
+fn master_writer(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<versioned::Writer, EngineError> {
+    let master: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM team_agents WHERE project=?1 AND role='master' ORDER BY id DESC LIMIT 1",
             [project.as_str()],
+            |row| row.get(0),
         )
+        .optional()
         .map_err(error)?;
-    connection
-        .execute(
-            "INSERT INTO team_task_roles(task,project,role) VALUES (?1,?2,?3)
-             ON CONFLICT(task) DO UPDATE SET role=excluded.role",
-            params![task, project.as_str(), role],
-        )
-        .map_err(error)?;
-    Ok(())
+    Ok(match master {
+        Some(id) => {
+            versioned::Writer::Agent(AgentId::team(id).map_err(|_| failure("team_agent_invalid"))?)
+        }
+        None => versioned::Writer::Owner {
+            force_after_conflict: false,
+        },
+    })
 }
 
 /// Gives a sub-agent the handle for the task it takes: the task's role, or for a task pinned

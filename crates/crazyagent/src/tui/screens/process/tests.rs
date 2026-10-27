@@ -266,7 +266,7 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };
-    shell.arrive(answered(save, Ok(ProcessReply::Saved(stale))));
+    shell.arrive(answered(save.clone(), Ok(ProcessReply::Saved(stale))));
     let shown = screen(&mut shell);
     assert!(
         shown.contains("changed since you opened"),
@@ -422,6 +422,7 @@ fn skill(id: &str, name: &str, line: &str) -> crate::plugins::SkillView {
         on_here: None,
         source: String::new(),
         folder: String::new(),
+        version: 0,
     }
 }
 

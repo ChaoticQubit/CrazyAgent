@@ -26,7 +26,7 @@ export function TeamAlertsSettings() {
   const groups = byProject(events.value.notifications);
   return <Panel title="Wake the master">
     <p className="tg-terminal-note">Sub-agent events wake each project's master on their own. Projects and agents can set their own rule on the Agents tab.</p>
-    <WakeRuleEditor target={{ level: "app" }} own={events.value.rule} effective={events.value.effective} fallback="shipped" reload={reload} />
+    <WakeRuleEditor target={{ level: "app" }} own={events.value.rule} version={events.value.rule_version} effective={events.value.effective} fallback="shipped" reload={reload} />
     {groups.map((group) => <div key={group.projectId}>
       <h3>{names.get(group.projectId) ?? "A removed project"}</h3>
       <NotificationList projectId={group.projectId} notifications={group.items} reload={reload} />

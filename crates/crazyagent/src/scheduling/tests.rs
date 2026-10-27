@@ -54,7 +54,8 @@ fn database() -> (tempfile::TempDir, Connection) {
 
 fn change(connection: &mut Connection, access: &ModelAccess, change: ScheduleChange) -> Outcome {
     let tx = connection.transaction().unwrap();
-    let outcome = apply(&tx, access, &change).unwrap();
+    let version = load(&tx).unwrap().version;
+    let outcome = apply(&tx, access, &change, version).unwrap();
     tx.commit().unwrap();
     outcome
 }
@@ -184,6 +185,7 @@ fn owner_choices_are_stored_read_back_and_cleared() {
                 connection: reference("b"),
                 plan: kept,
             }],
+            version: 4,
         }
     );
     assert_eq!(schedule.plan(&reference("a")), AccountPlan::default());
@@ -252,6 +254,75 @@ fn out_of_range_values_and_unknown_targets_are_refused() {
         "pool_not_found"
     );
     assert_eq!(load(&connection).unwrap(), Schedule::default());
+}
+
+#[test]
+fn stale_account_schedule_write_is_refused() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b"]);
+    let at = |connection: &mut Connection, edit: &ScheduleChange, version: u64| {
+        let tx = connection.transaction().unwrap();
+        let outcome = apply(&tx, &access, edit, version).unwrap();
+        tx.commit().unwrap();
+        outcome
+    };
+    let stale = Outcome::Rejected {
+        code: "stale_revision".into(),
+    };
+    let balanced = ScheduleChange::AppStrategy {
+        strategy: Strategy::Balanced,
+    };
+    assert_eq!(at(&mut connection, &balanced, 1), stale);
+    assert_eq!(load(&connection).unwrap(), Schedule::default());
+    let unknown = ScheduleChange::PoolStrategy {
+        pool: reference("pool-z"),
+        strategy: Some(Strategy::ManualRank),
+    };
+    assert_eq!(
+        at(&mut connection, &unknown, 7),
+        Outcome::Rejected {
+            code: "pool_not_found".into()
+        }
+    );
+    let too_much = ScheduleChange::Account {
+        connection: reference("a"),
+        plan: AccountPlan {
+            reserve_percent: 101,
+            ..AccountPlan::default()
+        },
+    };
+    assert_eq!(
+        at(&mut connection, &too_much, 7),
+        Outcome::Rejected {
+            code: "account_reserve_invalid".into()
+        }
+    );
+
+    assert_eq!(at(&mut connection, &balanced, 0), Outcome::Applied);
+    let saved = load(&connection).unwrap();
+    assert_eq!(saved.strategy, Strategy::Balanced);
+    assert_eq!(saved.version, 1);
+    let manual = ScheduleChange::AppStrategy {
+        strategy: Strategy::ManualRank,
+    };
+    assert_eq!(at(&mut connection, &manual, 0), stale);
+    let ranked = ScheduleChange::Account {
+        connection: reference("a"),
+        plan: AccountPlan {
+            rank: Some(1),
+            ..AccountPlan::default()
+        },
+    };
+    assert_eq!(at(&mut connection, &ranked, 0), stale);
+    assert_eq!(at(&mut connection, &ranked, 2), stale);
+    assert_eq!(load(&connection).unwrap(), saved);
+
+    assert_eq!(at(&mut connection, &manual, 1), Outcome::Applied);
+    assert_eq!(at(&mut connection, &ranked, 2), Outcome::Applied);
+    let redone = load(&connection).unwrap();
+    assert_eq!(redone.strategy, Strategy::ManualRank);
+    assert_eq!(redone.plan(&reference("a")).rank, Some(1));
+    assert_eq!(redone.version, 3);
 }
 
 #[test]

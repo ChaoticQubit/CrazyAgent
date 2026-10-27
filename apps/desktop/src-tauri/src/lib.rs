@@ -613,7 +613,7 @@ async fn desktop_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.project_read_paths(&id).await
 }
@@ -634,13 +634,14 @@ async fn desktop_set_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     paths: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_project_read_paths(&id, paths, generation)
+        .set_project_read_paths(&id, version, paths, generation)
         .await
 }
 
@@ -788,12 +789,13 @@ async fn desktop_team_wake_rule(
     state: State<'_, NativeState>,
     target: crazyagent::team::events::RuleTarget,
     rule: Option<crazyagent::team::events::WakeRule>,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_wake_rule(target, rule, generation)
+        .team_wake_rule(target, rule, version, generation)
         .await
 }
 
@@ -1182,10 +1184,14 @@ async fn desktop_set_pack_entry(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.set_pack_entry(id, on, generation).await
+    lock(&state)
+        .await?
+        .set_pack_entry(id, on, version, generation)
+        .await
 }
 
 #[tauri::command]
@@ -1193,10 +1199,14 @@ async fn desktop_remove_pack_entry(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_pack_entry(id, generation).await
+    lock(&state)
+        .await?
+        .remove_pack_entry(id, version, generation)
+        .await
 }
 
 #[tauri::command]
@@ -1575,12 +1585,13 @@ async fn desktop_set_account_schedule(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     change: ScheduleChange,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_account_schedule(change, generation)
+        .set_account_schedule(change, version, generation)
         .await
 }
 
@@ -1693,9 +1704,13 @@ async fn desktop_set_skill_enabled(
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
+    version: u64,
 ) -> Result<SkillView, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.set_skill_enabled(id, enabled).await
+    lock(&state)
+        .await?
+        .set_skill_enabled(id, enabled, version)
+        .await
 }
 
 #[tauri::command]
@@ -1734,9 +1749,10 @@ async fn desktop_remove_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_skill(id).await
+    lock(&state).await?.remove_skill(id, version).await
 }
 
 #[tauri::command]
@@ -1761,9 +1777,13 @@ async fn desktop_update_mcp_server(
     state: State<'_, NativeState>,
     id: String,
     spec: ServerSpec,
+    version: u64,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.update_mcp_server(id, spec).await
+    lock(&state)
+        .await?
+        .update_mcp_server(id, spec, version)
+        .await
 }
 
 #[tauri::command]
@@ -1783,11 +1803,12 @@ async fn desktop_set_mcp_server_enabled(
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
+    version: u64,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_mcp_server_enabled(id, enabled)
+        .set_mcp_server_enabled(id, enabled, version)
         .await
 }
 
@@ -1796,9 +1817,10 @@ async fn desktop_remove_mcp_server(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_mcp_server(id).await
+    lock(&state).await?.remove_mcp_server(id, version).await
 }
 
 #[tauri::command]
@@ -1808,9 +1830,13 @@ async fn desktop_switch_plugin(
     project_id: String,
     id: String,
     on: bool,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.switch_plugin(project_id, id, on).await
+    lock(&state)
+        .await?
+        .switch_plugin(project_id, id, on, version)
+        .await
 }
 
 #[tauri::command]

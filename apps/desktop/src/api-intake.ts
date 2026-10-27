@@ -110,6 +110,7 @@ const COPY: Record<string, string> = {
   setup_store_unavailable: "The app's data folder can't be written.",
   pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_not_installed: "This entry isn't installed yet. Run setup first.",
+  stale_revision: "The pack changed in another window, so this was not saved. The list was reloaded.",
   pack_id_invalid: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_too_many: "Pick at most 64 entries.",
   pack_name_taken: "A skill or server with this name already exists. Remove it first, then try again.",
@@ -274,13 +275,13 @@ export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
 }
 
 /** Switches one installed pack entry on or off for every project.
- * Inputs: its id and the state. Output: the new setup status. */
-export function setPackEntry(id: string, on: boolean): Promise<Result<SetupStatus>> {
-  return wrap(() => switchEntry(id, on, nextGeneration()));
+ * Inputs: its id, the state and the pack version shown. Output: the new setup status. */
+export function setPackEntry(id: string, on: boolean, version: number): Promise<Result<SetupStatus>> {
+  return wrap(() => switchEntry(id, on, version, nextGeneration()));
 }
 
 /** Removes one installed pack entry and the skill or server it added.
- * Input: its id. Output: the new setup status. */
-export function removePackEntry(id: string): Promise<Result<SetupStatus>> {
-  return wrap(() => removeEntry(id, nextGeneration()));
+ * Inputs: its id and the pack version shown. Output: the new setup status. */
+export function removePackEntry(id: string, version: number): Promise<Result<SetupStatus>> {
+  return wrap(() => removeEntry(id, version, nextGeneration()));
 }

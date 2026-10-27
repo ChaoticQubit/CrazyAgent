@@ -18,10 +18,12 @@ function targetKey(target: WakeRuleTarget): string {
 /** Edits the wake rule of one level: which sub-agent events wake the master and how many wakes
  * an hour it may take before auto-wake pauses. A switch or a new limit saves this level's own
  * rule; Reset clears it so the level above applies. Inputs: the level, its own rule or null,
- * the rule in effect, the level it falls back to and a reload. Output: the editor. */
-export function WakeRuleEditor({ target, own, effective, fallback, reload }: {
+ * the version the last read showed, the rule in effect, the level it falls back to and a reload.
+ * Output: the editor. */
+export function WakeRuleEditor({ target, own, version, effective, fallback, reload }: {
   target: WakeRuleTarget;
   own: WakeRule | null;
+  version: number;
   effective: WakeRule;
   fallback: WakeRuleLevel;
   reload: () => void;
@@ -40,7 +42,7 @@ export function WakeRuleEditor({ target, own, effective, fallback, reload }: {
   async function save(rule: WakeRule | null) {
     if (busy) return;
     setSaving(true);
-    const message = changeNote(await setWakeRule(target, rule, nextGeneration()), "wake rules");
+    const message = changeNote(await setWakeRule(target, rule, version, nextGeneration()), "wake rules");
     setSavedFrom(message === "" ? view : null);
     setSaving(false);
     setNote(message);
@@ -110,7 +112,8 @@ export function TeamEventsPanel({ projectId, status, reload }: { projectId: stri
     const found = status.agents.find((item) => item.id === id);
     return found ? found.label : `Agent ${id}`;
   };
-  const own = chosen ? events.wake.agents.find((item) => item.agent === chosen.id)?.rule ?? null : null;
+  const stored = chosen ? events.wake.agents.find((item) => item.agent === chosen.id) : undefined;
+  const own = stored?.rule ?? null;
   const above: WakeRuleLevel = events.wake.project ? "project" : events.wake.app ? "app" : "shipped";
   return <section className="tg-events" aria-label="Sub-agent events">
     <h3>Sub-agent events</h3>
@@ -123,13 +126,13 @@ export function TeamEventsPanel({ projectId, status, reload }: { projectId: stri
       <span className="grow">{displayText(eventLine(item))}</span><span className="pj-secondary">{eventState(item.state)}</span>
     </li>)}</ul> : <p className="tg-terminal-note">No sub-agent events yet.</p>}
     <h4>Wake the master for this project</h4>
-    <WakeRuleEditor target={{ level: "project", project_id: projectId }} own={events.wake.project}
+    <WakeRuleEditor target={{ level: "project", project_id: projectId }} own={events.wake.project} version={events.wake.project_version}
       effective={events.wake.effective} fallback={events.wake.app ? "app" : "shipped"} reload={reload} />
     {subs.length > 0 && <>
       <h4>Wake rule of one agent</h4>
       <Select id={`tg-wake-agent-${projectId}`} label="Agent" value={agent} onValue={setAgent}
         options={[{ value: "", label: "Pick an agent" }, ...subs.map((item) => ({ value: String(item.id), label: label(item.id) }))]} />
-      {chosen && <WakeRuleEditor target={{ level: "agent", project_id: projectId, agent: chosen.id }} own={own}
+      {chosen && <WakeRuleEditor target={{ level: "agent", project_id: projectId, agent: chosen.id }} own={own} version={stored?.version ?? 0}
         effective={own ?? events.wake.effective} fallback={above} reload={reload} />}
     </>}
   </section>;

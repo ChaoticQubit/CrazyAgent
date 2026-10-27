@@ -554,6 +554,7 @@ export interface AccountSchedule {
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
+  version: number;
 }
 
 export type ScheduleChange =
@@ -594,8 +595,8 @@ export function accountRanking(): Promise<Result<PoolRanking[]>> {
 
 /** Saves one account choice change. Input: the change. Output: ok once the engine applied
  * it, or a plain error. */
-export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
-  return change("desktop_set_account_schedule", { change: scheduleChange, generation: nextGeneration() });
+export function setAccountSchedule(scheduleChange: ScheduleChange, version: number): Promise<Result<void>> {
+  return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
 function poolId(): string {
@@ -702,14 +703,15 @@ export function addSkill(scope: PluginScope, folder: string): Promise<Result<Ski
   return call<SkillView>("desktop_add_skill", { scope, folder });
 }
 
-/** Turns a skill on or off where it was added. Inputs: skill id and the switch. */
-export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<SkillView>> {
-  return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
+/** Turns a skill on or off where it was added. Inputs: skill id, the switch and the version
+ * the list showed; a skill changed since is refused with `stale_revision`. */
+export function setSkillEnabled(id: string, enabled: boolean, version: number): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_set_skill_enabled", { id, enabled, version });
 }
 
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
-export function removeSkill(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill for its detail view: the skill with the project's switch when a project
@@ -750,14 +752,15 @@ export function approveMcpServer(id: string, spec: McpServerSpec): Promise<Resul
   return call<McpServerView>("desktop_approve_mcp_server", { id, spec });
 }
 
-/** Turns an MCP server on or off where it was added. Inputs: server id and the switch. */
-export function setMcpServerEnabled(id: string, enabled: boolean): Promise<Result<McpServerView>> {
-  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+/** Turns an MCP server on or off where it was added. Inputs: server id, the switch and the
+ * version the list showed; a server changed since is refused with `stale_revision`. */
+export function setMcpServerEnabled(id: string, enabled: boolean, version: number): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled, version });
 }
 
 /** Removes an MCP server and its saved secrets. Input: server id. */
-export function removeMcpServer(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_mcp_server", { id, version });
 }
 
 /** Saves or replaces one secret for an MCP server; the value is sent once and not kept here.
@@ -778,9 +781,9 @@ export function checkMcpServer(id: string): Promise<Result<McpServerView>> {
 }
 
 /** Switches a global skill or MCP server on or off for one project.
- * Inputs: project id, item id and the switch. */
-export function switchPlugin(projectId: string, id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_switch_plugin", { projectId, id, on });
+ * Inputs: project id, item id, the switch and the item's version the list showed. */
+export function switchPlugin(projectId: string, id: string, on: boolean, version: number): Promise<Result<void>> {
+  return call<void>("desktop_switch_plugin", { projectId, id, on, version });
 }
 
 /** Lists launched agents, newest first. Input: a project id, or none for every project.

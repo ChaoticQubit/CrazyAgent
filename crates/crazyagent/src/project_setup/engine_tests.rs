@@ -1253,12 +1253,12 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         .await
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
-    assert!(
-        owner
-            .project_read_paths(project.clone())
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![],
+            version: 0
+        }
     );
 
     let shared = tempfile::Builder::new()
@@ -1275,13 +1275,16 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
     let text = |path: &Path| path.to_str().unwrap().to_owned();
 
     let saved = owner
-        .set_project_read_paths(project.clone(), vec![text(&alias), text(&docs)], 2)
+        .set_project_read_paths(project.clone(), 0, vec![text(&alias), text(&docs)], 2)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
     assert_eq!(
         owner.project_read_paths(project.clone()).await.unwrap(),
-        vec![text(&docs)],
+        ReadPaths {
+            paths: vec![text(&docs)],
+            version: 1
+        },
         "a link is saved as the folder it names, once"
     );
 
@@ -1310,6 +1313,7 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         let refused = owner
             .set_project_read_paths(
                 project.clone(),
+                1,
                 vec![text(&docs), typed.clone()],
                 generation,
             )
@@ -1320,8 +1324,11 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
     }
     assert_eq!(
         owner.project_read_paths(project.clone()).await.unwrap(),
-        vec![text(&docs)],
-        "a refused change keeps the saved folders"
+        ReadPaths {
+            paths: vec![text(&docs)],
+            version: 1
+        },
+        "a refused change keeps the saved folders and their version"
     );
 
     let removed = owner
@@ -1334,6 +1341,218 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         0,
         "the project's read-only folders go with it"
     );
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn stale_project_setup_write_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let opened = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(opened.revision, 1, "both windows open revision 1");
+
+    let first = ProjectSetup {
+        about: "Plans meals for two.".into(),
+        ..pooled_setup(vec![])
+    };
+    let landed = owner
+        .update_project_setup(project.clone(), 1, Some("Meals for two".into()), first, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(landed), OwnerResult::Applied);
+    let brief_path = opened.state_folder().join("context/brief.md");
+    let brief = std::fs::read_to_string(&brief_path).unwrap();
+
+    let second = ProjectSetup {
+        about: "Plans a week of meals.".into(),
+        tech_stack: vec!["rust".into()],
+        ..pooled_setup(vec![])
+    };
+    for (revision, generation) in [(1, 3), (0, 4), (99, 5)] {
+        let refused = owner
+            .update_project_setup(
+                project.clone(),
+                revision,
+                Some("Week planner".into()),
+                second.clone(),
+                generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save from revision {revision} never replaces revision 2"
+        );
+    }
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            stored.revision,
+            stored.name.as_str(),
+            stored.about.as_str(),
+            stored.tech_stack.len()
+        ),
+        (2, "Meals for two", "Plans meals for two.", 0),
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&brief_path).unwrap(),
+        brief,
+        "the brief keeps the edit that landed"
+    );
+
+    let redone = owner
+        .update_project_setup(project.clone(), 2, None, second, 6)
+        .await
+        .unwrap();
+    assert_eq!(result(redone), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (stored.revision, stored.about.as_str()),
+        (3, "Plans a week of meals."),
+        "after a re-read the redo lands"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn stale_read_paths_write_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let shared = tempfile::Builder::new()
+        .prefix("ca-stale-read-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let real = std::fs::canonicalize(shared.path()).unwrap();
+    let (docs, assets) = (real.join("docs"), real.join("assets"));
+    std::fs::create_dir(&docs).unwrap();
+    std::fs::create_dir(&assets).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+
+    let opened = owner.project_read_paths(project.clone()).await.unwrap();
+    assert_eq!(opened.version, 0, "folders nobody saved are at version 0");
+    let landed = owner
+        .set_project_read_paths(project.clone(), opened.version, vec![text(&docs)], 2)
+        .await
+        .unwrap();
+    assert_eq!(result(landed), OwnerResult::Applied);
+
+    for (version, generation) in [(opened.version, 3), (7, 4)] {
+        let refused = owner
+            .set_project_read_paths(project.clone(), version, vec![text(&assets)], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save from version {version} never replaces version 1"
+        );
+    }
+    let invalid_and_stale = owner
+        .set_project_read_paths(project.clone(), 0, vec!["relative".into()], 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(invalid_and_stale),
+        rejected("read_path_not_absolute"),
+        "a refused folder is named before the version is checked"
+    );
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![text(&docs)],
+            version: 1
+        },
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT version FROM versioned_items WHERE item='read-paths:setup-pooled'
+             AND writer='owner'"
+        ),
+        1
+    );
+
+    let redone = owner
+        .set_project_read_paths(project.clone(), 1, vec![text(&docs), text(&assets)], 6)
+        .await
+        .unwrap();
+    assert_eq!(result(redone), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![text(&docs), text(&assets)],
+            version: 2
+        },
+        "after a re-read the redo lands"
+    );
+
+    let removed = owner.remove_project(project.clone(), 7).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='read-paths:setup-pooled'"),
+        2,
+        "a removed project's folders keep their version"
+    );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![],
+            version: 2
+        },
+        "the project added again under the same id starts with no folders"
+    );
+    for (version, generation) in [(0, 9), (1, 10)] {
+        let refused = owner
+            .set_project_read_paths(project.clone(), version, vec![text(&assets)], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save read before the removal at version {version} is refused"
+        );
+    }
+    let fresh = owner
+        .set_project_read_paths(project.clone(), 2, vec![text(&assets)], 11)
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
     drop(owner);
     engine.stop().await;
 }

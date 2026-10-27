@@ -121,6 +121,18 @@ impl Drop for Fixture {
     }
 }
 
+fn put_rule(
+    connection: &Connection,
+    target: &RuleTarget,
+    rule: Option<&WakeRule>,
+) -> Result<(), &'static str> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let version = rule_version(&tx, target).unwrap();
+    let done = set_rule(&tx, target, rule, version).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
 fn project() -> ProjectId {
     ProjectId::new(PROJECT).unwrap()
 }
@@ -1184,7 +1196,7 @@ fn with_finished_muted_a_result_ending_in_a_question_starts_no_master() {
     let fixture = Fixture::new();
     let connection = &fixture.connection;
     let ada = fixture.agent(PROJECT, "sub", "codex", "working");
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
@@ -1194,7 +1206,6 @@ fn with_finished_muted_a_result_ending_in_a_question_starts_no_master() {
             ..WakeRule::default()
         }),
     )
-    .unwrap()
     .unwrap();
     let task = fixture.task(
         ada,
@@ -1215,7 +1226,7 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
     let fixture = Fixture::new();
     let connection = &fixture.connection;
     let ada = fixture.agent(PROJECT, "sub", "codex", "working");
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
@@ -1225,7 +1236,6 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
             ..WakeRule::default()
         }),
     )
-    .unwrap()
     .unwrap();
     for (kind, text) in [
         (EventKind::Finished, "Done."),
@@ -1366,14 +1376,13 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
         hourly_cap: 2,
         ..WakeRule::default()
     };
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         Some(&rule),
     )
-    .unwrap()
     .unwrap();
     record(
         connection,
@@ -1436,17 +1445,14 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
         hourly_cap: 0,
         ..WakeRule::default()
     };
-    set_rule(connection, &RuleTarget::App, Some(&never))
-        .unwrap()
-        .unwrap();
-    set_rule(
+    put_rule(connection, &RuleTarget::App, Some(&never)).unwrap();
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         None,
     )
-    .unwrap()
     .unwrap();
     record(
         connection,
@@ -1528,14 +1534,13 @@ fn only_the_events_in_a_wake_are_named_and_none_while_the_hourly_cap_holds() {
         hourly_cap: 1,
         ..WakeRule::default()
     };
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         Some(&rule),
     )
-    .unwrap()
     .unwrap();
     for at in [300, 301] {
         let tx = immediate(connection).unwrap();
@@ -1592,9 +1597,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         hourly_cap: 1,
         ..shipped
     };
-    set_rule(connection, &RuleTarget::App, Some(&app))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &RuleTarget::App, Some(&app)).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (app, RuleLevel::App)
@@ -1602,16 +1605,12 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
     let here = RuleTarget::Project {
         project_id: project(),
     };
-    set_rule(connection, &here, Some(&project_rule))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &here, Some(&project_rule)).unwrap();
     let mine = RuleTarget::Agent {
         project_id: project(),
         agent: ada,
     };
-    set_rule(connection, &mine, Some(&agent_rule))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &mine, Some(&agent_rule)).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (agent_rule, RuleLevel::Agent)
@@ -1626,7 +1625,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         ..shipped
     };
     assert_eq!(
-        set_rule(connection, &here, Some(&too_high)).unwrap(),
+        put_rule(connection, &here, Some(&too_high)),
         Err("team_wake_cap_invalid")
     );
     for target in [
@@ -1640,7 +1639,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         },
     ] {
         assert_eq!(
-            set_rule(connection, &target, Some(&shipped)).unwrap(),
+            put_rule(connection, &target, Some(&shipped)),
             Err("team_agent_not_found")
         );
     }
@@ -1676,7 +1675,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
             .iter()
             .any(|event| event.kind == EventKind::Question && event.state == EventState::Muted)
     );
-    set_rule(connection, &mine, None).unwrap().unwrap();
+    put_rule(connection, &mine, None).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (project_rule, RuleLevel::Project)
@@ -1753,4 +1752,138 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
     let delivered = view(connection, &project()).unwrap().questions;
     assert!(delivered.is_empty(), "{delivered:?}");
     assert_eq!(node(delivered, ada), Some(0));
+}
+
+fn write_rule(
+    connection: &Connection,
+    target: &RuleTarget,
+    rule: Option<&WakeRule>,
+    version: u64,
+) -> Result<(), &'static str> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let done = set_rule(&tx, target, rule, version).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
+#[test]
+fn stale_team_rule_write_is_refused() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let here = RuleTarget::Project {
+        project_id: project(),
+    };
+    let mine = RuleTarget::Agent {
+        project_id: project(),
+        agent: ada,
+    };
+    let quiet = WakeRule {
+        progress: false,
+        ..WakeRule::default()
+    };
+    let loud = WakeRule {
+        hourly_cap: 9,
+        ..WakeRule::default()
+    };
+    for target in [&RuleTarget::App, &here, &mine] {
+        assert_eq!(rule_version(connection, target).unwrap(), 0);
+    }
+
+    assert_eq!(write_rule(connection, &here, Some(&quiet), 0), Ok(()));
+    for version in [0, 2] {
+        assert_eq!(
+            write_rule(connection, &here, Some(&loud), version),
+            Err("stale_revision"),
+            "a save from version {version} never replaces version 1"
+        );
+    }
+    let shown = view(connection, &project()).unwrap().wake;
+    assert_eq!(
+        (shown.project, shown.project_version),
+        (Some(quiet), 1),
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        write_rule(connection, &here, None, 0),
+        Err("stale_revision"),
+        "a stale Reset is refused too"
+    );
+    assert_eq!(
+        write_rule(
+            connection,
+            &here,
+            Some(&WakeRule {
+                hourly_cap: HOURLY_CAP_MAX + 1,
+                ..quiet
+            }),
+            0
+        ),
+        Err("team_wake_cap_invalid"),
+        "a bad limit is named before the version is checked"
+    );
+    assert_eq!(write_rule(connection, &here, Some(&loud), 1), Ok(()));
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.project_version,
+        2
+    );
+
+    assert_eq!(
+        rule_version(connection, &mine).unwrap(),
+        0,
+        "each level keeps its own version"
+    );
+    assert_eq!(write_rule(connection, &mine, Some(&quiet), 0), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&loud), 0),
+        Err("stale_revision")
+    );
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: quiet,
+            version: 1
+        }]
+    );
+    assert_eq!(write_rule(connection, &mine, None, 1), Ok(()));
+    assert!(view(connection, &project()).unwrap().wake.agents.is_empty());
+    assert_eq!(
+        rule_version(connection, &mine).unwrap(),
+        2,
+        "a cleared level keeps moving its version"
+    );
+    for version in [0, 1] {
+        assert_eq!(
+            write_rule(connection, &mine, Some(&loud), version),
+            Err("stale_revision"),
+            "a window that saw version {version} before the clear re-reads"
+        );
+    }
+    assert_eq!(write_rule(connection, &mine, Some(&loud), 2), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&quiet), 1),
+        Err("stale_revision"),
+        "a save read before the clear never replaces the rule set after it"
+    );
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
+    );
+
+    assert_eq!(
+        write_rule(connection, &RuleTarget::App, Some(&quiet), 0),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &RuleTarget::App, Some(&loud), 0),
+        Err("stale_revision")
+    );
+    let everywhere = app(connection).unwrap();
+    assert_eq!((everywhere.rule, everywhere.rule_version), (Some(quiet), 1));
+    assert_eq!(view(connection, &project()).unwrap().wake.app_version, 1);
 }

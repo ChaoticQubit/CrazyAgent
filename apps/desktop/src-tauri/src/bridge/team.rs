@@ -45,16 +45,25 @@ impl NativeBridge {
     }
 
     /// Sets or clears the wake rule of one level: the app default, a project or one agent.
-    /// Takes the level, the rule or none to fall back to the level above, and the generation.
-    /// Returns the actual commit receipt; a cap over the bound is a plain rejection.
+    /// Takes the level, the rule or none to fall back to the level above, the version the
+    /// screen showed and the generation. Returns the actual commit receipt; a cap over the
+    /// bound and a rule changed since are plain rejections.
     pub async fn team_wake_rule(
         &mut self,
         target: RuleTarget,
         rule: Option<WakeRule>,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.team_action(TeamAction::Wake { target, rule }, generation)
-            .await
+        self.team_action(
+            TeamAction::Wake {
+                target,
+                rule,
+                version,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Marks a project's owner notifications up to one id as seen, so they leave the badge.

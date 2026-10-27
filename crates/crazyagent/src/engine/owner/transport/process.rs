@@ -153,6 +153,7 @@ pub enum SavedText {
     },
 }
 
+#[derive(Debug)]
 enum Answer {
     Text(String),
     Current(ProcessText),

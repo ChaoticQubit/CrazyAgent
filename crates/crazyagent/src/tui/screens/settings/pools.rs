@@ -683,7 +683,9 @@ mod tests {
     fn change(ctx: &mut Ctx) -> crate::scheduling::ScheduleChange {
         match ctx.next_request() {
             Some(Request::Settings(job)) => match *job {
-                SettingsJob::SetSchedule { change, generation } => {
+                SettingsJob::SetSchedule {
+                    change, generation, ..
+                } => {
                     assert!(generation > 0);
                     change
                 }

@@ -154,6 +154,7 @@ pub enum OwnerMutation {
     },
     SetProjectReadPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
     Team {
@@ -161,6 +162,7 @@ pub enum OwnerMutation {
     },
     AccountSchedule {
         change: crate::scheduling::ScheduleChange,
+        version: u64,
     },
     UpdateProjectSetup {
         project_id: ProjectId,
@@ -177,9 +179,11 @@ pub enum OwnerMutation {
     SetPackEntry {
         id: String,
         on: bool,
+        version: u64,
     },
     RemovePackEntry {
         id: String,
+        version: u64,
     },
     SetProjectsHome {
         path: String,
@@ -319,9 +323,14 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectSetup { action }
             }
-            Self::SetProjectReadPaths { project_id, paths } => {
+            Self::SetProjectReadPaths {
+                project_id,
+                version,
+                paths,
+            } => {
                 let action = crate::project_setup::SetupAction::SetReadPaths {
                     project_id: project_id.clone(),
+                    version: *version,
                     paths: paths.clone(),
                 };
                 action.validate()?;
@@ -333,10 +342,11 @@ impl OwnerMutation {
                     action: action.clone(),
                 }
             }
-            Self::AccountSchedule { change } => {
+            Self::AccountSchedule { change, version } => {
                 change.validate()?;
                 Command::AccountSchedule {
                     change: change.clone(),
+                    version: *version,
                 }
             }
             Self::UpdateProjectSetup {
@@ -362,14 +372,18 @@ impl OwnerMutation {
             Self::RunSetup { pack } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Run { pack: pack.clone() },
             },
-            Self::SetPackEntry { id, on } => Command::OwnerSetup {
+            Self::SetPackEntry { id, on, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Set {
                     id: id.clone(),
                     on: *on,
+                    version: *version,
                 },
             },
-            Self::RemovePackEntry { id } => Command::OwnerSetup {
-                action: crate::setup::SetupAction::Remove { id: id.clone() },
+            Self::RemovePackEntry { id, version } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Remove {
+                    id: id.clone(),
+                    version: *version,
+                },
             },
             Self::SetProjectsHome { path } => {
                 let action = crate::projects_home::HomeAction::SetHome { path: path.clone() };
@@ -1060,6 +1074,7 @@ pub enum OwnerData {
     ProjectReadPaths {
         project_id: ProjectId,
         paths: Vec<String>,
+        version: u64,
     },
     ResearchJobs {
         project_id: ProjectId,
