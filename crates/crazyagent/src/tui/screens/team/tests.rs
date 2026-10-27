@@ -986,8 +986,16 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
         "a reply for another card is ignored\n{screen}"
     );
     shell.arrive(received(&master, Err("agent_instructions_unsafe")));
-    let screen = render(&mut shell).join("\n");
-    assert!(screen.contains("link or not a plain file"), "{screen}");
+    let rows = render(&mut shell);
+    let screen = rows.join("\n");
+    let first = rows
+        .iter()
+        .position(|row| row.contains("This agent's instructions file is a link or not a plain"))
+        .unwrap_or_else(|| panic!("the refusal sentence is shown\n{screen}"));
+    assert!(
+        rows[first + 1].contains("file, so CrazyAgent won't read it."),
+        "the sentence wraps onto the box's next row\n{screen}"
+    );
     assert!(!screen.contains("agent_instructions_unsafe"), "{screen}");
 
     shell.key(Key::Char('i'));
