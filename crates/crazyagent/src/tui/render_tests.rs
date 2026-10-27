@@ -480,6 +480,21 @@ fn a_home_card_whose_research_waits_out_a_rate_limit_says_so_not_needs_a_pool() 
 }
 
 #[test]
+fn a_project_name_with_a_direction_override_is_drawn_without_it() {
+    let mut cards = projects();
+    cards[0].name = "Ada\u{202e}txt.exe".into();
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(cards);
+    ctx.store.pools = Load::Ready(pools());
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    let shown = render(&mut shell, 80, 24).join("\n");
+    assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    assert!(shown.contains("Ada"), "{shown}");
+    assert!(shown.contains("txt.exe"), "{shown}");
+}
+
+#[test]
 fn home_cards_show_team_work_and_suggested_memories_and_m_opens_memory() {
     let mut cards = projects();
     cards[0].activity = Activity {
