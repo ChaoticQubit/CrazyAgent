@@ -336,6 +336,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The description in SKILL.md must be 1 to 1024 characters.",
     ),
     (
+        "skill_description_hidden",
+        "The description in SKILL.md has characters you cannot see, so agents could read something you did not approve.",
+    ),
+    (
         "skill_too_many_files",
         "A skill folder can hold up to 200 files.",
     ),

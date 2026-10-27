@@ -297,6 +297,47 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
 /// real_codex_and_claude_receive_the_approved_skill_server_and_context.
 /// No test checks a real third-party MCP server: none is installed or approved.
 #[tokio::test]
+async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches_agents() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let project = create_project(&mut controller, "app").await;
+    let root = case.root.path().to_path_buf();
+    let hidden = root.join("picked").join("hidden");
+    fs::create_dir_all(&hidden).unwrap();
+    fs::write(
+        hidden.join("SKILL.md"),
+        "---\nname: fmt\ndescription: Formats changed files.\u{e0041}\u{e0042}\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let refused = controller
+        .add_skill(Scope::Global, hidden.display().to_string())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "skill_description_hidden");
+    assert!(plain_problem(&refused.0).is_some());
+
+    let added = controller
+        .add_skill(Scope::Global, skill_folder(&root, "fmt", "fmt"))
+        .await
+        .unwrap();
+    let effective = controller.project_plugins(project.clone()).await.unwrap();
+    assert!(effective.skills.iter().any(|skill| skill.name == "fmt"));
+    let stored = PathBuf::from(&added.folder).join("SKILL.md");
+    fs::set_permissions(&stored, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &stored,
+        "---\nname: fmt\ndescription: Teaches fmt.\u{e0041}\u{e0042}\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let effective = controller.project_plugins(project.clone()).await.unwrap();
+    assert!(
+        effective.skills.iter().all(|skill| skill.name != "fmt"),
+        "a stored skill whose SKILL.md hides text is not given to agents"
+    );
+    case.close().await;
+}
+
+#[tokio::test]
 async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
     let mut case = Case::new().await;
     let mut controller = case.controller().await;

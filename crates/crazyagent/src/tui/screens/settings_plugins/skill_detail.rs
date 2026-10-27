@@ -5,6 +5,7 @@ use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
+use crate::tui::screens::new_project_view::printable;
 use crate::tui::screens::project_markdown::{self, MdLine};
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
@@ -180,7 +181,7 @@ impl SkillDetailPage {
             Load::Ready(detail) => detail,
             Load::Failed(code) => {
                 return vec![
-                    styled(self.name.clone(), Role::Accent, theme),
+                    styled(printable(self.name.clone()), Role::Accent, theme),
                     Line::default(),
                     Line::raw(plugin_plain(code)),
                     Line::raw("Press r to try again."),
@@ -188,14 +189,14 @@ impl SkillDetailPage {
             }
             Load::NotReady => {
                 return vec![
-                    styled(self.name.clone(), Role::Accent, theme),
+                    styled(printable(self.name.clone()), Role::Accent, theme),
                     Line::default(),
                     Line::raw("Skill details are not ready in this build."),
                 ];
             }
             Load::Idle | Load::Loading => {
                 return vec![
-                    styled(self.name.clone(), Role::Accent, theme),
+                    styled(printable(self.name.clone()), Role::Accent, theme),
                     Line::default(),
                     styled("Reading SKILL.md...", Role::Muted, theme),
                 ];
@@ -210,14 +211,18 @@ impl SkillDetailPage {
             (false, false) => styled("Off", Role::Muted, theme),
         };
         let mut lines = vec![join([
-            styled(skill.name.clone(), Role::Accent, theme),
+            styled(printable(skill.name.clone()), Role::Accent, theme),
             Line::raw("  "),
             state,
         ])];
-        lines.extend(wrap(&skill.description, limit).into_iter().map(Line::raw));
+        lines.extend(
+            wrap(&printable(skill.description.clone()), limit)
+                .into_iter()
+                .map(Line::raw),
+        );
         lines.push(styled(
             cut(
-                &format!("From {}", tilde(&skill.source, ctx)),
+                &printable(format!("From {}", tilde(&skill.source, ctx))),
                 limit,
                 ctx.glyphs.ellipsis,
             ),
@@ -236,7 +241,7 @@ impl SkillDetailPage {
         for file in &detail.files {
             let size = file_size(file.bytes);
             let room = limit.saturating_sub(size.len() + 2).max(8);
-            let path = cut(&file.path, room, ctx.glyphs.ellipsis);
+            let path = cut(&printable(file.path.clone()), room, ctx.glyphs.ellipsis);
             lines.push(join([
                 Line::raw(format!("{path}  ")),
                 styled(size, Role::Muted, theme),

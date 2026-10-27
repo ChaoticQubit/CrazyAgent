@@ -177,7 +177,7 @@ fn candidate(
         Err(code) => Some(ImportCandidate {
             from,
             folder: shown,
-            name: name.to_owned(),
+            name: crate::memory::visible_text(name),
             line: String::new(),
             state: ImportState::Unusable { code: code.into() },
         }),
@@ -309,6 +309,45 @@ mod tests {
     fn private_folder(path: &Path) {
         fs::create_dir_all(path).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn a_skill_whose_description_hides_text_is_unusable_and_its_folder_name_is_shown_escaped() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let claude = home.join(".claude/skills");
+        skill(
+            &claude.join("fmt"),
+            "fmt",
+            "Formats changed files.\u{e0041}\u{e0042}\u{e0043}",
+        );
+        skill(
+            &claude.join("tagged\u{e0041}"),
+            "tagged",
+            "Formats changed files.\u{200b}",
+        );
+        let list = scan(&home, &[]).unwrap();
+        assert_eq!(list.found.len(), 2);
+        for found in &list.found {
+            assert_eq!(
+                found.state,
+                ImportState::Unusable {
+                    code: "skill_description_hidden".into()
+                },
+                "{found:?}"
+            );
+            assert!(found.line.is_empty());
+            assert!(!crate::memory::hidden_text(&found.name), "{found:?}");
+        }
+        let names: Vec<&str> = list.found.iter().map(|found| found.name.as_str()).collect();
+        assert!(names.contains(&"fmt"));
+        assert!(names.contains(&"tagged\\u{e0041}"), "{names:?}");
+        assert!(
+            list.found
+                .iter()
+                .any(|found| found.folder.ends_with("tagged\u{e0041}")),
+            "the folder stays exact so an import names the same folder"
+        );
     }
 
     #[test]

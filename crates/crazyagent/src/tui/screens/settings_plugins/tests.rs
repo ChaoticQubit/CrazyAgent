@@ -1170,3 +1170,54 @@ fn the_import_page_scrolls_and_says_why_the_scan_failed() {
         )
     );
 }
+
+#[test]
+fn hidden_characters_in_a_skill_or_a_found_folder_are_drawn_as_escapes() {
+    let ctx = plugin_ctx(80, 24);
+    let mut shown = detail(true);
+    shown.skill.description = "Formats changed files.\u{e0041}\u{e0042}".into();
+    shown.skill.source = "/Users/mira/Skills/fmt\u{202e}".into();
+    shown.files[1].path = "references/\u{200b}tokens.md".into();
+    let lines = texts(&SkillDetailPage::with(shown).lines(70, &ctx));
+    assert!(
+        lines.contains(&"Formats changed files.\\u{e0041}\\u{e0042}".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"From ~/Skills/fmt\\u202e".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("references/\\u200btokens.md")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !crate::memory::hidden_text(line)),
+        "{lines:?}"
+    );
+
+    let mut tagged = found("fmt\u{e0041}", ImportFrom::Claude, ImportState::New);
+    tagged.line = "Formats changed files.\u{e0041}".into();
+    let page = ImportSkillsPage::with(ImportList {
+        found: vec![tagged],
+        more: 0,
+    });
+    let (lines, _) = page.lines(76, &ctx);
+    let lines = texts(&lines);
+    assert!(
+        lines.iter().any(|line| line.contains("[ ] fmt\\u{e0041}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Formats changed files.\\u{e0041}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !crate::memory::hidden_text(line)),
+        "{lines:?}"
+    );
+}

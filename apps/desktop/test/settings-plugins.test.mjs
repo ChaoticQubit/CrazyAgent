@@ -273,6 +273,16 @@ test("the import's outcomes say what was left out and why a skill was not import
   assert.equal(api.plainError("skill_import_name_changed"), "This folder now holds a different skill. Look for your skills again.");
 });
 
+test("hidden characters in a found skill's name, line or folder are shown as escapes", () => {
+  const value = { found: [found({ folder: "/Users/owner/.claude/skills/fmt\u{e0041}", name: "fmt\u{e0041}", line: "Formats files.\u200b", state: { kind: "new" } })], more: 0 };
+  const markup = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "ok", value },
+    { outcomes: [{ name: "/Users/owner/.claude/skills/fmt\u{e0041}", result: { kind: "error", code: "skill_description_hidden", message: "" } }] })));
+  assert.doesNotMatch(markup, /[\u200b\u{e0000}-\u{e0fff}]/u);
+  assert.match(markup, /Formats files\.\\u200b/);
+  assert.match(markup, /skills\/fmt\\u\{e0041\}/);
+  assert.equal(api.plainError("skill_description_hidden"), "The description in SKILL.md has characters you cannot see, so agents could read something you did not approve.");
+});
+
 test("the import list shows plain loading, not ready and error states", () => {
   assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "loading" }))), /skeleton/);
   assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "not_ready" }))), /Importing skills/);
