@@ -264,7 +264,8 @@ pub fn record_worktree_start(
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
 /// fsmonitor off, and adds it to that worktree's open change set or opens one above the
 /// commit the worktree started from, or its HEAD when no start is recorded, so commits
-/// the agent made itself land too. A failed or cancelled turn commits too. Inputs: the
+/// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
+/// waiting in the worktree settle on the change set the turn end leaves open. Inputs: the
 /// store, the workspace and the turn end. Output: the change set the work now belongs
 /// to, None when nothing is pending.
 pub fn record_turn_end(
@@ -273,13 +274,17 @@ pub fn record_turn_end(
     turn: &TurnEnd,
 ) -> Result<Option<ChangeSetId>, EngineError> {
     #[cfg(unix)]
-    return flow::record(
-        db,
-        workspace,
-        turn,
-        &crate::worktrees::TREE_BOUNDS,
-        flow::now_ms()?,
-    );
+    {
+        let kept = flow::record(
+            db,
+            workspace,
+            turn,
+            &crate::worktrees::TREE_BOUNDS,
+            flow::now_ms()?,
+        )?;
+        owner_edit::settle(db, &workspace.worktree, kept.as_ref())?;
+        Ok(kept)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, workspace, turn);
@@ -317,7 +322,8 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, 
 
 /// Reads one page of a change set's diff between its base and head, produced by the
 /// engine with no external diff or text conversion; files the owner edited in the agent's
-/// worktree carry `OwnerEdited`. Inputs: the store, the change set and the page.
+/// worktree before a turn end recorded them in this change set carry `OwnerEdited`.
+/// Inputs: the store, the change set and the page.
 /// Output: the page.
 pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
@@ -325,15 +331,7 @@ pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, 
         store::initialize(db)?;
         let record = store::load(db, id)?;
         let mut shown = diff::page(&record.repository, &record.base, &record.head, page)?;
-        let closed = matches!(record.state, ChangeState::Accepted | ChangeState::Discarded)
-            .then_some(record.updated_ms);
-        owner_edit::mark(
-            db,
-            &record.worktree,
-            record.created_ms,
-            closed,
-            &mut shown.files,
-        )?;
+        owner_edit::mark(db, &record.worktree, &record.id, &mut shown.files)?;
         Ok(shown)
     }
     #[cfg(not(unix))]
