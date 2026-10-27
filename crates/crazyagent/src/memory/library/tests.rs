@@ -1342,7 +1342,7 @@ async fn research_text_with_hidden_characters_stored_before_the_check_is_never_k
 
 #[tokio::test]
 async fn every_project_memory_read_for_counts_and_lists_reaches_past_one_engine_batch() {
-    let mut engine = Engine::start().await;
+    let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let mut generation = 0;
     let mut next = || {
