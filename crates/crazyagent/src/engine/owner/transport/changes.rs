@@ -307,6 +307,7 @@ async fn handle(
             }
             Action::Update { id } => {
                 landing::update(&db, &id)?;
+                crate::landing_turns::start_resolve(&db, &id)?;
                 Reply::Done
             }
         })

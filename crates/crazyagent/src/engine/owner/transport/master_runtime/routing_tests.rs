@@ -2530,7 +2530,11 @@ async fn asking_a_master_to_update_merges_the_owner_branch_and_its_next_turn_res
     drop(prepared);
     private_file(&repository.join("NOTES.md"), b"Written by the owner.\n");
     git(&repository, case.root.path(), &["add", "NOTES.md"]);
-    git(&repository, case.root.path(), &["commit", "-qm", "Owner notes"]);
+    git(
+        &repository,
+        case.root.path(),
+        &["commit", "-qm", "Owner notes"],
+    );
     let project = case.session.project_id.clone();
     let pending = case.owner.change_sets(project.clone()).await.unwrap();
     case.owner

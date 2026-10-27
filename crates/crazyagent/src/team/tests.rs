@@ -2072,3 +2072,63 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         "the clients read a conversation master's task as the master's, the owner's own as theirs"
     );
 }
+
+#[test]
+fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one_pinned_task() {
+    let (_directory, mut connection) = database();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES
+               ('team-resolve','master','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1);
+             INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES
+               (1,'team-resolve','/r','/r/a','/r/.git/worktrees/a'),
+               (2,'team-resolve','/r','/r/b','/r/.git/worktrees/b');",
+        )
+        .unwrap();
+    let project = ProjectId::new("team-resolve").unwrap();
+    let tx = connection.transaction().unwrap();
+    admit_resolve(&tx, &project, 1, "Resolve the master's merge.", 5)
+        .unwrap()
+        .unwrap();
+    admit_resolve(&tx, &project, 2, "Resolve the first merge.", 6)
+        .unwrap()
+        .unwrap();
+    admit_resolve(&tx, &project, 2, "Resolve the newest merge.", 7)
+        .unwrap()
+        .unwrap();
+    tx.commit().unwrap();
+    let messages: Vec<(String, String, String)> = connection
+        .prepare("SELECT author,text,state FROM team_messages WHERE project='team-resolve'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        messages,
+        vec![(
+            "engine".to_owned(),
+            "Resolve the master's merge.".to_owned(),
+            "pending".to_owned()
+        )]
+    );
+    let tasks: Vec<(String, String, i64)> = connection
+        .prepare(
+            "SELECT t.prompt,t.status,p.agent FROM team_tasks t JOIN team_task_pins p ON p.task=t.id
+             WHERE t.project='team-resolve'",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        tasks,
+        vec![(
+            "Resolve the newest merge.".to_owned(),
+            "queued".to_owned(),
+            2
+        )]
+    );
+}

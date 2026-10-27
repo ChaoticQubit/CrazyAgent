@@ -1485,8 +1485,18 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
                 .env("PATH", "/usr/bin:/bin")
                 .env("HOME", &fixture.base)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
-                .args(["-c", "user.name=Owner", "-c", "user.email=owner@crazyagent.invalid"])
-                .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+                .args([
+                    "-c",
+                    "user.name=Owner",
+                    "-c",
+                    "user.email=owner@crazyagent.invalid",
+                ])
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(arguments)
                 .current_dir(&project)
                 .stdin(Stdio::null())
@@ -1529,7 +1539,10 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap();
     assert_eq!((agent, status.as_str()), (Some(member.id), "running"));
     assert_eq!(sent, prompt);
-    assert!(prompt.contains("CrazyAgent merged it into your worktree"), "{prompt}");
+    assert!(
+        prompt.contains("CrazyAgent merged it into your worktree"),
+        "{prompt}"
+    );
     assert!(
         project.join(&worktree).join("OWNER.md").is_file(),
         "the update merged the owner's commit into the sub-agent's worktree"

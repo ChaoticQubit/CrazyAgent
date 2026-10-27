@@ -138,7 +138,11 @@ fn fitted(prompt: &str) -> String {
         .collect();
     let mut lines: Vec<&str> = clean.lines().collect();
     let fits = |lines: &[&str], more: bool| {
-        let added = if more && !lines.contains(&MORE) { MORE.len() + 1 } else { 0 };
+        let added = if more && !lines.contains(&MORE) {
+            MORE.len() + 1
+        } else {
+            0
+        };
         lines.iter().map(|line| line.len() + 1).sum::<usize>() + added <= RESOLVE_PROMPT_BYTES_MAX
     };
     let mut cut = false;
@@ -161,7 +165,10 @@ fn fitted(prompt: &str) -> String {
     }
     let mut fitted = lines.join("\n");
     fitted.push('\n');
-    assert!(fitted.len() <= RESOLVE_PROMPT_BYTES_MAX, "resolve_prompt_bounds");
+    assert!(
+        fitted.len() <= RESOLVE_PROMPT_BYTES_MAX,
+        "resolve_prompt_bounds"
+    );
     fitted
 }
 
@@ -171,4 +178,37 @@ fn refused(code: &str) -> EngineError {
 
 fn storage(_: rusqlite::Error) -> EngineError {
     refused("changes_unavailable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_resolve_prompt_keeps_its_instructions_and_fits_the_task_bound() {
+        let head = "The owner's branch changed while your work waited for review, so CrazyAgent merged it into your worktree.\nThese files have conflict markers (<<<<<<<, ======= and >>>>>>>):\n";
+        let tail = "Resolve every conflict so both sides' intent is kept, remove every marker, and make sure the project still builds and its tests pass.\nDo not run git commit; CrazyAgent records your changes when you finish.\n";
+        let mut prompt = String::from(head);
+        for n in 0..50 {
+            prompt.push_str(&format!("- {}\u{1b}/file-{n}.md\n", "deep/".repeat(30)));
+        }
+        prompt.push_str(tail);
+        assert!(prompt.len() > RESOLVE_PROMPT_BYTES_MAX);
+        let fitted = fitted(&prompt);
+        assert!(fitted.len() <= RESOLVE_PROMPT_BYTES_MAX, "{}", fitted.len());
+        assert!(fitted.starts_with(head), "{fitted}");
+        assert!(fitted.ends_with(tail), "{fitted}");
+        assert!(fitted.contains("/file-0.md\n"), "{fitted}");
+        assert!(!fitted.contains("/file-49.md"), "{fitted}");
+        assert_eq!(
+            fitted
+                .matches("\n- and more; search the worktree for <<<<<<<\nResolve every")
+                .count(),
+            1,
+            "{fitted}"
+        );
+        assert!(!fitted.chars().any(|c| c.is_control() && c != '\n'));
+        let short = format!("{head}- a.md\n{tail}");
+        assert_eq!(super::fitted(&short), short);
+    }
 }
