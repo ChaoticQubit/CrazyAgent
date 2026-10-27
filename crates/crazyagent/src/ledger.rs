@@ -65,10 +65,9 @@ pub trait Check {
     fn check(&self, action: &Action) -> Resolution;
 }
 
-/// The pending actions of one kind after a check, every one of them already finished:
-/// those whose effect happened, those that never started, which the caller completes as
-/// new actions, and those whose outcome is unknown, which are shown to the owner and
-/// never replayed.
+/// The pending actions of one kind after a check. Finished: those whose effect happened,
+/// and those that never started, which the caller completes as new actions. Still pending:
+/// those whose outcome is unknown, which are shown to the owner and never replayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub done: Vec<Action>,
@@ -170,12 +169,13 @@ pub fn pending_key(
     store::pending_key(db, kind, key)
 }
 
-/// Checks every pending action of one kind against real state and finishes each, so none
-/// stays open: Done as done, NotStarted as failed, since its effect never happened and the
-/// caller completes it as a new action, and Unknown as unknown, never offered for replay.
-/// Call it inside the transaction that acts on the lists, so a crash cannot finish an
-/// action and lose what the owner must be shown. Inputs: the ledger, the kind and the
-/// check. Output: the finished actions by resolution.
+/// Checks every pending action of one kind against real state: a Done action is finished
+/// as done, a NotStarted one as failed, since its effect never happened and the caller
+/// completes it as a new action, and an Unknown one stays pending, so each start shows it
+/// to the owner again until `finish(Outcome::Unknown)` closes it; it is never returned for
+/// replay. Call it inside the transaction that acts on the lists, so a crash cannot finish
+/// an action and lose what the caller must do with it. Inputs: the ledger, the kind and
+/// the check. Output: the checked actions by resolution.
 pub fn resolve(
     db: &Connection,
     kind: ActionKind,
@@ -190,7 +190,10 @@ pub fn resolve(
         let (outcome, list) = match check.check(&action) {
             Resolution::Done => (Outcome::Done, &mut resolved.done),
             Resolution::NotStarted => (Outcome::Failed, &mut resolved.not_started),
-            Resolution::Unknown => (Outcome::Unknown, &mut resolved.unknown),
+            Resolution::Unknown => {
+                resolved.unknown.push(action);
+                continue;
+            }
         };
         finish(db, action.id, outcome)?;
         list.push(action);

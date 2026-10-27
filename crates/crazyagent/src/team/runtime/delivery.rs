@@ -14,6 +14,10 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// The most bytes of an item's first line kept to find it again in the agent's record.
 pub(super) const MARKER_BYTES_MAX: usize = 200;
+/// The most delivery intents of one kind kept pending with an unknown outcome until the
+/// owner dismisses them. A start closes older ones as unknown, their team notes kept, so
+/// undismissed ones never fill the ledger that every delivery and agent start shares.
+pub(super) const UNKNOWN_KEPT: usize = 64;
 
 /// The team note for a message the master had already received when the engine stopped.
 pub(super) const DELIVERED_NOTE: &str = "A message reached the master just before CrazyAgent closed, so it was not sent again. If no answer to it appears, send it again.";
@@ -120,12 +124,13 @@ pub(super) fn ended(
 
 /// At engine start, right after sent messages and running tasks were reset to wait again,
 /// checks every delivery the earlier engine intended against the agent's own session record
-/// and closes each, in one transaction. A message that arrived is answered with its owner
+/// and settles each, in one transaction. A message that arrived is answered with its owner
 /// notes delivered, and a task that arrived fails with a plain reason, which its master
 /// hears once the transaction committed; neither is typed again. One that never arrived
-/// waits and is typed once more. One the record cannot tell about is failed with a note and
-/// never typed again. Input: the engine connection. Output: Ok, or a SQLite or ledger
-/// failure.
+/// waits and is typed once more. One the record cannot tell about is failed with a note,
+/// never typed again, and its intent stays pending for the owner, checked again at each
+/// start, up to `UNKNOWN_KEPT` of each kind. Input: the engine connection. Output: Ok, or
+/// a SQLite or ledger failure.
 pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     ledger::initialize(connection)?;
     let tx =
@@ -139,6 +144,7 @@ pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     for action in &messages.unknown {
         settle_message(&tx, action, false, now)?;
     }
+    keep_newest(&tx, &messages.unknown)?;
     let tasks = ledger::resolve(&tx, ActionKind::Dispatch, &check)?;
     let mut failed = Vec::new();
     for action in &tasks.done {
@@ -147,9 +153,22 @@ pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     for action in &tasks.unknown {
         failed.extend(settle_task(&tx, action, UNKNOWN_TASK, now)?);
     }
+    keep_newest(&tx, &tasks.unknown)?;
     tx.commit().map_err(error)?;
     for task in failed {
         events::task_ended(connection, task, now)?;
+    }
+    Ok(())
+}
+
+/// Closes as unknown every unknown delivery intent of one kind but the newest
+/// `UNKNOWN_KEPT`, which stay pending until the owner dismisses them. Inputs: the
+/// transaction and the kind's unknown intents, oldest first, as `ledger::pending` lists
+/// them. Output: Ok, or a ledger failure.
+fn keep_newest(tx: &Transaction<'_>, unknown: &[Action]) -> Result<(), EngineError> {
+    let older = unknown.len().saturating_sub(UNKNOWN_KEPT);
+    for action in &unknown[..older] {
+        ledger::finish(tx, action.id, Outcome::Unknown)?;
     }
     Ok(())
 }
