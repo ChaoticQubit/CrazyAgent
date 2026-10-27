@@ -113,6 +113,7 @@ pub enum Request {
     Changes(Box<super::client::changes::ChangesQuery>),
     Process(Box<super::client::process::ProcessQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
+    Reveal(Box<super::client::ide::RevealQuery>),
     Reconnect,
 }
 
@@ -156,6 +157,7 @@ impl std::fmt::Debug for Request {
             Self::Changes(_) => "Changes",
             Self::Process(_) => "Process",
             Self::Cleanup(_) => "Cleanup",
+            Self::Reveal(_) => "Reveal",
             Self::Reconnect => "Reconnect",
         })
     }

@@ -1,5 +1,6 @@
 import type * as vscode from "vscode";
 import { Engine } from "./engine.js";
+import { reveal } from "./reveal.js";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -7,7 +8,7 @@ import { Engine } from "./engine.js";
  */
 export type Feature = (context: vscode.ExtensionContext, engine: Engine) => void;
 
-const features: Feature[] = [];
+const features: Feature[] = [reveal];
 
 /**
  * Starts every feature when the CrazyAgent engine launched this IDE server, which it

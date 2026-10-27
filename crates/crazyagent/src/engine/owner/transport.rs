@@ -42,6 +42,7 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
@@ -1969,6 +1970,7 @@ enum Protocol {
     Usage,
     NativeAuth,
     Process,
+    Ide,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -1996,6 +1998,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("usage", Protocol::Usage),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
+        ("ide", Protocol::Ide),
     ];
     Ok(named
         .into_iter()
@@ -2075,6 +2078,12 @@ async fn serve_admitted(
             }
             Protocol::Process => {
                 return process::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::Ide if ide::deferred(body) => return Ok(Some(Deferred::Ide(a))),
+            Protocol::Ide => {
+                return ide::serve(stream, engine, authority, auth, &a, body)
                     .await
                     .map(|()| None);
             }
@@ -2214,6 +2223,10 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::Ide(a) => {
+            let served = ide::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2267,6 +2280,7 @@ enum Deferred {
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    Ide(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2307,6 +2321,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Usage => usage::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
+        Protocol::Ide => ide::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

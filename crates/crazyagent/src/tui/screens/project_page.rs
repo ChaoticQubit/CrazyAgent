@@ -13,11 +13,13 @@ use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
 use crate::tui::client::editor;
+use crate::tui::client::ide::RevealQuery;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
@@ -837,6 +839,10 @@ impl ProjectPage {
                 }
                 Flow::Handled
             }
+            ProjectReply::Reveal(target) => {
+                self.reveal(target, ctx);
+                Flow::Handled
+            }
             ProjectReply::Edit(request) => {
                 match opening(&request) {
                     Ok(Opening::Open(file)) => editor::ask(ctx, file, None),
@@ -939,6 +945,13 @@ impl ProjectPage {
         }
     }
 
+    fn reveal(&self, target: RevealTarget, ctx: &mut Ctx) {
+        ctx.request(Request::Reveal(Box::new(RevealQuery {
+            project: self.screen.project.clone(),
+            target,
+        })));
+    }
+
     fn edit_changed(&self, path: &str, ctx: &mut Ctx) {
         let Some(folder) = self.screen.project_folder() else {
             ctx.say(Message::error(
@@ -1030,6 +1043,9 @@ impl Screen for ProjectPage {
         {
             if let Some(path) = self.screen.changes.take_edit() {
                 self.edit_changed(&path, ctx);
+            }
+            if let Some(target) = self.screen.changes.take_reveal() {
+                self.reveal(target, ctx);
             }
             self.pump(ctx);
             self.redraw(ctx);

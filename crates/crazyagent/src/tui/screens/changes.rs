@@ -4,6 +4,7 @@ use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeSetId, ChangeSetView, ChangeState, ChangedFile, FileKind,
     FileMark, FileStatus, MESSAGE_BYTES_MAX, TurnOutcome,
@@ -74,6 +75,7 @@ pub(in crate::tui) struct ProjectChanges {
     stale: bool,
     read_ms: i64,
     edit: Option<String>,
+    reveal: Option<RevealTarget>,
 }
 
 impl ProjectChanges {
@@ -97,6 +99,7 @@ impl ProjectChanges {
             stale: true,
             read_ms: 0,
             edit: None,
+            reveal: None,
         }
     }
 
@@ -325,6 +328,14 @@ impl ProjectChanges {
                 }
                 true
             }
+            (KeyCode::Char('O'), _) => {
+                let target = self.chosen().map(|set| RevealTarget::ChangeSet {
+                    id: set.id.clone(),
+                    path: self.diff.as_ref().and_then(|_| self.shown_file()),
+                });
+                self.reveal = target;
+                true
+            }
             _ if self.diff.is_some() => self.diff_key(key.code),
             _ => self.list_key(key.code),
         };
@@ -336,6 +347,12 @@ impl ProjectChanges {
     /// Takes the view. Returns the path the change set lists, once per ask.
     pub fn take_edit(&mut self) -> Option<String> {
         self.edit.take()
+    }
+
+    /// Takes what the owner asked to open in the desktop IDE with `O`: the chosen change
+    /// set's worktree, or the file whose diff is shown. Takes the view. Returns it once.
+    pub fn take_reveal(&mut self) -> Option<RevealTarget> {
+        self.reveal.take()
     }
 
     /// Names the changed file whose diff section is at the top of the diff view, from that
@@ -685,6 +702,9 @@ impl ProjectChanges {
             if actions.restore {
                 help.push(("r", "Restore"));
             }
+        }
+        if !self.sets.is_empty() {
+            help.push(("O", "Open in IDE"));
         }
         if self.diff.is_some() {
             help.push(("v", "$EDITOR"));

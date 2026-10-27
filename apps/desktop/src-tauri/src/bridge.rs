@@ -23,6 +23,7 @@ mod agents;
 mod changes;
 mod cleanup;
 mod harnesses;
+mod ide_reveal;
 pub mod intake;
 pub mod master;
 pub mod memory;

@@ -1191,6 +1191,19 @@ export function teamGraph(id: string): Promise<TeamGraph> {
   return invoke<TeamGraph>("desktop_team_graph", { id });
 }
 
+/** The project whose IDE tab a TUI "open in IDE" asked to bring forward, and the reveal
+ * that asked. */
+export interface IdeFocus {
+  project: string;
+  request: string;
+}
+
+/** Takes, once, the IDE tab a TUI "open in IDE" asked the app to show, and raises the
+ * window when there is one. Output: the project and reveal, or null when none is waiting. */
+export function ideFocus(): Promise<IdeFocus | null> {
+  return invoke<IdeFocus | null>("desktop_ide_focus");
+}
+
 /** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
  * and then live output until the terminal closes or the view detaches. Inputs: the terminal
  * name and the channel. Output: the view's serial once the engine accepted the attach. */
