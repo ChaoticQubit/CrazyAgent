@@ -27,6 +27,7 @@ pub mod paths;
 pub mod platform;
 pub mod plugins;
 pub mod pools;
+pub mod project_files;
 pub mod project_setup;
 pub mod projects_home;
 pub mod protocol;

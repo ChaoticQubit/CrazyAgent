@@ -590,6 +590,17 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_files(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    query: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_files(&id, &query).await
+}
+
+#[tauri::command]
 async fn desktop_set_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2181,6 +2192,7 @@ pub fn run() {
             desktop_add_project_documents,
             desktop_delete_project_context,
             desktop_project_read_paths,
+            desktop_project_files,
             desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,
