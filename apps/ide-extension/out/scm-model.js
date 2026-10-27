@@ -1,12 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.REFUSAL_CODES = exports.BASE_SCHEME = void 0;
+exports.COMMENT_SENT = exports.REFUSAL_CODES = exports.BASE_SCHEME = void 0;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
 exports.acceptedNote = acceptedNote;
 exports.basePath = basePath;
 exports.parseBasePath = parseBasePath;
 exports.scmGroups = scmGroups;
+exports.commentTarget = commentTarget;
+exports.commentRefusal = commentRefusal;
 exports.BASE_SCHEME = "crazyagent-base";
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
@@ -140,4 +142,28 @@ function scmGroups(sets, now) {
         });
     }
     return groups;
+}
+const COMMENT_STATES = new Set(["pending", "conflict", "updating"]);
+const COMMENT_REFUSALS = {
+    changes_closed: "These changes were already accepted or discarded, so the agent can't act on this comment.",
+    team_conversation_full: "Too many of your messages are waiting for the master. Send more once it has answered.",
+    team_message_invalid: "The message is empty or too long.",
+    project_setup_missing: "This project was created before project setup existed.",
+};
+exports.COMMENT_SENT = "Sent to the team conversation with its file and line.";
+function commentTarget(sets, fsPath) {
+    for (const set of sets) {
+        if (!COMMENT_STATES.has(set.state) || set.problem !== null)
+            continue;
+        const root = `${set.worktree.replace(/\/+$/, "")}/`;
+        if (!fsPath.startsWith(root))
+            continue;
+        const path = fsPath.slice(root.length);
+        if (set.files.some((file) => file.path === path && file.status !== "deleted"))
+            return { id: set.id, path };
+    }
+    return null;
+}
+function commentRefusal(code) {
+    return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : refusal(code);
 }

@@ -1,7 +1,7 @@
 use super::diff;
 use super::git::failure;
 use super::store::{self, Record};
-use super::{ChangeSetId, ChangedFile, FileKind, FileStatus};
+use super::{ChangeSetId, ChangeSetView, ChangedFile, FileKind, FileStatus};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
@@ -32,6 +32,17 @@ pub(crate) fn locate(
     id: &ChangeSetId,
 ) -> Result<PathBuf, EngineError> {
     Ok(of_project(db, project, id)?.worktree)
+}
+
+/// Reads a change set of the IDE's project as the Changes list shows it, however many sets
+/// the project has. Inputs: the store, the project and the change set. Output: the view, or
+/// `changes_not_found`.
+pub(crate) fn view(
+    db: &Connection,
+    project: &ProjectId,
+    id: &ChangeSetId,
+) -> Result<ChangeSetView, EngineError> {
+    Ok(of_project(db, project, id)?.view())
 }
 
 /// Lists every file a change set touches, across all pages of its diff, which the engine

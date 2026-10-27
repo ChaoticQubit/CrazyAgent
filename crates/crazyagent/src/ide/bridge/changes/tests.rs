@@ -6,18 +6,18 @@ use crate::protocol::FRAME_BYTES_MAX;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const NOW: u64 = 1_800_000_000_000;
+pub(in crate::ide::bridge) const NOW: u64 = 1_800_000_000_000;
 
 /// One owner repository on `main` with its own git identity, an agent worktree added
 /// from it holding a modified, an added and a deleted file, an owner home with no global
 /// git config, and an engine store with the change set that turn made.
-struct Case {
+pub(in crate::ide::bridge) struct Case {
     _tmp: tempfile::TempDir,
-    repo: PathBuf,
-    home: PathBuf,
-    worktree: PathBuf,
-    db: Connection,
-    project: ProjectId,
+    pub(in crate::ide::bridge) repo: PathBuf,
+    pub(in crate::ide::bridge) home: PathBuf,
+    pub(in crate::ide::bridge) worktree: PathBuf,
+    pub(in crate::ide::bridge) db: Connection,
+    pub(in crate::ide::bridge) project: ProjectId,
 }
 
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
@@ -47,7 +47,7 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
 }
 
 impl Case {
-    fn new() -> Self {
+    pub(in crate::ide::bridge) fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let (repo, home, engine) = (root.join("repo"), root.join("home"), root.join("engine"));
@@ -105,7 +105,7 @@ impl Case {
         }
     }
 
-    fn only(&self, now: u64) -> IdeChangeSet {
+    pub(in crate::ide::bridge) fn only(&self, now: u64) -> IdeChangeSet {
         let mut sets = change_sets(&self.db, &self.project, now).unwrap();
         assert_eq!(sets.len(), 1, "{sets:?}");
         sets.remove(0)

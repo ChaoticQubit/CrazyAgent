@@ -101,7 +101,7 @@ fn commit_id(head: &str) -> bool {
 
 /// The agent's name and role without the harness the change set's label adds after a
 /// middle dot. Input: the label. Output: the name, such as "Ada (@builder)".
-fn agent_name(label: &str) -> String {
+pub(super) fn agent_name(label: &str) -> String {
     label
         .split(" \u{b7} ")
         .next()
@@ -112,7 +112,7 @@ fn agent_name(label: &str) -> String {
 
 /// The first line of the proposed commit message, at most `TITLE_CHARS_MAX` characters.
 /// Input: the message. Output: the title.
-fn title(message: &str) -> String {
+pub(super) fn title(message: &str) -> String {
     let line = message.lines().next().unwrap_or("").trim();
     let mut title: String = line.chars().take(TITLE_CHARS_MAX).collect();
     if line.chars().count() > TITLE_CHARS_MAX {
@@ -326,4 +326,4 @@ pub(crate) fn restore(
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;
