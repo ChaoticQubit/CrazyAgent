@@ -631,5 +631,7 @@ fn said(speaker: Speaker, text: String) -> Option<(Speaker, String)> {
         .then_some((speaker, text))
 }
 
+pub mod pending;
+
 #[cfg(all(test, unix))]
 mod tests;
