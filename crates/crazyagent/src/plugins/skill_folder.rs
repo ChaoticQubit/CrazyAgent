@@ -302,10 +302,13 @@ fn walk(
     assert!(rules.skip_private || tally.skipped_total == 0);
     match destination {
         Some(_) => assert!(tally.planned.is_empty()),
-        None => assert!(
-            tally.planned.len() == tally.files
-                && tally.planned.iter().map(|file| file.bytes).sum::<u64>() == tally.bytes
-        ),
+        None => {
+            assert!(tally.planned.iter().map(|file| file.bytes).sum::<u64>() == tally.bytes);
+            assert!(
+                tally.planned.len() == tally.files
+                    || (result.is_err() && tally.planned.len() + 1 == tally.files)
+            );
+        }
     }
     result.map(|meta| (meta, tally.planned))
 }
