@@ -185,7 +185,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.capture("team");
 
       await me.click("Conversation", "a, button, [role=tab]");
-      await me.waitFor("the master conversation", (text) => text.includes("Enter to send"));
+      await me.waitFor("the master conversation", (text) => text.includes("/ for commands, @ to tag"));
       await me.type(".cs textarea", "Hello master, what is in this repository?");
       await me.enter();
       const line = /Waiting to start|Thinking\.\.\.|The master stopped|Not signed in|Sign-in is out of date|Couldn't send|isn't installed/;
