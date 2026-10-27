@@ -1658,7 +1658,9 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     let landing = crate::landing::open(&fixture.base).unwrap();
     let sets = crate::landing::list(&landing, &project).unwrap();
     assert_eq!(sets.len(), 1, "{sets:#?}");
-    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Master);
+    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Sub);
+    assert_eq!(sets[0].agent.id, master.to_string());
+    assert_eq!(sets[0].agent.label, "Team master (codex)");
     assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
     assert_eq!(sets[0].files, 1);
 
