@@ -1368,6 +1368,9 @@ impl OwnerServer {
     }
 
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        if let Ok(root) = changes::engine_root(&self.authority) {
+            crate::ide::fetch::on_engine_start(&root);
+        }
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
         let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
