@@ -60,9 +60,7 @@ fn claude_assistant(
     )
 }
 
-fn rows(
-    db: &Connection,
-) -> Vec<(
+type Row = (
     i64,
     String,
     String,
@@ -73,7 +71,9 @@ fn rows(
     i64,
     i64,
     i64,
-)> {
+);
+
+fn rows(db: &Connection) -> Vec<Row> {
     let mut statement = db
         .prepare(
             "SELECT hour_ms,kind,pool,account,agent,session,input,output,cache_read,cache_write
