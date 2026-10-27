@@ -539,6 +539,7 @@ fn master_wire_types_are_closed_snake_case_without_producer_actions() {
         "capture_incomplete",
         "output_limit",
         "unsupported_capability",
+        "instructions_too_large",
         "cancelled",
         "unknown",
     ] {

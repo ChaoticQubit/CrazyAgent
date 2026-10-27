@@ -135,6 +135,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
   assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
     "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
+  assert.equal(research.turnLine(turn("failed", "instructions_too_large", "master_instructions_too_large")),
+    "The master stopped: the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again. (master_instructions_too_large)");
   for (const phase of ["failed", "blocked", "uncertain"]) {
     const line = research.turnLine(turn(phase, "unknown", null));
     assert.equal(line, `The master stopped. (${phase})`);
