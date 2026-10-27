@@ -35,9 +35,12 @@ impl Computed {
 /// A change's repository with its base and head commits.
 type Key = (PathBuf, String, String);
 
-/// The diffs computed for recent pages, least recently read first, at most `RECENT_MAX`
-/// and `RECENT_BYTES_MAX` apart from the newest.
-static RECENT: LazyLock<Mutex<VecDeque<(Key, Arc<Computed>)>>> = LazyLock::new(Default::default);
+/// Computed diffs with their keys, least recently read first.
+type Recent = VecDeque<(Key, Arc<Computed>)>;
+
+/// The diffs computed for recent pages, at most `RECENT_MAX` and `RECENT_BYTES_MAX` apart
+/// from the newest.
+static RECENT: LazyLock<Mutex<Recent>> = LazyLock::new(Default::default);
 
 /// Line counts of a change: how many paths changed and how many lines were added and
 /// removed across them, binary files counting no lines.
