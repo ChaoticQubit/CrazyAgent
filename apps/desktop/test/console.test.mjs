@@ -182,3 +182,31 @@ test("in a real page: / opens the command menu, Enter runs the chosen command, u
   assert.equal(seen.cleared.lines.length, 0, "/clear empties the view");
   assert.deepEqual(seen.cleared.sent, []);
 });
+
+const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+
+test("a name or reply holding a direction override is drawn without it in every console line kind", () => {
+  const evil = "Ada\u202etxt.exe";
+  const html = renderToStaticMarkup(createElement(Console, {
+    projectId: "p-1",
+    lines: ["owner", "reply", "engine", "tool", "delegate", "error"].map((kind, index) => ({ id: String(index), kind, text: `${evil} (@onboarding-fix): **${evil}**` })),
+    agents: agentMentions([graphNode("team-1", `${evil} (@onboarding-fix)`)]), files: null, status: evil,
+    onSend() {}, onStop() {}, onNavigate() {},
+  }));
+  assert.doesNotMatch(html, BIDI);
+  assert.equal(html.match(/Ada\\u202etxt\.exe/g)?.length, 13, "each copy shows the hidden character as an escape");
+});
+
+test("the @ menu shows an agent whose name holds a direction override without it", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await evaluate(fixture);
+    const id = await evaluate(`Fixture.mount(["Ada\u202etxt.exe (@onboarding-fix)", "Grace"], ["src/\u2067main.rs", "README.md"])`);
+    await evaluate(`document.getElementById(${JSON.stringify(id)}).focus()`);
+    await send("Input.insertText", { text: "@" });
+    await evaluate(tick);
+    return evaluate("Fixture.state().options");
+  });
+  assert.ok(seen.some((option) => option.includes("Ada\\u202etxt.exe")), JSON.stringify(seen));
+  assert.ok(seen.every((option) => !BIDI.test(option)), JSON.stringify(seen));
+  assert.ok(seen.some((option) => option.includes("README.md")) && seen.every((option) => !option.includes("main.rs")), JSON.stringify(seen));
+});

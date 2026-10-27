@@ -4,7 +4,7 @@ use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
     Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint,
-    too_small,
+    strip_bidi, too_small,
 };
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
@@ -730,10 +730,16 @@ impl Shell {
         }
     }
 
-    /// Draws the whole frame: background, header, rule, body, message line,
-    /// help line, then any modal and the cursor.
+    /// Draws the whole frame, then removes direction-changing characters from every cell.
     /// Input: the ratatui frame. Output: none.
     pub fn draw(&mut self, frame: &mut Frame) {
+        self.paint(frame);
+        strip_bidi(frame.buffer_mut());
+    }
+
+    /// Paints background, header, rule, body, message line, help line, then any modal and
+    /// the cursor. Input: the ratatui frame. Output: none.
+    fn paint(&mut self, frame: &mut Frame) {
         let area = frame.area();
         self.ctx.width = area.width;
         self.ctx.height = area.height;
@@ -1000,7 +1006,7 @@ mod tests {
         let mut team = card("Ledgerline", 0);
         team.activity = Activity {
             working: Some(2),
-            suggestions: 0,
+            ..Activity::default()
         };
         ctx.store.projects = Load::Ready(vec![team, card("Tidepool", 1)]);
         let mut shell = at(Place::Home, ctx);

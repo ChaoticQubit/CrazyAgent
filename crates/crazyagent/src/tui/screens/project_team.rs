@@ -123,6 +123,7 @@ pub(in crate::tui) struct TeamView {
     pub confirm: Option<i64>,
     pub draft: Option<Draft>,
     pub wake: Option<WakeEdit>,
+    pub alerts: bool,
     pub notice: Option<Notice>,
     pub now_ms: i64,
     pub offset: i64,
@@ -145,6 +146,7 @@ impl TeamView {
             confirm: None,
             draft: None,
             wake: None,
+            alerts: false,
             notice: None,
             now_ms: 0,
             offset: 0,
@@ -309,8 +311,8 @@ impl TeamView {
         }
     }
 
-    /// Handles one key: move, switch list, cancel a task after asking, or the
-    /// keep-warm switch.
+    /// Handles one key: move, switch list, cancel a task after asking, the
+    /// keep-warm switch, or open the notifications and mark them seen.
     /// Takes the key event. Returns what the host should do next.
     pub fn key(&mut self, key: KeyEvent) -> TeamReply {
         if self.draft.is_some() {
@@ -318,6 +320,16 @@ impl TeamView {
         }
         if self.wake.is_some() {
             return self.wake_key(key);
+        }
+        if self.alerts {
+            return match key.code {
+                KeyCode::Char('s') => self.mark_seen(),
+                KeyCode::Char('a') | KeyCode::Esc => {
+                    self.alerts = false;
+                    TeamReply::Handled
+                }
+                _ => TeamReply::Ignored,
+            };
         }
         if let Some(task) = self.confirm {
             return match key.code {
@@ -362,6 +374,10 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('s') => self.mark_seen(),
+            KeyCode::Char('a') => {
+                self.alerts = true;
+                TeamReply::Handled
+            }
             _ => TeamReply::Ignored,
         };
         self.clamp();
@@ -686,6 +702,57 @@ impl TeamView {
         })
     }
 
+    fn alert_rows(&self, content: usize, room: usize, look: &Look) -> Vec<Row> {
+        let mut notifications: Vec<_> = self
+            .status
+            .iter()
+            .flat_map(|status| status.events.notifications.iter())
+            .collect();
+        notifications.sort_by_key(|item| std::cmp::Reverse(item.id));
+        let unseen = notifications
+            .iter()
+            .filter(|item| item.seen_ms.is_none())
+            .count();
+        let mut rows = vec![
+            Row::default(),
+            Row::of("Notifications", look.heading).push(format!("  {unseen} new"), look.muted),
+        ];
+        if notifications.is_empty() {
+            rows.push(Row::of(
+                "  No notifications yet. Sub-agents that need you show here.",
+                look.muted,
+            ));
+            return rows;
+        }
+        let fits = room.saturating_sub(rows.len());
+        let shown = if notifications.len() > fits {
+            fits.saturating_sub(1)
+        } else {
+            notifications.len()
+        };
+        for item in &notifications[..shown] {
+            let (word, style) = match item.seen_ms {
+                None => ("New", look.warning),
+                Some(_) => ("Seen", look.muted),
+            };
+            rows.push(spread(
+                content,
+                Row::of(format!("  {word}"), style)
+                    .pad(8)
+                    .push(title(&item.text), look.fg),
+                Row::of(
+                    format!("  {} ago", duration(self.now_ms - item.created_ms)),
+                    look.muted,
+                ),
+            ));
+        }
+        let hidden = notifications.len() - shown;
+        if hidden > 0 {
+            rows.push(Row::of(format!("  {hidden} older not shown"), look.muted));
+        }
+        rows
+    }
+
     fn wake_rows(&self, edit: WakeEdit, content: usize, look: &Look) -> Vec<Row> {
         let Some((own, shown)) = self.wake_rule(edit.level) else {
             return Vec::new();
@@ -805,6 +872,13 @@ impl TeamView {
             .and_then(|harness| harness.delegation_label.clone())
         {
             lines.push(Row::of(label, look.muted));
+        }
+        if self.alerts {
+            let notice: Vec<Row> = self.notice.iter().map(|notice| notice.row(look)).collect();
+            let room = room.saturating_sub(lines.len() + notice.len());
+            lines.extend(self.alert_rows(content, room, look));
+            lines.extend(notice);
+            return (lines, self.help(), None);
         }
         if wide {
             lines.push(Row::default());
@@ -1124,6 +1198,21 @@ impl TeamView {
                 ("Esc", "Close"),
             ];
         }
+        let unseen = self.status.as_ref().is_some_and(|status| {
+            status
+                .events
+                .notifications
+                .iter()
+                .any(|item| item.seen_ms.is_none())
+        });
+        if self.alerts {
+            let mut help = Vec::new();
+            if unseen {
+                help.push(("s", "Seen"));
+            }
+            help.push(("Esc", "Close"));
+            return help;
+        }
         let mut help = vec![
             ("\u{2191}\u{2193}", "Move"),
             ("Tab", "Agents or tasks"),
@@ -1132,13 +1221,14 @@ impl TeamView {
             ("w", "Keep warm"),
             ("e", "Wake rules"),
         ];
-        if self.status.as_ref().is_some_and(|status| {
-            status
-                .events
-                .notifications
-                .iter()
-                .any(|item| item.seen_ms.is_none())
-        }) {
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| !status.events.notifications.is_empty())
+        {
+            help.push(("a", "Notifications"));
+        }
+        if unseen {
             help.push(("s", "Seen"));
         }
         help.extend([TABS, ("Esc", "Home")]);

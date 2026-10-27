@@ -6,8 +6,13 @@ use crate::harnesses::terminal_session::paste;
 use crate::project_setup::StoredSetup;
 use crate::protocol::ProjectId;
 use crate::terminal::{AgentId, Host};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::path::Path;
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub const INPUT_TEXT_MAX: usize = 16 * 1024;
@@ -15,6 +20,8 @@ const OWNER_QUIET_MS: i64 = 10_000;
 const DRAFT_ABANDONED_MS: i64 = 120_000;
 const INPUT_SETTLE_MS: i64 = 30_000;
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
+const TYPING_WRITE_EVERY: Duration = Duration::from_secs(1);
+const TYPED_AGENTS_MAX: usize = 4096;
 const CHANGES_LISTED_MAX: usize = 20;
 const MASTER_TURNS_KEPT: i64 = 2000;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
@@ -258,21 +265,24 @@ pub(crate) fn turn_ended(
 
 /// Types one engine message into a project's live master as one paste plus Enter, only
 /// while the master is idle and the owner is not typing, so w-events can queue team events.
-/// Takes the engine database, the terminal host, the project and the text.
-/// Returns Ok once typed, or why it was not typed; nothing is typed on refusal.
+/// Takes the engine database, the terminal host, the engine's owner typing signal when it
+/// has one, the project and the text. The newer of the signal and the stored owner typing
+/// counts. Returns Ok once typed, or why it was not typed; nothing is typed on refusal.
 pub fn master_input(
     connection: &Connection,
     host: &dyn Host,
+    typing: Option<&OwnerTyping>,
     project: &ProjectId,
     text: &str,
 ) -> Result<(), InputRefused> {
-    master_input_at(connection, host, project, text, now_ms())
+    master_input_at(connection, host, typing, project, text, now_ms())
 }
 
 /// [`master_input`] at a given time. Takes the same inputs and the time in milliseconds.
 pub(crate) fn master_input_at(
     connection: &Connection,
     host: &dyn Host,
+    typing: Option<&OwnerTyping>,
     project: &ProjectId,
     text: &str,
     now: i64,
@@ -311,6 +321,12 @@ pub(crate) fn master_input_at(
     if turn_open || input_ms.is_some_and(|at| now - at < INPUT_SETTLE_MS) {
         return Err(InputRefused::Busy);
     }
+    let (typed_ms, draft) = match typing.and_then(|typing| typing.get(agent)) {
+        Some(held) if typed_ms.is_none_or(|at| at <= held.at_ms) => {
+            (Some(held.at_ms), held.draft.unwrap_or(draft))
+        }
+        _ => (typed_ms, draft),
+    };
     let since_typed = typed_ms.map_or(i64::MAX, |at| now - at);
     if since_typed < OWNER_QUIET_MS || (draft && since_typed < DRAFT_ABANDONED_MS) {
         return Err(InputRefused::OwnerTyping);
@@ -348,16 +364,226 @@ pub fn owner_typed(
     bytes: &[u8],
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    let (submitted, drafting) = keys(bytes);
-    connection
-        .execute(
-            "UPDATE team_live_masters SET typed_ms=?2,
-             draft=CASE WHEN ?4 THEN 1 WHEN ?3 THEN 0 ELSE draft END
-             WHERE agent=?1 AND live=1",
-            params![agent, now_ms, submitted, drafting],
-        )
-        .map_err(state)?;
+    write_typed(connection, agent, Typed::of(bytes, now_ms)).map_err(state)?;
     Ok(())
+}
+
+/// The owner typing signal, kept in memory so a key the owner types into a team agent's
+/// terminal never waits on the engine database: per team agent, the time of the owner's
+/// last key and whether it left an unsent line. One background writer copies it to
+/// `team_live_masters` for live masters at most once per `TYPING_WRITE_EVERY` on one
+/// reused connection, so the signal survives an engine restart.
+pub struct OwnerTyping {
+    shared: Arc<SharedTyping>,
+    writer: Option<JoinHandle<()>>,
+}
+
+struct SharedTyping {
+    state: Mutex<Typing>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Typing {
+    agents: HashMap<i64, Typed>,
+    unwritten: BTreeSet<i64>,
+    closed: bool,
+}
+
+/// The owner's last key into one team agent and the unsent line it left: none while no
+/// key so far submitted or drafted a line, so the stored value stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Typed {
+    at_ms: i64,
+    draft: Option<bool>,
+}
+
+impl Typed {
+    /// Reads what keys typed at one time do to the owner's line.
+    /// Takes the keys and the time in milliseconds. Returns the signal they give.
+    fn of(bytes: &[u8], at_ms: i64) -> Self {
+        let (submitted, drafting) = keys(bytes);
+        let draft = match (drafting, submitted) {
+            (true, _) => Some(true),
+            (false, true) => Some(false),
+            (false, false) => None,
+        };
+        Self { at_ms, draft }
+    }
+}
+
+impl SharedTyping {
+    fn state(&self) -> MutexGuard<'_, Typing> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl OwnerTyping {
+    /// Starts the signal and its writer for one engine database. Takes the path of
+    /// `engine.db`. Returns the signal; when no writer thread can start it stays in memory.
+    pub fn new(database: PathBuf) -> Self {
+        let shared = Arc::new(SharedTyping {
+            state: Mutex::default(),
+            changed: Condvar::new(),
+        });
+        let writing = shared.clone();
+        let writer = std::thread::Builder::new()
+            .name("owner-typing".into())
+            .spawn(move || write_typing(&writing, &database))
+            .ok();
+        Self { shared, writer }
+    }
+
+    /// Records keys the owner typed into one team agent's terminal, in memory only; the
+    /// keys themselves are not kept. Takes the team agent id, the keys and the time in
+    /// milliseconds. A signal already holding `TYPED_AGENTS_MAX` recent agents drops it.
+    pub fn record(&self, agent: i64, bytes: &[u8], now_ms: i64) {
+        let typed = Typed::of(bytes, now_ms);
+        let mut state = self.shared.state();
+        let Typing {
+            agents, unwritten, ..
+        } = &mut *state;
+        if agents.len() >= TYPED_AGENTS_MAX && !agents.contains_key(&agent) {
+            agents.retain(|id, kept| {
+                unwritten.contains(id) || now_ms - kept.at_ms < DRAFT_ABANDONED_MS
+            });
+            if agents.len() >= TYPED_AGENTS_MAX {
+                return;
+            }
+        }
+        let draft = typed
+            .draft
+            .or(agents.get(&agent).and_then(|kept| kept.draft));
+        agents.insert(
+            agent,
+            Typed {
+                at_ms: now_ms,
+                draft,
+            },
+        );
+        unwritten.insert(agent);
+        assert!(agents.len() <= TYPED_AGENTS_MAX && unwritten.len() <= agents.len());
+        drop(state);
+        self.shared.changed.notify_all();
+    }
+
+    fn get(&self, agent: i64) -> Option<Typed> {
+        self.shared.state().agents.get(&agent).copied()
+    }
+}
+
+impl Drop for OwnerTyping {
+    /// Stops the writer once it wrote what is left, which waits at most its busy timeout.
+    fn drop(&mut self) {
+        self.shared.state().closed = true;
+        self.shared.changed.notify_all();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// Copies the owner typing signal to `team_live_masters` until the signal closes, at most
+/// once per `TYPING_WRITE_EVERY`. A busy database keeps the keys for the next write; any
+/// other failure loses only that copy. Takes the shared signal and the database path.
+fn write_typing(shared: &SharedTyping, database: &Path) {
+    let mut connection: Option<Connection> = None;
+    loop {
+        let (batch, closed) = {
+            let mut state = shared
+                .changed
+                .wait_while(shared.state(), |state| {
+                    state.unwritten.is_empty() && !state.closed
+                })
+                .unwrap_or_else(PoisonError::into_inner);
+            let unwritten = std::mem::take(&mut state.unwritten);
+            let batch: Vec<(i64, Typed)> = unwritten
+                .iter()
+                .filter_map(|agent| state.agents.get(agent).map(|typed| (*agent, *typed)))
+                .collect();
+            assert_eq!(batch.len(), unwritten.len());
+            (batch, state.closed)
+        };
+        if batch.is_empty() {
+            assert!(closed);
+            return;
+        }
+        if connection.is_none() {
+            connection = open_typing(database);
+        }
+        let written = match &connection {
+            Some(open) => write_batch(open, &batch),
+            None => Ok(()),
+        };
+        if let Err(problem) = written {
+            connection = None;
+            let busy = matches!(
+                problem.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            );
+            if busy && !closed {
+                let mut state = shared.state();
+                let Typing {
+                    agents, unwritten, ..
+                } = &mut *state;
+                unwritten.extend(
+                    batch
+                        .iter()
+                        .map(|(agent, _)| *agent)
+                        .filter(|agent| agents.contains_key(agent)),
+                );
+            }
+        }
+        if closed {
+            return;
+        }
+        let _ = shared
+            .changed
+            .wait_timeout_while(shared.state(), TYPING_WRITE_EVERY, |state| !state.closed);
+    }
+}
+
+fn open_typing(database: &Path) -> Option<Connection> {
+    let connection = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .ok()?;
+    connection.busy_timeout(Duration::from_secs(5)).ok()?;
+    Some(connection)
+}
+
+/// Writes the owner typing of the agents that are live masters now, in one transaction;
+/// any other agent's keys cause no write. Takes the connection and the batch.
+/// Returns any SQLite failure.
+fn write_batch(connection: &Connection, batch: &[(i64, Typed)]) -> rusqlite::Result<()> {
+    let live: HashSet<i64> = connection
+        .prepare("SELECT agent FROM team_live_masters WHERE live=1 AND agent IS NOT NULL")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let masters: Vec<(i64, Typed)> = batch
+        .iter()
+        .filter(|(agent, _)| live.contains(agent))
+        .copied()
+        .collect();
+    if masters.is_empty() {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    for (agent, typed) in masters {
+        write_typed(&tx, agent, typed)?;
+    }
+    tx.commit()
+}
+
+fn write_typed(connection: &Connection, agent: i64, typed: Typed) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE team_live_masters SET typed_ms=?2, draft=COALESCE(?3,draft)
+         WHERE agent=?1 AND live=1",
+        params![agent, typed.at_ms, typed.draft],
+    )
 }
 
 /// Reads what typed bytes do to the owner's unsent line: whether they submit or clear it
