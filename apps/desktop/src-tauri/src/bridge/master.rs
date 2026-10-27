@@ -765,7 +765,7 @@ fallback_allowed = false
         assert!(
             after_close
                 .session
-                .is_none_or(|closed| closed.phase == MasterSessionPhase::Closed)
+                .is_none_or(|parked| parked.phase == MasterSessionPhase::Parked)
         );
         assert!(!declared.exists());
         assert!(

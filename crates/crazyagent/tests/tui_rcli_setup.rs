@@ -212,7 +212,7 @@ try:
             session = opened(1)
             if mode == 'reconcile':
                 key(fixture.F4)
-                fixture.wait_session(database, child, master, 1, 'rcli', 'closed')
+                fixture.wait_session(database, child, master, 1, 'rcli', 'parked')
                 fixture.setup(master, child, 'RCLI')
                 expect('Owner catalog revision')
                 key(b'h')

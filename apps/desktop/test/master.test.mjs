@@ -113,6 +113,7 @@ test("a burst of calls refused busy together does not retry in step until some g
 test("master controls offer Close on an open master and Start again once it is closed", () => {
   assert.deepEqual(conversation.masterControls(undefined), { start: true, close: false });
   assert.deepEqual(conversation.masterControls("configured"), { start: false, close: true });
+  assert.deepEqual(conversation.masterControls("parked"), { start: true, close: false });
   assert.deepEqual(conversation.masterControls("closed"), { start: true, close: false });
 });
 
