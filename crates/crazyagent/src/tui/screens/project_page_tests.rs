@@ -1117,6 +1117,56 @@ async fn a_resumed_session_shows_the_owner_s_earlier_messages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    assert!(shown.contains("n New session"), "{shown}");
+    assert!(!shown.contains("earlier"), "{shown}");
+
+    shell.key(Key::Char('n'));
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("1 earlier") && shown.contains("No messages yet.")
+    })
+    .await;
+    assert!(!shown.contains("RCLI stopped"), "{shown}");
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    let fresh = fresh.unwrap();
+    assert_ne!(fresh.session_id, first.session_id);
+    assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+
+    shell.key(Key::Char('l'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Sessions  2"), "{shown}");
+    assert!(shown.contains("Enter Resume"), "{shown}");
+    let parked = shown
+        .lines()
+        .find(|line| line.contains("Parked"))
+        .unwrap_or_else(|| panic!("no parked row:\n{shown}"));
+    assert!(parked.contains("Plan the first slice"), "{shown}");
+    if !parked.contains("> Parked") {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("RCLI stopped") && !shown.contains("Sessions  2")
+    })
+    .await;
+    assert!(shown.contains("1 earlier"), "{shown}");
+    assert!(!shown.contains("No messages yet."), "{shown}");
+    assert!(shown.contains("Plan the first slice"), "{shown}");
+    let (resumed, _) = latest_master(&mut engine, &notes).await;
+    let resumed = resumed.unwrap();
+    assert_eq!(resumed.session_id, first.session_id);
+    assert_eq!(resumed.phase, MasterSessionPhase::Configured);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_on_home() {
     let mut engine = Engine::start().await;
     let notes = engine.project("notes-cli", "Notes CLI", 1).await;

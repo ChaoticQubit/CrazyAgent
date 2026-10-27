@@ -10,6 +10,7 @@ use super::project::{
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
 use super::project_time::{clock, duration};
+use super::sessions::Sessions;
 use crate::project_setup::{
     ContextItem, ContextKind, Platform, ResearchJob, ResearchKind, ResearchStatus,
 };
@@ -989,9 +990,12 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
             look.muted,
         );
     }
+    let session = screen
+        .sessions
+        .header(content, screen.now_ms, screen.offset, look);
     let mut lines = vec![
         spread(content, head, master_status(&status, look)),
-        Row::default(),
+        session.filter(|_| assigned).unwrap_or_default(),
     ];
     let available = room.saturating_sub(4);
     let (body, top, input, help): (Vec<Row>, bool, Row, Help) = if !screen.pool_ready {
@@ -1059,7 +1063,17 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         if transcript.open && !screen.typing {
             help.insert(1, ("e", "End conversation"));
         }
-        (body, empty, input_row(screen, look), help)
+        if !screen.typing {
+            let at = help.len().saturating_sub(2);
+            help.splice(at..at, Sessions::conversation_help());
+        }
+        match screen
+            .sessions
+            .view(content, available, screen.now_ms, screen.offset, look)
+        {
+            Some((rows, keys)) if !screen.typing => (rows, true, input_row(screen, look), keys),
+            _ => (body, empty, input_row(screen, look), help),
+        }
     } else {
         (
             vec![Row::of(
