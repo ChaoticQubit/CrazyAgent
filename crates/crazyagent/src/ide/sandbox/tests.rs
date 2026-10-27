@@ -256,6 +256,10 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         r#"/bin/ln -s /private/tmp "$1""#,
         &user_data.join("machine")
     ));
+    let hard =
+        r#"linked="${1%/*/*}/linked.json"; /bin/ln "$1" "$linked" && printf '{}' > "$linked""#;
+    assert!(!sh(&profile, hard, &settings));
+    assert!(!user_data.join("linked.json").exists());
     assert!(sh(&profile, r#": > "$1""#, &user_data.join("logs.txt")));
     assert!(sh(
         &profile,
@@ -346,10 +350,12 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
-/// DEC-098 addendum 9: the server cannot read an agent's IDE config, the `.vscode` folder
-/// of an agent worktree and any `.code-workspace` file in one, under either agents root and
-/// in any letter case, so an agent cannot set the owner's IDE settings. The project's own
-/// files, the agent's other files and the engine's workspace file stay readable.
+/// DEC-098 addendum 9: the server cannot read an agent's IDE config, any `.vscode` folder
+/// in an agent worktree and any `.code-workspace` file in one, under either agents root and
+/// in any letter case, so an agent cannot set the owner's IDE settings. A link an agent
+/// commits under those names is refused as well, though the file it leads to stays
+/// readable by its own name. The project's own files, the agent's other files and the
+/// engine's workspace file stay readable.
 #[test]
 fn the_ide_server_cannot_read_agent_ide_config() {
     let scratch = tempfile::Builder::new()
@@ -364,13 +370,15 @@ fn the_ide_server_cannot_read_agent_ide_config() {
     let home = mine.join("server");
     let inner = root.join(".crazyagent").join("worktrees").join("agent-1");
     let outer = root.join("worktrees").join("agent-2");
+    let linked = root.join("worktrees").join("agent-3");
     for path in [
         &home,
         &build,
         &inner.join(".vscode"),
-        &inner.join("src"),
+        &inner.join("src").join(".vscode"),
         &outer.join(".VSCode"),
         &root.join(".vscode"),
+        &linked.join("docs"),
     ] {
         folder(path);
     }
@@ -378,6 +386,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
     let refused = [
         inner.join(".vscode").join("settings.json"),
         inner.join(".vscode").join("tasks.json"),
+        inner.join("src").join(".vscode").join("settings.json"),
         outer.join(".VSCode").join("settings.json"),
         inner.join("team.code-workspace"),
         inner.join("src").join("Other.Code-Workspace"),
@@ -388,11 +397,22 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         root.join(".vscode").join("settings.json"),
         inner.join("src").join("main.rs"),
         outer.join("README.md"),
+        linked.join("docs").join("settings.json"),
         workspace.clone(),
     ];
     for path in refused.iter().chain(allowed.iter()) {
         fs::write(path, planted).unwrap();
     }
+    std::os::unix::fs::symlink("docs", linked.join(".vscode")).unwrap();
+    std::os::unix::fs::symlink("docs/settings.json", linked.join("team.code-workspace")).unwrap();
+    std::os::unix::fs::symlink("../src/main.rs", inner.join(".vscode").join("launch.json"))
+        .unwrap();
+    std::os::unix::fs::symlink("docs", linked.join("notes")).unwrap();
+    let through_links = [
+        linked.join(".vscode").join("settings.json"),
+        linked.join("team.code-workspace"),
+        inner.join(".vscode").join("launch.json"),
+    ];
     let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
     let grants = Grants {
         data: &data,
@@ -411,11 +431,22 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         let (ran, printed) = read(path);
         assert!(!ran && printed.is_empty(), "{}", path.display());
     }
+    for path in &through_links {
+        let (ran, printed) = read(path);
+        assert!(!ran && printed.is_empty(), "{}", path.display());
+    }
     let variant = inner.join(".VSCODE").join("Settings.json");
     assert!(!read(&variant).0, "{}", variant.display());
     assert!(!run(&profile, "/bin/ls", &[inner.join(".vscode").as_os_str()]).0);
+    assert!(!run(&profile, "/bin/ls", &[linked.join(".vscode").as_os_str()]).0);
     for path in &allowed {
         assert_eq!(read(path), (true, planted.to_owned()), "{}", path.display());
     }
+    let named_plainly = linked.join("notes").join("settings.json");
+    assert_eq!(
+        read(&named_plainly),
+        (true, planted.to_owned()),
+        "a link is refused for its name, not for being a link"
+    );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
