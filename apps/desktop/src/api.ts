@@ -862,14 +862,33 @@ export function suggestionsFrom(project: { id: string; name: string }, items: Me
     .map((item) => ({ project_id: project.id, project_name: project.name, id: item.id, version: item.version, text: item.text }));
 }
 
-/** Reads unreviewed research memories across projects (first page of each, up to 50
+export const MEMORY_PAGES_MAX = 20;
+
+/** Reads a project's memories, research saved for approval included, batch after batch up to
+ * MEMORY_PAGES_MAX batches, for every screen that lists or counts them; one engine batch holds
+ * at most 8 entries of any status. Input: the project id. Output: the memories in id order and
+ * whether more remain unread. */
+export async function loadAllProjectMemories(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
+  const items: MemoryItem[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MEMORY_PAGES_MAX; page += 1) {
+    const batch: Result<MemoryItem[]> = await call<MemoryItem[]>("desktop_project_memories", { id, after });
+    if (batch.kind !== "ok") return batch;
+    if (batch.value.length === 0) return { kind: "ok", value: { items, more: false } };
+    items.push(...batch.value);
+    after = batch.value[batch.value.length - 1].id;
+  }
+  return { kind: "ok", value: { items, more: true } };
+}
+
+/** Reads unreviewed research memories across projects (every memory batch of each, up to 50
  * projects). Input: the projects. Output: the suggestions. */
 export async function memorySuggestions(projects: { id: string; name: string }[]): Promise<Result<Suggestion[]>> {
   const found: Suggestion[] = [];
   for (const project of projects.slice(0, SUGGESTION_PROJECTS_MAX)) {
-    const items = await call<MemoryItem[]>("desktop_project_memories", { id: project.id, after: null });
-    if (items.kind !== "ok") return items;
-    found.push(...suggestionsFrom(project, items.value));
+    const memories = await loadAllProjectMemories(project.id);
+    if (memories.kind !== "ok") return memories;
+    found.push(...suggestionsFrom(project, memories.value.items));
   }
   return { kind: "ok", value: found };
 }

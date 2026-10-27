@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
-import { listMcpServers, listSkills, nextGeneration, poolSummaries } from "../../api";
-import { failureCopy, loadAllProjectMemories, retryResearch } from "../../api-projects";
+import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
+import { failureCopy, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";

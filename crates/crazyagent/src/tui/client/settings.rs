@@ -621,7 +621,7 @@ impl NativeOwner {
     }
 
     /// Reads the research memories waiting for the owner and the ones kept in a
-    /// project, the first page of each project's inbox, as the desktop does.
+    /// project, every inbox batch of each project, as the desktop does.
     /// Inputs: the projects and the lost-connection flag. Output: at most
     /// SUGGESTIONS_MAX suggestions, or the first plain problem code.
     pub(super) async fn suggestions(
@@ -633,7 +633,7 @@ impl NativeOwner {
         let mut found: Vec<Suggestion> = Vec::new();
         for project in projects.into_iter().take(SUGGESTION_PROJECTS_MAX) {
             let entries = controller
-                .project_memories(project, None)
+                .all_project_memories(project)
                 .await
                 .map_err(|error| problem(&error, lost))?;
             found.extend(entries.into_iter().filter_map(|entry| {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -809,18 +809,24 @@ test("a master turn whose edits wait in Changes shows the engine's note, and a t
   assert.equal(research.changesLine({ id: "t4", ordinal: 4, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: "  " }), null);
 });
 
-test("Overview counts suggested memories across every memory batch, the way the Memory panel lists them", () => {
-  const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
-  const overview = source("screens/project/overview.tsx");
-  const memory = source("screens/project/memory.tsx");
-  assert.equal(typeof api.loadAllProjectMemories, "function");
-  assert.match(overview, /loadAllProjectMemories\(data\.id\)\.then\(\(result\) => \{[^}]*memoryGroups\(result\.value\.items\)\.suggested\.length/);
-  assert.doesNotMatch(overview, /loadProjectMemories\(/, "one engine batch holds at most 8 entries of any status");
-  assert.match(memory, /loadAllProjectMemories\(data\.id\)/);
-  assert.doesNotMatch(memory, /loadProjectMemories\(/);
-  const all = source("api-projects.ts").match(/export async function loadAllProjectMemories[\s\S]*?\n}\n/)?.[0] ?? "";
+test("every desktop memory list and count reads all memory batches, never one engine batch of 8", async () => {
+  const shared = await import("../src/api.ts");
+  assert.equal(typeof shared.loadAllProjectMemories, "function");
+  const root = new URL("../src/", import.meta.url);
+  const source = (path) => readFileSync(new URL(path, root), "utf8");
+  const sources = (dir) => readdirSync(new URL(dir, root), { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
+    ? sources(`${dir}${entry.name}/`) : /\.tsx?$/.test(entry.name) ? [`${dir}${entry.name}`] : []);
+  const screens = sources("").filter((path) => path !== "engine-client.ts");
+  const readers = screens.filter((path) => source(path).includes('"desktop_project_memories"'));
+  assert.deepEqual(readers, ["api.ts"], "one engine batch holds at most 8 entries of any status, so only the paging loader reads it");
+  assert.deepEqual(screens.filter((path) => /\bprojectMemories\(/.test(source(path))), [], "nothing reads one batch through the typed client");
+  const body = (text, name) => text.match(new RegExp(`export async function ${name}[\\s\\S]*?\\n}\\n`))?.[0] ?? "";
+  const all = body(source("api.ts"), "loadAllProjectMemories");
   assert.match(all, /page < MEMORY_PAGES_MAX/);
-  assert.match(all, /loadProjectMemories\(id, after\)/);
+  assert.match(all, /"desktop_project_memories", \{ id, after \}/);
   assert.match(all, /after = batch\.value\[batch\.value\.length - 1\]\.id/);
   assert.match(all, /batch\.value\.length === 0\) return \{ kind: "ok", value: \{ items, more: false \} \}/);
+  assert.match(body(source("api.ts"), "memorySuggestions"), /loadAllProjectMemories\(project\.id\)[\s\S]*suggestionsFrom\(project, memories\.value\.items\)/);
+  assert.match(source("screens/project/overview.tsx"), /loadAllProjectMemories\(data\.id\)\.then\(\(result\) => \{[^}]*memoryGroups\(result\.value\.items\)\.suggested\.length/);
+  assert.match(source("screens/project/memory.tsx"), /loadAllProjectMemories\(data\.id\)/);
 });

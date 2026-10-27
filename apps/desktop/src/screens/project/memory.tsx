@@ -1,7 +1,7 @@
-import { deleteMemory, editProjectMemory, nextGeneration, savedMemories } from "../../api";
+import { deleteMemory, editProjectMemory, loadAllProjectMemories, nextGeneration, savedMemories } from "../../api";
 import type { Result, SavedMemory } from "../../api";
 import { useEffect, useState } from "react";
-import { failureCopy, loadAllProjectMemories, promoteProjectMemory, reviewMemory } from "../../api-projects";
+import { failureCopy, promoteProjectMemory, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog, StatusBadge } from "../../ui";

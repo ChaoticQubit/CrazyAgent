@@ -1264,3 +1264,67 @@ async fn research_text_with_hidden_characters_stored_before_the_check_is_never_k
     drop(owner);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn every_project_memory_read_for_counts_and_lists_reaches_past_one_engine_batch() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-pages", next()).await;
+    let headings: Vec<String> = (1..=11)
+        .map(|index| format!("Finding {index:02}"))
+        .collect();
+    let report: String = headings
+        .iter()
+        .map(|heading| format!("## {heading}\n\nHouseholds note {heading}.\n\n"))
+        .collect();
+    std::fs::write(
+        engine
+            .folder("mem-pages")
+            .join("context/research/market_research.md"),
+        format!("# Market\n\n{report}"),
+    )
+    .unwrap();
+    for heading in &headings {
+        assert_eq!(
+            result(
+                owner
+                    .save_research_to_memory(
+                        meals.clone(),
+                        ResearchKind::MarketResearch,
+                        Some(heading.clone()),
+                        next()
+                    )
+                    .await
+                    .unwrap()
+            ),
+            OwnerResult::Applied,
+            "{heading}"
+        );
+    }
+
+    let first = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(
+        first.len(),
+        8,
+        "one engine batch stops at the default batch size"
+    );
+    let all = owner.all_project_memories(meals.clone()).await.unwrap();
+    assert_eq!(all.len(), headings.len(), "every suggestion is read");
+    assert!(
+        all.windows(2)
+            .all(|pair| pair[0].id.as_str() < pair[1].id.as_str()),
+        "batches continue after the last id without repeats"
+    );
+    assert_eq!(all[..first.len()], first[..]);
+    assert!(
+        all.iter()
+            .all(|entry| entry.status == KnowledgeStatus::Provisional && !entry.human_reviewed)
+    );
+    drop(owner);
+    engine.stop().await;
+}

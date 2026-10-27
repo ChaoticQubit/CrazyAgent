@@ -78,10 +78,11 @@ impl NativeOwner {
                     .map_err(problem)?,
             ),
             SetupQuery::Memories { project, after } => SetupView::Memories(
-                controller
-                    .project_memories(project, after)
-                    .await
-                    .map_err(problem)?,
+                match after {
+                    None => controller.all_project_memories(project).await,
+                    Some(after) => controller.project_memories(project, Some(after)).await,
+                }
+                .map_err(problem)?,
             ),
             SetupQuery::ReviewMemory {
                 project,

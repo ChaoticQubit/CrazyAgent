@@ -6,6 +6,8 @@ use crate::project_setup::{
 };
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 
+const MEMORY_PAGES_MAX: usize = 20;
+
 impl OwnerController {
     /// Reads the New Project choices and the smart team defaults for a pool and toggles.
     /// Takes the chosen pool, if any, and the chosen research toggles.
@@ -339,6 +341,31 @@ impl OwnerController {
             },
             _ => Err(EngineError("controller_read_response".into())),
         }
+    }
+
+    /// Lists every memory of a project, research saved for approval included, in id order,
+    /// batch after batch up to `MEMORY_PAGES_MAX` batches, for counts and lists that must not
+    /// stop at one engine batch of at most 8. Takes the project id. Returns the current entry
+    /// versions, or `controller_read_response` when a batch does not continue after the last.
+    pub async fn all_project_memories(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<KnowledgeEntry>, EngineError> {
+        let mut entries: Vec<KnowledgeEntry> = Vec::new();
+        for _ in 0..MEMORY_PAGES_MAX {
+            let after = entries.last().map(|entry| entry.id.clone());
+            let batch = self
+                .project_memories(project_id.clone(), after.clone())
+                .await?;
+            let Some(last) = batch.last() else {
+                break;
+            };
+            if after.is_some_and(|after| last.id.as_str() <= after.as_str()) {
+                return Err(EngineError("controller_read_response".into()));
+            }
+            entries.extend(batch);
+        }
+        Ok(entries)
     }
 
     /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.

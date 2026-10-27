@@ -407,30 +407,6 @@ export interface MemoryItem {
 
 export type MemoryDecision = { decision: "Keep" } | { decision: "Reject" } | { decision: "Remove" };
 
-export const MEMORY_PAGES_MAX = 20;
-
-/** Reads a project's memories, research saved for approval included, page by page.
- * Inputs: the project id and the last memory id already shown, or null.
- * Output: one engine batch of memories. */
-export function loadProjectMemories(id: string, after: string | null): Promise<Result<MemoryItem[]>> {
-  return call<MemoryItem[]>("desktop_project_memories", { id, after });
-}
-
-/** Reads a project's memories batch after batch, up to MEMORY_PAGES_MAX batches, for every
- * screen that lists or counts them; one engine batch holds at most 8 entries of any status.
- * Input: the project id. Output: the memories in id order and whether more remain unread. */
-export async function loadAllProjectMemories(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
-  const items: MemoryItem[] = [];
-  let after: string | null = null;
-  for (let page = 0; page < MEMORY_PAGES_MAX; page += 1) {
-    const batch = await loadProjectMemories(id, after);
-    if (batch.kind !== "ok") return batch;
-    if (batch.value.length === 0) return { kind: "ok", value: { items, more: false } };
-    items.push(...batch.value);
-    after = batch.value[batch.value.length - 1].id;
-  }
-  return { kind: "ok", value: { items, more: true } };
-}
 
 /** Saves, dismisses or deletes one memory; Keep is the owner's one-click approval.
  * Inputs: project id, memory id, the version shown, the decision and a generation.
