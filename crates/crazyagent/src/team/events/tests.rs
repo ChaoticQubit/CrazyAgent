@@ -870,3 +870,67 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         (project_rule, RuleLevel::Project)
     );
 }
+
+#[test]
+fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_graph_node() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let bo = fixture.agent(PROJECT, "sub", "claude-code", "working");
+    for (agent, kind, at) in [
+        (ada, EventKind::Question, 10),
+        (bo, EventKind::Finished, 11),
+        (ada, EventKind::Question, 12),
+        (bo, EventKind::Question, 13),
+    ] {
+        record(connection, &project(), agent, None, kind, "Proceed?", at)
+            .unwrap()
+            .unwrap();
+    }
+    let counted = view(connection, &project()).unwrap().questions;
+    assert_eq!(
+        counted,
+        [
+            AgentQuestions {
+                agent: ada,
+                count: 2
+            },
+            AgentQuestions {
+                agent: bo,
+                count: 1
+            }
+        ]
+    );
+    let agents: Vec<serde_json::Value> = [ada, bo]
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id, "role": "sub", "harness": "codex", "tools": true, "account": null, "worktree": null,
+                "status": "working", "status_label": "Working", "task": null, "turns": 0, "problem": null,
+                "process_group": null, "created_ms": 0, "heartbeat_ms": 0, "stopped_ms": null,
+            })
+        })
+        .collect();
+    let node = |questions: Vec<AgentQuestions>, agent: i64| {
+        let mut status: crate::team::TeamStatus = serde_json::from_value(serde_json::json!({
+            "project_id": PROJECT, "keep_warm": false, "paused": false, "min_agents": 0, "max_agents": 2,
+            "harnesses": [], "tasks": [], "messages": [], "plan": [],
+            "agents": agents.clone(),
+            "events": serde_json::to_value(EventsView::default()).unwrap(),
+        }))
+        .unwrap();
+        status.events.questions = questions;
+        crate::team::graph(&status)
+            .nodes
+            .into_iter()
+            .find(|node| node.id == format!("team-{agent}"))
+            .unwrap()
+            .questions
+    };
+    assert_eq!(node(counted.clone(), ada), Some(2));
+    assert_eq!(node(counted, bo), Some(1));
+    assert!(deliver_by_message(connection, &project(), true, 100).unwrap());
+    let delivered = view(connection, &project()).unwrap().questions;
+    assert!(delivered.is_empty(), "{delivered:?}");
+    assert_eq!(node(delivered, ada), Some(0));
+}

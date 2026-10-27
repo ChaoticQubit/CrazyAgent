@@ -32,6 +32,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         account: None,
         agents: None,
         terminal: None,
+        questions: None,
     }
 }
 

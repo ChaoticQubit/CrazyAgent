@@ -7,6 +7,7 @@ use crate::protocol::ProjectId;
 use crate::terminal::{AgentId, Host, HostError, type_prompt};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -315,6 +316,15 @@ pub struct EventsView {
     pub notifications: Vec<Notification>,
     pub paused: bool,
     pub wake: WakeView,
+    #[serde(default)]
+    pub questions: Vec<AgentQuestions>,
+}
+
+/// How many question events of one sub-agent wait in the queue for the master.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentQuestions {
+    pub agent: i64,
+    pub count: u16,
 }
 
 /// What the app shows across projects: the app-level wake rule, the rule in force without a
@@ -694,6 +704,32 @@ pub fn waiting(
         .map_err(error)?;
     statement
         .query_map([project.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)
+}
+
+/// Counts each sub-agent's question events that have not reached the master yet.
+/// Takes the connection and the project. Returns one entry per agent with any, by agent id.
+pub fn questions(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<AgentQuestions>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT agent,COUNT(*) FROM team_events WHERE project=?1 AND kind='question' AND state='queued'
+             GROUP BY agent ORDER BY agent",
+        )
+        .map_err(error)?;
+    statement
+        .query_map([project.as_str()], |row| {
+            let count: i64 = row.get(1)?;
+            assert!(count > 0);
+            Ok(AgentQuestions {
+                agent: row.get(0)?,
+                count: u16::try_from(count).unwrap_or(u16::MAX),
+            })
+        })
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)
@@ -1224,6 +1260,7 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
             effective,
             level,
         },
+        questions: questions(connection, project)?,
     })
 }
 
@@ -1367,8 +1404,8 @@ pub fn due(
     let mut rules: BTreeMap<i64, (WakeRule, RuleLevel)> = BTreeMap::new();
     let mut wanted = Vec::new();
     for event in queued {
-        if !rules.contains_key(&event.agent) {
-            rules.insert(event.agent, rule(tx, Some(project), Some(event.agent))?);
+        if let Entry::Vacant(slot) = rules.entry(event.agent) {
+            slot.insert(rule(tx, Some(project), Some(event.agent))?);
         }
         if rules[&event.agent].0.wakes(event.kind) {
             wanted.push(event);

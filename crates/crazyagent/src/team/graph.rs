@@ -18,6 +18,7 @@ pub enum NodeKind {
 /// One node of a project's team graph.
 /// `parent` links an agent to its harness group and a group to the master.
 /// `terminal` is the name to attach to, for the master and agents with a terminal.
+/// `questions` counts an agent's question events still queued for the master; none elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -30,6 +31,8 @@ pub struct GraphNode {
     pub account: Option<String>,
     pub agents: Option<u8>,
     pub terminal: Option<AgentId>,
+    #[serde(default)]
+    pub questions: Option<u16>,
 }
 
 /// Where one handed-out task stands, as the graph draws it.
@@ -114,6 +117,7 @@ pub fn graph(status: &TeamStatus) -> TeamGraph {
         terminal: master
             .filter(|agent| agent.status.live())
             .and_then(|agent| AgentId::team(agent.id).ok()),
+        questions: None,
     }];
     let mut groups = BTreeSet::new();
     for harness in status
@@ -135,6 +139,7 @@ pub fn graph(status: &TeamStatus) -> TeamGraph {
             account: None,
             agents: Some(u8::try_from(harness.live.max(0)).unwrap_or(u8::MAX)),
             terminal: None,
+            questions: None,
         });
     }
     let mut agents = BTreeSet::new();
@@ -157,6 +162,14 @@ pub fn graph(status: &TeamStatus) -> TeamGraph {
             account: agent.account.clone(),
             agents: None,
             terminal: agent.status.live().then_some(terminal),
+            questions: Some(
+                status
+                    .events
+                    .questions
+                    .iter()
+                    .find(|item| item.agent == agent.id)
+                    .map_or(0, |item| item.count),
+            ),
         });
     }
     let edges: Vec<GraphEdge> = status
