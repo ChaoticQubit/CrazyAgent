@@ -75,3 +75,23 @@ test("in the master composer Shift+Enter adds a line and Enter is taken as send,
   assert.equal(seen.entered.value, "first line\nsecondかな", "Enter adds no line; with no engine the send waits");
   assert.equal(seen.entered.help, "Enter to send, Shift+Enter for a new line");
 });
+
+test("after a master turn ends its terminal, the composer still takes typing and keeps the draft; only Send waits until the terminal is live", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await evaluate(fixture);
+    const id = await evaluate("Fixture.mountTerminalComposer(false)");
+    const read = async () => { await evaluate(tick); return evaluate(`Fixture.field(${JSON.stringify(id)})`); };
+    await evaluate(`document.getElementById(${JSON.stringify(id)}).focus()`);
+    await send("Input.insertText", { text: "next step" });
+    await enter(send);
+    const ended = { ...await read(), controls: await evaluate("Fixture.setLive(false)") };
+    const live = await evaluate("Fixture.setLive(true)");
+    await evaluate(`document.getElementById(${JSON.stringify(id)}).focus()`);
+    await enter(send);
+    return { ended, live, sent: await read() };
+  });
+  assert.deepEqual(seen.ended, { ...seen.ended, value: "next step", focused: true, sent: [], controls: { disabled: false, send: true } });
+  assert.match(seen.ended.help, /Sends once the terminal is live\./);
+  assert.deepEqual(seen.live, { disabled: false, send: false });
+  assert.deepEqual(seen.sent.sent, ["next step"], "the kept draft sends once the terminal is live");
+});

@@ -55,8 +55,10 @@ export function promptCopy(node: GraphNode): { label: string; placeholder: strin
 }
 
 /** The prompt box under an agent's terminal: Enter sends the text as one message, Shift+Enter
- * adds a line. Inputs: the node, whether the terminal is live and the send action, which says
- * whether the prompt was queued. Output: the form. */
+ * adds a line. The box always takes typing and keeps its draft, as a master turn's terminal
+ * ends after each turn; only sending waits for a live terminal. Inputs: the node, whether the
+ * terminal is live and the send action, which says whether the prompt was queued. Output: the
+ * form. */
 export function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
   const [text, setText] = useState("");
   const id = `tg-prompt-${node.id}`;
@@ -68,12 +70,12 @@ export function Composer({ node, live, onSend }: { node: GraphNode; live: boolea
   };
   return <form className="tg-composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
     <label htmlFor={id} className="pj-sr">{displayText(copy.label)}</label>
-    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text} disabled={!live}
+    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text}
       placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
       onChange={(event) => setText(event.target.value)}
       onKeyDown={(event) => { if (sendsMessage(event.nativeEvent)) { event.preventDefault(); send(); } }} />
     <div className="tg-composer-foot">
-      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Opens once the terminal is live." : check.kind === "too_long" ? check.reason : "Sends the text as one message, then Enter. Enter to send, Shift+Enter for a new line."}</span>
+      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Sends once the terminal is live." : check.kind === "too_long" ? check.reason : "Sends the text as one message, then Enter. Enter to send, Shift+Enter for a new line."}</span>
       <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || check.kind !== "ok"}>Send</Button>
     </div>
   </form>;
