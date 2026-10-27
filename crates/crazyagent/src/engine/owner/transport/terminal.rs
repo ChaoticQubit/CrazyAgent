@@ -326,6 +326,29 @@ async fn heard(database: PathBuf, agent: i64, text: String) {
     .await;
 }
 
+/// Records keys the owner typed into a team agent's terminal as the owner typing signal
+/// that holds engine input to a live master back. Takes the engine database, the team agent
+/// id and the keys. A failure loses only the signal; the keys already reached the terminal.
+#[cfg(unix)]
+async fn typed(database: PathBuf, agent: i64, bytes: Vec<u8>) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .ok()?;
+        connection.busy_timeout(Duration::from_secs(5)).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
+        crate::team::master::owner_typed(&connection, agent, &bytes, now).ok()
+    })
+    .await;
+}
+
 #[cfg(not(unix))]
 impl OwnerClient {
     /// Refuses a terminal view where the owner socket is a Unix domain socket the platform
@@ -401,8 +424,17 @@ async fn watch(
                     }
                 }
                 Some(request) => {
+                    let keys = match (&request, member, &database) {
+                        (TerminalRequest::Input { bytes }, Some(member), Some(database)) => {
+                            Some((database.clone(), member, bytes.clone()))
+                        }
+                        _ => None,
+                    };
                     if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
                         break "terminal_ended";
+                    }
+                    if let Some((database, member, bytes)) = keys {
+                        typed(database, member, bytes).await;
                     }
                 }
             },

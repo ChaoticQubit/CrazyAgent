@@ -15,7 +15,8 @@ use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost}
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
-use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
+use crate::harnesses::terminal_session::{AgentSession, PaneRecord, TerminalSession};
+use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
@@ -124,6 +125,7 @@ struct Plan {
     sandbox_profile: PathBuf,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
+    live: bool,
 }
 
 impl Plan {
@@ -165,6 +167,7 @@ struct Adoption {
     agent: AgentId,
     record: PaneRecord,
     limits: LaunchLimits,
+    live: bool,
 }
 
 /// Who one agent is in its team: the project, role, team harness, account and tools
@@ -190,6 +193,23 @@ enum TurnEnd {
     Closed,
 }
 
+impl TurnEnd {
+    /// The stored word for how a live master turn ended.
+    /// Input: the turn end. Output: a fixed lowercase word.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::RateLimited => "rate_limited",
+            Self::TimedOut => "timed_out",
+            Self::TooLong => "too_long",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 enum Report {
     Ready {
         group: u32,
@@ -205,6 +225,10 @@ enum Report {
     },
     Ended {
         problem: Option<String>,
+    },
+    Turn {
+        end: Option<TurnEnd>,
+        text: String,
     },
 }
 
@@ -236,6 +260,9 @@ struct Worker {
     grants: u64,
     thread: Option<JoinHandle<()>>,
     hosted: Option<Hosted>,
+    live: bool,
+    briefed: bool,
+    turn_started: Option<i64>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -257,6 +284,7 @@ pub struct TeamRuntime {
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     swept: Option<Instant>,
+    events: Option<super::master::TeamEvents>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -361,6 +389,7 @@ impl TeamRuntime {
             agents: None,
             terminal: None,
             swept: None,
+            events: None,
         })
     }
 
@@ -369,6 +398,14 @@ impl TeamRuntime {
     /// Takes the register of the same engine database. Returns the runtime.
     pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
         self.agents = Some(agents);
+        self
+    }
+
+    /// Gives a live master's `message`, `answer` and `status` tools their team event
+    /// handlers. Takes the handlers. Returns the runtime; without them those tools answer
+    /// that team messaging is not available.
+    pub fn with_events(mut self, events: super::master::TeamEvents) -> Self {
+        self.events = Some(events);
         self
     }
 
@@ -525,6 +562,7 @@ impl TeamRuntime {
             agent,
             record: record.clone(),
             limits: self.launch_limits(),
+            live: self.live_master(&project, role, launch),
         };
         self.run_worker(
             id,
@@ -945,6 +983,8 @@ impl TeamRuntime {
         self.retire_rejected(project, access);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
+        self.keep_live(&stored, access, &paused)?;
+        self.serve_live_calls(&stored, access)?;
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         self.dispatch(&stored, access, &paused)?;
@@ -1258,6 +1298,9 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
+        if super::master::live(&self.connection, project)? {
+            return self.feed_live(project);
+        }
         let restarting = self
             .workers
             .values()
@@ -1375,6 +1418,246 @@ impl TeamRuntime {
             super::direct::delivered(&self.connection, project, newest)?;
         }
         self.mark_agent(id, AgentStatus::Working, None)
+    }
+
+    /// Keeps a project's live master running while its switch is on: starts it on a ready
+    /// pool account of the master harness, briefs it once its thread waits, and stops a
+    /// master whose mode no longer matches the switch. A master that cannot start leaves
+    /// one team note per distinct reason. Takes the setup, live access and paused accounts.
+    fn keep_live(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let on = super::master::live(&self.connection, project)?;
+        if self
+            .workers
+            .values()
+            .any(|w| &w.project == project && w.role == AgentRole::Master && w.restarting)
+        {
+            return Ok(());
+        }
+        if let Some(id) = self.master(project) {
+            let worker = self.workers.get_mut(&id).expect("master worker exists");
+            if worker.live != on {
+                if worker.busy.is_none() {
+                    worker.stopping = true;
+                    let _ = worker.orders.send(Order::Stop);
+                }
+                return Ok(());
+            }
+            if on && !worker.briefed {
+                return self.brief(stored, access, id);
+            }
+            return Ok(());
+        }
+        let harness = stored.team.master.clone();
+        let live_capable = launch_harness(&harness)
+            .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
+        if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
+            return Ok(());
+        }
+        let started = match self.account_for(access, project, &harness, paused) {
+            Ok(account) => self.spawn(
+                stored,
+                AgentRole::Master,
+                &harness,
+                stored.team.master_tools,
+                &account,
+            )?,
+            Err(reason) => Err(reason),
+        };
+        match started {
+            Ok(id) => {
+                super::master::problem(&self.connection, project, None)?;
+                self.brief(stored, access, id)
+            }
+            Err(reason) => {
+                let line = full_stop(format!(
+                    "The live master could not start: {}",
+                    bound_text(&reason, 300)
+                ));
+                if super::master::problem(&self.connection, project, Some(&line))? {
+                    self.note(project, &line)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Hands a live master that waits for its start the briefing, with the signed-in
+    /// account's profile on a managed account. Takes the setup, live access and the agent.
+    /// Returns once sent; a profile still in use waits for the next tick.
+    fn brief(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        id: i64,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let grant = if self.workers[&id].managed {
+            match self.grant(access, id, project) {
+                Ok(Some(grant)) => Some(grant),
+                Ok(None) => return Ok(()),
+                Err(reason) => {
+                    let worker = self.workers.get_mut(&id).expect("master worker exists");
+                    worker.stopping = true;
+                    let _ = worker.orders.send(Order::Stop);
+                    return self.note(
+                        project,
+                        &full_stop(format!(
+                            "The live master could not start: {}",
+                            bound_text(&reason, 300)
+                        )),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let framing = live_framing(stored, self.workers[&id].team_tool);
+        let worker = self.workers.get_mut(&id).expect("master worker exists");
+        if worker.orders.send(Order::Turn(framing, grant)).is_ok() {
+            worker.briefed = true;
+        }
+        Ok(())
+    }
+
+    /// Answers the team calls a project's live master made since the last tick.
+    /// Takes the setup and live access. Returns any SQLite failure.
+    fn serve_live_calls(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+    ) -> Result<(), EngineError> {
+        let Some(id) = self.master(&stored.project_id) else {
+            return Ok(());
+        };
+        if !self.workers[&id].live || !self.workers[&id].team_tool {
+            return Ok(());
+        }
+        let mailbox = self.mailbox(id);
+        let answering = super::master::Answering {
+            access,
+            stored,
+            landing: &self.root,
+            events: self.events.as_ref(),
+            host: self.terminal.as_deref(),
+        };
+        super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
+    }
+
+    /// Types the oldest waiting team message into a project's live master once it is idle
+    /// and the owner is not typing, with the owner's prompts to sub-agents it has not heard.
+    /// Takes the project. Returns any SQLite failure; a message that cannot be typed is
+    /// failed with a team note, one that must wait stays pending.
+    fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        let Some(id) = self.master(project) else {
+            return Ok(());
+        };
+        let Some(host) = self.terminal.clone() else {
+            return Ok(());
+        };
+        if !self.workers[&id].live || !self.workers[&id].briefed {
+            return Ok(());
+        }
+        let pending: Option<(i64, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' ORDER BY id LIMIT 1",
+                [project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((message, author, text)) = pending else {
+            return Ok(());
+        };
+        let (heard, newest) = super::direct::notes(&self.connection, project)?;
+        let speaker = if author == "owner" {
+            "[owner]"
+        } else {
+            "[team]"
+        };
+        let typed = bound_text(
+            &format!("{heard}{speaker} {text}"),
+            super::master::INPUT_TEXT_MAX,
+        );
+        let state =
+            match super::master::master_input(&self.connection, host.as_ref(), project, &typed) {
+                Ok(()) => "answered",
+                Err(super::master::InputRefused::Invalid) => "failed",
+                Err(_) => return Ok(()),
+            };
+        self.connection
+            .execute(
+                "UPDATE team_messages SET state=?2 WHERE id=?1",
+                params![message, state],
+            )
+            .map_err(error)?;
+        if state == "failed" {
+            return self.note(
+                project,
+                "A team message could not be typed into the master because it is empty or not plain text.",
+            );
+        }
+        if let Some(newest) = newest {
+            super::direct::delivered(&self.connection, project, newest)?;
+        }
+        Ok(())
+    }
+
+    /// Hands the tasks a tools-off live master wrote as reply lines to the team, each
+    /// through `admit` like any master task; refused ones are listed in one team note.
+    /// Takes the project and the turn's reply text. Returns any SQLite failure.
+    fn admit_reply_lines(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
+        let proposed = parse_delegations(text);
+        if proposed.is_empty() {
+            return Ok(());
+        }
+        let (Some(stored), Some(access)) = (self.stored(project)?, (self.access)()) else {
+            return Ok(());
+        };
+        let now = now_ms();
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let mut refused = Vec::new();
+        for delegation in &proposed {
+            if let Err(code) = admit(
+                &tx,
+                &access,
+                &stored,
+                delegation.harness.as_deref(),
+                &delegation.prompt,
+                TaskSource::Master,
+                None,
+                now,
+            )? {
+                refused.push(format!(
+                    "- {}: {}",
+                    bound_text(&delegation.prompt, 200),
+                    refusal(code)
+                ));
+            }
+        }
+        if !refused.is_empty() {
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &format!(
+                    "The live master's tasks were not handed off:\n{}",
+                    refused.join("\n")
+                ),
+                MessageState::Note,
+                now,
+            )?;
+        }
+        tx.commit().map_err(error)
     }
 
     fn mark_agent(
@@ -1687,7 +1970,7 @@ impl TeamRuntime {
         let ids: Vec<i64> = self
             .workers
             .iter()
-            .filter(|(_, w)| &w.project == project && w.busy.is_none() && !w.stopping)
+            .filter(|(_, w)| &w.project == project && w.busy.is_none() && !w.stopping && !w.live)
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
@@ -1932,6 +2215,10 @@ impl TeamRuntime {
         let turn_time = self.limits.turn_time;
         let managed =
             matches!(&launch, Launch::Fresh(_, mode) if matches!(**mode, Mode::PerTurn { .. }));
+        let (live, adopted) = match &launch {
+            Launch::Fresh(plan, _) => (plan.live, false),
+            Launch::Adopt(adoption) => (adoption.live, true),
+        };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
             .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, turn_time))
@@ -1962,6 +2249,9 @@ impl TeamRuntime {
                 grants: 0,
                 thread: Some(thread),
                 hosted: seat.hosted,
+                live,
+                briefed: adopted,
+                turn_started: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -2023,6 +2313,12 @@ impl TeamRuntime {
                 (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
+        let live = self.live_master(&stored.project_id, role, launch);
+        if live && tools {
+            private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
+                with_code("the master's tool mailbox could not be made", Some(&e.0))
+            })?;
+        }
         let context = self.context(&stored.project_id, id, role, tools)?;
         let network = if tools {
             SandboxNetwork::Open
@@ -2096,6 +2392,7 @@ impl TeamRuntime {
             sandbox_profile: profile,
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
+            live,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -2128,6 +2425,22 @@ impl TeamRuntime {
         self.agent_folder(id).join("tmp").join(tool::DROP_FILE)
     }
 
+    fn mailbox(&self, id: i64) -> PathBuf {
+        self.agent_folder(id).join("tmp").join(tool::MAILBOX_FOLDER)
+    }
+
+    /// Tells whether a project's master runs live: its own app kept running in a pane the
+    /// owner types into. Takes the project, the role and the launch harness. Returns true
+    /// for a master while the project's live switch is on, the harness has an interactive
+    /// app and the engine has a terminal host; a state read failure counts as off.
+    fn live_master(&self, project: &ProjectId, role: AgentRole, harness: &str) -> bool {
+        role == AgentRole::Master
+            && self.terminal.is_some()
+            && crate::harnesses::interactive::support(harness)
+                == crate::harnesses::interactive::Support::Terminal
+            && super::master::live(&self.connection, project).unwrap_or(false)
+    }
+
     /// Reads what one team agent launch receives: the project context and approved
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
     /// tool for a master with tools on, served by the captured engine while the file at its
@@ -2145,7 +2458,24 @@ impl TeamRuntime {
         let context =
             crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
         let master = role == AgentRole::Master;
+        let live = master
+            && self
+                .connection
+                .query_row("SELECT harness FROM team_agents WHERE id=?1", [id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok()
+                .and_then(|harness| launch_harness(&harness))
+                .is_some_and(|harness| self.live_master(project, role, harness));
         match &self.delegation_tool {
+            Some(engine) if master && tools && live => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                context
+                    .with_live_team_tool(engine, &self.mailbox(id))
+                    .map_err(unread)
+            }
             Some(engine) if master && tools => {
                 let engine = engine
                     .verified_path()
@@ -2233,6 +2563,9 @@ impl TeamRuntime {
                 if let Some(hosted) = &self.workers[&id].hosted {
                     hosted.started(group);
                 }
+                if self.workers[&id].live {
+                    super::master::pane_ready(&self.connection, &self.workers[&id].project, id)?;
+                }
                 self.connection
                     .execute(
                         "UPDATE team_agents SET process_group=?2, status=?3, heartbeat_ms=?4 WHERE id=?1",
@@ -2314,8 +2647,67 @@ impl TeamRuntime {
                 self.mark_agent(id, AgentStatus::Idle, None)?;
                 Ok(false)
             }
+            Report::Turn { end: None, .. } => {
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                worker.turn_started = Some(now_ms());
+                if let Some(hosted) = &worker.hosted {
+                    hosted.set_busy(true);
+                }
+                super::master::turn_started(&self.connection, id)?;
+                self.mark_agent(id, AgentStatus::Working, None)?;
+                Ok(false)
+            }
+            Report::Turn {
+                end: Some(end),
+                text,
+            } => {
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                let started = worker.turn_started.take();
+                worker.idle_since = Instant::now();
+                worker.worked = true;
+                if let Some(hosted) = &worker.hosted {
+                    hosted.text(&text);
+                    hosted.set_busy(false);
+                }
+                let (project, connection, team_tool) = (
+                    worker.project.clone(),
+                    worker.connection.clone(),
+                    worker.team_tool,
+                );
+                if end == TurnEnd::RateLimited {
+                    self.pause(&connection)?;
+                    self.workers.get_mut(&id).expect("worker exists").stopping = true;
+                }
+                let turn = super::master::turn_ended(
+                    &self.connection,
+                    &project,
+                    id,
+                    started,
+                    now_ms(),
+                    end.name(),
+                )?;
+                self.connection
+                    .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
+                    .map_err(error)?;
+                if !team_tool {
+                    self.admit_reply_lines(&project, &text)?;
+                }
+                self.land_turn(
+                    id,
+                    &project,
+                    format!("live-{turn}"),
+                    format!("Master turn {turn}"),
+                    "the live master's turn",
+                    end,
+                )?;
+                self.mark_agent(id, AgentStatus::Idle, None)?;
+                Ok(false)
+            }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                if worker.live {
+                    super::master::pane_ended(&self.connection, &worker.project, id)?;
+                }
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -2402,6 +2794,40 @@ impl TeamRuntime {
         let Some(busy) = busy else {
             return Ok(());
         };
+        let prompt = |sql: &str, key: i64| -> Result<String, EngineError> {
+            self.connection
+                .query_row(sql, [key], |row| row.get::<_, String>(0))
+                .optional()
+                .map(Option::unwrap_or_default)
+                .map_err(error)
+        };
+        let (turn, line, what) = match busy {
+            Busy::Task(task) => (
+                format!("task-{task}"),
+                prompt("SELECT prompt FROM team_tasks WHERE id=?1", task)?,
+                format!("task {task}"),
+            ),
+            Busy::Message(message) => (
+                format!("message-{message}"),
+                prompt("SELECT text FROM team_messages WHERE id=?1", message)?,
+                "the team master's turn".to_owned(),
+            ),
+        };
+        self.land_turn(id, project, turn, line, &what, end)
+    }
+
+    /// Lands one ended turn of an agent under its change-set turn key, as `land` does.
+    /// Inputs: the agent, its project, the turn key, the prompt line, what ended for the
+    /// note and how it ended. Output: any SQLite failure writing the note.
+    fn land_turn(
+        &mut self,
+        id: i64,
+        project: &ProjectId,
+        turn: String,
+        line: String,
+        what: &str,
+        end: TurnEnd,
+    ) -> Result<(), EngineError> {
         type Row = (String, String, String, String, String);
         let row: Option<Row> = self
             .connection
@@ -2425,25 +2851,12 @@ impl TeamRuntime {
             return Ok(());
         };
         let harness = excerpt(&harness, 64);
-        let prompt = |sql: &str, key: i64| -> Result<String, EngineError> {
-            self.connection
-                .query_row(sql, [key], |row| row.get::<_, String>(0))
-                .optional()
-                .map(Option::unwrap_or_default)
-                .map_err(error)
+        let seat = if AgentRole::parse(&role) == Some(AgentRole::Master) {
+            "agent"
+        } else {
+            "sub-agent"
         };
-        let (turn, line, what) = match busy {
-            Busy::Task(task) => (
-                format!("task-{task}"),
-                prompt("SELECT prompt FROM team_tasks WHERE id=?1", task)?,
-                format!("task {task} ({harness}, sub-agent {id})"),
-            ),
-            Busy::Message(message) => (
-                format!("message-{message}"),
-                prompt("SELECT text FROM team_messages WHERE id=?1", message)?,
-                format!("the team master's turn ({harness}, agent {id})"),
-            ),
-        };
+        let what = format!("{what} ({harness}, {seat} {id})");
         let label = if AgentRole::parse(&role) == Some(AgentRole::Master) {
             format!("Team master ({harness})")
         } else {
@@ -2739,6 +3152,45 @@ fn framing(stored: &StoredSetup, team_tool: bool) -> String {
     )
 }
 
+/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
+/// how team events arrive and when to ask the owner. Takes the setup and whether it has
+/// the engine's team tools. Returns the text.
+fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
+    let team = stored
+        .team
+        .sub_harnesses
+        .iter()
+        .map(|slot| {
+            format!(
+                "- {}: up to {} agents, tools {}",
+                slot.harness,
+                slot.agents,
+                if slot.tools { "on" } else { "off" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let how = if team_tool {
+        format!(
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team and {}() lists the change sets waiting for the owner. Name sub-agents by their @role handle.\n",
+            tool::SERVER_NAME,
+            tool::TOOL_NAME,
+            tool::MESSAGE_TOOL,
+            tool::ANSWER_TOOL,
+            tool::STATUS_TOOL,
+            tool::CHANGES_TOOL
+        )
+    } else {
+        "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+    };
+    format!(
+        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
+        stored.name,
+        team,
+        master_brief(stored)
+    )
+}
+
 /// Reads the project brief for the master the way setup reads context: one
 /// chunk at most, never through a link and never blocking on a special file.
 /// Input: the setup. Output: the brief cut to `BRIEF_BYTES_MAX`, with a plain
@@ -2803,6 +3255,15 @@ fn work(
     leave: Arc<AtomicBool>,
     turn_time: Duration,
 ) {
+    let launch = match launch {
+        Launch::Fresh(plan, mode) if plan.live => {
+            let problem = live(&plan, *mode, &orders, &reports, &cancel, &leave);
+            let _ = reports.send(Report::Ended { problem });
+            return;
+        }
+        other => other,
+    };
+    let adopted_live = matches!(&launch, Launch::Adopt(adoption) if adoption.live);
     let started = match launch {
         Launch::Fresh(plan, mode) => match *mode {
             Mode::Kept { account, context } => {
@@ -2823,6 +3284,7 @@ fn work(
                 agent,
                 record,
                 limits,
+                ..
             } = *adoption;
             AgentSession::adopt(host.clone(), agent.clone(), &record, limits).map_err(|problem| {
                 let _ = host.kill(&agent);
@@ -2834,12 +3296,164 @@ fn work(
         }
     };
     let problem = match started {
+        Ok(AgentSession::Terminal(session)) if adopted_live => {
+            live_serve(*session, None, &orders, &reports, &cancel, &leave, true)
+        }
         Ok(session) => serve(
             session, &orders, &reports, &cancel, &interrupt, &leave, turn_time,
         ),
         Err(problem) => Some(problem),
     };
     let _ = reports.send(Report::Ended { problem });
+}
+
+/// Runs a live master: waits for its briefing order, starts its own app in its pane (on
+/// a signed-in account the credential copy and profile use are held for the whole
+/// session), types the briefing, then follows every turn. Takes the plan, the account
+/// mode and the worker's channels and flags. Returns the problem that ended it, if any.
+fn live(
+    plan: &Plan,
+    mode: Mode,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    leave: &AtomicBool,
+) -> Option<String> {
+    let Next::Turn(framing, grant) = next_turn(orders, cancel, None) else {
+        return None;
+    };
+    let (started, held, keep) = match mode {
+        Mode::Kept { account, context } => (
+            AgentSession::start(plan.request(account), context, plan.pane.clone()),
+            None,
+            true,
+        ),
+        Mode::PerTurn { home } => {
+            let Some(grant) = grant else {
+                return Some("The live master was started without its signed-in account".into());
+            };
+            let Grant { profile, context } = *grant;
+            let credential =
+                match profile.hand_to_agent(&home, plan.limits.run_time, &plan.executable) {
+                    Ok(credential) => credential,
+                    Err(problem) => {
+                        return Some(with_code(
+                            "The signed-in account could not reach the agent",
+                            Some(&problem.0),
+                        ));
+                    }
+                };
+            let request = plan.request(AccountBinding::Subscription { home });
+            (
+                AgentSession::start(request, context, plan.pane.clone()),
+                Some((profile, credential)),
+                false,
+            )
+        }
+    };
+    let problem = match started {
+        Ok(AgentSession::Terminal(session)) => live_serve(
+            *session,
+            Some(&framing),
+            orders,
+            reports,
+            cancel,
+            leave,
+            keep,
+        ),
+        Ok(other) => {
+            let _ = other.stop();
+            Some(with_code(
+                "The master has no terminal app to run live",
+                Some("team_master_no_terminal"),
+            ))
+        }
+        Err(problem) => Some(with_code("The agent could not start", Some(&problem.0))),
+    };
+    drop(held);
+    problem
+}
+
+/// Follows every turn of a live master's pane, the owner's included, and reports each
+/// start and end with the turn's reply text, bounded, for landing, usage and reply-line
+/// delegation. A turn the provider refused for a rate limit ends the session so the
+/// engine moves the master to another pool account. Takes the session, the briefing to
+/// type first, the worker's channels and flags, and whether a later engine may take the
+/// pane over. Returns the problem that ended it, if any.
+fn live_serve(
+    mut session: TerminalSession,
+    framing: Option<&str>,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    leave: &AtomicBool,
+    keep: bool,
+) -> Option<String> {
+    session.follow_every_turn();
+    let _ = reports.send(Report::Ready {
+        group: session.process_group(),
+        pane: session.record().filter(|_| keep).cloned(),
+    });
+    if let Some(framing) = framing
+        && let Err(problem) = session.send_or_cancel(framing, cancel)
+    {
+        session.stop();
+        return (problem.0 != "launch_cancelled")
+            .then(|| with_code("The master could not be briefed", Some(&problem.0)));
+    }
+    let mut text = String::new();
+    let (mut limited, mut interrupted) = (false, false);
+    let mut problem = None;
+    while !cancel.load(Ordering::SeqCst) {
+        match orders.try_recv() {
+            Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Ok(Order::Turn(..)) | Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        match session.next_fact(EVENT_WAIT) {
+            Ok(Some(TranscriptEvent::TurnStarted)) => {
+                text.clear();
+                (limited, interrupted) = (false, false);
+                let _ = reports.send(Report::Turn {
+                    end: None,
+                    text: String::new(),
+                });
+            }
+            Ok(Some(TranscriptEvent::Text { text: said })) => {
+                if text.len() + said.len() <= LIVE_REPLY_BYTES_MAX {
+                    text.push_str(&said);
+                }
+            }
+            Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
+            Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
+            Ok(Some(TranscriptEvent::TurnFinished { success })) => {
+                let end = match (limited, interrupted, success) {
+                    (true, ..) => TurnEnd::RateLimited,
+                    (false, true, _) => TurnEnd::Interrupted,
+                    (false, false, true) => TurnEnd::Success,
+                    (false, false, false) => TurnEnd::Failed,
+                };
+                let _ = reports.send(Report::Turn {
+                    end: Some(end),
+                    text: std::mem::take(&mut text),
+                });
+                if limited {
+                    break;
+                }
+            }
+            Ok(Some(TranscriptEvent::ToolUse { .. } | TranscriptEvent::Waiting) | None) => {}
+            Err(closed) => {
+                problem = Some(with_code(PROCESS_CLOSED, Some(&closed.0)));
+                break;
+            }
+        }
+    }
+    assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
+    if problem.is_none() && keep && leave.load(Ordering::SeqCst) {
+        session.leave();
+    } else {
+        session.stop();
+    }
+    problem
 }
 
 enum Next {
@@ -3011,6 +3625,7 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const LIVE_REPLY_BYTES_MAX: usize = 64 * 1024;
 const NOTE_PROMPT_BYTES_MAX: usize = 80;
 const NOTE_RESULT_BYTES_MAX: usize = 300;
 const NOTE_PROBLEM_BYTES_MAX: usize = 200;

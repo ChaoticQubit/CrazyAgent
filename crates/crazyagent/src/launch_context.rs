@@ -234,7 +234,28 @@ impl AgentContext {
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
     /// is not plain or an approved server already uses the name.
-    pub fn with_team_tool(mut self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
+    pub fn with_team_tool(self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
+        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop)
+    }
+
+    /// Adds the engine's own MCP server that gives a live team master with tools on its team
+    /// tools, answered by the engine at once through the mailbox folder. Input: the absolute
+    /// canonical engine executable and the absolute mailbox in the master's private temporary
+    /// folder. Output: the context, or a plain code as for [`Self::with_team_tool`].
+    pub fn with_live_team_tool(
+        self,
+        executable: &Path,
+        mailbox: &Path,
+    ) -> Result<Self, LaunchError> {
+        self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)
+    }
+
+    fn with_team_server(
+        mut self,
+        executable: &Path,
+        subcommand: &str,
+        drop: &Path,
+    ) -> Result<Self, LaunchError> {
         let plain = |path: &Path| {
             path.is_absolute()
                 .then(|| path.to_str())
@@ -258,7 +279,7 @@ impl AgentContext {
             name: name.into(),
             spec: ServerSpec::Stdio {
                 command,
-                args: vec![crate::team::tool::SERVER_COMMAND.into(), drop],
+                args: vec![subcommand.into(), drop],
             },
             secrets: Vec::new(),
         });
