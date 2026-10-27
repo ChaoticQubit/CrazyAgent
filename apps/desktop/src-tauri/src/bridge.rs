@@ -33,6 +33,7 @@ pub mod project_setup;
 mod queue;
 mod team;
 pub mod terminal;
+mod usage;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};

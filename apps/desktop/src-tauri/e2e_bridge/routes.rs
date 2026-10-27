@@ -1396,6 +1396,39 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.restart_agent(id)?; call.await }.await;
             routed(result)
         }
+        "desktop_usage_report" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                since_ms: Option<i64>,
+                offset_minutes: i32,
+            }
+            let Args { since_ms, offset_minutes } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_report(since_ms, offset_minutes)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_usage_refresh" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_refresh()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_usage_set_reset" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                account: String,
+                window_kind: String,
+                at_ms: Option<i64>,
+            }
+            let Args { account, window_kind, at_ms } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_set_reset(account, window_kind, at_ms)?; call.await }.await;
+            routed(result)
+        }
         "desktop_changes" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

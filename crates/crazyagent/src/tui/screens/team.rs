@@ -419,11 +419,11 @@ impl Team {
             ),
             Line::default(),
         ];
-        lines.extend(wrap(&edge.text, limit).into_iter().map(Line::raw));
+        lines.extend(wrap(&plain(&edge.text), limit).into_iter().map(Line::raw));
         lines.push(Line::default());
         lines.push(styled("Reply", Role::Muted, theme));
         match &edge.reply {
-            Some(reply) => lines.extend(wrap(reply, limit).into_iter().map(Line::raw)),
+            Some(reply) => lines.extend(wrap(&plain(reply), limit).into_iter().map(Line::raw)),
             None => lines.push(styled("No reply yet.", Role::Muted, theme)),
         }
         Some(lines)
@@ -718,28 +718,33 @@ fn account_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
     }
 }
 
+/// One tree row's text after its prefix. A master or agent row leads with its
+/// status glyph, then its label and status word; a task row leads with its
+/// status glyph, then the agent it went to and its title. The row is cut from
+/// the right with an ellipsis, so the glyph always shows. Inputs: the row, the
+/// graph and the context. Output: the line.
 fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
-    let state = |node: &GraphNode| match node.status {
-        Some(status) => {
-            let kind = agent_status(status);
-            let word = node
-                .status_label
-                .clone()
-                .unwrap_or_else(|| status.label().to_owned());
-            Span::styled(
-                format!("  {} {word}", glyphs.status(kind)),
-                theme.style(kind.role()),
-            )
-        }
-        None => Span::raw(""),
-    };
     match &row.body {
-        Body::Master(node) | Body::Agent(node) => Line::from(vec![
-            Span::raw(graph.nodes[*node].label.clone()),
-            state(&graph.nodes[*node]),
-        ]),
+        Body::Master(node) | Body::Agent(node) => {
+            let node = &graph.nodes[*node];
+            match node.status {
+                Some(status) => {
+                    let kind = agent_status(status);
+                    let word = node
+                        .status_label
+                        .clone()
+                        .unwrap_or_else(|| status.label().to_owned());
+                    Line::from(vec![
+                        Span::styled(glyphs.status(kind), theme.style(kind.role())),
+                        Span::raw(format!(" {}", node.label)),
+                        Span::styled(format!("  {word}"), theme.style(kind.role())),
+                    ])
+                }
+                None => Line::raw(node.label.clone()),
+            }
+        }
         Body::Group { node, count } => Line::from(vec![
             Span::styled(graph.nodes[*node].label.clone(), theme.heading),
             Span::styled(format!(" ({count})"), theme.muted),
@@ -759,12 +764,7 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             let (kind, _) = edge_status(edge.state);
             Line::from(vec![
                 Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                Span::raw(format!(
-                    " {} {} {}  ",
-                    label(graph, &edge.from),
-                    glyphs.right,
-                    label(graph, &edge.to)
-                )),
+                Span::raw(format!(" {}  ", label(graph, &edge.to))),
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
@@ -839,12 +839,25 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
 }
 
+/// Task text safe to draw in a terminal cell grid: tabs become spaces and
+/// other control characters but newlines are dropped, so nothing moves the
+/// cursor or overlaps. Input: the text. Output: the cleaned text.
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|character| if character == '\t' { ' ' } else { character })
+        .filter(|character| *character == '\n' || !character.is_control())
+        .collect()
+}
+
+/// The one-line title of a task: its first non-blank line, cleaned by
+/// `plain`, with whitespace runs read as one space. Input: the task text.
+/// Output: the title, or "Untitled task" for blank text.
 fn title(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
+    plain(text)
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .find(|line| !line.is_empty())
-        .unwrap_or("Untitled task")
-        .to_owned()
+        .unwrap_or_else(|| "Untitled task".to_owned())
 }
 
 /// The body rectangle the shell gives screens, from the window size.
