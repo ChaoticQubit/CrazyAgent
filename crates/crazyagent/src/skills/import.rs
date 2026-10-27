@@ -1,6 +1,6 @@
 use super::{SkillInfo, one_line};
 use crate::engine::EngineError;
-use crate::plugins::skill_folder::{self, IMPORTED};
+use crate::plugins::skill_folder::{self, IMPORTED, PlannedFile};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -137,10 +137,27 @@ fn digest(folder: &Path) -> Option<[u8; 32]> {
         if read > skill_folder::BYTES_MAX {
             return None;
         }
-        hash.update(relative.as_bytes());
-        hash.update([0]);
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(&bytes);
+        feed(&mut hash, &relative, &bytes);
+    }
+    Some(hash.finalize().into())
+}
+
+fn feed(hash: &mut Sha256, relative: &str, bytes: &[u8]) {
+    hash.update(relative.as_bytes());
+    hash.update([0]);
+    hash.update((bytes.len() as u64).to_le_bytes());
+    hash.update(bytes);
+}
+
+fn planned_digest(planned: &[PlannedFile]) -> Option<[u8; 32]> {
+    let mut files: Vec<(&str, &PlannedFile)> = planned
+        .iter()
+        .map(|file| Some((file.relative.to_str()?, file)))
+        .collect::<Option<_>>()?;
+    files.sort_by(|left, right| left.0.cmp(right.0));
+    let mut hash = Sha256::new();
+    for (relative, file) in files {
+        feed(&mut hash, relative, &skill_folder::read_planned(file).ok()?);
     }
     Some(hash.finalize().into())
 }
@@ -150,15 +167,12 @@ fn candidate(
     folder: &Path,
     name: &str,
     added: &[SkillInfo],
-    scratch: &Path,
 ) -> Result<Option<ImportCandidate>, EngineError> {
     let shown = folder
         .to_str()
         .ok_or_else(|| error("skill_import_home_unknown"))?
         .to_owned();
-    let random = crate::engine::owner::random_id()?;
-    let trial = scratch.join(format!(".scan-{}", &random[..24]));
-    let found = match skill_folder::copy_with(folder, &trial, &IMPORTED) {
+    Ok(match skill_folder::check_with(folder, &IMPORTED) {
         Err("skill_missing_skill_md") => None,
         Err(code) => Some(ImportCandidate {
             from,
@@ -167,12 +181,12 @@ fn candidate(
             line: String::new(),
             state: ImportState::Unusable { code: code.into() },
         }),
-        Ok(meta) => {
+        Ok((meta, planned)) => {
             let state = match added.iter().find(|skill| skill.name == meta.name) {
                 None => ImportState::New,
                 Some(skill) => {
-                    let same = digest(&trial)
-                        .is_some_and(|copied| digest(Path::new(&skill.folder)) == Some(copied));
+                    let same = planned_digest(&planned)
+                        .is_some_and(|checked| digest(Path::new(&skill.folder)) == Some(checked));
                     if same {
                         ImportState::Added {
                             id: skill.id.clone(),
@@ -192,22 +206,15 @@ fn candidate(
                 state,
             })
         }
-    };
-    if let Err(problem) = std::fs::remove_dir_all(&trial)
-        && problem.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(error("plugin_store_unavailable"));
-    }
-    Ok(found)
+    })
 }
 
 /// Finds the skills in the owner's `~/.claude/skills` and `~/.codex/skills` folders: each
-/// folder holding SKILL.md, skipping dot folders. Each one is copied under the import rules
-/// into a private scratch folder and removed again, so the state says exactly what an
-/// import would do; the source folders are only read. Inputs: the owner's home, the app's
-/// skills and an existing private scratch folder. Output: what fits one reply, and the rest
-/// as a count.
-pub fn scan(home: &Path, added: &[SkillInfo], scratch: &Path) -> Result<ImportList, EngineError> {
+/// folder holding SKILL.md, skipping dot folders. Each one is checked in place under the
+/// import rules, so the state says exactly what an import would do; nothing is written and
+/// the source folders are only read. Inputs: the owner's home and the app's skills. Output:
+/// what fits one reply, and the rest as a count.
+pub fn scan(home: &Path, added: &[SkillInfo]) -> Result<ImportList, EngineError> {
     if !home.is_absolute() || home.to_str().is_none() {
         return Err(error("skill_import_home_unknown"));
     }
@@ -219,7 +226,7 @@ pub fn scan(home: &Path, added: &[SkillInfo], scratch: &Path) -> Result<ImportLi
             if !std::fs::metadata(&folder).is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            if let Some(found) = candidate(from, &folder, &name, added, scratch)? {
+            if let Some(found) = candidate(from, &folder, &name, added)? {
                 all.push(found);
             }
         }
@@ -308,9 +315,7 @@ mod tests {
     fn a_scan_lists_both_skills_folders_with_each_state_and_changes_nothing() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
-        let scratch = root.path().join("scratch");
         let store = root.path().join("store");
-        private_folder(&scratch);
         private_folder(&store);
         let claude = home.join(".claude/skills");
         let codex = home.join(".codex/skills");
@@ -347,8 +352,9 @@ mod tests {
             stored(&store, &kept, "skill-graph"),
         ];
         let before = tree(&home);
+        let everything = tree(root.path());
 
-        let list = scan(&home, &added, &scratch).unwrap();
+        let list = scan(&home, &added).unwrap();
         let rows: Vec<(ImportFrom, &str, &str, &ImportState)> = list
             .found
             .iter()
@@ -416,13 +422,17 @@ mod tests {
         );
         assert_eq!(list.more, 0);
         assert_eq!(tree(&home), before, "the owner's folders are only read");
-        assert!(fs::read_dir(&scratch).unwrap().next().is_none());
+        assert_eq!(
+            tree(root.path()),
+            everything,
+            "a scan writes nothing anywhere"
+        );
 
         let empty = root.path().join("empty-home");
         fs::create_dir(&empty).unwrap();
-        assert_eq!(scan(&empty, &added, &scratch).unwrap().found, vec![]);
+        assert_eq!(scan(&empty, &added).unwrap().found, vec![]);
         assert_eq!(
-            scan(Path::new("relative"), &added, &scratch).unwrap_err().0,
+            scan(Path::new("relative"), &added).unwrap_err().0,
             "skill_import_home_unknown"
         );
     }
@@ -431,15 +441,13 @@ mod tests {
     fn a_scan_with_more_skills_than_one_reply_counts_the_rest() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
-        let scratch = root.path().join("scratch");
-        private_folder(&scratch);
         let claude = home.join(".claude/skills");
         let description = "d".repeat(900);
         for index in 0..200 {
             let name = format!("skill-{index:03}");
             skill(&claude.join(&name), &name, &description);
         }
-        let list = scan(&home, &[], &scratch).unwrap();
+        let list = scan(&home, &[]).unwrap();
         assert!(!list.found.is_empty());
         assert_eq!(list.found.len() + list.more as usize, 200);
         assert!(list.more > 0);

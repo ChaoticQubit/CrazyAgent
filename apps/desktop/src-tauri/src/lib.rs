@@ -1694,7 +1694,7 @@ async fn desktop_skill_import_scan(
     state: State<'_, NativeState>,
 ) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.skill_import_scan().await
+    read(&state).await?.skill_import_scan().await
 }
 
 #[tauri::command]

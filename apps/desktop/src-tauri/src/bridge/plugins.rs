@@ -94,10 +94,10 @@ impl NativeBridge {
     /// Looks for skills in the owner's Claude Code and Codex skills folders, only when the
     /// owner opens Import my skills. Output: each skill found with its state.
     pub async fn skill_import_scan(
-        &mut self,
+        &self,
     ) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
         self.plugins_ready()?;
-        self.controller()?
+        self.reader()?
             .skill_import_scan()
             .await
             .map_err(plugin_failure)
