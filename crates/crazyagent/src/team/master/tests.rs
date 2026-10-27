@@ -624,6 +624,30 @@ fn chat(connection: &Connection, author: crate::team::MessageAuthor, text: &str)
     id
 }
 
+/// Sends one owner chat message of the project through the owner's team Message path,
+/// which records it as an owner turn. Inputs: the connection and the text. Output: the
+/// message id.
+fn typed_turn(connection: &Connection, text: &str) -> i64 {
+    let tx = connection.unchecked_transaction().unwrap();
+    let action = crate::team::TeamAction::Message {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        text: text.into(),
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &ModelAccess::default(), &action).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    let id = tx
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
 #[test]
 fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
     use crate::team::MessageAuthor;
@@ -642,7 +666,7 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
     );
     assert_eq!(text(&answers[0]), (NO_MASTER, true));
 
-    let before = chat(&fixture.connection, MessageAuthor::Owner, "Yes, ship it.");
+    let before = typed_turn(&fixture.connection, "Yes, ship it.");
     fixture.live(Some(MASTER));
     let answers = serve_while(
         &mut fixture,
@@ -666,7 +690,8 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
         MessageAuthor::Master,
         "The owner said yes.",
     );
-    let owner = chat(&fixture.connection, MessageAuthor::Owner, "Yes, Friday.");
+    let unrecorded = chat(&fixture.connection, MessageAuthor::Owner, "Yes, Friday.");
+    let owner = typed_turn(&fixture.connection, "Yes, Friday.");
     let record = |id: u64, question: u64, turn: i64| {
         tool_call(
             id,
@@ -682,10 +707,12 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
             record(4, 1, own),
             record(5, 9, owner),
             record(6, 1, owner + 100),
+            record(9, 1, unrecorded),
         ],
     );
     assert_eq!(text(&answers[0]), (TURN_REFUSED, true));
     assert_eq!(text(&answers[1]), (TURN_REFUSED, true));
+    assert_eq!(text(&answers[4]), (TURN_REFUSED, true));
     assert_eq!(
         text(&answers[2]),
         (
@@ -737,7 +764,7 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
         .connection
         .query_row("SELECT COUNT(*) FROM team_messages", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(messages, 3);
+    assert_eq!(messages, 4);
     let page = std::fs::read_to_string(
         folder
             .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
