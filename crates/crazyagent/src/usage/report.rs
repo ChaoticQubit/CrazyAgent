@@ -147,7 +147,8 @@ fn harness_name(id: &str) -> String {
 }
 
 /// Flags the rows whose key ran a harness without a reader in the range, newest harness
-/// first, and adds a row for each such key that counted no tokens, after the counted rows.
+/// first, and adds a row for each such key the top rows left out, after them, with the key's
+/// full count, so a key outside the top rows never shows as zero when it counted tokens.
 /// Inputs: the store, the rows, the grouping column, the project or none, the range start.
 /// Output: the rows, at most `2 * ROWS_MAX`.
 fn flag_unreported(
@@ -180,13 +181,19 @@ fn flag_unreported(
                     .get_or_insert_with(|| harness_name(&harness));
                 row.last_ms = row.last_ms.max(last_ms);
             }
-            None if room => rows.push(UsageRow {
-                key,
-                tokens: Tokens::default(),
-                runs: 0,
-                last_ms,
-                not_reported_by: Some(harness_name(&harness)),
-            }),
+            None if room => {
+                let mut row =
+                    full_count(db, column, project, since_ms, &key)?.unwrap_or_else(|| UsageRow {
+                        key,
+                        tokens: Tokens::default(),
+                        runs: 0,
+                        last_ms,
+                        not_reported_by: None,
+                    });
+                row.not_reported_by = Some(harness_name(&harness));
+                row.last_ms = row.last_ms.max(last_ms);
+                rows.push(row);
+            }
             None => {}
         }
     }
@@ -197,6 +204,21 @@ fn flag_unreported(
             .all(|row| row.not_reported_by.is_some())
     );
     Ok(rows)
+}
+
+/// The full count of one key in the range, read for a flagged key the top rows left out.
+/// Inputs: the store, the grouping column, the project or none, the range start and the key.
+/// Output: the key's row, or none when it counted no tokens in the range.
+fn full_count(
+    db: &Connection,
+    column: &str,
+    project: Option<&str>,
+    since_ms: i64,
+    key: &str,
+) -> Result<Option<UsageRow>, EngineError> {
+    let mut found = rows(db, column, true, project, since_ms, Some(key))?;
+    assert!(found.len() <= 1 && found.iter().all(|row| row.key == key));
+    Ok(found.pop())
 }
 
 /// The names of the harnesses without a reader that ran in the range, sorted, at most
@@ -248,13 +270,14 @@ fn rows(
     unattributed: bool,
     project: Option<&str>,
     since_ms: i64,
+    key: Option<&str>,
 ) -> Result<Vec<UsageRow>, EngineError> {
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
                 COUNT(DISTINCT agent||'/'||session),MAX(hour_ms)
              FROM usage_tokens WHERE hour_ms>=?1 AND (?3 OR {column}<>'')
-                AND (?4 IS NULL OR project=?4)
+                AND (?4 IS NULL OR project=?4) AND (?5 IS NULL OR {column}=?5)
              GROUP BY {column}
              ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) DESC, {column}
              LIMIT ?2"
@@ -262,7 +285,7 @@ fn rows(
         .map_err(storage)?;
     statement
         .query_map(
-            params![since_ms, ROWS_MAX as i64, unattributed, project],
+            params![since_ms, ROWS_MAX as i64, unattributed, project, key],
             |row| {
                 Ok(UsageRow {
                     key: row.get(0)?,
@@ -427,16 +450,16 @@ pub fn report(
         runs,
         projects: flag_unreported(
             db,
-            rows(db, "project", true, project, since)?,
+            rows(db, "project", true, project, since, None)?,
             "project",
             project,
             since,
         )?,
-        pools: rows(db, "pool", false, project, since)?,
-        accounts: rows(db, "account", true, project, since)?,
+        pools: rows(db, "pool", false, project, since, None)?,
+        accounts: rows(db, "account", true, project, since, None)?,
         agents: flag_unreported(
             db,
-            rows(db, "agent", false, project, since)?,
+            rows(db, "agent", false, project, since, None)?,
             "agent",
             project,
             since,
