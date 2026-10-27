@@ -1820,10 +1820,16 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert_eq!(sets[0].files, 1);
 
     let input = Connection::open(fixture.base.join("engine.db")).unwrap();
-    super::super::master::master_input(&input, host.as_ref(), &project, "[owner] status please")
-        .unwrap();
+    super::super::master::master_input(
+        &input,
+        host.as_ref(),
+        None,
+        &project,
+        "[owner] status please",
+    )
+    .unwrap();
     assert_eq!(
-        super::super::master::master_input(&input, host.as_ref(), &project, "[owner] again"),
+        super::super::master::master_input(&input, host.as_ref(), None, &project, "[owner] again"),
         Err(super::super::master::InputRefused::Busy),
         "engine input waits while its last input settles"
     );

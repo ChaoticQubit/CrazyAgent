@@ -1696,12 +1696,17 @@ impl TeamRuntime {
             &format!("{heard}{speaker} {text}"),
             super::master::INPUT_TEXT_MAX,
         );
-        let state =
-            match super::master::master_input(&self.connection, host.as_ref(), project, &typed) {
-                Ok(()) => "answered",
-                Err(super::master::InputRefused::Invalid) => "failed",
-                Err(_) => return Ok(()),
-            };
+        let state = match super::master::master_input(
+            &self.connection,
+            host.as_ref(),
+            self.agents.as_deref().map(Agents::typing),
+            project,
+            &typed,
+        ) {
+            Ok(()) => "answered",
+            Err(super::master::InputRefused::Invalid) => "failed",
+            Err(_) => return Ok(()),
+        };
         self.connection
             .execute(
                 "UPDATE team_messages SET state=?2 WHERE id=?1",

@@ -155,7 +155,14 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
     host.spawn(&AgentId::team(MASTER).unwrap(), &command)
         .unwrap();
     let input = |text: &str, now: i64| {
-        master_input_at(&fixture.connection, host.as_ref(), &project, text, now)
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            text,
+            now,
+        )
     };
 
     assert_eq!(input("hello", NOW), Err(InputRefused::NoMaster));
@@ -253,6 +260,134 @@ fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothi
     fixture.set("live=0");
     owner_typed(&fixture.connection, MASTER, b"off", NOW + 4).unwrap();
     assert_eq!(fixture.draft(), (Some(NOW + 2), false));
+}
+
+#[test]
+fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
+        .unwrap();
+    fixture.live(Some(MASTER));
+    let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
+    let input = |text: &str, now: i64| {
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            Some(&typing),
+            &project,
+            text,
+            now,
+        )
+    };
+
+    typing.record(MASTER, b"x", NOW - 5_000);
+    assert_eq!(input("hello", NOW), Err(InputRefused::OwnerTyping));
+    assert_eq!(
+        input("hello", NOW + 60_000),
+        Err(InputRefused::OwnerTyping),
+        "an unsent draft kept in memory holds engine input back"
+    );
+    typing.record(MASTER, b"\x1b[D", NOW - 1);
+    assert_eq!(input("hello", NOW + 60_000), Err(InputRefused::OwnerTyping));
+    typing.record(MASTER, b"\r", NOW);
+    assert_eq!(input("hello", NOW + 5_000), Err(InputRefused::OwnerTyping));
+    assert_eq!(
+        fixture.draft(),
+        (None, false),
+        "the refusals came from memory alone"
+    );
+    typing.record(MASTER + 1, b"other", NOW + 10_000);
+    assert_eq!(
+        input("hello", NOW + 11_000),
+        Ok(()),
+        "keys typed into another agent do not hold the master back"
+    );
+    let seen = typed_until(&typed, b"hello\x1b[201~\r");
+    assert!(seen.ends_with(b"hello\x1b[201~\r"), "{seen:?}");
+}
+
+#[test]
+fn owner_typing_reaches_the_database_for_the_live_master_at_most_once_a_second() {
+    let fixture = Fixture::new();
+    fixture.live(Some(MASTER));
+    fixture
+        .connection
+        .execute_batch(
+            "CREATE TABLE typing_writes(at INTEGER);
+             CREATE TRIGGER typing_written AFTER UPDATE OF typed_ms ON team_live_masters
+             BEGIN INSERT INTO typing_writes(at) VALUES (NEW.typed_ms); END;",
+        )
+        .unwrap();
+    let writes = || -> i64 {
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM typing_writes", [], |row| row.get(0))
+            .unwrap()
+    };
+    let landed = |wanted: (Option<i64>, bool)| {
+        let until = Instant::now() + Duration::from_secs(10);
+        while fixture.draft() != wanted && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        fixture.draft() == wanted
+    };
+    let typing = OwnerTyping::new(fixture.base.join("engine.db"));
+
+    fixture.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let recording = Instant::now();
+    typing.record(MASTER, b"plan", NOW);
+    assert!(
+        recording.elapsed() < Duration::from_millis(100),
+        "recording a key never waits on the database"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    fixture.connection.execute_batch("COMMIT").unwrap();
+    assert!(
+        landed((Some(NOW), true)),
+        "the signal is written once the lock is free"
+    );
+
+    let typing_started = Instant::now();
+    for step in 1..=60 {
+        typing.record(MASTER, b"\x1b[D", NOW + step);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    typing.record(MASTER, b"\r", NOW + 61);
+    assert!(landed((Some(NOW + 61), false)));
+    let elapsed = typing_started.elapsed();
+    let written = writes();
+    assert!(
+        written >= 2 && written - 1 <= elapsed.as_secs() as i64 + 2,
+        "62 keys over {elapsed:?} made {written} writes"
+    );
+
+    fixture.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    typing.record(MASTER + 1, b"other", NOW + 70);
+    std::thread::sleep(Duration::from_millis(1_500));
+    let closing = Instant::now();
+    drop(typing);
+    assert!(
+        closing.elapsed() < Duration::from_secs(2),
+        "keys for an agent that is not the live master never wait on the database lock"
+    );
+    fixture.connection.execute_batch("COMMIT").unwrap();
+    assert_eq!(fixture.draft(), (Some(NOW + 61), false));
 }
 
 fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> Vec<Value> {
