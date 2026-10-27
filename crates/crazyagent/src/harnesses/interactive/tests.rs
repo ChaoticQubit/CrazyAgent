@@ -97,6 +97,7 @@ fn run(key_file: Option<&Path>) -> Run<'_> {
     Run {
         session_id: SESSION,
         key_file,
+        resume: false,
     }
 }
 
@@ -320,6 +321,53 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
     assert!(built.env.contains(&("PATH".to_owned(), tools_on_path())));
 }
 
+/// A resumed Codex or Claude Code app continues the conversation it recorded under the
+/// stored id, Codex through its `resume` subcommand after its settings and Claude Code
+/// through `--resume` in place of a new `--session-id`, with the same transcript source.
+#[test]
+fn a_resumed_harness_continues_the_conversation_it_recorded() {
+    let case = Case::new();
+    let resumed = Run {
+        resume: true,
+        ..run(None)
+    };
+    let codex = case.request("codex", case.subscription(), false);
+    let fresh = command(&codex, None, &run(None)).unwrap();
+    let again = command(&codex, None, &resumed).unwrap();
+    let mut argv = fresh.argv.clone();
+    argv.extend(strings(&["resume", SESSION]));
+    assert_eq!(again.argv, argv);
+    assert_eq!(again.transcript, fresh.transcript);
+    assert_eq!(again.env, fresh.env);
+    let unknown = Run {
+        session_id: "not-a-uuid",
+        ..resumed
+    };
+    assert_eq!(
+        command(&codex, None, &unknown).unwrap_err().0,
+        "launch_session_id_invalid"
+    );
+
+    let claude = case.request("claude-code", case.subscription(), false);
+    let fresh = command(&claude, None, &run(None)).unwrap();
+    let again = command(&claude, None, &resumed).unwrap();
+    let at = fresh
+        .argv
+        .iter()
+        .position(|argument| argument == "--session-id")
+        .unwrap();
+    let mut argv = fresh.argv.clone();
+    argv[at] = "--resume".into();
+    assert_eq!(argv[at + 1], SESSION);
+    assert_eq!(again.argv, argv);
+    assert!(!again.argv.iter().any(|argument| argument == "--session-id"));
+    assert_eq!(again.transcript, fresh.transcript);
+    assert_eq!(
+        command(&claude, None, &unknown).unwrap_err().0,
+        "launch_session_id_invalid"
+    );
+}
+
 #[test]
 fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment() {
     let case = Case::new();
@@ -483,6 +531,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
     let bad = Run {
         session_id: "not-a-uuid",
         key_file: None,
+        resume: false,
     };
     assert_eq!(
         command(&request, None, &bad).unwrap_err().0,

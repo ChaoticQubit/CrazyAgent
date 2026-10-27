@@ -15,11 +15,12 @@ use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost}
 use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
-use crate::harnesses::terminal_session::{AgentSession, PaneRecord, TerminalSession};
+use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
+use crate::master_sessions::ResumePlan;
 use crate::project_setup::{StoredSetup, load_setup};
-use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
@@ -116,7 +117,8 @@ struct Grant {
 
 /// Everything about an agent's harness launch except the account, so a managed agent
 /// can start a fresh process for each turn. `pane` is the terminal host and the agent's
-/// pane name when the agent runs its interactive app in a pane.
+/// pane name when the agent runs its interactive app in a pane; `resume` the harness
+/// conversation a live master continues instead of starting one.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -128,6 +130,7 @@ struct Plan {
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
     live: bool,
+    resume: Option<Resume>,
 }
 
 impl Plan {
@@ -245,6 +248,7 @@ enum Report {
         end: Option<TurnEnd>,
         text: String,
     },
+    Conversation(Resume),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +282,8 @@ struct Worker {
     live: bool,
     briefed: bool,
     turn_started: Option<i64>,
+    session: Option<String>,
+    seed: Option<String>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -302,6 +308,7 @@ pub struct TeamRuntime {
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
+    resuming: Option<(i64, Resume)>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -409,6 +416,7 @@ impl TeamRuntime {
             events: None,
             watch: super::events::Watch::default(),
             live_starts: BTreeMap::new(),
+            resuming: None,
         })
     }
 
@@ -593,6 +601,11 @@ impl TeamRuntime {
             live,
             managed,
         };
+        let session = if live {
+            crate::master_sessions::live_session(&self.connection, &project)?
+        } else {
+            None
+        };
         self.run_worker(
             id,
             Launch::Adopt(Box::new(adoption)),
@@ -605,6 +618,7 @@ impl TeamRuntime {
                 hosted,
             },
         )?;
+        self.workers.get_mut(&id).expect("adopted worker").session = session;
         Ok(Ok(()))
     }
 
@@ -1539,12 +1553,17 @@ impl TeamRuntime {
         {
             return Ok(());
         }
+        let session = crate::master_sessions::live_session(&self.connection, project)?;
         if let Some(id) = self.master(project) {
             let worker = self.workers.get_mut(&id).expect("master worker exists");
-            if worker.live != on {
+            let moved = on && worker.live && worker.session != session;
+            if worker.live != on || moved {
                 if worker.busy.is_none() {
                     worker.stopping = true;
                     let _ = worker.orders.send(Order::Stop);
+                }
+                if moved {
+                    self.live_starts.remove(project);
                 }
                 return Ok(());
             }
@@ -1572,12 +1591,15 @@ impl TeamRuntime {
         }
         starts.push(Instant::now());
         let started = match self.account_for(access, project, &harness, paused) {
-            Ok(account) => self.start_master(stored, &harness, &account)?,
+            Ok(account) => self.start_master(stored, &harness, &account, session.as_deref())?,
             Err(reason) => Err(reason),
         };
         match started {
-            Ok(id) => {
+            Ok((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
+                if let Some(note) = note {
+                    self.note(project, &note)?;
+                }
                 self.brief(stored, access, id)
             }
             Err(reason) => self.live_off(
@@ -1587,25 +1609,75 @@ impl TeamRuntime {
         }
     }
 
-    /// Starts a project's live master in the worktree and home of the project's last master
-    /// on this harness when one is known, so one master worktree serves the project across
-    /// starts and nothing it left there is lost; one that cannot start there starts fresh.
-    /// Takes the setup, the master harness and the account. Returns the agent id, or the
-    /// plain reason it could not start.
+    /// Starts a project's live master for its live session. A session whose harness
+    /// conversation can continue starts the master that kept it, in its worktree and home,
+    /// resuming that conversation; otherwise the project's last master on this harness
+    /// starts again in its own worktree and home, so nothing it left there is lost, or a new
+    /// one starts. A session with earlier turns that cannot continue gets a fresh harness
+    /// conversation seeded with them, and its note says so. Takes the setup, the master
+    /// harness, the account and the live session. Returns the agent id with the note to
+    /// show, or the plain reason it could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
         harness: &str,
         account: &TeamAccount,
-    ) -> Result<Result<i64, String>, EngineError> {
+        session: Option<&str>,
+    ) -> Result<Result<(i64, Option<String>), String>, EngineError> {
+        let project = &stored.project_id;
         let tools = stored.team.master_tools;
+        let launch = launch_harness(harness).unwrap_or(harness);
+        let session = session.map(SessionId::new).transpose().map_err(error)?;
+        let mut plan = match &session {
+            Some(session) => crate::master_sessions::resume_harness(
+                &self.connection,
+                project,
+                session,
+                launch,
+                account.connection.as_str(),
+            )?,
+            None => ResumePlan::New,
+        };
+        if let ResumePlan::Resume {
+            agent,
+            conversation,
+            record,
+        } = &plan
+        {
+            let resume = Resume {
+                id: conversation.clone(),
+                record: record.clone(),
+            };
+            self.resuming = Some((*agent, resume));
+            let revived =
+                self.revive(stored, *agent, AgentRole::Master, harness, tools, account)?;
+            self.resuming = None;
+            if let Ok(id) = revived {
+                assert_eq!(id, *agent);
+                return Ok(Ok(self.seat_session(id, session.as_ref(), None)));
+            }
+            let session = session.as_ref().expect("only a session resumes");
+            let kept =
+                super::master::session_conversation(&self.connection, project, session.as_str())?;
+            plan = crate::master_sessions::fresh_harness(
+                &self.connection,
+                project,
+                session,
+                kept.as_ref(),
+            )?;
+        }
+        let seeded = match plan {
+            ResumePlan::Fresh { seed, note } => Some((seed, note)),
+            ResumePlan::New => None,
+            ResumePlan::Resume { .. } => unreachable!("a resume plan was handled above"),
+        };
         let last: Option<i64> = self
             .connection
             .query_row(
                 "SELECT a.id FROM team_agents a JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
                  WHERE a.project=?1 AND a.role='master' AND a.harness=?2 AND a.status IN ('stopped','failed')
                  ORDER BY a.id DESC LIMIT 1",
-                params![stored.project_id.as_str(), harness],
+                params![project.as_str(), harness],
                 |row| row.get(0),
             )
             .optional()
@@ -1614,9 +1686,31 @@ impl TeamRuntime {
             && let Ok(id) = self.revive(stored, last, AgentRole::Master, harness, tools, account)?
         {
             assert_eq!(id, last);
-            return Ok(Ok(id));
+            return Ok(Ok(self.seat_session(id, session.as_ref(), seeded)));
         }
-        self.spawn(stored, AgentRole::Master, harness, tools, account)
+        Ok(self
+            .spawn(stored, AgentRole::Master, harness, tools, account)?
+            .map(|id| self.seat_session(id, session.as_ref(), seeded)))
+    }
+
+    /// Binds a live master that just started to the session it runs, with the seed its
+    /// briefing carries for a fresh conversation of a session with earlier turns. Takes the
+    /// agent, the session and the seed with its note. Returns the agent and the note.
+    fn seat_session(
+        &mut self,
+        id: i64,
+        session: Option<&SessionId>,
+        seeded: Option<(String, String)>,
+    ) -> (i64, Option<String>) {
+        let worker = self
+            .workers
+            .get_mut(&id)
+            .expect("a started master has a worker");
+        assert!(worker.live && !worker.briefed);
+        worker.session = session.map(|session| session.as_str().to_owned());
+        let (seed, note) = seeded.unzip();
+        worker.seed = seed;
+        (id, note)
     }
 
     /// Turns a project's live master off after it could not keep running, so the runtime
@@ -1664,12 +1758,16 @@ impl TeamRuntime {
         } else {
             None
         };
-        let framing = live_framing(
+        let mut framing = live_framing(
             stored,
             self.workers[&id].team_tool,
             &super::available_harnesses(access, &stored.project_id),
         );
         let worker = self.workers.get_mut(&id).expect("master worker exists");
+        if let Some(seed) = worker.seed.take() {
+            framing.push_str("\n\n");
+            framing.push_str(&seed);
+        }
         if worker.orders.send(Order::Turn(framing, grant)).is_ok() {
             worker.briefed = true;
         }
@@ -2290,8 +2388,20 @@ impl TeamRuntime {
         kept: Option<[String; 3]>,
     ) -> Result<Result<i64, String>, EngineError> {
         let prepared = self.prepare(stored, id, role, harness, tools, account, kept.is_some());
+        let resume = self
+            .resuming
+            .take()
+            .filter(|(agent, _)| *agent == id)
+            .map(|(_, resume)| resume);
         let (root, plan, mode) = match prepared {
-            Ok(prepared) => prepared,
+            Ok((root, plan, mode)) => (
+                root,
+                Plan {
+                    resume: resume.filter(|_| plan.live),
+                    ..plan
+                },
+                mode,
+            ),
             Err(problem) => {
                 self.connection
                     .execute(
@@ -2450,6 +2560,8 @@ impl TeamRuntime {
                 live,
                 briefed,
                 turn_started: None,
+                session: None,
+                seed: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -2490,7 +2602,8 @@ impl TeamRuntime {
             return Err("project folder overlaps engine state".into());
         }
         let agent = self.agent_folder(id);
-        let own_home = agent.join("home");
+        let own_home = agent_home(&self.state, id);
+        assert_eq!(own_home.parent(), Some(agent.as_path()));
         let tmp = agent.join("tmp");
         for directory in [&agent, &own_home, &tmp] {
             private_directory(directory)
@@ -2604,6 +2717,7 @@ impl TeamRuntime {
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
             live,
+            resume: None,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -2839,6 +2953,28 @@ impl TeamRuntime {
             }
             Report::Usage { tokens } => {
                 self.count_usage(id, tokens);
+                Ok(false)
+            }
+            Report::Conversation(resume) => {
+                let worker = &self.workers[&id];
+                if worker.live
+                    && let Some(session) = &worker.session
+                {
+                    let kept = super::master::SessionConversation {
+                        agent: id,
+                        harness: launch_harness(&worker.harness)
+                            .unwrap_or(&worker.harness)
+                            .to_owned(),
+                        connection: worker.connection.as_str().to_owned(),
+                        resume,
+                    };
+                    super::master::keep_conversation(
+                        &self.connection,
+                        &worker.project,
+                        session,
+                        &kept,
+                    )?;
+                }
                 Ok(false)
             }
             Report::Finished { text, end, cause } => {
@@ -3618,9 +3754,10 @@ fn live(
     let Next::Turn(framing, grant) = next_turn(orders, cancel, None) else {
         return None;
     };
+    let resume = plan.resume.as_ref();
     let (started, held, keep) = match mode {
         Mode::Kept { account, context } => (
-            AgentSession::start(plan.request(account), context, plan.pane.clone()),
+            AgentSession::start_resuming(plan.request(account), context, plan.pane.clone(), resume),
             None,
             true,
         ),
@@ -3641,7 +3778,7 @@ fn live(
                 };
             let request = plan.request(AccountBinding::Subscription { home });
             (
-                AgentSession::start(request, context, plan.pane.clone()),
+                AgentSession::start_resuming(request, context, plan.pane.clone(), resume),
                 Some((credential, profile)),
                 true,
             )
@@ -3650,7 +3787,7 @@ fn live(
     let problem = match started {
         Ok(AgentSession::Terminal(session)) => live_serve(
             *session,
-            Some(&framing),
+            resume.is_none().then_some(framing.as_str()),
             orders,
             reports,
             cancel,
@@ -3771,7 +3908,11 @@ fn live_serve(
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
     let mut problem = None;
+    let mut named = false;
     while !cancel.load(Ordering::SeqCst) {
+        if !named && let Some(conversation) = session.conversation() {
+            named = reports.send(Report::Conversation(conversation)).is_ok();
+        }
         match orders.try_recv() {
             Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             Ok(Order::Turn(..)) | Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -4327,6 +4468,16 @@ impl Drop for TeamService {
     fn drop(&mut self) {
         self.halt();
     }
+}
+
+/// The private home one team agent's harness runs with as its CLAUDE_CONFIG_DIR or
+/// CODEX_HOME. Inputs: the team state folder (`<runtime>/team`) and the agent id.
+/// Output: `<state>/agents/agent-<id>/home`.
+pub fn agent_home(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("agents")
+        .join(format!("agent-{id}"))
+        .join("home")
 }
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,

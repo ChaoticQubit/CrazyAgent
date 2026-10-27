@@ -23,7 +23,7 @@ pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE
 pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
-pub use transport::process::PROCESS_CODES;
+pub use transport::process::{AgentInstructions, PROCESS_CODES};
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{

@@ -14,6 +14,10 @@ const APP_HEADING: &str = "\n## App instructions\n\n";
 const PROJECT_HEADING: &str = "\n## Project instructions\n\n";
 pub const PROCESS_BYTES_MAX: usize =
     TITLE.len() + APP_HEADING.len() + PROJECT_HEADING.len() + 2 * (TEXT_BYTES_MAX + 1);
+pub const SKILLS_FILE: &str = "crazyagent-skills";
+pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
+const SKILLS_RECORD_BYTES_MAX: usize =
+    SKILLS_RECORD_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 1);
 
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
@@ -224,10 +228,10 @@ pub fn prepare(
     }
     real_folder(home)?;
     let name = harness.instruction_file();
-    remove_entry(&home.join(name))?;
     if text.is_empty() {
-        return Ok(());
+        return remove_entry(&home.join(name));
     }
+    remove_folder(&home.join(name))?;
     write_whole(home, name, text.as_bytes())
 }
 
@@ -250,6 +254,115 @@ pub fn import_global(home: &Path) -> Result<String, AgentHomeError> {
     }
 }
 
+/// What one agent was given at its last launch, read back from its private home: the
+/// text of its harness's instruction file and the names of the skills installed for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Received {
+    pub text: String,
+    pub skills: Vec<String>,
+}
+
+/// Records the names of the skills one launch installed in the agent's home, one per
+/// line, replacing the last launch's list and any entry planted under its name.
+/// Inputs: the agent's 0700 home and the names. Output: unit, or `agent_skills_invalid`
+/// for more than `SKILLS_RECORD_MAX` names or a name outside the skill name rule.
+pub fn record_skills(home: &Path, names: &[&str]) -> Result<(), AgentHomeError> {
+    if names.len() > SKILLS_RECORD_MAX || !names.iter().all(|name| skill_name(name)) {
+        return Err(failure("agent_skills_invalid"));
+    }
+    if !home.is_absolute() {
+        return Err(failure("agent_home_invalid"));
+    }
+    real_folder(home)?;
+    remove_folder(&home.join(SKILLS_FILE))?;
+    let record: String = names.iter().map(|name| format!("{name}\n")).collect();
+    assert!(record.len() <= SKILLS_RECORD_BYTES_MAX);
+    write_whole(home, SKILLS_FILE, record.as_bytes())
+}
+
+/// Reads back what one agent's last launch left in its home: its harness's instruction
+/// file and the recorded skill names. Each must be a plain single-link file of this user,
+/// opened without following a link or waiting on a pipe, and within its bound.
+/// Inputs: the agent's home and its harness. Output: none before the first launch made
+/// the home, else the text (empty when none was given) and the names, or a plain code.
+pub fn received(home: &Path, harness: Harness) -> Result<Option<Received>, AgentHomeError> {
+    match fs::symlink_metadata(home) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(failure("agent_instructions_unreadable")),
+        Ok(metadata) if !metadata.is_dir() => return Err(failure("agent_instructions_unsafe")),
+        Ok(_) => {}
+    }
+    let text = read_home_file(&home.join(harness.instruction_file()), PROCESS_BYTES_MAX)?;
+    let record = read_home_file(&home.join(SKILLS_FILE), SKILLS_RECORD_BYTES_MAX)?;
+    let skills: Vec<String> = record.split_terminator('\n').map(str::to_owned).collect();
+    if skills.len() > SKILLS_RECORD_MAX {
+        return Err(failure("agent_instructions_too_large"));
+    }
+    if !skills.iter().all(|name| skill_name(name)) {
+        return Err(failure("agent_instructions_invalid"));
+    }
+    Ok(Some(Received { text, skills }))
+}
+
+fn skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= crate::plugins::skill_folder::NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+fn read_home_file(path: &Path, bytes_max: usize) -> Result<String, AgentHomeError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
+    #[cfg(not(unix))]
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(failure("agent_instructions_unsafe"));
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(String::new());
+        }
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) => {
+            return Err(failure("agent_instructions_unsafe"));
+        }
+        Err(_) => return Err(failure("agent_instructions_unreadable")),
+    };
+    let held = file
+        .metadata()
+        .map_err(|_| failure("agent_instructions_unreadable"))?;
+    if !held.is_file() || !sole_own_link(&held) {
+        return Err(failure("agent_instructions_unsafe"));
+    }
+    let mut bytes = Vec::new();
+    file.take(bytes_max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| failure("agent_instructions_unreadable"))?;
+    if bytes.len() > bytes_max {
+        return Err(failure("agent_instructions_too_large"));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) if !text.contains('\0') => Ok(text),
+        _ => Err(failure("agent_instructions_invalid")),
+    }
+}
+
+#[cfg(unix)]
+fn sole_own_link(metadata: &fs::Metadata) -> bool {
+    metadata.nlink() == 1 && metadata.uid() == rustix::process::geteuid().as_raw()
+}
+
+#[cfg(not(unix))]
+fn sole_own_link(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
 fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     let metadata = fs::symlink_metadata(folder).map_err(|_| failure("process_folder_missing"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -266,6 +379,16 @@ fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
         Ok(_) => fs::remove_file(path),
     };
     removed.map_err(|_| failure("agent_home_unwritable"))
+}
+
+/// Clears a directory planted where a file is about to be written; a file or link stays
+/// for the rename to replace atomically, so a reader never finds the name missing.
+/// Input: the entry path. Output: unit, or `agent_home_unwritable`.
+fn remove_folder(path: &Path) -> Result<(), AgentHomeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => remove_entry(path),
+        _ => Ok(()),
+    }
 }
 
 fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {

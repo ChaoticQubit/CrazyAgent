@@ -1,6 +1,6 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{OwnerClient, PROCESS_CODES};
+use crazyagent::engine::owner::{AgentInstructions, OwnerClient, PROCESS_CODES};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
@@ -83,6 +83,25 @@ impl NativeBridge {
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client.default_process().await.map_err(process_error)
+        }))
+    }
+
+    /// Reads what one team agent received at its last launch, run without the bridge lock.
+    /// Inputs: the project id and the agent id, or none for the project's newest master.
+    /// Output: the read-only view.
+    pub fn agent_instructions(
+        &self,
+        project_id: String,
+        agent: Option<i64>,
+    ) -> Result<Unlocked<AgentInstructions>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .agent_instructions(project, agent)
+                .await
+                .map_err(process_error)
         }))
     }
 }
