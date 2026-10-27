@@ -3050,9 +3050,7 @@ impl TeamRuntime {
                 );
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
-                    let worker = self.workers.get_mut(&id).expect("worker exists");
-                    worker.stopping = true;
-                    let _ = worker.orders.send(Order::Stop);
+                    self.workers.get_mut(&id).expect("worker exists").stopping = true;
                 }
                 let turn = super::master::turn_ended(
                     &self.connection,

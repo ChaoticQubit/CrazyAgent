@@ -915,6 +915,10 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "team_agent_not_found" => {
             "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead."
         }
+        "team_conversation_full" => {
+            "Too many of your messages are waiting for the master. Send more once it has answered."
+        }
+        "team_task_invalid" => "The task is empty or too long.",
         "changes_unavailable" => return format!("{NOT_READY} {NOT_READY_LINE}"),
         other => return plain_problem(other),
     }

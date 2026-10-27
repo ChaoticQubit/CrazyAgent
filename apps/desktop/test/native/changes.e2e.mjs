@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -37,6 +38,35 @@ function ownerRepo(folder) {
   git(folder, "add", ".");
   git(folder, ...OWNER, "commit", "-q", "-m", "Start the seed shop");
   return git(folder, "rev-parse", "HEAD");
+}
+
+/** Puts the agent on the project's team the way the engine keeps a stopped sub-agent: its
+ * row and the worktree it works in, so Ask agent to update can hand it the resolve work.
+ * Inputs: the engine root, the project, the owner repository and the worktree. Output: the
+ * agent's engine id. */
+function teamAgent(runtime, project, repo, worktree) {
+  const store = new DatabaseSync(join(runtime, "engine.db"));
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    const now = Date.now();
+    const id = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?,'sub','codex',1,'stopped',?,?)").run(project, now, now).lastInsertRowid);
+    assert.ok(Number.isSafeInteger(id) && id > 0, "the engine numbers the team agent");
+    store.prepare("INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?,?,?,?,?)").run(id, project, repo, worktree, join(repo, ".git", "worktrees", AGENT));
+    return String(id);
+  } finally {
+    store.close();
+  }
+}
+
+/** Counts the resolve tasks the engine pinned to a team agent. Inputs: the engine root and
+ * the agent's id. Output: the count. */
+function resolveTasks(runtime, agent) {
+  const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+  try {
+    return Number(store.prepare("SELECT count(*) AS n FROM team_task_pins WHERE agent=?").get(Number(agent)).n);
+  } finally {
+    store.close();
+  }
 }
 
 /** Makes the edits a sub-agent leaves in its worktree: a text change with markup in it, a
@@ -105,8 +135,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 
     assert.ok(existsSync(join(runtime, "engine.db")), "the engine keeps its database in its root");
     git(repo, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+    const member = teamAgent(runtime, project, repo, worktree);
     const recordTurn = (prompt) => {
-      const result = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, AGENT, AGENT_LABEL, repo, worktree, join(repo, ".git", "worktrees", AGENT), prompt], { encoding: "utf8", env: { ...env } });
+      const result = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, member, AGENT_LABEL, repo, worktree, join(repo, ".git", "worktrees", AGENT), prompt], { encoding: "utf8", env: { ...env } });
       assert.equal(result.status, 0, `the engine records the agent's turn: ${result.stderr}`);
       const id = result.stdout.trim();
       assert.match(id, /^[0-9a-f]{32}$/, "an edited worktree makes a change set");
@@ -205,6 +236,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("changes-updating");
         assert.match(readFileSync(join(worktree, "README.md"), "utf8"), /^<<<<<<< /m, "the update merged the owner's branch into the agent's worktree with conflict markers");
         assert.equal(head(), daily, "an update never moves the owner's branch");
+        assert.equal(resolveTasks(runtime, member), 1, "the update handed its agent one pinned resolve task");
         for (const command of ["desktop_change_diff", "desktop_discard_change", "desktop_restore_change", "desktop_accept_change", "desktop_update_change"]) {
           assert.ok(log.calls.includes(command), `the page called ${command}`);
         }
