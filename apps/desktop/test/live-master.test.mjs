@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import "./load-source.mjs";
+import { bundle, withPage } from "./browser.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
 const live = await import("../src/screens/project/live-master.tsx");
@@ -29,9 +30,112 @@ test("only Codex and Claude Code masters run live, and the master is found by ki
   assert.equal(live.masterNode([node("a", "agent", "team-2"), node("m", "master", "team-1")]).id, "m");
 });
 
-test("the terminal hands Shift+Enter to the key override before xterm reads it", () => {
-  const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*const override = keyOverride\(event\);/);
+test("the project page mounts the master area on one line, where the team activity strip wraps it", () => {
   const page = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
   assert.match(page, /active === "conversation" && <MasterArea data=\{data\} \/>/);
+});
+
+const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
+
+async function inPage(check) {
+  return withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    return check({ evaluate, send });
+  });
+}
+
+test("with the live master on, its terminal fills the master area with no close button and no message box", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountView("running")');
+    return evaluate("Fixture.shown()");
+  });
+  assert.equal(seen.live, true);
+  assert.equal(seen.terminalLabel, "Master terminal");
+  assert.equal(seen.close, false, "the master's terminal is the area itself; nothing closes it");
+  assert.equal(seen.conversation, false);
+  assert.equal(seen.composer, false);
+  assert.ok(seen.buttons.includes("Earlier conversation"), seen.buttons.join(", "));
+  assert.ok(seen.area.bottom - seen.area.top >= seen.viewport - 200 - 1, JSON.stringify(seen.area));
+  assert.ok(seen.area.bottom - seen.box.bottom <= 1, `terminal reaches the bottom of the area: ${JSON.stringify(seen)}`);
+  assert.ok(seen.box.height >= (seen.area.bottom - seen.area.top) - 60, `terminal takes the area below its head: ${JSON.stringify(seen)}`);
+});
+
+test("before the master's terminal opens, and when the engine can't start it, the area says so and keeps the earlier conversation reachable", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const states = {};
+    for (const state of ["starting", "waiting", "not_ready"]) {
+      await evaluate(`Fixture.mountView(${JSON.stringify(state)})`);
+      states[state] = await evaluate("Fixture.shown()");
+    }
+    await evaluate('Fixture.mountView("refused", "team_master_pool_empty")');
+    states.refused = await evaluate("Fixture.shown()");
+    return states;
+  });
+  assert.match(seen.starting.text, /Starting the master \(Codex\)\.\.\./);
+  assert.match(seen.waiting.text, /Waiting for the master's terminal\./);
+  assert.match(seen.not_ready.text, /Not ready yet: the live master terminal isn't in this build\./);
+  assert.match(seen.refused.text, /The master terminal couldn't start\. The engine refused\./);
+  assert.ok(seen.refused.buttons.includes("Try again"), seen.refused.buttons.join(", "));
+  for (const [state, view] of Object.entries(seen)) {
+    assert.equal(view.terminal, false, state);
+    assert.ok(view.buttons.includes("Earlier conversation"), state);
+  }
+});
+
+test("Earlier conversation opens the old engine-driven conversation read-only, and the live master comes back", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountView("running")');
+    const opened = await evaluate('Fixture.click("Earlier conversation")');
+    const earlier = await evaluate("Fixture.shown()");
+    const closed = await evaluate('Fixture.click("Back to the live master")');
+    return { opened, earlier, closed, back: await evaluate("Fixture.shown()") };
+  });
+  assert.equal(seen.opened, true);
+  assert.equal(seen.earlier.conversation, true);
+  assert.equal(seen.earlier.terminal, false);
+  assert.equal(seen.earlier.composer, false, "no message box: the old session is read-only");
+  assert.equal(seen.earlier.send, false);
+  assert.ok(!seen.earlier.buttons.some((text) => ["Send", "Send again", "Stop", "Conversation actions"].includes(text)), seen.earlier.buttons.join(", "));
+  assert.match(seen.earlier.text, /No earlier conversation/);
+  assert.equal(seen.closed, true);
+  assert.equal(seen.back.terminal, true);
+  assert.equal(seen.back.conversation, false);
+});
+
+test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountArea("rcli")');
+    const plan = await evaluate("Fixture.shown()");
+    await evaluate('Fixture.mountView("refused", "team_master_no_terminal")');
+    const engine = await evaluate("Fixture.shown()");
+    await evaluate("Fixture.mountArea(undefined)");
+    const loading = await evaluate("Fixture.shown()");
+    return { plan, engine, loading };
+  });
+  for (const [why, view] of Object.entries({ plan: seen.plan, engine: seen.engine })) {
+    assert.equal(view.live, false, why);
+    assert.equal(view.terminal, false, why);
+    assert.equal(view.conversation, true, why);
+    assert.equal(view.composer, true, `${why}: the conversation takes messages as today`);
+  }
+  assert.equal(seen.loading.conversation, false, "nothing is decided before the team plan is read");
+  assert.equal(seen.loading.live, false);
+  assert.match(seen.loading.text, /Loading the master\.\.\./);
+});
+
+test("in a real xterm, Shift+Enter types Ctrl+J once and Enter still types Enter", async () => {
+  const typed = await inPage(async ({ evaluate, send }) => {
+    await evaluate("Fixture.mountKeys()");
+    const press = async (modifiers) => {
+      for (const type of ["keyDown", "keyUp"]) {
+        await send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers, ...(type === "keyDown" ? { text: "\r" } : {}) });
+      }
+    };
+    await press(8);
+    await press(0);
+    await send("Input.insertText", { text: "a" });
+    return evaluate("Fixture.typedText()");
+  });
+  assert.deepEqual(typed, ["\n", "\r", "a"]);
 });

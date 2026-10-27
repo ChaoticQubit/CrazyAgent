@@ -1,5 +1,5 @@
 import { Channel } from "@tauri-apps/api/core";
-import type { ITerminalOptions } from "@xterm/xterm";
+import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
@@ -81,14 +81,27 @@ export function Composer({ node, live, onSend }: { node: GraphNode; live: boolea
   </form>;
 }
 
+/** Routes a terminal's keys to the agent: what xterm types, and Shift+Enter as one new line
+ * that xterm never also reads as Enter. Inputs: the terminal and the typing action. Output:
+ * the subscription for xterm's typed text. */
+export function typeKeys(terminal: Terminal, type: (data: string) => void): IDisposable {
+  const typed = terminal.onData(type);
+  terminal.attachCustomKeyEventHandler((event) => {
+    const override = keyOverride(event);
+    if (override.typed !== null) type(override.typed);
+    return override.xterm;
+  });
+  return typed;
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel. Closing it detaches
  * the view; the agent keeps running. Inputs: the graph node, a harness name lookup and the
- * close action. Output: the panel. */
+ * close action, when the panel can be closed. Output: the panel. */
 export function TerminalPanel({ node, harness, onClose }: {
   node: GraphNode;
   harness?: (id: string) => string;
-  onClose: () => void;
+  onClose?: () => void;
 }) {
   const screen = useRef<HTMLDivElement>(null);
   const prompt = useRef<((text: string) => boolean) | null>(null);
@@ -143,12 +156,7 @@ export function TerminalPanel({ node, harness, onClose }: {
       });
       const run = jobQueue(() => end(STOPPED_TYPING));
       const type = keyQueue(run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok");
-      const typed = terminal.onData((data) => { if (live) type(encodeTyped(data)); });
-      terminal.attachCustomKeyEventHandler((event) => {
-        const override = keyOverride(event);
-        if (live && override.typed !== null) type(encodeTyped(override.typed));
-        return override.xterm;
-      });
+      const typed = typeKeys(terminal, (data) => { if (live) type(encodeTyped(data)); });
       prompt.current = (text) => {
         if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();
@@ -207,7 +215,7 @@ export function TerminalPanel({ node, harness, onClose }: {
     <div className="tg-terminal-head">
       <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(nodeLine(node, harness))}</span>
       {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
-      <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />
+      {onClose && <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />}
     </div>
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
     {view.kind === "not_ready" && <NotReady what="Agent terminals" compact />}

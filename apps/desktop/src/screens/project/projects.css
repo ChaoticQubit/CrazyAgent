@@ -181,21 +181,8 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-paths li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .pj-paths .pj-mono { min-width: 0; overflow-wrap: anywhere; }
 
-.pj-master-live {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-  flex: 1;
-}
-
-.pj-master-live > .tg-terminal {
-  flex: 1;
-  min-height: 60vh;
-}
-
-.pj-master-earlier {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.pj-master-live { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; min-width: 0; }
+.pj-master-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.pj-master-live > .tg-terminal { flex: 1; min-height: 0; }
+.pj-master-live .tg-terminal-screen { min-height: 160px; }
+.pj-master-live > .pj-convo { flex: 1; height: auto; min-height: 0; }

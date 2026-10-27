@@ -49,9 +49,10 @@ export function TurnOpening({ turn, sent }: { turn: MasterTurn; sent: string | u
 }
 
 /** Conversation tab: the project's master conversation with replies as safe Markdown.
- * Input: the project data. Output: the thread and composer; it polls every two seconds
- * while a reply is still coming. */
-export function ConversationTab({ data }: { data: ProjectData }) {
+ * Inputs: the project data and whether the conversation is only read, as the one from
+ * before a live master. Output: the thread and, unless read-only, its actions and composer;
+ * it polls every two seconds while a reply is still coming. */
+export function ConversationTab({ data, readOnly = false }: { data: ProjectData; readOnly?: boolean }) {
   const [ticket, setTicket] = useState("");
   const [master, setMaster] = useState<MasterState>();
   const [turns, setTurns] = useState<MasterTurn[]>([]);
@@ -202,18 +203,20 @@ export function ConversationTab({ data }: { data: ProjectData }) {
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
 
   return <div className="pj-convo">
-    <div className="pj-convo-head">
+    {!readOnly && <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
         <Menu label="Conversation actions" items={[
           ...(active && !working ? [{ label: "End conversation", icon: "circle-stop" as const, onSelect: () => void end() }] : []),
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
-    </div>
+    </div>}
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     <div className="pj-thread" ref={thread} aria-live="polite">
-      {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">
-        Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>}
+      {turns.length === 0 && Object.keys(sent).length === 0 && (readOnly
+        ? <ProjectEmpty title="No earlier conversation">Messages sent to the master before it ran live stay here to read.</ProjectEmpty>
+        : <ProjectEmpty title="No messages yet">
+          Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>)}
       {turns.map((turn) => <div key={turn.id} className="pj-turn" data-testid="master-turn">
         <TurnOpening turn={turn} sent={sent[turn.id]} />
         {turn.reply ? <div className="pj-msg-master"><ProjectMark />
@@ -222,11 +225,12 @@ export function ConversationTab({ data }: { data: ProjectData }) {
         {taskLines(turn).map((line, index) => <p key={`task-${index}`} className="pj-small pj-muted" data-testid="master-task">{displayText(line)}</p>)}
         {changesLine(turn) !== null && <p className="pj-small pj-muted" data-testid="master-changes">{displayText(changesLine(turn) ?? "")}</p>}
         {accountLines(turn).map((line) => <p key={line} className="pj-small pj-muted" data-testid="master-account">{displayText(line)}</p>)}
-        {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
+        {!readOnly && again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}
       {Object.entries(sent).filter(([id]) => !turns.some((turn) => turn.id === id)).map(([id, message]) =>
         <div key={`pending-${id}`} className="pj-turn"><div className="pj-msg-owner"><p>{displayText(message)}</p></div><p className="pj-small pj-muted">{thinkingLine(sentAtByProject.get(data.id)?.[id], now)}</p></div>)}
     </div>
+    {!readOnly && <>
     {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
       <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=team`)}>Change master</button></div>}
     {noPool && <div className="pj-note warn" role="alert"><p>Pick a pool to start. The master replies once this project has one.</p>
@@ -246,5 +250,6 @@ export function ConversationTab({ data }: { data: ProjectData }) {
           <button type="submit" className="btn primary" disabled={!sendable} data-testid="send-master-message">{waiting ? "Thinking..." : "Send"}</button></span>
       </div>
     </form>
+    </>}
   </div>;
 }
