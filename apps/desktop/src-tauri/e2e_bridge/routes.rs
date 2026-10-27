@@ -1020,6 +1020,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.pool_summaries().await }.await;
             routed(result)
         }
+        "desktop_account_schedule" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.account_schedule().await }.await;
+            routed(result)
+        }
+        "desktop_set_account_schedule" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                change: crazyagent::scheduling::ScheduleChange,
+                generation: u64,
+            }
+            let Args { change, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.set_account_schedule(change, generation).await }.await;
+            routed(result)
+        }
         "desktop_account_catalog" => {
             let result: Result<_, BridgeError> = async { lock(state).await?.account_catalog().await }.await;
             routed(result)

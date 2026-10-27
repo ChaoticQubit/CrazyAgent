@@ -14,6 +14,7 @@ import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { SessionContext, useLoad } from "../../state";
+import { ProjectAccountOrder } from "../settings/account-choice";
 import { PluginsAndSkills } from "../settings/plugins";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -99,6 +100,7 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
       later laterLabel={NO_POOL.label} laterNote={NO_POOL.note} onChange={setChoice} />}
     {state.error && <p className="pj-error" role="alert">{state.error}</p>}
     <div><button type="button" className="btn primary" disabled={!(steps.assign || steps.record) || state.busy} onClick={() => void save()}>{state.busy ? "Saving..." : "Save pool"}</button></div>
+    {data.assigned && <ProjectAccountOrder project={data.id} pool={data.assigned.pool.id} />}
   </div>;
 }
 

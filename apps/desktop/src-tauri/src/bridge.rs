@@ -31,6 +31,7 @@ pub mod picker;
 mod plugins;
 pub mod project_setup;
 mod queue;
+mod scheduling;
 mod team;
 pub mod terminal;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
@@ -501,6 +502,7 @@ impl NativeBridge {
             OwnerMutation::Team { action } => {
                 ("team", Some(action.project().as_str().to_owned()), None)
             }
+            OwnerMutation::AccountSchedule { .. } => ("account_schedule", None, None),
             OwnerMutation::UpdateProjectSetup { project_id, .. } => (
                 "project_setup_update",
                 Some(project_id.as_str().to_owned()),
