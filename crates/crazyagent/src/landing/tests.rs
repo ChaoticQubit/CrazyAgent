@@ -1063,7 +1063,8 @@ fn agent_history_past_the_byte_path_depth_or_ignore_bounds_is_refused_and_change
         case.edit(".gitignore", "");
         case.edit("secret.env", "TOKEN=x\n");
     };
-    let cases: Vec<(&str, &str, Box<dyn Fn(&Case) + '_>, &str)> = vec![
+    type Setup<'a> = Box<dyn Fn(&Case) + 'a>;
+    let cases: Vec<(&str, &str, Setup<'_>, &str)> = vec![
         (
             "a committed blob past the byte bound",
             "",

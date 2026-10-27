@@ -43,15 +43,16 @@ async fn engine() -> (
 /// Runs git as a test owner would, with an empty home and no system config.
 /// Inputs: the home, the folder and the arguments.
 fn git(home: &Path, dir: &Path, args: &[&str]) {
-    let status = std::process::Command::new("/usr/bin/git")
-        .args(args)
-        .current_dir(dir)
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .status()
-        .unwrap();
+    let status = crazyagent::spawn_gate::status(
+        std::process::Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1"),
+    )
+    .unwrap();
     assert!(status.success(), "git {args:?} failed");
 }
 

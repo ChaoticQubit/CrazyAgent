@@ -927,7 +927,7 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
         project: project(),
         agent: Some(5),
     };
-    assert_eq!(asked(&mut shell), [codex.clone()]);
+    assert_eq!(asked(&mut shell), std::slice::from_ref(&codex));
     let screen = render(&mut shell).join("\n");
     assert!(screen.contains("Instructions: codex-1"), "{screen}");
     assert!(
@@ -976,7 +976,7 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
     };
     assert_eq!(
         asked(&mut shell),
-        [master.clone()],
+        std::slice::from_ref(&master),
         "the master card reads the newest master"
     );
     shell.arrive(received(&codex, Err("agent_instructions_unsafe")));
@@ -993,7 +993,7 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
     shell.key(Key::Char('i'));
     assert_eq!(
         asked(&mut shell),
-        [master.clone()],
+        std::slice::from_ref(&master),
         "i reads the card again"
     );
     shell.arrive(received(
@@ -1038,7 +1038,7 @@ fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
         project: project(),
         agent: Some(5),
     };
-    assert_eq!(asked(&mut shell), [codex.clone()]);
+    assert_eq!(asked(&mut shell), std::slice::from_ref(&codex));
     let text: String = (1..=80).map(|line| format!("RULE-{line:02}\n")).collect();
     shell.arrive(received(
         &codex,

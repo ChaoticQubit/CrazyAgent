@@ -272,6 +272,7 @@ fn no_launch_command_kind_carries_a_relay_token_or_a_provider_key() {
                 &Run {
                     session_id: &session,
                     key_file: Some(&key_file),
+                    resume: false,
                 },
             )
             .unwrap();
