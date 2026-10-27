@@ -12,6 +12,8 @@ mod flow;
 #[cfg(unix)]
 mod git;
 #[cfg(unix)]
+pub(crate) mod ide;
+#[cfg(unix)]
 mod owner;
 #[cfg(unix)]
 mod retire;

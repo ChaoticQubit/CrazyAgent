@@ -1,5 +1,8 @@
 import type * as vscode from "vscode";
+import { registerBaseContent } from "./base-content.js";
+import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
+import { registerChanges } from "./scm.js";
 import { registerTrust } from "./trust.js";
 
 /**
@@ -8,7 +11,7 @@ import { registerTrust } from "./trust.js";
  */
 export type Feature = (context: vscode.ExtensionContext, engine: Engine) => void;
 
-const features: Feature[] = [registerTrust];
+const features: Feature[] = [registerBaseContent, registerChanges, registerComments, registerTrust];
 
 /**
  * Starts every feature when the CrazyAgent engine launched this IDE server, which it

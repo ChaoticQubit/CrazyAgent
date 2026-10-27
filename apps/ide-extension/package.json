@@ -17,6 +17,92 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "crazyagent.changes.accept",
+        "title": "Accept",
+        "category": "CrazyAgent",
+        "icon": "$(check)"
+      },
+      {
+        "command": "crazyagent.changes.discard",
+        "title": "Discard",
+        "category": "CrazyAgent",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "crazyagent.changes.restore",
+        "title": "Restore",
+        "category": "CrazyAgent",
+        "icon": "$(history)"
+      },
+      {
+        "command": "crazyagent.changes.refresh",
+        "title": "Refresh changes",
+        "category": "CrazyAgent",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.comments.send",
+        "title": "Send to the agent",
+        "category": "CrazyAgent"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "crazyagent.changes.accept",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.discard",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.restore",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.refresh",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.comments.send",
+          "when": "false"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "crazyagent.comments.send",
+          "when": "commentController == crazyagent.comments",
+          "group": "inline"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "crazyagent.changes.refresh",
+          "when": "scmProvider == crazyagent",
+          "group": "navigation"
+        }
+      ],
+      "scm/resourceGroup/context": [
+        {
+          "command": "crazyagent.changes.accept",
+          "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.open$/",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.changes.discard",
+          "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.(open|unread|waiting)$/",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.changes.restore",
+          "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.restorable$/",
+          "group": "inline"
+        }
+      ]
+    },
     "themes": [
       {
         "label": "CrazyAgent Dark",

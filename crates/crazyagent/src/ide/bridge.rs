@@ -31,7 +31,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 5] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 9] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -43,6 +43,22 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 5] = [
     (
         "out/extension.js",
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
+    ),
+    (
+        "out/base-content.js",
+        include_bytes!("../../../../apps/ide-extension/out/base-content.js"),
+    ),
+    (
+        "out/comments.js",
+        include_bytes!("../../../../apps/ide-extension/out/comments.js"),
+    ),
+    (
+        "out/scm-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm-model.js"),
+    ),
+    (
+        "out/scm.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm.js"),
     ),
     (
         "out/trust.js",
@@ -60,6 +76,9 @@ const EVENTS_QUEUED: usize = 64;
 const WRITE_TIME: Duration = Duration::from_secs(10);
 const PATH_BYTES_MAX: usize = 4096;
 const TEXT_BYTES_MAX: usize = 16384;
+/// The most bytes one diff comment may hold, so with its file and line it fits one typed
+/// agent prompt and one team conversation message.
+pub(super) const COMMENT_BYTES_MAX: usize = 2048;
 const NAME_BYTES_MAX: usize = 128;
 const VERSION_BYTES_MAX: usize = 64;
 const CAPABILITY: &str = "capability";
@@ -89,11 +108,19 @@ pub enum IdeCall {
     #[serde(rename = "ide.change_diff")]
     ChangeDiff { id: ChangeSetId, page: u16 },
     #[serde(rename = "ide.base_blob")]
-    BaseBlob { id: ChangeSetId, path: String },
+    BaseBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
     #[serde(rename = "ide.accept")]
-    Accept { id: ChangeSetId, message: String },
+    Accept {
+        id: ChangeSetId,
+        head: String,
+        message: String,
+    },
     #[serde(rename = "ide.discard")]
-    Discard { id: ChangeSetId },
+    Discard { id: ChangeSetId, head: String },
     #[serde(rename = "ide.restore")]
     Restore { id: ChangeSetId },
     #[serde(rename = "ide.comment")]
@@ -174,8 +201,9 @@ pub enum IdeEvent {
 
 impl IdeRequest {
     /// Checks every argument's bounds before any handler runs: paths are relative, at most
-    /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX` and a
-    /// comment is not blank on a line from 1; extension ids are `publisher.name`.
+    /// `PATH_BYTES_MAX` bytes and free of NUL and `..`; texts fit `TEXT_BYTES_MAX`, a comment
+    /// fits `COMMENT_BYTES_MAX` and is not blank on a line from 1; extension ids are
+    /// `publisher.name`.
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
@@ -185,7 +213,7 @@ impl IdeRequest {
             } => {
                 relative(path)
                     && *line > 0
-                    && text.len() <= TEXT_BYTES_MAX
+                    && text.len() <= COMMENT_BYTES_MAX
                     && !text.trim().is_empty()
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
@@ -551,8 +579,8 @@ async fn answer(
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }
-        | IdeCall::Comment { .. }
-        | IdeCall::OwnerEdit { .. }
+        | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
+        IdeCall::OwnerEdit { .. }
         | IdeCall::Memories {}
         | IdeCall::MemoryDecide { .. }
         | IdeCall::Agents {}
@@ -562,6 +590,31 @@ async fn answer(
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
     Ok(IdeReply::Ok { data })
+}
+
+/// Answers a Changes call or a diff comment where the engine lands change sets; elsewhere
+/// it is unavailable. Inputs: the owner runtime, the project and the call. Output: the
+/// reply data.
+async fn change_call(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    call: IdeCall,
+) -> Result<serde_json::Value, EngineError> {
+    #[cfg(unix)]
+    {
+        let root = runtime.ide()?.root;
+        match call {
+            IdeCall::Comment { .. } => {
+                comments::answer(root, runtime.terminal().ok(), project.clone(), call).await
+            }
+            call => changes::answer(root, project.clone(), call).await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (runtime, project, call);
+        Err(failure("ide_request_unavailable"))
+    }
 }
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
@@ -743,5 +796,9 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
     Ok(())
 }
 
+#[cfg(unix)]
+mod changes;
+#[cfg(unix)]
+mod comments;
 #[cfg(all(test, unix))]
 mod tests;
