@@ -416,7 +416,7 @@ impl GeneralEdit {
             .into_iter()
             .filter(|platform| self.platforms.contains(platform))
             .collect();
-        let research: Vec<ResearchKind> = ResearchKind::ALL
+        let research: Vec<ResearchKind> = ResearchKind::CHOICES
             .into_iter()
             .filter(|kind| self.research.contains(kind))
             .collect();
@@ -1009,7 +1009,7 @@ impl ProjectScreen {
         items.sort_by_key(|item| {
             (
                 match item.kind {
-                    ContextKind::Brief => 0,
+                    ContextKind::Brief | ContextKind::Plan => 0,
                     ContextKind::Research => 1,
                     ContextKind::Document => 2,
                 },
@@ -1783,6 +1783,9 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Char('d') => match item {
+                Some(item) if item.kind == ContextKind::Plan => {
+                    self.problem = Some("The roadmap and release process can't be deleted.".into());
+                }
                 Some(item) if item.kind != ContextKind::Brief => {
                     self.confirm_delete = Some(item.path);
                 }

@@ -120,6 +120,7 @@ pub enum ResearchKind {
     DesignResearch,
     FrontEndDesign,
     TechStackResearch,
+    RoadmapPlanning,
 }
 
 impl ResearchKind {
@@ -129,6 +130,16 @@ impl ResearchKind {
         Self::DesignResearch,
         Self::FrontEndDesign,
         Self::TechStackResearch,
+    ];
+    /// Every kind a setup may hold: the research toggles, then the roadmap planning toggle,
+    /// whose job waits until the project's other jobs end.
+    pub const CHOICES: [ResearchKind; 6] = [
+        Self::MarketResearch,
+        Self::CompetitorResearch,
+        Self::DesignResearch,
+        Self::FrontEndDesign,
+        Self::TechStackResearch,
+        Self::RoadmapPlanning,
     ];
 
     /// Names the research toggle in plain language for every client.
@@ -141,6 +152,7 @@ impl ResearchKind {
             Self::DesignResearch => "Design research",
             Self::FrontEndDesign => "Front-end design",
             Self::TechStackResearch => "Tech stack research",
+            Self::RoadmapPlanning => "Roadmap and release process",
         }
     }
 
@@ -154,6 +166,7 @@ impl ResearchKind {
             Self::DesignResearch => "design_research",
             Self::FrontEndDesign => "front_end_design",
             Self::TechStackResearch => "tech_stack_research",
+            Self::RoadmapPlanning => "roadmap_planning",
         }
     }
 
@@ -161,14 +174,17 @@ impl ResearchKind {
     /// Takes the snake case name.
     /// Returns the kind, or none for an unknown name.
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.name() == name)
+        Self::CHOICES.into_iter().find(|kind| kind.name() == name)
     }
 
     /// Gives the report path of this kind relative to the project folder.
     /// Takes the research kind.
-    /// Returns `context/research/<kind>.md`.
+    /// Returns `context/research/<kind>.md`, or the roadmap beside the brief for planning.
     pub fn report_path(self) -> String {
-        format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name())
+        match self {
+            Self::RoadmapPlanning => crate::planning::ROADMAP.to_owned(),
+            _ => format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name()),
+        }
     }
 }
 
@@ -352,7 +368,7 @@ impl ProjectSetup {
             team.validate()?;
         }
         assert!(self.platforms.len() <= Platform::ALL.len());
-        assert!(self.research.len() <= ResearchKind::ALL.len());
+        assert!(self.research.len() <= ResearchKind::CHOICES.len());
         Ok(())
     }
 }
@@ -574,6 +590,7 @@ pub enum ContextKind {
     Brief,
     Document,
     Research,
+    Plan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -860,7 +877,7 @@ pub fn catalog(
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");
     }
-    if research.len() > ResearchKind::ALL.len() {
+    if research.len() > ResearchKind::CHOICES.len() {
         return Err("research_duplicate");
     }
     let catalog = ProjectCatalog {
@@ -1477,8 +1494,8 @@ fn sync_pool_status(tx: &Transaction<'_>, config: &EffectiveConfig) -> Result<()
     Ok(())
 }
 
-/// Atomically claims the oldest queued research job for one runner.
-/// Takes a connection, the configuration, a claimer identity and the time.
+/// Atomically claims the oldest queued research job for one runner; a roadmap planning job
+/// waits until its project's other jobs end. Takes a connection, the configuration, a claimer identity and the time.
 /// Returns the claimed job marked Running, or none when nothing is claimable.
 pub fn claim_research_job(
     connection: &mut Connection,
@@ -1493,10 +1510,14 @@ pub fn claim_research_job(
     sync_pool_status(&tx, config)?;
     let id: Option<i64> = tx
         .query_row(
-            "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
-            started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
-            WHERE id=(SELECT id FROM research_jobs WHERE status='queued' ORDER BY id LIMIT 1)
-            AND status='queued' RETURNING id",
+            &format!(
+                "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
+                started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
+                WHERE id=(SELECT id FROM research_jobs WHERE status='queued' AND {}
+                ORDER BY id LIMIT 1)
+                AND status='queued' RETURNING id",
+                crate::planning::AFTER_RESEARCH
+            ),
             params![claimer, now],
             |row| row.get(0),
         )
@@ -1884,7 +1905,7 @@ fn delete_context(
         return Ok(rejected("project_setup_missing"));
     };
     let kind = context_kind(path).ok_or_else(|| failure("context_path_invalid"))?;
-    if kind == ContextKind::Brief {
+    if matches!(kind, ContextKind::Brief | ContextKind::Plan) {
         return Ok(rejected("context_item_protected"));
     }
     let (directory, name) = path
@@ -2596,6 +2617,9 @@ fn context_kind(path: &str) -> Option<ContextKind> {
     if rest == "brief.md" {
         return Some(ContextKind::Brief);
     }
+    if [crate::planning::ROADMAP, crate::planning::RELEASE_PROCESS].contains(&path) {
+        return Some(ContextKind::Plan);
+    }
     let (directory, name) = rest.split_once('/')?;
     if name.is_empty()
         || name.starts_with('.')
@@ -2709,6 +2733,9 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
         Ok(())
     };
     push(format!("{CONTEXT_DIRECTORY}/brief.md"), ContextKind::Brief)?;
+    for path in [crate::planning::ROADMAP, crate::planning::RELEASE_PROCESS] {
+        push(path.to_owned(), ContextKind::Plan)?;
+    }
     for (directory, kind) in [
         ("documents", ContextKind::Document),
         ("research", ContextKind::Research),

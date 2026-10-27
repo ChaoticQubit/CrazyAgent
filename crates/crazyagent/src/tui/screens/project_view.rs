@@ -1514,6 +1514,10 @@ fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row)
     match item.kind {
         ContextKind::Brief => (Row::default(), Row::of("Project brief", look.muted)),
         ContextKind::Document => (Row::default(), Row::of("You added it", look.muted)),
+        ContextKind::Plan => (
+            Row::default(),
+            Row::of("Planned after research", look.muted),
+        ),
         ContextKind::Research => {
             let label = research_kind(&item.path).map_or("Research", |kind| kind.label());
             match screen.job_for(&item.path) {
