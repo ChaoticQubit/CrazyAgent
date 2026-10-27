@@ -83,6 +83,8 @@ enum Pending {
     Attach {
         agent: AgentId,
         located: Option<Lines>,
+        history: usize,
+        view: bool,
         reply: SyncSender<Result<TerminalStream, HostError>>,
     },
 }
@@ -653,6 +655,8 @@ fn viewer(
     agent: AgentId,
     located_lines: &[Vec<u8>],
     capture: &[Vec<u8>],
+    limit: usize,
+    view: bool,
 ) -> Result<TerminalStream, HostError> {
     let Located {
         pane,
@@ -663,14 +667,18 @@ fn viewer(
         modes,
         history,
     } = located(located_lines).ok_or_else(|| failure("terminal_command_failed"))?;
+    let history = history.min(limit);
+    assert!(capture.len() <= history + usize::from(rows));
     let (earlier, screen) = capture.split_at(history.min(capture.len()));
-    state.viewers.retain(|viewer| viewer.feed.open());
-    if state.viewers.len() >= VIEWERS_MAX {
-        return Err(failure("terminal_viewers_full"));
-    }
     let (feed, receiver) = buffer();
-    state.viewers.push(Viewer { pane, window, feed });
-    assert!(state.viewers.len() <= VIEWERS_MAX);
+    if view {
+        state.viewers.retain(|viewer| viewer.feed.open());
+        if state.viewers.len() >= VIEWERS_MAX {
+            return Err(failure("terminal_viewers_full"));
+        }
+        state.viewers.push(Viewer { pane, window, feed });
+        assert!(state.viewers.len() <= VIEWERS_MAX);
+    }
     Ok(TerminalStream {
         agent,
         cols,
@@ -704,11 +712,15 @@ fn finish(state: &mut State, answer: Answer) {
         Pending::Attach {
             agent,
             located: None,
+            history,
+            view,
             reply,
         } => match answer {
             Ok(lines) => state.pending.push_front(Pending::Attach {
                 agent,
                 located: Some(lines),
+                history,
+                view,
                 reply,
             }),
             Err(error) => {
@@ -718,9 +730,12 @@ fn finish(state: &mut State, answer: Answer) {
         Pending::Attach {
             agent,
             located: Some(lines),
+            history,
+            view,
             reply,
         } => {
-            let opened = answer.and_then(|screen| viewer(state, agent, &lines, &screen));
+            let opened =
+                answer.and_then(|screen| viewer(state, agent, &lines, &screen, history, view));
             let _ = reply.send(opened);
         }
     }
@@ -749,8 +764,9 @@ fn capture_rows(state: &State) -> Option<usize> {
     match state.pending.front()? {
         Pending::Attach {
             located: Some(lines),
+            history,
             ..
-        } => located(lines).map(|found| found.history + usize::from(found.rows)),
+        } => located(lines).map(|found| found.history.min(*history) + usize::from(found.rows)),
         _ => None,
     }
 }
@@ -835,6 +851,43 @@ fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
     Ok(agents)
 }
 
+impl Tmux {
+    /// Reads an agent terminal's screen and at most `history` rows above it in one tmux
+    /// command block, and opens a viewer on its live output when `view` is set.
+    /// Takes the name, the history row limit and whether to view. Returns the stream.
+    fn capture(
+        &self,
+        agent: &AgentId,
+        history: usize,
+        view: bool,
+    ) -> Result<TerminalStream, HostError> {
+        assert!(history <= HISTORY_ROWS_MAX);
+        let control = self.live_control()?;
+        let target = target(agent);
+        let start = if history == 0 {
+            "0".to_owned()
+        } else {
+            format!("-{history}")
+        };
+        let line = format!(
+            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}}' ; capture-pane {} -S {start} -t {target}",
+            control.capture
+        );
+        let (reply, answer) = sync_channel(1);
+        control.send(
+            &line,
+            Pending::Attach {
+                agent: agent.clone(),
+                located: None,
+                history,
+                view,
+                reply,
+            },
+        )?;
+        control.wait(&answer)
+    }
+}
+
 impl Host for Tmux {
     fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
         let line = spawn_line(agent, command)?;
@@ -867,22 +920,11 @@ impl Host for Tmux {
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
-        let control = self.live_control()?;
-        let target = target(agent);
-        let line = format!(
-            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}}' ; capture-pane {} -S -{HISTORY_ROWS_MAX} -t {target}",
-            control.capture
-        );
-        let (reply, answer) = sync_channel(1);
-        control.send(
-            &line,
-            Pending::Attach {
-                agent: agent.clone(),
-                located: None,
-                reply,
-            },
-        )?;
-        control.wait(&answer)
+        self.capture(agent, HISTORY_ROWS_MAX, true)
+    }
+
+    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
+        self.capture(agent, 0, false).map(|stream| stream.screen)
     }
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {

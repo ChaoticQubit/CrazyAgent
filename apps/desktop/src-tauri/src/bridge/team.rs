@@ -1,6 +1,7 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
+use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -30,6 +31,44 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(status)
+    }
+
+    /// Reads the app's own wake rule and every project's newest owner notifications.
+    /// Returns the bounded view with the unseen count for the badge, or a plain failure code.
+    pub async fn team_events(&mut self) -> Result<AppEvents, BridgeError> {
+        let events = self
+            .controller()?
+            .team_events()
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(events)
+    }
+
+    /// Sets or clears the wake rule of one level: the app default, a project or one agent.
+    /// Takes the level, the rule or none to fall back to the level above, and the generation.
+    /// Returns the actual commit receipt; a cap over the bound is a plain rejection.
+    pub async fn team_wake_rule(
+        &mut self,
+        target: RuleTarget,
+        rule: Option<WakeRule>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.team_action(TeamAction::Wake { target, rule }, generation)
+            .await
+    }
+
+    /// Marks a project's owner notifications up to one id as seen, so they leave the badge.
+    /// Takes the project id, the newest seen notification id and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_seen(
+        &mut self,
+        id: &str,
+        upto: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::Seen { project_id, upto }, generation)
+            .await
     }
 
     /// Sends one message from the owner to the project's master agent.
@@ -175,10 +214,12 @@ impl NativeBridge {
         action
             .validate()
             .map_err(|_| failure("team_action_invalid"))?;
-        self.controller()?
-            .team_status(action.project().clone())
-            .await
-            .map_err(|e| read_failure(&e.0))?;
+        if let Some(project_id) = action.project() {
+            self.controller()?
+                .team_status(project_id.clone())
+                .await
+                .map_err(|e| read_failure(&e.0))?;
+        }
         self.controller()?
             .begin_mutation(OwnerMutation::Team { action }, generation)
             .map_err(|error| caused("owner_not_ready", &error.0))?;

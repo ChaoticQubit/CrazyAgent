@@ -656,7 +656,7 @@ async fn results_of_a_parked_session_wait_for_it_and_its_agents_are_its_own() {
 }
 
 #[tokio::test]
-async fn upgrading_a_version_2_database_makes_ended_sessions_resumable() {
+async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     let case = Case::new().await;
     assert_eq!(case.open("open-zero").await, OwnerResult::Applied);
     assert_eq!(
@@ -690,7 +690,7 @@ async fn upgrading_a_version_2_database_makes_ended_sessions_resumable() {
          {CURRENT}; {LATEST};
          ALTER TABLE team_tasks DROP COLUMN session;
          ALTER TABLE team_agents DROP COLUMN session;
-         PRAGMA user_version = 2;"
+         PRAGMA user_version = 3;"
     ))
     .unwrap();
     let closed: String = db
@@ -714,7 +714,7 @@ async fn upgrading_a_version_2_database_makes_ended_sessions_resumable() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let schema: String = db
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE name='master_sessions'",
@@ -738,7 +738,7 @@ async fn upgrading_a_version_2_database_makes_ended_sessions_resumable() {
     assert!(
         root_backups(&case)
             .iter()
-            .any(|name| name.starts_with("2-to-3-")),
+            .any(|name| name.starts_with("3-to-4-")),
         "the upgrade kept a backup"
     );
     drop(db);

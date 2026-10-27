@@ -575,6 +575,40 @@ impl Bench {
         serde_json::from_value(body["spec"]["repositories"].clone()).unwrap()
     }
 
+    /// The draft text the engine keeps on the project's onboarding row, read
+    /// from its database.
+    fn drafted(&self, project: &ProjectId) -> String {
+        let db = rusqlite::Connection::open_with_flags(
+            self.root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT drafted FROM onboarding WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The bytes, inode and modified time of the draft file in the repo,
+    /// read without following a link.
+    fn draft_file(&self) -> (Vec<u8>, u64, std::time::SystemTime) {
+        use std::os::unix::fs::MetadataExt;
+        let file = self
+            .repo
+            .join(".crazyagent")
+            .join("setup")
+            .join("draft.json");
+        let metadata = fs::symlink_metadata(&file).unwrap();
+        assert!(metadata.file_type().is_file());
+        (
+            fs::read(&file).unwrap(),
+            metadata.ino(),
+            metadata.modified().unwrap(),
+        )
+    }
+
     /// Saves the owner's setup for `project` from the review form: the
     /// onboarding draft with the owner's name, about text and platforms.
     async fn save_setup(&mut self, project: &ProjectId, draft: &ProjectSetup) {
@@ -1795,7 +1829,8 @@ async fn an_added_folder_is_its_project_repository_and_older_projects_are_repair
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_pick_changes() {
+async fn a_paused_mapping_rechecks_without_rewriting_its_draft_and_moves_on_once_the_pick_changes()
+{
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
     let pick = Arc::new(Mutex::new(AccountPick::Paused { until_ms: i64::MAX }));
@@ -1816,15 +1851,24 @@ async fn mapping_waits_while_every_pool_account_is_paused_and_moves_on_once_the_
         )
     };
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut first = None;
     while *asked.lock().unwrap() < 3 {
         assert!(
             Instant::now() < deadline,
             "mapping never asked for an account"
         );
+        if first.is_none() && *asked.lock().unwrap() >= 1 {
+            first = Some((bench.draft_file(), bench.drafted(&project)));
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let (file, drafted) = first.unwrap();
+    assert!(String::from_utf8(file.0.clone()).unwrap().contains("Rust"));
     let view = bench.view(&project).await;
     assert!(!settled(&view.mapping), "{view:?}");
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert_eq!(bench.draft_file(), file);
+    assert_eq!(bench.drafted(&project), drafted);
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     *pick.lock().unwrap() = AccountPick::NoUsableAccount;
     let view = bench.settle(&project, Duration::from_secs(60)).await;

@@ -184,6 +184,37 @@ fn a_saved_draft_and_overview_are_reused_not_overwritten() {
 }
 
 #[test]
+fn saving_an_unchanged_draft_leaves_the_file_and_a_changed_one_replaces_it() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let file = layout.join("setup").join("draft.json");
+    let mut saved = Drafted::new("Demo tool".into(), &pool());
+    draft::save(&layout, &saved).unwrap();
+    let first = std::fs::symlink_metadata(&file).unwrap();
+    draft::save(&layout, &saved).unwrap();
+    let again = std::fs::symlink_metadata(&file).unwrap();
+    assert_eq!(
+        (again.ino(), again.modified().unwrap()),
+        (first.ino(), first.modified().unwrap())
+    );
+    let mut longer = std::fs::read(&file).unwrap();
+    longer.push(b'\n');
+    std::fs::write(&file, &longer).unwrap();
+    draft::save(&layout, &saved).unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        serde_json::to_vec_pretty(&saved).unwrap()
+    );
+    let kept = std::fs::symlink_metadata(&file).unwrap().ino();
+    saved.draft.about = "Changed by the agent.".into();
+    draft::save(&layout, &saved).unwrap();
+    assert_ne!(std::fs::symlink_metadata(&file).unwrap().ino(), kept);
+    assert_eq!(draft::reused(&layout), Some(saved));
+}
+
+#[test]
 fn a_linked_draft_is_ignored() {
     let dir = rust_repo();
     let outside = tempfile::tempdir().unwrap();

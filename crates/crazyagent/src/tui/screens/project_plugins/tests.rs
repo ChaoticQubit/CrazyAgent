@@ -525,6 +525,53 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
 }
 
 #[test]
+fn a_short_window_keeps_the_question_and_the_notice_before_the_details() {
+    let look = Look::plain();
+    let texts = |view: &ProjectPlugins, room: usize| -> Vec<String> {
+        let (rows, _) = view.rows(76, room, &look);
+        assert!(rows.len() <= room, "{} rows in {room}", rows.len());
+        rows.iter()
+            .map(|row| row.text().trim_end().to_owned())
+            .collect()
+    };
+    let mut view = loaded();
+    for _ in 0..3 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Char(' ')));
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    let shown = texts(&view, 8);
+    assert!(
+        shown.iter().any(|row| row == "tidepool-style is off."),
+        "{shown:?}"
+    );
+    assert!(
+        shown.iter().any(|row| row.starts_with("tidepool-style")),
+        "the details keep their name line: {shown:?}"
+    );
+
+    view.key(press(KeyCode::Char('d')));
+    let shown = texts(&view, 8);
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.starts_with("Remove tidepool-style?")),
+        "{shown:?}"
+    );
+    assert!(
+        shown.iter().any(|row| row.contains("Your folder stays.")),
+        "{shown:?}"
+    );
+    let roomy = texts(&view, 18);
+    assert!(
+        roomy
+            .iter()
+            .any(|row| row == "How to do tidepool-style work."),
+        "a window with room keeps the whole panel: {roomy:?}"
+    );
+}
+
+#[test]
 fn e_edits_only_this_projects_own_servers() {
     let mut view = loaded();
     assert!(
