@@ -2307,7 +2307,10 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
         ),
         ("conversation-alone", vec![]),
     ] {
-        let setup = stored(project, sub);
+        let mut setup = stored(project, sub);
+        if setup.team.sub_harnesses.is_empty() {
+            setup.team.max_agents = 1;
+        }
         connection
             .execute(
                 "INSERT INTO project_setups VALUES (?1,?2)",

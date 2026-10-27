@@ -476,7 +476,10 @@ async fn failing_step_rolls_back_and_names_the_backup() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     assert!(
-        failed.starts_with("storage_migration_failed: step 4 failed:"),
+        failed.starts_with(&format!(
+            "storage_migration_failed: step {} failed:",
+            latest(STEPS) + 2
+        )),
         "{failed}"
     );
     assert!(failed.contains("the database is unchanged"), "{failed}");
@@ -492,7 +495,7 @@ async fn failing_step_rolls_back_and_names_the_backup() {
     drop(copy);
 
     upgrade(&mut db, &root.database(), Some(&sources), &steps(&[probe])).unwrap();
-    assert_eq!(version(&db).unwrap(), 3);
+    assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
 }
 
 #[tokio::test]
@@ -515,9 +518,10 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     assert!(
-        failed.starts_with(
-            "storage_migration_failed: step 4 failed: the step ended the upgrade transaction;"
-        ),
+        failed.starts_with(&format!(
+            "storage_migration_failed: step {} failed: the step ended the upgrade transaction;",
+            latest(STEPS) + 2
+        )),
         "{failed}"
     );
     assert!(
