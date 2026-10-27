@@ -4,7 +4,7 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
-use crate::terminal::AgentId;
+use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 20] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -117,6 +117,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 20] = [
     (
         "out/reveal-path.js",
         include_bytes!("../../../../apps/ide-extension/out/reveal-path.js"),
+    ),
+    (
+        "out/pty.js",
+        include_bytes!("../../../../apps/ide-extension/out/pty.js"),
+    ),
+    (
+        "out/terminal.js",
+        include_bytes!("../../../../apps/ide-extension/out/terminal.js"),
     ),
 ];
 
@@ -215,6 +223,10 @@ pub enum IdeCall {
     RevealAck { request: RequestId },
     #[serde(rename = "ide.events")]
     Events {},
+    #[serde(rename = "ide.session")]
+    Session {},
+    #[serde(rename = "ide.terminal")]
+    Terminal { cols: u16, rows: u16 },
 }
 
 /// The owner's decision on a memory nomination.
@@ -279,6 +291,9 @@ impl IdeRequest {
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
             IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
+            IdeCall::Terminal { cols, rows } => {
+                (SIZE_MIN..=SIZE_MAX).contains(cols) && (SIZE_MIN..=SIZE_MAX).contains(rows)
+            }
             IdeCall::ExtensionRequest { id, version }
             | IdeCall::ExtensionDecide { id, version, .. } => {
                 extension_id(id) && extension_version(version)
@@ -294,7 +309,8 @@ impl IdeRequest {
             | IdeCall::Agents {}
             | IdeCall::Extensions {}
             | IdeCall::RevealAck { .. }
-            | IdeCall::Events {} => true,
+            | IdeCall::Events {}
+            | IdeCall::Session {} => true,
         };
         if !valid {
             return Err(failure("ide_request_invalid"));
@@ -345,21 +361,27 @@ pub(crate) struct IdeHost<'a> {
 }
 
 /// The live IDE capabilities of one owner server, at most one per project and
-/// `GRANTS_MAX` in all. Each holds its token, its file and the sender of its project's
-/// events; dropping a grant kills its token and ends its subscriptions. The reveals the
-/// TUI sent wait here for their IDE to acknowledge them.
+/// `GRANTS_MAX` in all. Each holds its token, its file, whether the extension took its
+/// session yet and the sender of its project's events; dropping a grant kills its token
+/// and ends its subscriptions. The reveals the TUI sent wait here for their IDE to
+/// acknowledge them, and beside them run the Sandboxed IDE terminals of the owner server.
 #[derive(Default)]
 pub(crate) struct Grants {
     live: Mutex<Vec<Grant>>,
     reveals: reveal::Reveals,
+    #[cfg(unix)]
+    terminals: std::sync::Arc<Mutex<terminal::Terminals>>,
 }
 
-/// One project's capability for one IDE server launch.
+/// One project's capability for one IDE server launch. Until `taken`, the token is the
+/// file's and admits only `ide.session`; after it, the token is the session's, the file
+/// is gone and every other call is admitted.
 struct Grant {
     project: ProjectId,
     token: [u8; 32],
     file: PathBuf,
     identity: (u64, u64),
+    taken: bool,
     events: broadcast::Sender<IdeEvent>,
 }
 
@@ -393,6 +415,7 @@ impl Grants {
             token,
             file: file.clone(),
             identity,
+            taken: false,
             events,
         });
         assert!(live.len() <= GRANTS_MAX);
@@ -407,9 +430,43 @@ impl Grants {
 
     /// Admits an IDE handshake: `CAI1`, slot zero and a token compared in constant time
     /// with every live token. Input: the handshake packet. Output: the project its
-    /// capability names, or `ide_capability_refused`.
+    /// capability names and whether its session was taken, or `ide_capability_refused`.
+    fn known(&self, packet: &[u8; 37]) -> Result<(ProjectId, bool), EngineError> {
+        self.find(packet, |grant| Ok((grant.project.clone(), grant.taken)))
+    }
+
+    /// Admits an IDE handshake with a session token. Input: the handshake packet. Output:
+    /// the project its capability names, `ide_capability_refused` or, for the capability
+    /// file's token, `ide_session_required`.
     pub(crate) fn admit(&self, packet: &[u8; 37]) -> Result<ProjectId, EngineError> {
-        self.find(packet, |grant| Ok(grant.project.clone()))
+        match self.known(packet)? {
+            (project, true) => Ok(project),
+            (_, false) => Err(failure("ide_session_required")),
+        }
+    }
+
+    /// Swaps the capability file's token for a fresh session token, then removes the file
+    /// while it is still the file the engine wrote, so a process that reads it later gets
+    /// a dead token. Each grant has one session: a second try is refused. Input: the
+    /// handshake packet. Output: the session token, or `ide_capability_refused`,
+    /// `ide_session_taken`, `ide_entropy_unavailable` or the file's cleanup failure.
+    fn session(&self, packet: &[u8; 37]) -> Result<[u8; 32], EngineError> {
+        let mut token = [0; 32];
+        getrandom::fill(&mut token).map_err(|_| failure("ide_entropy_unavailable"))?;
+        let (file, identity) = {
+            let mut live = self.live.lock().map_err(|_| failure("ide_unavailable"))?;
+            let index = matching(&live, packet).ok_or_else(|| failure("ide_capability_refused"))?;
+            let grant = &mut live[index];
+            if grant.taken {
+                return Err(failure("ide_session_taken"));
+            }
+            grant.token = token;
+            grant.taken = true;
+            assert!(live.iter().filter(|grant| grant.token == token).count() == 1);
+            (live[index].file.clone(), live[index].identity)
+        };
+        remove_capability(&file, identity)?;
+        Ok(token)
     }
 
     /// Subscribes a handshake's capability to its project's events, at most
@@ -417,6 +474,9 @@ impl Grants {
     /// `ide_capability_refused` or `ide_events_busy`.
     fn subscribe(&self, packet: &[u8; 37]) -> Result<broadcast::Receiver<IdeEvent>, EngineError> {
         self.find(packet, |grant| {
+            if !grant.taken {
+                return Err(failure("ide_session_required"));
+            }
             if grant.events.receiver_count() >= SUBSCRIBERS_MAX {
                 return Err(failure("ide_events_busy"));
             }
@@ -433,18 +493,8 @@ impl Grants {
         packet: &[u8; 37],
         pick: impl FnOnce(&Grant) -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
-        if &packet[..4] != MAGIC || packet[4] != 0 {
-            return Err(failure("ide_capability_refused"));
-        }
         let live = self.live.lock().map_err(|_| failure("ide_unavailable"))?;
-        assert!(live.len() <= GRANTS_MAX);
-        let mut found = None;
-        for (index, grant) in live.iter().enumerate() {
-            if bool::from(grant.token.ct_eq(&packet[5..])) {
-                found = Some(index);
-            }
-        }
-        match found {
+        match matching(&live, packet) {
             Some(index) => pick(&live[index]),
             None => Err(failure("ide_capability_refused")),
         }
@@ -485,8 +535,26 @@ impl Grants {
     }
 }
 
+/// Finds the live grant a handshake names: `CAI1`, slot zero and a token compared in
+/// constant time with every live token. Inputs: the grants and the packet. Output: the
+/// grant's index, or none.
+fn matching(live: &[Grant], packet: &[u8; 37]) -> Option<usize> {
+    assert!(live.len() <= GRANTS_MAX);
+    if &packet[..4] != MAGIC || packet[4] != 0 {
+        return None;
+    }
+    let mut found = None;
+    for (index, grant) in live.iter().enumerate() {
+        if bool::from(grant.token.ct_eq(&packet[5..])) {
+            found = Some(index);
+        }
+    }
+    found
+}
+
 /// Issues the capability one IDE server launch hands its extension: it allows only the
-/// IDE calls, only for this project, until `revoke` or the owner server stops.
+/// IDE calls, only for this project, until `revoke` or the owner server stops. The file
+/// holds a one-time token the extension swaps for its session with `ide.session`.
 /// Inputs: the owner runtime and the project. Output: the capability file path.
 pub fn issue(
     runtime: &OwnerRuntimeHandle,
@@ -569,9 +637,10 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Serves one IDE capability connection after its handshake: admits the token, reads one
-/// request for the capability's own project and answers it, or turns the connection into
-/// the project's event subscription. The handshake deadline bounds the request and every
-/// call but the subscription and the Changes calls, which run git under `bound`.
+/// request for the capability's own project and answers it, swaps the capability file for
+/// the extension's session, or turns the connection into the project's event subscription
+/// or a Sandboxed terminal. The handshake deadline bounds the request and every call but
+/// the subscription, the terminal and the Changes calls, which run git under `bound`.
 /// Accept, Discard or Restore past it is `changes_outcome_unknown`, and what one did is
 /// reported even when its capability was revoked while it ran.
 /// Inputs: the stream, handshake packet, owner runtime and deadline.
@@ -588,6 +657,26 @@ pub(crate) async fn serve(
         Ok(Ok((_, IdeCall::Events {}))) => {
             events(&mut stream, &packet, &runtime).await;
             (None, false)
+        }
+        Ok(Ok((_, IdeCall::Session {}))) => {
+            let reply = match runtime.ide_grants().session(&packet) {
+                Ok(token) => IdeReply::Ok {
+                    data: serde_json::json!({ "token": hex(&token) }),
+                },
+                Err(error) => refusal(&error),
+            };
+            let _ = write(&mut stream, &reply).await;
+            let _ = stream.shutdown().await;
+            return;
+        }
+        #[cfg(unix)]
+        Ok(Ok((project, IdeCall::Terminal { cols, rows }))) => {
+            terminal::serve(stream, packet, runtime, project, (cols, rows)).await;
+            return;
+        }
+        #[cfg(not(unix))]
+        Ok(Ok((_, IdeCall::Terminal { .. }))) => {
+            (Some(refusal(&failure("ide_terminal_unavailable"))), false)
         }
         Ok(Ok((project, call))) => {
             let writes = matches!(
@@ -632,9 +721,11 @@ fn bound(call: &IdeCall, deadline: Instant) -> Instant {
 }
 
 /// Reads the one request frame, then admits the handshake, so a refusal never leaves
-/// unread bytes that could reset the connection before the client reads it. Inputs: the
-/// stream, packet and owner runtime. Output: the capability's project and the call, or
-/// `ide_capability_refused`, `ide_request_invalid` or `ide_project_refused`.
+/// unread bytes that could reset the connection before the client reads it. The capability
+/// file's token admits only `ide.session`, and a session token admits everything else.
+/// Inputs: the stream, packet and owner runtime. Output: the capability's project and the
+/// call, or `ide_capability_refused`, `ide_request_invalid`, `ide_project_refused`,
+/// `ide_session_required` or `ide_session_taken`.
 async fn open(
     stream: &mut UnixStream,
     packet: &[u8; 37],
@@ -643,14 +734,19 @@ async fn open(
     let frame = crate::engine::read_frame(stream)
         .await
         .map_err(|_| failure("ide_request_invalid"))?;
-    let project = runtime.ide_grants().admit(packet)?;
+    let (project, taken) = runtime.ide_grants().known(packet)?;
     let request: IdeRequest =
         serde_json::from_slice(&frame[4..]).map_err(|_| failure("ide_request_invalid"))?;
     request.validate()?;
     if request.project != project {
         return Err(failure("ide_project_refused"));
     }
-    Ok((project, request.call))
+    let session = matches!(request.call, IdeCall::Session {});
+    match (session, taken) {
+        (true, true) => Err(failure("ide_session_taken")),
+        (true, false) | (false, true) => Ok((project, request.call)),
+        (false, false) => Err(failure("ide_session_required")),
+    }
 }
 
 /// Answers one call. Each later IDE slice moves its call from the unavailable list to its
@@ -700,7 +796,9 @@ async fn answer(
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
         IdeCall::RevealAck { request } => reveal::acked(runtime, project, &request)?,
-        IdeCall::Events {} => return Err(failure("ide_request_invalid")),
+        IdeCall::Events {} | IdeCall::Session {} | IdeCall::Terminal { .. } => {
+            return Err(failure("ide_request_invalid"));
+        }
     };
     Ok(IdeReply::Ok { data })
 }
@@ -914,5 +1012,7 @@ mod changes;
 #[cfg(unix)]
 mod comments;
 mod extensions;
+#[cfg(unix)]
+mod terminal;
 #[cfg(all(test, unix))]
 mod tests;

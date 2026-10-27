@@ -14,6 +14,7 @@ const changes_js_1 = require("./sidebar/changes.js");
 const context_js_1 = require("./sidebar/context.js");
 const memories_js_1 = require("./sidebar/memories.js");
 const scm_js_1 = require("./scm.js");
+const terminal_js_1 = require("./terminal.js");
 const features = [
     base_content_js_1.registerBaseContent,
     scm_js_1.registerChanges,
@@ -25,10 +26,11 @@ const features = [
     readonly_js_1.readonly,
     extensions_js_1.extensions,
     reveal_js_1.reveal,
+    terminal_js_1.sandboxedTerminal,
 ];
 function activate(context) {
     (0, lock_js_1.startLock)(context, process.env);
-    const engine = engine_js_1.Engine.fromEnv(process.env);
+    const engine = engine_js_1.Engine.fromEnv(process.env, context.secrets);
     if (engine === undefined)
         return;
     context.subscriptions.push(engine);

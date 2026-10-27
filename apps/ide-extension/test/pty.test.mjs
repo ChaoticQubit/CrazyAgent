@@ -1,0 +1,127 @@
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+import { Engine, encodeFrame } from "../out/engine.js";
+import { BUSY, INPUT_BYTES_MAX, SandboxedPty, UNAVAILABLE, clampSize, stopped } from "../out/pty.js";
+import { memoryStore, reading, withServer } from "./peer.mjs";
+
+const fixture = JSON.parse(readFileSync(new URL("./frames.json", import.meta.url), "utf8"));
+const terminal = fixture.terminal;
+const bytes = (entry) => Buffer.from(entry.frame, "hex");
+const LIMIT = { timeout: 10_000 };
+
+async function withSession(check) {
+  await withServer(async (server, socket, capability) => {
+    const store = memoryStore([["crazyagent.session.alpha", fixture.token]]);
+    await check(new Engine(socket, capability, store), server, socket);
+  });
+}
+
+async function until(done) {
+  while (!done()) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+function watched(pty) {
+  const seen = { shown: [], closed: 0 };
+  pty.onDidWrite((text) => seen.shown.push(text));
+  pty.onDidClose(() => (seen.closed += 1));
+  return seen;
+}
+
+async function opened(engine, server, size) {
+  const pty = new SandboxedPty((name, args) => engine.stream(name, args));
+  const seen = watched(pty);
+  const accepted = once(server, "connection");
+  pty.open(size);
+  const [connection] = await accepted;
+  const gone = once(connection, "close");
+  const peer = reading(connection);
+  assert.equal((await peer.take(37)).toString("hex"), fixture.handshake);
+  return { pty, seen, connection, gone, peer };
+}
+
+test("the Sandboxed terminal opens, types, resizes and closes with the engine's frames", LIMIT, async () => {
+  await withSession(async (engine, server) => {
+    const { pty, seen, connection, gone, peer } = await opened(engine, server, { columns: 80, rows: 24 });
+    assert.equal((await peer.frame()).toString("hex"), terminal.open.frame);
+    const [ok, first, second, end] = terminal.frames.map(bytes);
+    const stream = Buffer.concat([ok, first, second]);
+    for (let at = 0; at < stream.length; at += 5) connection.write(stream.subarray(at, at + 5));
+    pty.handleInput("ls ✓\r");
+    assert.equal((await peer.frame()).toString("hex"), terminal.requests[0].frame);
+    pty.setDimensions({ columns: 120, rows: 40 });
+    assert.equal((await peer.frame()).toString("hex"), terminal.requests[1].frame);
+    await until(() => seen.shown.join("") === "café ✓\r\n");
+    assert.ok(!seen.shown.join("").includes("�"));
+    connection.write(end);
+    await until(() => seen.closed === 1);
+    pty.handleInput("after");
+    pty.setDimensions({ columns: 90, rows: 30 });
+    pty.close();
+    await gone;
+    assert.equal(peer.left(), 0);
+    assert.equal(seen.shown.join(""), "café ✓\r\n");
+    assert.equal(seen.closed, 1);
+  });
+});
+
+test("closing detaches, and long typing goes in frames the engine accepts", LIMIT, async () => {
+  await withSession(async (engine, server) => {
+    const { pty, seen, connection, gone, peer } = await opened(engine, server, { columns: 1, rows: 5000 });
+    const open = JSON.parse((await peer.frame()).subarray(4).toString("utf8"));
+    assert.deepEqual(open.call, { name: "ide.terminal", args: { cols: 2, rows: 1000 } });
+    connection.write(bytes(terminal.frames[0]));
+    pty.handleInput("x".repeat(INPUT_BYTES_MAX + 1));
+    for (const length of [INPUT_BYTES_MAX, 1]) {
+      const sent = JSON.parse((await peer.frame()).subarray(4).toString("utf8"));
+      assert.equal(sent.kind, "input");
+      assert.equal(sent.bytes.length, length);
+      assert.ok(sent.bytes.every((byte) => byte === 0x78));
+    }
+    pty.close();
+    assert.equal((await peer.frame()).toString("hex"), terminal.requests[2].frame);
+    await gone;
+    assert.equal(peer.left(), 0);
+    assert.deepEqual(seen, { shown: [], closed: 0 });
+  });
+});
+
+test("a refused or broken terminal stays open and says why", LIMIT, async () => {
+  await withSession(async (engine, server, socket) => {
+    const refused = await opened(engine, server, undefined);
+    const open = JSON.parse((await refused.peer.frame()).subarray(4).toString("utf8"));
+    assert.deepEqual(open.call.args, { cols: 80, rows: 24 });
+    refused.connection.write(encodeFrame({ kind: "rejected", code: "ide_terminal_unavailable" }));
+    await until(() => refused.seen.shown.length === 1);
+    assert.deepEqual(refused.seen, { shown: [`\r\n${UNAVAILABLE}\r\n`], closed: 0 });
+    await refused.gone;
+
+    const dropped = await opened(engine, server, undefined);
+    await dropped.peer.frame();
+    dropped.connection.write(bytes(terminal.frames[0]));
+    dropped.connection.end();
+    await until(() => dropped.seen.shown.length === 1);
+    assert.deepEqual(dropped.seen, { shown: ["\r\nThe Sandboxed terminal stopped (ide_engine_closed).\r\n"], closed: 0 });
+
+    const unready = new Engine(socket, join(socket, "missing"), memoryStore());
+    const sessionless = new SandboxedPty((name, args) => unready.stream(name, args));
+    const seen = watched(sessionless);
+    sessionless.open(undefined);
+    sessionless.handleInput("ignored");
+    await until(() => seen.shown.length === 1);
+    assert.deepEqual(seen, { shown: ["\r\nThe Sandboxed terminal stopped (ide_session_missing).\r\n"], closed: 0 });
+  });
+});
+
+test("sizes stay in the engine's bounds and stop reasons stay plain", () => {
+  assert.deepEqual(clampSize(undefined), { columns: 80, rows: 24 });
+  assert.deepEqual(clampSize({ columns: 1, rows: 5000 }), { columns: 2, rows: 1000 });
+  assert.deepEqual(clampSize({ columns: Number.NaN, rows: 30.7 }), { columns: 80, rows: 30 });
+  assert.equal(stopped("ide_terminal_unavailable"), UNAVAILABLE);
+  assert.equal(stopped("ide_terminals_busy"), BUSY);
+  assert.equal(stopped("ide_capability_revoked"), "The Sandboxed terminal stopped (ide_capability_revoked).");
+  assert.equal(stopped("x\u001b[2J"), "The Sandboxed terminal stopped (unknown).");
+  assert.ok(UNAVAILABLE.includes('"IDE shell"'));
+});

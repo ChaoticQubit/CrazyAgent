@@ -11,6 +11,7 @@ import { sidebarChanges } from "./sidebar/changes.js";
 import { sidebarContext } from "./sidebar/context.js";
 import { sidebarMemories } from "./sidebar/memories.js";
 import { registerChanges } from "./scm.js";
+import { sandboxedTerminal } from "./terminal.js";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -29,16 +30,18 @@ const features: Feature[] = [
   readonly,
   extensions,
   reveal,
+  sandboxedTerminal,
 ];
 
 /**
  * Starts the settings lock, then every feature when the CrazyAgent engine launched this IDE
- * server, which it shows by setting the capability and socket variables.
+ * server, which it shows by setting the capability and socket variables. The bridge keeps
+ * its session token in the context's secret storage.
  * Input: the extension context. Output: none; the bridge closes with the context.
  */
 export function activate(context: vscode.ExtensionContext): void {
   startLock(context, process.env);
-  const engine = Engine.fromEnv(process.env);
+  const engine = Engine.fromEnv(process.env, context.secrets);
   if (engine === undefined) return;
   context.subscriptions.push(engine);
   for (const feature of features) feature(context, engine);
