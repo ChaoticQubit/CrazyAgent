@@ -267,8 +267,9 @@ pub fn record_worktree_start(
 /// fsmonitor off, and adds it to that worktree's open change set or opens one above the
 /// commit the worktree started from, or its HEAD when no start is recorded, so commits
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
-/// waiting in the worktree settle on the change set the turn end leaves open. Inputs: the
-/// store, the workspace and the turn end. Output: the change set the work now belongs
+/// waiting in the worktree settle on the change set the turn end leaves open; when they
+/// cannot, they keep waiting for the next turn end and the recorded set is still returned.
+/// Inputs: the store, the workspace and the turn end. Output: the change set the work now belongs
 /// to, None when nothing is pending.
 pub fn record_turn_end(
     db: &Connection,
@@ -284,7 +285,10 @@ pub fn record_turn_end(
             &crate::worktrees::TREE_BOUNDS,
             flow::now_ms()?,
         )?;
-        owner_edit::settle(db, &workspace.worktree, kept.as_ref())?;
+        owner_edit::logged(
+            "settle",
+            owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
+        );
         Ok(kept)
     }
     #[cfg(not(unix))]

@@ -1927,6 +1927,85 @@ fn all_pages(case: &Case, id: &ChangeSetId) -> Vec<ChangeDiff> {
     pages
 }
 
+/// How many owner edits the store keeps. Inputs: the store and the change set they settled
+/// on, `""` for those still waiting, or None for every one. Output: the count.
+fn owner_edit_rows(db: &Connection, change_set: Option<&str>) -> i64 {
+    match change_set {
+        Some(set) => db.query_row(
+            "SELECT COUNT(*) FROM landing_owner_edits WHERE change_set=?1",
+            [set],
+            |row| row.get(0),
+        ),
+        None => db.query_row("SELECT COUNT(*) FROM landing_owner_edits", [], |row| {
+            row.get(0)
+        }),
+    }
+    .unwrap()
+}
+
+#[test]
+fn a_turn_end_that_cannot_settle_owner_edits_still_reports_its_change_set() {
+    let case = Case::new();
+    case.edit("notes.txt", "a note\n");
+    owner_edit::record(&case.db, &case.workspace.worktree, "notes.txt", NOW_MS).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_settle BEFORE UPDATE ON landing_owner_edits
+             BEGIN SELECT RAISE(ABORT, 'store busy'); END;",
+        )
+        .unwrap();
+    let id = case
+        .turn(TurnOutcome::Succeeded)
+        .expect("the recorded change set is reported");
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(owner_edit_rows(&case.db, Some("")), 1);
+    case.db
+        .execute_batch("DROP TRIGGER refuse_settle;")
+        .unwrap();
+    case.edit("notes.txt", "a longer note\n");
+    let again = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(owner_edit_rows(&case.db, Some("")), 0);
+    assert_eq!(owner_edit_rows(&case.db, Some(again.as_str())), 1);
+}
+
+#[test]
+fn owner_edits_are_forgotten_once_their_set_is_accepted_or_pruned_or_the_worktree_retires() {
+    let case = Case::new();
+    case.edit("notes.txt", "a note\n");
+    owner_edit::record(&case.db, &case.workspace.worktree, "notes.txt", NOW_MS).unwrap();
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(owner_edit_rows(&case.db, Some(first.as_str())), 1);
+    let landed = case.accept(&first).unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }), "{landed:?}");
+    assert_eq!(owner_edit_rows(&case.db, None), 0);
+
+    case.edit("more.txt", "more\n");
+    owner_edit::record(&case.db, &case.workspace.worktree, "more.txt", NOW_MS).unwrap();
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    let until = discard(&case.db, &second, &case.view(&second).head, NOW_MS).unwrap();
+    assert_eq!(
+        owner_edit_rows(&case.db, Some(second.as_str())),
+        1,
+        "a discarded set keeps its marks while it can be restored"
+    );
+    assert_eq!(prune(&case.db, until + 1).unwrap(), 1);
+    assert_eq!(owner_edit_rows(&case.db, None), 0);
+
+    owner_edit::record(&case.db, &case.workspace.worktree, "late.txt", NOW_MS).unwrap();
+    assert_eq!(owner_edit_rows(&case.db, Some("")), 1);
+    let workspace = &case.workspace;
+    let retired = retire_worktree(
+        &case.db,
+        &workspace.repository,
+        &workspace.worktree,
+        &workspace.git_dir,
+        until + 2,
+    )
+    .unwrap();
+    assert_eq!(retired, Ok(()));
+    assert_eq!(owner_edit_rows(&case.db, None), 0);
+}
+
 #[test]
 fn a_change_sets_file_list_stays_when_other_diffs_push_its_diff_out() {
     let case = Case::new();
