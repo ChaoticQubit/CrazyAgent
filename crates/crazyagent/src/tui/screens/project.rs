@@ -5,6 +5,7 @@ use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -557,6 +558,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
+    pub recovery: ProjectRecovery,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -577,6 +579,7 @@ impl ProjectScreen {
         Self {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
+            recovery: ProjectRecovery::new(project.clone()),
             sessions: Sessions::default(),
             project,
             name,

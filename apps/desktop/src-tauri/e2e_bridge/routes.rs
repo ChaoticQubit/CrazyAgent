@@ -1836,6 +1836,46 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.agent_instructions(project_id, agent)?; call.await }.await;
             routed(result)
         }
+        "desktop_recovery_banner" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.recovery_banner(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_retry_recovery" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                agent: i64,
+            }
+            let Args { agent } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.retry_recovery(agent)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_dismiss_recovery" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                action_kind: crazyagent::ledger::ActionKind,
+                id: i64,
+            }
+            let Args { action_kind, id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.dismiss_recovery(action_kind, id)?; call.await }.await;
+            routed(result)
+        }
         "desktop_default_process" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.default_process()?; call.await }.await;
             routed(result)

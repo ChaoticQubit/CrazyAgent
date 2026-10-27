@@ -147,6 +147,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("changes");
                     connection.changes(*query).unwrap();
                 }
+                Request::Recovery(query) => {
+                    sent.push("recovery");
+                    connection.recovery(*query).unwrap();
+                }
                 Request::TeamGraph { project } => {
                     sent.push("team graph");
                     connection.team_graph(project).unwrap();
@@ -509,6 +513,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
         [
             "pools",
             "pool projects",
+            "recovery",
             "setup",
             "jobs",
             "context",

@@ -761,6 +761,9 @@ impl ProjectPage {
     }
 
     fn pump(&mut self, ctx: &mut Ctx) {
+        if let Some(query) = self.screen.recovery.next_query(now_ms()) {
+            ctx.request(Request::Recovery(Box::new(query)));
+        }
         if self.screen.tab == Tab::Changes
             && let Some(query) = self.screen.changes.next_query(now_ms())
         {
@@ -953,6 +956,15 @@ impl ProjectPage {
         }
     }
 
+    fn recovery_has_keys(&self) -> bool {
+        self.screen.edit.is_none()
+            && self.screen.review.is_none()
+            && self.screen.pool_picker.is_none()
+            && self.screen.confirm_delete.is_none()
+            && self.screen.general.is_none()
+            && !self.screen.confirm_remove
+    }
+
     fn changes_have_keys(&self) -> bool {
         self.screen.tab == Tab::Changes
             && self.screen.edit.is_none()
@@ -1024,6 +1036,11 @@ impl Screen for ProjectPage {
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         self.screen.width = ctx.width;
+        if self.recovery_has_keys() && self.screen.recovery.key(key) {
+            self.pump(ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
         if self.changes_have_keys()
             && let Some(event) = key_event(key)
             && self.screen.changes.key(event, now_ms())
@@ -1100,6 +1117,9 @@ impl Screen for ProjectPage {
                     self.screen.plugins.apply(event);
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
+                OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
+                    self.screen.recovery.apply(event);
+                }
                 _ => return Flow::Handled,
             },
             Arrival::PoolEdited(result) => self.assigned(result, ctx),
@@ -1118,6 +1138,7 @@ impl Screen for ProjectPage {
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
                 self.screen.changes.forget_reads();
+                self.screen.recovery.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
             }
@@ -1166,6 +1187,7 @@ impl Screen for ProjectPage {
             || self.waiting.is_some()
             || self.screen.plugins.busy()
             || self.screen.changes.busy()
+            || self.screen.recovery.busy()
     }
 
     fn draft(&self) -> bool {

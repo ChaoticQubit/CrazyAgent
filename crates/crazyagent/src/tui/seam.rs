@@ -112,6 +112,7 @@ pub enum Request {
     Intake(Box<super::client::intake::IntakeJob>),
     Changes(Box<super::client::changes::ChangesQuery>),
     Process(Box<super::client::process::ProcessQuery>),
+    Recovery(Box<super::client::recovery::RecoveryQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
     Reconnect,
 }
