@@ -69,6 +69,9 @@ fn agent(
         created_ms: NOW - 20 * MINUTE,
         heartbeat_ms: NOW,
         stopped_ms: None,
+        persona: None,
+        handle: None,
+        name: String::new(),
     }
 }
 
@@ -150,13 +153,18 @@ fn team() -> TeamStatus {
         ],
         agents: vec![
             agent(1, AgentRole::Master, "codex", AgentStatus::Idle, None),
-            agent(
-                2,
-                AgentRole::Sub,
-                "claude-code",
-                AgentStatus::Working,
-                Some(11),
-            ),
+            TeamAgent {
+                persona: Some("Ada".into()),
+                handle: Some("charts".into()),
+                name: "Ada (@charts)".into(),
+                ..agent(
+                    2,
+                    AgentRole::Sub,
+                    "claude-code",
+                    AgentStatus::Working,
+                    Some(11),
+                )
+            },
             stopped,
         ],
         tasks: vec![setup, charts, api],
@@ -241,7 +249,7 @@ fn the_team_draws_agents_and_tasks_at_120_and_80_columns() {
     let master = find(&wide, "> Master");
     assert!(master.contains("Codex") && master.contains("ChatGPT Pro - main"));
     assert!(master.contains("Waiting for work"));
-    let sub = find(&wide, "Sub-agent 1");
+    let sub = find(&wide, "Ada (@charts)");
     assert!(sub.contains("Claude Max - work"));
     assert!(sub.contains("Working  Build the charts component"));
     assert!(find(&wide, "Sub-agent 2").contains("Stopped"));
@@ -290,7 +298,7 @@ fn the_panel_follows_the_focused_task() {
     assert!(find(&rows, "Use the readings API.").starts_with("  "));
     assert!(
         rows.iter()
-            .any(|row| row.contains("Agent         Sub-agent 1"))
+            .any(|row| row.contains("Agent         Ada (@charts)"))
     );
     view.key(press(KeyCode::Down));
     view.key(press(KeyCode::Down));

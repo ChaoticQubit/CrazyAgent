@@ -696,6 +696,9 @@ impl TeamView {
         if agent.role == AgentRole::Master {
             return "Master".into();
         }
+        if !agent.name.trim().is_empty() {
+            return agent.name.clone();
+        }
         let before = self
             .status
             .iter()
@@ -724,7 +727,14 @@ impl TeamView {
                 };
                 rows.push(spread(
                     content,
-                    Row::of(self.agent_name(agent), look.heading),
+                    Row::of(
+                        crate::team::names::line(
+                            &self.agent_name(agent),
+                            &agent.harness,
+                            &agent.status_label,
+                        ),
+                        look.heading,
+                    ),
                     Row::of(when, look.muted),
                 ));
                 rows.push(entry(

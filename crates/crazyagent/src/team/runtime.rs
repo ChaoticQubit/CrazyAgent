@@ -1,7 +1,7 @@
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
-    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, now_ms,
+    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
     parse_delegations, pick_account, tool,
 };
 use crate::agents::{
@@ -1629,6 +1629,7 @@ impl TeamRuntime {
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            names::assign_task_role(&self.connection, project, agent, task)?;
             self.mark_agent(agent, AgentStatus::Working, Some(task))?;
         }
         Ok(())
@@ -1755,6 +1756,9 @@ impl TeamRuntime {
             .map_err(error)?;
         let id = self.connection.last_insert_rowid();
         assert!(id > 0);
+        if role == AgentRole::Sub {
+            names::assign_persona(&self.connection, &stored.project_id, id)?;
+        }
         self.launch(stored, id, role, harness, tools, account, again, None)
     }
 
@@ -1799,6 +1803,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the sub-agent is not stopped".into()));
         }
+        names::assign_persona(&self.connection, &stored.project_id, id)?;
         let kept = [repository, worktree, git_dir];
         self.launch(
             stored,
@@ -2447,7 +2452,12 @@ impl TeamRuntime {
         let label = if AgentRole::parse(&role) == Some(AgentRole::Master) {
             format!("Team master ({harness})")
         } else {
-            format!("Sub-agent {id} ({harness})")
+            let name = names::name(&self.connection, id)?;
+            format!(
+                "{} \u{b7} {}",
+                names::label(AgentRole::Sub, id, name.as_ref()),
+                names::harness_name(&harness)
+            )
         };
         let workspace = crate::landing::Workspace {
             project: project.clone(),
@@ -2656,7 +2666,10 @@ impl TeamRuntime {
         }
         let mut delegations = proposed;
         for line in parse_delegations(text) {
-            if !delegations.contains(&line) {
+            if !delegations
+                .iter()
+                .any(|seen| seen.harness == line.harness && seen.prompt == line.prompt)
+            {
                 delegations.push(line);
             }
         }
@@ -2674,7 +2687,7 @@ impl TeamRuntime {
             return tx.commit().map_err(error);
         }
         for delegation in &delegations {
-            if let Err(code) = admit(
+            match admit(
                 &tx,
                 &access,
                 &stored,
@@ -2684,11 +2697,16 @@ impl TeamRuntime {
                 Some(reply),
                 now,
             )? {
-                refused.push(format!(
+                Ok(task) => {
+                    if let Some(role) = &delegation.role {
+                        names::set_task_role(&tx, project, task, role)?;
+                    }
+                }
+                Err(code) => refused.push(format!(
                     "- {}: {}",
                     bound_text(&delegation.prompt, 200),
                     refusal(code)
-                ));
+                )),
             }
         }
         if !refused.is_empty() {

@@ -143,15 +143,18 @@ fn delegation_lines_are_read_from_a_master_reply() {
         [
             Delegation {
                 harness: None,
-                prompt: "Write apple.txt".into()
+                prompt: "Write apple.txt".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("codex".into()),
-                prompt: "List the files".into()
+                prompt: "List the files".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("claude-code".into()),
-                prompt: "Review the notes".into()
+                prompt: "Review the notes".into(),
+                role: None,
             },
         ]
     );
@@ -567,6 +570,127 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
     );
     assert_eq!(team.harnesses[0].delegation, Some(DelegationPath::Reply));
     assert_eq!(team.harnesses[1].agents_max, 1);
+}
+
+#[test]
+fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-names",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-names", &["local-a"]);
+    let agent = |role: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('team-names',?1,'codex',0,'working',1,1)",
+                [role],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let master = agent("master");
+    let first = agent("sub");
+    let second = agent("sub");
+    let unnamed = agent("sub");
+    for sub in [first, second] {
+        names::assign_persona(&connection, &project, sub).unwrap();
+    }
+    names::assign_role(&connection, &project, first, "onboarding-fix")
+        .unwrap()
+        .unwrap();
+    let rename = |agent: i64, handle: &str| TeamAction::Rename {
+        project_id: project.clone(),
+        agent,
+        handle: handle.into(),
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "@docs-pass")).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "onboarding-fix")).unwrap(),
+        rejected("team_handle_taken")
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "Docs Pass")).unwrap(),
+        rejected("team_handle_invalid")
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(master, "lead")).unwrap(),
+        rejected("team_agent_unknown")
+    );
+    for invalid in [rename(second, &"a".repeat(34)), rename(0, "docs")] {
+        assert_eq!(
+            execute(&tx, &pool, &invalid).unwrap_err().0,
+            "team_handle_invalid"
+        );
+    }
+    tx.commit().unwrap();
+    let team = status(&connection, &setup).unwrap();
+    let shown: Vec<(i64, &str, Option<&str>, Option<&str>)> = team
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.id,
+                a.name.as_str(),
+                a.persona.as_deref(),
+                a.handle.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (master, "Master", None, None),
+            (
+                first,
+                &*format!("{} (@onboarding-fix)", names::PERSONAS[0]),
+                Some(names::PERSONAS[0]),
+                Some("onboarding-fix")
+            ),
+            (
+                second,
+                &*format!("{} (@docs-pass)", names::PERSONAS[1]),
+                Some(names::PERSONAS[1]),
+                Some("docs-pass")
+            ),
+            (unnamed, &*format!("Sub-agent {unnamed}"), None, None),
+        ]
+    );
+    assert_eq!(
+        graph(&team)
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Agent)
+            .map(|node| node.label.clone())
+            .collect::<Vec<_>>(),
+        [
+            format!("{} (@onboarding-fix)", names::PERSONAS[0]),
+            format!("{} (@docs-pass)", names::PERSONAS[1]),
+            format!("Sub-agent {unnamed}"),
+        ]
+    );
+    assert_eq!(
+        names::resolve(&connection, &project, "@docs-pass").unwrap(),
+        Some(second)
+    );
 }
 
 #[test]
@@ -1211,6 +1335,14 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
         "the plan's two warm sub-agents start once and are not started again: {cold:#?}"
     );
     assert!(cold.agents.iter().all(|a| a.status == AgentStatus::Failed));
+    assert_eq!(
+        cold.agents
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        [names::PERSONAS[0], names::PERSONAS[1]],
+        "each sub-agent gets its own persona when it starts: {cold:#?}"
+    );
     assert!(
         cold.messages.iter().any(|m| m.state == MessageState::Note
             && m.text.starts_with("Keeping sub-agents warm was turned off")),
