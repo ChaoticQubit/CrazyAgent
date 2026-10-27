@@ -1417,16 +1417,17 @@ mod tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
             .collect::<BTreeMap<_, _>>();
+        let claude_path = crate::sandbox::toolchains::agent_path(
+            &ToolHomes::owner().unwrap(),
+            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+        );
         let mut expected_claude = BTreeMap::from([
             ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
             ("HOME", home.to_str().unwrap()),
             ("LANG", "C"),
             ("LC_ALL", "C"),
-            (
-                "PATH",
-                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
-            ),
+            ("PATH", claude_path.as_str()),
             ("TERM", "dumb"),
             ("TMPDIR", tmp.to_str().unwrap()),
         ]);
