@@ -289,7 +289,9 @@ fn real_dir(path: &Path) -> bool {
 /// draft when it already exists; nothing in it is overwritten. Research stays
 /// off. Starting a folder that is already onboarding returns its project and
 /// retries only failed steps; an onboarding left by a removed project starts
-/// over as a new project. Takes the transaction, configuration, engine
+/// over as a new project, also when it was left at another folder with the
+/// same name that is gone, and is refused as `onboarding_project_mismatch`
+/// while that folder is still there. Takes the transaction, configuration, engine
 /// database path and action. Returns Applied or a plain rejection.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
@@ -338,6 +340,25 @@ pub(crate) fn execute(
     }
     if exists {
         return Ok(rejected("project_exists"));
+    }
+    let leftover: Option<String> = tx
+        .query_row(
+            "SELECT repo FROM onboarding WHERE project=?1",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(leftover) = leftover {
+        assert_ne!(leftover, repo_text);
+        if std::fs::symlink_metadata(&leftover).is_ok() {
+            return Ok(rejected("onboarding_project_mismatch"));
+        }
+        tx.execute(
+            "DELETE FROM onboarding WHERE project=?1",
+            [project_id.as_str()],
+        )
+        .map_err(error)?;
     }
     let layout = crate::projects_home::prepare_layout(&repo)?;
     if layout != repo.join(CRAZYAGENT_DIRECTORY)

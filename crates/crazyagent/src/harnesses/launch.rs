@@ -41,7 +41,10 @@ pub const DURABLE_OUTPUT: &str = "output.log";
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
-const CODEX_TOOLS_OFF: [&str; 13] = [
+/// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
+/// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
+/// web search tool and no MCP server.
+pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "sandbox_mode=\"read-only\"",
     "approval_policy=\"never\"",
     "features.shell_tool=false",
