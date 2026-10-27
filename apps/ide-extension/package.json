@@ -1,0 +1,26 @@
+{
+  "name": "crazyagent-ide",
+  "displayName": "CrazyAgent",
+  "description": "CrazyAgent change sets, agents and memories inside the CrazyAgent IDE.",
+  "publisher": "crazyagent",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {},
+  "scripts": {
+    "build": "node ../desktop/node_modules/typescript/bin/tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.140.0"
+  }
+}
