@@ -22,11 +22,11 @@ async function settled(evaluate) {
   assert.fail("the sends never settled");
 }
 
-async function fullScreen(check) {
+async function fullScreen(check, keys = true) {
   return withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
-    await evaluate("Fixture.mount(24, 80)");
+    await evaluate(`Fixture.mount(24, 80, ${keys})`);
     await evaluate(`Fixture.write(${JSON.stringify(FULL_SCREEN)})`);
     await evaluate("Fixture.frames()");
     const at = await evaluate("Fixture.view()");
@@ -66,4 +66,15 @@ test("keys typed between wheel events keep their place among the scrolling", asy
     assert.equal(shape, "wwwwwwqwwwww", "scrolling never jumps ahead of a key typed after it, nor behind one typed before it");
     assert.equal(done.stats.stopped, 0);
   });
+});
+
+test("with the message box as the only input, keys stay out of the agent's terminal and the wheel still scrolls it", async () => {
+  await fullScreen(async ({ evaluate, send, at }) => {
+    await wheel(send, at, 3);
+    await evaluate("Fixture.focus()");
+    await send("Input.dispatchKeyEvent", { type: "char", text: "q" });
+    await wheel(send, at, 2);
+    const done = await settled(evaluate);
+    assert.equal(done.text.replace(WHEEL_DOWN, "w"), "wwwww", "only the wheel reached the agent");
+  }, false);
 });

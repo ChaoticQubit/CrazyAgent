@@ -8,6 +8,7 @@ import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
 import { TerminalPanel } from "../team";
 import "../team/team-graph.css";
+import { readMasterInput } from "../../state";
 import { ConversationTab } from "./conversation";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -150,13 +151,14 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 }
 
 /** The live master area in one state: one console whose head names the master, its state
- * and account and holds the switch, above the master's terminal filling the rest, or a line
- * while it starts, can't or is stopped; or the earlier engine-driven conversation, read-only,
+ * and account and holds the switch, above the master's terminal filling the rest, typed into
+ * as the owner's Master input setting says, or a line while it starts, can't or is stopped; or the earlier engine-driven conversation, read-only,
  * behind a toggle. An engine that says the master has no terminal app gets today's
  * conversation instead. Inputs: the project data, the master harness id, the state and the
  * switch action. Output: the area. */
 export function LiveMasterView({ data, harness, live, onSwitch }: { data: ProjectData; harness: string; live: Live; onSwitch: (on: boolean) => void }) {
   const [earlier, setEarlier] = useState(false);
+  const [input] = useState(readMasterInput);
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
@@ -197,6 +199,6 @@ export function LiveMasterView({ data, harness, live, onSwitch }: { data: Projec
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
     {live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Waiting for the master's terminal. It opens once the master signs in and starts.</p>}
-    {live.kind === "running" && live.node && <TerminalPanel key={live.node.terminal ?? live.node.id} node={live.node} harness={name} embedded />}
+    {live.kind === "running" && live.node && <TerminalPanel key={live.node.terminal ?? live.node.id} node={live.node} harness={name} embedded input={input} />}
   </div>;
 }

@@ -3,10 +3,11 @@ import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
+import type { InputChoice } from "./terminal-io";
 import { Button, Icon, NotReady, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeLine } from "./graph";
-import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, jobQueue, keyOverride, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
 const RESIZE_PAUSE_MS = 120;
@@ -67,6 +68,14 @@ export function typingNote(node: GraphNode): string {
   return node.kind === "master"
     ? "Typing goes straight to the master."
     : "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
+}
+
+/** The status line's note on where the owner's typing goes. Inputs: the node and the input
+ * choice. Output: one sentence. */
+export function inputNote(node: GraphNode, input: InputChoice): string {
+  if (input === "box") return `The terminal shows ${node.label}; type in the message box below.`;
+  if (input === "terminal") return `${typingNote(node)} Enter sends, Shift+Enter adds a line.`;
+  return typingNote(node);
 }
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
@@ -153,8 +162,9 @@ export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: 
 /** Routes an opened terminal's input to its send queue while the view is live: typed keys,
  * pastes and mouse reports in order, with the reports xterm makes from a wheel event sent on
  * the wheel lane, so a fast scroll on a full-screen agent is batched. Inputs: the terminal,
- * the send queue, the send call for one chunk and the live check. Output: the subscription. */
-export function connectInput(terminal: Terminal, run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>, live: () => boolean): IDisposable {
+ * the send queue, the send call for one chunk, the live check and whether keys may reach
+ * the terminal; without keys only the wheel does. Output: the subscription. */
+export function connectInput(terminal: Terminal, run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>, live: () => boolean, keys: () => boolean = () => true): IDisposable {
   const lanes = inputLanes(run, send);
   let wheeling = false;
   terminal.attachCustomWheelEventHandler(() => {
@@ -165,7 +175,7 @@ export function connectInput(terminal: Terminal, run: (job: () => Promise<boolea
   const route = (bytes: Uint8Array) => {
     if (!live()) return;
     if (wheeling) lanes.wheel(bytes);
-    else lanes.typed(bytes);
+    else if (keys()) lanes.typed(bytes);
   };
   const typed = typeKeys(terminal, (data) => route(encodeTyped(data)));
   const binary = terminal.onBinary((data) => route(encodeBinary(data)));
@@ -183,14 +193,18 @@ export function connectInput(terminal: Terminal, run: (job: () => Promise<boolea
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
  * status line. Closing it detaches the view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
- * closed, and `embedded` when a console around it owns the head and typing goes to the
- * terminal alone. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose, embedded = false }: {
+ * closed, `embedded` when a console around it owns the head, and where the owner types:
+ * the terminal, the message box under it, or both. Output: the panel. */
+export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both" }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
   embedded?: boolean;
+  input?: InputChoice;
 }) {
+  const mode = inputMode(input);
+  const keys = useRef(mode.keys);
+  keys.current = mode.keys;
   const screen = useRef<HTMLDivElement>(null);
   const prompt = useRef<((text: string) => boolean) | null>(null);
   const latest = useRef<(() => void) | null>(null);
@@ -269,7 +283,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
         sendSize();
       });
       const run = jobQueue(() => end(STOPPED_TYPING));
-      const input = connectInput(terminal, run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok", () => live);
+      const typing = connectInput(terminal, run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok", () => live, () => keys.current);
       prompt.current = (text) => {
         if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();
@@ -311,7 +325,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
         texts.current = null;
         channel.onmessage = () => {};
         observer.disconnect();
-        input.dispose();
+        typing.dispose();
         resized.dispose();
         scrolled.dispose();
         window.clearTimeout(timer);
@@ -360,10 +374,10 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
       <button type="button" role="menuitem" className="menu-item" onClick={() => void copy(texts.current?.output() ?? "", "Copied the output.")}><Icon name="file-text" size={14} />Copy output</button>
     </div>}
     {view.kind === "live" && <div className="tg-terminal-note">
-      <span role="status">{copied ?? (embedded ? `${typingNote(node)} Enter sends, Shift+Enter adds a line.` : typingNote(node))}</span>
+      <span role="status">{copied ?? inputNote(node, input)}</span>
       {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
       <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(texts.current?.output() ?? "", "Copied the output.")}>Copy output</Button>
     </div>}
-    {!embedded && name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
+    {mode.box && name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
   </section>;
 }

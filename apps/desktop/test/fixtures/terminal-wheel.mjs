@@ -14,7 +14,7 @@ export const stats = { queued: 0, finished: 0, most: 0, stopped: 0, wheels: 0 };
 
 /** Mounts one agent terminal view wired as the team panel wires it, with a send that the
  * page holds while `hold` is on, as an engine still busy with earlier input does. */
-export function mount(rows, cols) {
+export function mount(rows, cols, keys = true) {
   input?.dispose();
   terminal?.dispose();
   sent.length = 0;
@@ -45,7 +45,7 @@ export function mount(rows, cols) {
     sent.push(chunk);
     if (!hold) return Promise.resolve(true);
     return new Promise((done) => held.push(done));
-  }, () => true);
+  }, () => true, () => keys);
 }
 
 export function write(text) {

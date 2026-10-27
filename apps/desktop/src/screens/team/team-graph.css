@@ -409,6 +409,25 @@
   font-size: 11px;
 }
 
+.tg-terminal.embedded .tg-composer {
+  border-top-color: var(--terminal-border);
+  background: var(--terminal-surface);
+}
+
+.tg-terminal.embedded .tg-composer-input {
+  border-color: var(--terminal-border);
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+}
+
+.tg-terminal.embedded .tg-composer-foot .tg-terminal-note {
+  min-height: 0;
+  padding: 0;
+  border-top: 0;
+  background: transparent;
+  color: var(--terminal-muted);
+}
+
 .tg-terminal.embedded .tg-terminal-state {
   background: transparent;
   color: var(--terminal-muted);

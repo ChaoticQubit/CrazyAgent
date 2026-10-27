@@ -28,6 +28,17 @@ test("Copy output keeps every written line and drops trailing spaces and the bla
   assert.equal(io.outputText([]), "");
 });
 
+test("each master input choice says whether keys reach the terminal and whether the message box shows", () => {
+  assert.deepEqual(io.inputMode("terminal"), { keys: true, box: false });
+  assert.deepEqual(io.inputMode("box"), { keys: false, box: true });
+  assert.deepEqual(io.inputMode("both"), { keys: true, box: true });
+  assert.deepEqual(io.INPUT_CHOICES.map((choice) => choice.value), ["terminal", "box", "both"]);
+  assert.equal(io.INPUT_DEFAULT, "terminal");
+  assert.equal(io.inputChoice("box"), "box");
+  assert.equal(io.inputChoice("something else"), "terminal", "an unknown stored value reads as the default");
+  assert.equal(io.inputChoice(null), "terminal");
+});
+
 const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
 
 async function keyPress(send, modifiers) {
