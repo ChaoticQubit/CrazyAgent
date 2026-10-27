@@ -411,6 +411,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
         landing: &landing,
         events: None,
         host: None,
+        config: None,
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     while !server.is_finished() {
@@ -535,6 +536,7 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
         landing: &landing,
         events: None,
         host: None,
+        config: None,
     };
     assert_eq!(
         serve_calls(&mut fixture.connection, &answering, &mailbox).unwrap(),
