@@ -266,6 +266,15 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
             ShellEvent::PoolEdited(result) => Arrival::PoolEdited(result),
         },
         OwnerEvent::TeamGraph { project, result } => Arrival::TeamGraph { project, result },
+        OwnerEvent::ProjectFiles {
+            project,
+            query,
+            result,
+        } => Arrival::ProjectFiles {
+            project,
+            query,
+            result,
+        },
         other => Arrival::Owner(Box::new(other)),
     }
 }
@@ -302,6 +311,7 @@ fn send(
         Request::Wire { command, revision } => connection.start(command, revision).map(|_| ()),
         Request::Settings(job) => connection.settings(*job),
         Request::TeamGraph { project } => connection.team_graph(project),
+        Request::ProjectFiles { project, query } => connection.project_files(project, query),
         request @ (Request::TerminalAttach { .. }
         | Request::TerminalInput { .. }
         | Request::TerminalResize { .. }

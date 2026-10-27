@@ -714,7 +714,9 @@ fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<(
 }
 
 /// Saves the draft as `layout`/setup/draft.json, creating `setup/` if the
-/// layout has none. Returns any I/O failure.
+/// layout has none, and leaves a file that already holds the same bytes
+/// untouched so a recheck does not wake the owner's file watchers. Returns
+/// any I/O failure.
 pub(crate) fn save(layout: &Path, drafted: &Drafted) -> std::io::Result<()> {
     let setup = layout.join(LAYOUT_SETUP);
     match std::fs::DirBuilder::new().create(&setup) {
@@ -723,7 +725,30 @@ pub(crate) fn save(layout: &Path, drafted: &Drafted) -> std::io::Result<()> {
         Err(error) => return Err(error),
     }
     let bytes = serde_json::to_vec_pretty(drafted).map_err(std::io::Error::other)?;
+    if open_folder(&setup).is_some_and(|folder| holds(&folder, DRAFT_FILE, &bytes)) {
+        return Ok(());
+    }
     replace_file(&setup, DRAFT_FILE, &bytes)
+}
+
+/// Whether the regular file `name` in `folder` holds exactly `bytes`, read
+/// without following a link and never more than one byte past their length.
+/// Takes the folder, the file name and the bytes. Returns `false` for a
+/// missing, linked or unreadable file.
+fn holds(folder: &Folder, name: &str, bytes: &[u8]) -> bool {
+    let Some(file) = open_in(folder, name) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let bound = bytes.len() as u64 + 1;
+    let mut found = Vec::new();
+    if file.take(bound).read_to_end(&mut found).is_err() {
+        return false;
+    }
+    assert!(found.len() as u64 <= bound);
+    found == bytes
 }
 
 /// The overview in `layout`/overview.md, bounded to 64 KiB and never read

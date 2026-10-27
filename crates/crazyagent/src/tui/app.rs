@@ -871,6 +871,7 @@ impl App {
             OwnerEvent::Shell(_)
             | OwnerEvent::Settings(_)
             | OwnerEvent::TeamGraph { .. }
+            | OwnerEvent::ProjectFiles { .. }
             | OwnerEvent::Intake(_)
             | OwnerEvent::Changes(_)
             | OwnerEvent::Process(_)

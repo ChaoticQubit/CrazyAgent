@@ -1899,7 +1899,7 @@ pub(crate) fn add_worktree(
 /// under memory pressure; the resolved real git has neither. Falls back to [`GIT`] where
 /// xcrun cannot resolve it (for example on Linux), no worse than before. Returns the path.
 #[cfg(unix)]
-fn setup_git() -> &'static Path {
+pub(crate) fn setup_git() -> &'static Path {
     static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     RESOLVED.get_or_init(|| real_git().unwrap_or_else(|| PathBuf::from(GIT)))
 }

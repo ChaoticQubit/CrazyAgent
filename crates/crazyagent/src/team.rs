@@ -1,6 +1,6 @@
 use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
-use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
+use crate::project_setup::{HarnessSlot, StoredSetup, TEAM_AGENTS_MAX, TeamPlan};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 pub mod cleanup;
 pub mod direct;
 pub mod graph;
+pub mod master;
 pub mod names;
 pub mod runtime;
 pub mod tool;
@@ -354,6 +355,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    LiveMaster {
+        project_id: ProjectId,
+        on: bool,
+    },
     Pause {
         project_id: ProjectId,
     },
@@ -412,7 +417,10 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
+            Self::KeepWarm { .. }
+            | Self::LiveMaster { .. }
+            | Self::Pause { .. }
+            | Self::Resume { .. } => Ok(()),
         }
     }
 
@@ -425,6 +433,7 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
             | Self::HandOff { project_id, .. }
@@ -746,15 +755,88 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
+    master::initialize(connection)?;
     names::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
-fn slot<'a>(plan: &'a TeamPlan, harness: &str) -> Option<&'a HarnessSlot> {
+/// Finds the plan slot a sub-agent on this harness runs under. An empty plan means any
+/// harness (DEC-096 addendum 3): each harness that can run team agents gets a slot whose
+/// count never binds before the team maximum, with tools following the master's switch.
+/// Takes the plan and a harness id. Returns the slot, or none when the plan does not allow it.
+fn slot(plan: &TeamPlan, harness: &str) -> Option<HarnessSlot> {
     let wanted = launch_harness(harness);
-    plan.sub_harnesses.iter().find(|slot| {
-        slot.harness == harness || (wanted.is_some() && launch_harness(&slot.harness) == wanted)
-    })
+    if plan.sub_harnesses.is_empty() {
+        return wanted.map(|id| HarnessSlot {
+            harness: id.to_owned(),
+            agents: TEAM_AGENTS_MAX,
+            tools: plan.master_tools,
+        });
+    }
+    plan.sub_harnesses
+        .iter()
+        .find(|slot| {
+            slot.harness == harness || (wanted.is_some() && launch_harness(&slot.harness) == wanted)
+        })
+        .cloned()
+}
+
+/// Lists every harness that can run team agents, in catalog order.
+fn runnable_harnesses() -> impl Iterator<Item = &'static str> {
+    crate::harnesses::specs()
+        .iter()
+        .filter_map(|spec| launch_harness(spec.id))
+}
+
+/// Lists the harnesses an empty team plan can use now: those that run team agents and have
+/// an eligible account in the project's pool. Takes the live model access and the project.
+/// Returns the launch harness ids in catalog order, empty without a pool or fitting account.
+pub fn available_harnesses(access: &ModelAccess, project: &ProjectId) -> Vec<&'static str> {
+    runnable_harnesses()
+        .filter(|id| {
+            matches!(eligible_accounts(access, project, id),
+                Accounts::Usable(accounts) if !accounts.is_empty())
+        })
+        .collect()
+}
+
+/// Lists the harnesses a plan hands work to: its own slots, or for an empty plan every
+/// harness that can run team agents. Takes the plan. Returns the harness ids.
+fn plan_harnesses(plan: &TeamPlan) -> Vec<String> {
+    if plan.sub_harnesses.is_empty() {
+        return runnable_harnesses().map(str::to_owned).collect();
+    }
+    plan.sub_harnesses
+        .iter()
+        .map(|slot| slot.harness.clone())
+        .collect()
+}
+
+/// Tells a master leading an empty team plan which harnesses it can use and that only the
+/// team maximum limits them, or that a maximum of one agent leaves no room for sub-agents.
+/// Takes the plan and the harnesses with an eligible account now. Returns plain lines, each
+/// ending in a newline.
+pub fn any_harness_text(plan: &TeamPlan, available: &[&str]) -> String {
+    assert!(plan.sub_harnesses.is_empty());
+    if plan.max_agents <= 1 {
+        return "The team maximum is 1 agent, you, so CrazyAgent refuses every task you hand over. Do the work yourself, or tell the owner to raise the team maximum in the project's Team settings.\n".to_owned();
+    }
+    let mut text = if available.is_empty() {
+        "The team plan names no harness, so any harness that can run sub-agents may take your tasks, but no harness has an account in the project's pool yet. Tasks you hand over wait until the owner adds one.\n".to_owned()
+    } else {
+        let mut list =
+            "The team plan names no harness, so you may use any harness that can run now:\n"
+                .to_owned();
+        for harness in available {
+            list.push_str(&format!("- {harness}\n"));
+        }
+        list
+    };
+    text.push_str(&format!(
+        "There is no per-harness limit, only the team maximum of {} agents, counting you.\n",
+        plan.max_agents
+    ));
+    text
 }
 
 fn active_tasks(
@@ -768,6 +850,63 @@ fn active_tasks(
         |row| row.get(0),
     )
     .map_err(error)
+}
+
+/// Picks the slot for a task under an empty team plan (DEC-096 addendum 3); a team maximum
+/// of one agent leaves no room. A named harness must run team agents and, while any harness
+/// has an eligible account, be one of those.
+/// Without a name the least loaded of those wins, the master's harness on a tie. With no
+/// eligible account anywhere the task parks on the named harness, or the master's.
+/// Takes the transaction, live access, the setup and the named harness. Returns the slot,
+/// or a plain refusal code.
+fn any_slot(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    harness: Option<&str>,
+) -> Result<Result<HarnessSlot, &'static str>, EngineError> {
+    let plan = &stored.team;
+    assert!(plan.sub_harnesses.is_empty());
+    if plan.max_agents <= 1 {
+        return Ok(Err("team_has_no_sub_agents"));
+    }
+    let available = available_harnesses(access, &stored.project_id);
+    if let Some(harness) = harness {
+        let Some(chosen) = slot(plan, harness) else {
+            return Ok(Err(if crate::harnesses::spec(harness).is_some() {
+                "team_harness_cannot_run"
+            } else {
+                "team_harness_not_in_plan"
+            }));
+        };
+        if !available.is_empty() && !available.contains(&chosen.harness.as_str()) {
+            return Ok(Err("team_harness_cannot_run"));
+        }
+        return Ok(Ok(chosen));
+    }
+    let master = launch_harness(&plan.master);
+    let mut candidates = if available.is_empty() {
+        master
+            .or_else(|| runnable_harnesses().next())
+            .into_iter()
+            .collect()
+    } else {
+        available
+    };
+    candidates.sort_by_key(|id| Some(*id) != master);
+    let mut best: Option<(&str, i64)> = None;
+    for candidate in candidates {
+        let load = active_tasks(tx, &stored.project_id, Some(candidate))?;
+        if best.is_none_or(|(_, seen)| load < seen) {
+            best = Some((candidate, load));
+        }
+    }
+    let Some((chosen, _)) = best else {
+        return Ok(Err("team_harness_cannot_run"));
+    };
+    Ok(Ok(slot(plan, chosen).expect(
+        "a harness that runs team agents has a slot in an empty plan",
+    )))
 }
 
 /// Admits one task for a sub-agent against the project's team plan and pool.
@@ -788,25 +927,29 @@ pub fn admit(
         return Ok(Err("team_task_invalid"));
     }
     let plan = &stored.team;
-    if plan.sub_harnesses.is_empty() {
-        return Ok(Err("team_has_no_sub_agents"));
-    }
-    let chosen = match harness {
-        Some(harness) => match slot(plan, harness) {
-            Some(chosen) => chosen,
-            None => return Ok(Err("team_harness_not_in_plan")),
-        },
-        None => {
-            let mut best: Option<(&HarnessSlot, i64)> = None;
-            for candidate in &plan.sub_harnesses {
-                let load = active_tasks(tx, &stored.project_id, Some(&candidate.harness))? * 64
-                    / i64::from(candidate.agents.max(1));
-                if best.is_none_or(|(_, seen)| load < seen) {
-                    best = Some((candidate, load));
+    let chosen = if plan.sub_harnesses.is_empty() {
+        match any_slot(tx, access, stored, harness)? {
+            Ok(chosen) => chosen,
+            Err(code) => return Ok(Err(code)),
+        }
+    } else {
+        match harness {
+            Some(harness) => match slot(plan, harness) {
+                Some(chosen) => chosen,
+                None => return Ok(Err("team_harness_not_in_plan")),
+            },
+            None => {
+                let mut best: Option<(&HarnessSlot, i64)> = None;
+                for candidate in &plan.sub_harnesses {
+                    let load = active_tasks(tx, &stored.project_id, Some(&candidate.harness))? * 64
+                        / i64::from(candidate.agents.max(1));
+                    if best.is_none_or(|(_, seen)| load < seen) {
+                        best = Some((candidate, load));
+                    }
                 }
+                best.map(|(chosen, _)| chosen.clone())
+                    .ok_or_else(|| failure("team_has_no_sub_agents"))?
             }
-            best.map(|(chosen, _)| chosen)
-                .ok_or_else(|| failure("team_has_no_sub_agents"))?
         }
     };
     let Some(launch) = launch_harness(&chosen.harness) else {
@@ -1193,6 +1336,16 @@ pub fn execute(
                 params![project.as_str(), on],
             )
             .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::LiveMaster { on, .. } => {
+            if *on
+                && crate::harnesses::interactive::support(&stored.team.master)
+                    != crate::harnesses::interactive::Support::Terminal
+            {
+                return Ok(rejected("team_master_no_terminal"));
+            }
+            master::set_live(tx, project, *on)?;
             Ok(Outcome::Applied)
         }
         TeamAction::Pause { .. } => {
@@ -1613,15 +1766,28 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         delegation_label: Some(master_path.label().into()),
         runnable: launch_harness(&plan.master).is_some(),
     }];
-    harnesses.extend(plan.sub_harnesses.iter().map(|slot| TeamHarness {
-        harness: slot.harness.clone(),
+    let slots = if plan.sub_harnesses.is_empty() {
+        let subs_max = plan.max_agents.saturating_sub(1);
+        runnable_harnesses()
+            .filter(|_| subs_max > 0)
+            .map(|harness| HarnessSlot {
+                harness: harness.to_owned(),
+                agents: subs_max,
+                tools: plan.master_tools,
+            })
+            .collect()
+    } else {
+        plan.sub_harnesses.clone()
+    };
+    harnesses.extend(slots.into_iter().map(|slot| TeamHarness {
+        live: live(AgentRole::Sub, &slot.harness),
+        runnable: launch_harness(&slot.harness).is_some(),
+        harness: slot.harness,
         role: AgentRole::Sub,
         agents_max: slot.agents,
         tools: slot.tools,
-        live: live(AgentRole::Sub, &slot.harness),
         delegation: None,
         delegation_label: None,
-        runnable: launch_harness(&slot.harness).is_some(),
     }));
     let steps = match master_reply(connection, project, None)? {
         Some((reply, text)) => plan_steps(connection, project, reply, &text)?,

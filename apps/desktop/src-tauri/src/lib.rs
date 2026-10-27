@@ -591,6 +591,17 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_files(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    query: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_files(&id, &query).await
+}
+
+#[tauri::command]
 async fn desktop_set_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -685,6 +696,21 @@ async fn desktop_team_keep_warm(
     lock(&state)
         .await?
         .team_keep_warm(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_live_master(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_live_master(&id, on, generation)
         .await
 }
 
@@ -2192,12 +2218,14 @@ pub fn run() {
             desktop_add_project_documents,
             desktop_delete_project_context,
             desktop_project_read_paths,
+            desktop_project_files,
             desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
             desktop_team_rename,
