@@ -117,6 +117,30 @@ test("a master alone is one card, and at most NODES_MAX nodes are drawn", () => 
   assert.equal(graph.layoutCards(graph.layoutGraph(many)).length, graph.NODES_MAX);
 });
 
+test("past NODES_MAX the master and frames stay, and running, waiting, failed then stopped agents are drawn newest first", () => {
+  const harnesses = Array.from({ length: 8 }, (_, index) => `h${index + 1}`);
+  const nodes = [node("m", "master", { label: "Master", status: "working", terminal: "team-0" })];
+  for (const harness of harnesses) nodes.push(node(`g-${harness}`, "harness_group", { parent: "m", label: harness, harness }));
+  const status = (index) => index <= 10 ? "stopped" : index <= 12 ? "failed" : index === 13 ? "stopped" : ["starting", "idle", "working"][index % 3];
+  for (let index = 1; index <= 63; index += 1) {
+    const harness = harnesses[index % harnesses.length];
+    nodes.push(node(`team-${index}`, "agent", { parent: `g-${harness}`, harness, status: status(index), questions: index === 13 ? 1 : 0, terminal: `team-${index}` }));
+  }
+  const team = { project_id: "p", nodes, edges: [] };
+  assert.equal(nodes.length, 72);
+  const layout = graph.layoutGraph(team);
+  const drawn = graph.layoutCards(layout).map((item) => item.node.id);
+  assert.equal(drawn.length, graph.NODES_MAX - harnesses.length);
+  assert.equal(layout.masters.length, 1);
+  assert.equal(layout.groups.filter((group) => group.node).length, harnesses.length);
+  assert.equal(layout.hidden, 8);
+  const kept = new Set(drawn);
+  for (let index = 1; index <= 63; index += 1) assert.equal(kept.has(`team-${index}`), index > 8, `team-${index}`);
+  assert.equal(graph.graphSummary(team, layout.hidden), "17 of 63 agents working. 0 tasks live. 8 agents not shown.");
+  assert.equal(graph.graphSummary(team), "17 of 63 agents working. 0 tasks live.");
+  assert.equal(graph.layoutGraph({ project_id: "p", nodes: nodes.slice(0, 40), edges: [] }).hidden, 0);
+});
+
 for (const count of [10, 20, 40]) {
   for (const harnesses of [["codex"], ["claude", "codex", "gemini"]]) {
     test(`cards, frames and badges never overlap with ${count} agents on ${harnesses.length} harnesses`, () => {

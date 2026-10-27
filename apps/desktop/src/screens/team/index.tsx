@@ -204,7 +204,7 @@ export function TeamGraphView({ projectId, harness, account }: {
     <div className="tg-head">
       <h3 id={`${ids}-title`}>Team graph</h3>
       <span className="tg-summary" role="status">
-        {graphSummary(team)}{questions > 0 ? ` ${questions} ${questions === 1 ? "question" : "questions"} waiting.` : ""}
+        {graphSummary(team, layout.hidden)}{questions > 0 ? ` ${questions} ${questions === 1 ? "question" : "questions"} waiting.` : ""}
       </span>
     </div>
     {read.stale && <Notice tone="warn" alert>
