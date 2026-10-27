@@ -1155,7 +1155,9 @@ impl ResearchRunner {
         }
         if job.kind == ResearchKind::RoadmapPlanning.name() {
             let state = crate::projects_home::state_folder(root);
-            crate::planning::publish(&state, body, harness.label())?;
+            let plan = crate::planning::publish(&state, body, harness.label())?;
+            crate::planning::raise(self.database(), &job.project, &plan)
+                .map_err(|_| crate::planning::QUESTIONS_UNLOGGED)?;
             return Ok(state.join(crate::planning::ROADMAP));
         }
         let report = render_report(&kind_label(&job.kind), harness.label(), body);

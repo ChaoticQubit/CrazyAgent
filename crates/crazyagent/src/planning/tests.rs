@@ -372,3 +372,97 @@ fn the_prompt_carries_the_brief_and_bounded_research_without_links() {
     assert!(bare.contains("(The owner has not written a brief yet.)"));
     assert!(bare.contains("No research reports were written for this project."));
 }
+
+#[test]
+fn unclear_points_become_planning_questions() {
+    use crate::questions::{self, Source, State};
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-planning-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("engine");
+    let folder = base.join("project");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&folder).unwrap();
+    let state = project_state(&folder);
+    let db = questions::open(&root).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::team::initialize(&db).unwrap();
+    crate::ide::workspace::tests::add_project(&db, "planned", &folder);
+    let database = root.join("engine.db");
+    let project = ProjectId::new("planned").unwrap();
+    let agent = tempfile::tempdir().unwrap();
+    let plan = publish(&state, &written_by_a_process(agent.path(), REPLY), "Codex").unwrap();
+    assert_eq!(raise(&database, "planned", &plan).unwrap(), 2);
+    assert_eq!(
+        raise(&database, "planned", &plan).unwrap(),
+        0,
+        "a retried plan does not ask a pending question twice"
+    );
+    let mut pending = questions::list(&db, &project, true, None).unwrap();
+    pending.sort_by_key(|question| question.id);
+    let texts: Vec<&str> = pending.iter().map(|q| q.question.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Which payment provider should V1 use?",
+            "Is offline mode needed in V1, or can it wait for V2?"
+        ]
+    );
+    for question in &pending {
+        assert_eq!(question.source, Source::Planning);
+        assert_eq!(question.state, State::Pending);
+        assert_eq!(question.context.as_deref(), Some(QUESTION_CONTEXT));
+        assert!(question.options.is_empty());
+    }
+    let page = fs::read_to_string(state.join("questions.md")).unwrap();
+    assert!(
+        page.contains(&format!("Question {} from roadmap planning", pending[0].id)),
+        "{page}"
+    );
+    assert_eq!(record_answers(&database).unwrap(), 0);
+    questions::answer(&db, &project, pending[0].id, 0, "Stripe", 2000)
+        .unwrap()
+        .unwrap();
+    questions::dismiss(&db, &project, pending[1].id, 0, 2000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        questions::untaken(&db, questions::Step::Planning).unwrap(),
+        [project.clone()]
+    );
+    assert_eq!(record_answers(&database).unwrap(), 2);
+    let roadmap = fs::read_to_string(state.join(ROADMAP)).unwrap();
+    assert!(
+        roadmap.ends_with(&format!(
+            "\n{ANSWERS_HEADING}\n\n- Question {}: Which payment provider should V1 use?\n  Owner: Stripe\n- Question {}: Is offline mode needed in V1, or can it wait for V2?\n  The owner dismissed it.\n",
+            pending[0].id, pending[1].id
+        )),
+        "{roadmap}"
+    );
+    assert!(
+        questions::untaken(&db, questions::Step::Planning)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(record_answers(&database).unwrap(), 0);
+    assert_eq!(fs::read_to_string(state.join(ROADMAP)).unwrap(), roadmap);
+    let entry = answer_line(
+        pending[0].id,
+        Some("Which payment provider should V1 use?"),
+        Some("Stripe"),
+    );
+    assert_eq!(
+        with_answers(Some(&roadmap), &[entry]),
+        roadmap,
+        "an answer is listed once"
+    );
+    assert!(
+        questions::list(&db, &project, true, None)
+            .unwrap()
+            .is_empty()
+    );
+}

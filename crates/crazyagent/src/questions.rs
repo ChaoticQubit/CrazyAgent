@@ -44,7 +44,7 @@ const COLUMNS: &str = "id,project,source,agent,question,options,recommended,cont
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
-    source TEXT NOT NULL CHECK(source IN ('master','mapping','research','landing','terminal')),
+    source TEXT NOT NULL CHECK(source IN ('master','mapping','research','landing','terminal','planning')),
     agent INTEGER,
     question TEXT NOT NULL,
     options TEXT NOT NULL,
@@ -74,8 +74,8 @@ const _: () = assert!(TERMINAL_BYTES_MAX <= QUESTION_BYTES_MAX);
 const _: () = assert!(QUESTION_BYTES_MAX <= events::ESCALATION_BYTES_MAX);
 
 /// Who asked an owner question: a project's master through its ask tool, an engine step
-/// (mapping "Open questions", research, a landing conflict), or a master's own terminal
-/// question box the engine saw on its screen. On the owner wire each is its snake_case name.
+/// (mapping "Open questions", research, a landing conflict, roadmap planning), or a master's
+/// own terminal question box the engine saw on its screen. On the owner wire each is its snake_case name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -84,6 +84,7 @@ pub enum Source {
     Research,
     Landing,
     Terminal,
+    Planning,
 }
 
 /// The engine steps that raise their own owner questions and take each answer once.
@@ -92,6 +93,7 @@ pub enum Step {
     Mapping,
     Research,
     Landing,
+    Planning,
 }
 
 /// Where an owner question stands: waiting for the owner until answered or dismissed.
@@ -165,12 +167,13 @@ enum Settle<'a> {
 }
 
 impl Source {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Master,
         Self::Mapping,
         Self::Research,
         Self::Landing,
         Self::Terminal,
+        Self::Planning,
     ];
 
     fn name(self) -> &'static str {
@@ -180,6 +183,7 @@ impl Source {
             Self::Research => "research",
             Self::Landing => "landing",
             Self::Terminal => "terminal",
+            Self::Planning => "planning",
         }
     }
 
@@ -195,6 +199,7 @@ impl Source {
             Self::Research => "research",
             Self::Landing => "landing",
             Self::Terminal => "the master, asked in terminal",
+            Self::Planning => "roadmap planning",
         }
     }
 }
@@ -205,6 +210,7 @@ impl Step {
             Self::Mapping => Source::Mapping,
             Self::Research => Source::Research,
             Self::Landing => Source::Landing,
+            Self::Planning => Source::Planning,
         }
     }
 }
@@ -553,6 +559,36 @@ pub fn take(
     Ok(taken)
 }
 
+/// Lists the projects holding a settled question one engine step raised and has not taken
+/// yet, so the step opens a write transaction only where `take` has work. Inputs: the engine
+/// connection and the step. Output: at most `OPEN_PER_PROJECT_MAX` projects in name order.
+pub fn untaken(connection: &Connection, step: Step) -> Result<Vec<ProjectId>, EngineError> {
+    let tx = connection.unchecked_transaction().map_err(unavailable)?;
+    ensure(&tx)?;
+    let projects = {
+        let mut statement = tx
+            .prepare_cached(
+                "SELECT DISTINCT project FROM owner_questions
+                 WHERE source=?1 AND state!='pending' AND handed=0
+                 ORDER BY project LIMIT ?2",
+            )
+            .map_err(unavailable)?;
+        statement
+            .query_map(params![step.source().name(), OPEN_PER_PROJECT_MAX], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(unavailable)?
+            .map(|project| {
+                project
+                    .map_err(unavailable)
+                    .and_then(|project| ProjectId::new(&project).map_err(unavailable))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    assert!(projects.len() as i64 <= OPEN_PER_PROJECT_MAX);
+    Ok(projects)
+}
+
 /// Lists one project's questions newest first: only pending ones, or all, those older than
 /// `before` when given, at most `LISTED_MAX` and `LISTED_BYTES_MAX` bytes of JSON. Inputs:
 /// the engine connection, the project, the filter and the paging id. Output: the questions.
@@ -729,7 +765,7 @@ fn settle(
             }
         }
         Source::Master | Source::Terminal => (true, None),
-        Source::Mapping | Source::Research | Source::Landing => (false, None),
+        Source::Mapping | Source::Research | Source::Landing | Source::Planning => (false, None),
     };
     let changed = tx
         .execute(
