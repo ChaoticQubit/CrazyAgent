@@ -240,6 +240,34 @@ fn an_update_a_master_cannot_take_says_why_in_plain_words() {
 }
 
 #[test]
+fn an_update_the_team_refuses_says_why_in_the_desktop_words() {
+    for (code, sentence) in [
+        (
+            "team_agent_not_found",
+            "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.",
+        ),
+        (
+            "team_conversation_full",
+            "Too many of your messages are waiting for the master. Send more once it has answered.",
+        ),
+        ("team_task_invalid", "The task is empty or too long."),
+    ] {
+        let mut view = listed(vec![set('1', ChangeState::Conflict)]);
+        assert!(view.key(key(KeyCode::Char('u')), NOW));
+        let query = reply(&mut view, Err(code.into()));
+        assert_eq!(query, ChangesQuery::Update { id: id('1') });
+        assert!(
+            crate::engine::owner::CHANGES_CODES.contains(&code),
+            "{code}"
+        );
+        let shown = text(&view);
+        assert!(shown.contains(sentence), "{code}: {shown}");
+        assert!(!shown.contains("That didn't work"), "{code}: {shown}");
+        assert_eq!(refusal(code), sentence);
+    }
+}
+
+#[test]
 fn a_conflicting_accept_names_the_files_and_offers_ask_agent_to_update() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     view.key(key(KeyCode::Char('a')), NOW);
