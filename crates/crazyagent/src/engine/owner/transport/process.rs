@@ -107,8 +107,8 @@ pub struct AgentInstructions {
 }
 
 /// What a saved instructions text comes to: the bytes of app and project instructions the
-/// project's agents now receive (the app text alone after an app save) and the most a
-/// Claude master is sure to take beside the largest project context.
+/// project's agents now receive (the largest across set-up projects after an app save) and
+/// the most a Claude master is sure to take beside the largest project context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSaved {
@@ -438,12 +438,14 @@ async fn handle(
             agent_instructions(&root, &project, agent).map(Answer::Agent)
         }
         action => {
-            let saved = match &action {
-                Action::Save { project } => Some(project.clone()),
+            let saved = match (&action, &text) {
+                (Action::Save { project }, Some(text)) => Some((project.clone(), text.clone())),
                 _ => None,
             };
             match (saved, run(&root, home.as_deref(), action, text)?) {
-                (Some(project), None) => sized(&root, project.as_ref()).map(Answer::Saved),
+                (Some((project, text)), None) => {
+                    Ok(Answer::Saved(sized(&root, project.as_ref(), &text)))
+                }
                 (None, Some(text)) => Ok(Answer::Text(text)),
                 _ => Err(unknown()),
             }
@@ -496,26 +498,67 @@ fn run(
     })
 }
 
-/// Measures what the owner's instructions come to after a save: the app and project text
-/// the project's agents now receive, or the app text alone after an app save, beside what a
-/// Claude master is sure to take. Inputs: the engine root and the project, none for the
-/// app. Output: the sizes, or a plain code.
-fn sized(root: &Path, project: Option<&ProjectId>) -> Result<ProcessSaved, EngineError> {
-    let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
-    let app = crate::agent_home::read_app(root).map_err(code)?;
-    let own = match project {
-        Some(project) => {
-            crate::agent_home::read_project(&project_folder(root, project)?).map_err(code)?
+/// The most set-up projects an app-wide save reads for its Claude warning, as many as Home
+/// lists.
+const SAVED_PROJECTS_MAX: i64 = 200;
+
+const _: () = assert!(
+    PROCESS_BYTES_MAX <= u32::MAX as usize
+        && super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32::MAX as usize
+);
+
+/// Measures what the owner's instructions come to after a save that landed, from the text
+/// just saved: the app and project text the project's agents now receive, the largest
+/// across set-up projects after an app save, beside what a Claude master is sure to take.
+/// A text that cannot be read counts as empty, so a landed save never reports a failure.
+/// Inputs: the engine root, the project, none for the app, and the saved text. Output: the
+/// sizes.
+fn sized(root: &Path, project: Option<&ProjectId>, saved: &str) -> ProcessSaved {
+    let given = match project {
+        Some(_) => {
+            let app = crate::agent_home::read_app(root).unwrap_or_default();
+            crate::agent_home::render(&app, saved).len()
         }
-        None => String::new(),
+        None => project_texts(root)
+            .iter()
+            .map(|own| crate::agent_home::render(saved, own).len())
+            .fold(crate::agent_home::render(saved, "").len(), usize::max),
     };
-    let given = crate::agent_home::render(&app, &own);
-    assert!(given.len() <= PROCESS_BYTES_MAX);
-    Ok(ProcessSaved {
-        bytes: u32::try_from(given.len()).map_err(|_| unknown())?,
-        claude_bytes_max: u32::try_from(super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX)
-            .map_err(|_| unknown())?,
-    })
+    assert!(given <= PROCESS_BYTES_MAX);
+    ProcessSaved {
+        bytes: given as u32,
+        claude_bytes_max: super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX as u32,
+    }
+}
+
+/// Reads the instructions of the set-up projects, at most `SAVED_PROJECTS_MAX`, so an app
+/// save can tell whether it pushes one past what a Claude master takes. A project whose
+/// folder or text cannot be read is left out. Input: the engine root. Output: the texts.
+fn project_texts(root: &Path) -> Vec<String> {
+    let Ok(connection) = read_only(root) else {
+        return Vec::new();
+    };
+    let Ok(tx) = connection.unchecked_transaction() else {
+        return Vec::new();
+    };
+    let ids: Vec<String> =
+        match tx.prepare("SELECT project FROM project_setups ORDER BY project LIMIT ?1") {
+            Ok(mut statement) => statement
+                .query_map([SAVED_PROJECTS_MAX], |row| row.get(0))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+    assert!(ids.len() <= SAVED_PROJECTS_MAX as usize);
+    ids.iter()
+        .filter_map(|id| {
+            let project = ProjectId::new(id).ok()?;
+            let folder = crate::launch_context::agent_project(&tx, &project)
+                .ok()?
+                .folder?;
+            crate::agent_home::read_project(&folder).ok()
+        })
+        .collect()
 }
 
 /// Reads what one team agent of a project received at its last launch from its private

@@ -38,8 +38,8 @@ const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
 #[cfg(unix)]
 const _: () = assert!(
-    (crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1) as u64
-        < crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX
+    crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1
+        < crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
 );
 #[cfg(unix)]
 const MASTER_TMP: &str = "tmp";

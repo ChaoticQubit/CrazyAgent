@@ -37,8 +37,8 @@ mod process;
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 #[cfg(unix)]
 const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
-/// The most bytes of the instruction file Claude Code is launched with.
-#[cfg(unix)]
+/// The most bytes of the instruction file Claude Code is launched with. Defined on every
+/// platform, since the Process page warns against it wherever the engine runs.
 pub(crate) const INSTRUCTIONS_BYTES_MAX: u64 = 64 * 1024;
 #[cfg(unix)]
 const TOOL_STEPS_MAX: &str = "24";

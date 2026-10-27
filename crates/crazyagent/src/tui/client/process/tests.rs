@@ -129,6 +129,42 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
             && warning.contains(&format!("not {:.1} KB", given.len() as f64 / 1024.0)),
         "{warning}"
     );
+
+    let Ok(ProcessReply::Saved(again)) = native
+        .process(ProcessQuery::Save {
+            project: None,
+            text: app.clone(),
+        })
+        .await
+        .result
+    else {
+        panic!("the app save lands again");
+    };
+    assert_eq!(
+        again, both,
+        "an app save measures the project it now pushes past what a Claude master takes"
+    );
+    assert!(again.claude_warning().is_some());
+
+    let app_file = launch.data.join(crate::agent_home::APP_FILE);
+    std::fs::remove_file(&app_file).unwrap();
+    std::fs::create_dir(&app_file).unwrap();
+    let landed = native
+        .process(ProcessQuery::Save {
+            project: Some(project.clone()),
+            text: own.clone(),
+        })
+        .await
+        .result;
+    assert_eq!(
+        landed,
+        Ok(ProcessReply::Saved(crate::engine::owner::ProcessSaved {
+            bytes: crate::agent_home::render("", &own).len() as u32,
+            claude_bytes_max: claude_room(),
+        })),
+        "a save that landed is reported saved though the app text cannot be read"
+    );
+    std::fs::remove_dir(&app_file).unwrap();
     service.shutdown().await.unwrap();
 }
 
