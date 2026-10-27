@@ -532,3 +532,44 @@ fn a_conversation_record_gives_its_typed_messages_and_replies() {
     assert!(conversation_messages("claude-code", &link).is_empty());
     assert!(conversation_messages("codex", &case.path().join("gone.jsonl")).is_empty());
 }
+
+/// A FIFO where a transcript is expected is never opened for a blocking read: a pane's
+/// reader, a resumed reader and the excerpt reader all return at once and take nothing.
+#[test]
+fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
+    let case = Case::new();
+    let (file, reader) = case.claude();
+    let made = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&file)
+            .env_clear()
+            .stdin(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(made.success());
+    let work = case.work();
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let read = reader.read();
+        let resumed = TranscriptReader::resumed(
+            Transcript::ClaudeSession { file: file.clone() },
+            &work,
+            &file,
+            None,
+        )
+        .err();
+        let messages = conversation_messages("claude-code", &file);
+        let _ = sent.send((read, reader.conversation(), resumed, messages));
+    });
+    let (read, named, resumed, messages) = got
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a FIFO must not block a transcript reader");
+    assert_eq!(read, Ok(Vec::new()));
+    assert_eq!(named, None);
+    assert_eq!(
+        resumed,
+        Some(LaunchError("launch_resume_unavailable".to_owned()))
+    );
+    assert!(messages.is_empty());
+}

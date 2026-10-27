@@ -644,8 +644,9 @@ pub fn resume_harness(
 /// How a session's master starts when its kept harness conversation cannot continue: a
 /// session with earlier turns starts a fresh harness conversation seeded with the summary
 /// of its engine turns, its kept harness conversation and its state, with a note saying
-/// so; a session without starts new. Takes the connection, project, session and the kept
-/// conversation. Returns `Fresh` or `New`.
+/// so; a session without starts new. A record the reader refused at a resume is not read.
+/// Takes the connection, project, session and the kept conversation. Returns `Fresh` or
+/// `New`.
 pub fn fresh_harness(
     connection: &Connection,
     project: &ProjectId,
@@ -656,7 +657,9 @@ pub fn fresh_harness(
     if let Some(summary) = transcript_summary(connection, project, session)? {
         parts.push(summary);
     }
-    let read = kept.and_then(record_summary);
+    let read = kept
+        .filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
+        .and_then(record_summary);
     let lost = kept.is_some() && read.is_none();
     parts.extend(read);
     if parts.is_empty() && !lost {
@@ -751,7 +754,11 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip, flat};
+    use super::{LOST_NOTE, ResumePlan, clip, flat, resume_harness};
+    use crate::harnesses::terminal_session::Resume;
+    use crate::protocol::{ProjectId, SessionId};
+    use crate::team::master::{SessionConversation, keep_conversation};
+    use std::time::Duration;
 
     #[test]
     fn listed_lines_hold_no_control_characters_and_stay_bounded() {
@@ -767,5 +774,59 @@ mod tests {
         let long = flat(&"word ".repeat(40), 12).unwrap();
         assert_eq!(long, "word word...");
         assert!(long.chars().count() <= 12);
+    }
+
+    /// A FIFO left at a kept harness record, as a tools-on master could make in its own
+    /// home, is never opened for a blocking read: the session's start returns at once with a
+    /// fresh conversation and the note that the earlier one could not be read.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_kept_record_falls_back_at_once_with_the_lost_note() {
+        let folder = tempfile::tempdir().unwrap();
+        let database = folder.path().join("engine.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let id = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        let made = crate::spawn_gate::status(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&record)
+                .env_clear()
+                .stdin(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(made.success());
+        let project = ProjectId::new("fifo-project").unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+        keep_conversation(&connection, &project, "s-fifo", &kept).unwrap();
+        drop(connection);
+        let (sent, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            let plan = resume_harness(
+                &connection,
+                &project,
+                &SessionId::new("s-fifo").unwrap(),
+                "claude-code",
+                "local-a",
+            );
+            let _ = sent.send(plan.map_err(|problem| problem.0));
+        });
+        let plan = got
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a FIFO at the kept record must not block the session's start")
+            .unwrap();
+        let ResumePlan::Fresh { note, .. } = &plan else {
+            panic!("a FIFO is no record to resume: {plan:?}");
+        };
+        assert_eq!(note, LOST_NOTE);
     }
 }

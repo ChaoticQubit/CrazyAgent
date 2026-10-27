@@ -249,6 +249,7 @@ enum Report {
         text: String,
     },
     Conversation(Resume),
+    ResumeRefused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2977,6 +2978,15 @@ impl TeamRuntime {
                 }
                 Ok(false)
             }
+            Report::ResumeRefused => {
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                worker.stopping = true;
+                if let Some(session) = worker.session.clone() {
+                    let project = worker.project.clone();
+                    super::master::refuse_conversation(&self.connection, &project, &session)?;
+                }
+                Ok(false)
+            }
             Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
@@ -3801,7 +3811,12 @@ fn live(
                 Some("team_master_no_terminal"),
             ))
         }
-        Err(problem) => Some(with_code("The agent could not start", Some(&problem.0))),
+        Err(problem) => {
+            if resume.is_some() && problem.0 == RESUME_REFUSED {
+                let _ = reports.send(Report::ResumeRefused);
+            }
+            Some(with_code("The agent could not start", Some(&problem.0)))
+        }
     };
     drop(held);
     problem
@@ -4212,6 +4227,7 @@ fn excerpt(text: &str, max: usize) -> String {
     assert!(cut.len() <= max);
     cut
 }
+const RESUME_REFUSED: &str = "launch_resume_unavailable";
 const LIVE_STARTS_MAX: usize = 3;
 const LIVE_STARTS_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LIVE_STOPPED: &str = "The live master was turned off";

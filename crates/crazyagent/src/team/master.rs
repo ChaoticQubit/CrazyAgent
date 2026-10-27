@@ -168,6 +168,28 @@ pub(crate) fn keep_conversation(
     Ok(())
 }
 
+/// The conversation id kept for a session whose record the harness reader refused at a
+/// resume: never resumed, and its record is never read for a summary again.
+pub(crate) const REFUSED_CONVERSATION: &str = "refused";
+
+/// Marks the harness conversation a project's master session kept as refused, after the
+/// reader would not follow its record at a resume, so the next start begins a fresh
+/// conversation instead of trying the same resume again. Takes the engine database, the
+/// project and the session. Returns any SQLite failure; nothing changes without a kept row.
+pub(crate) fn refuse_conversation(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "UPDATE team_master_conversations SET conversation=?3 WHERE session=?1 AND project=?2",
+            params![session, project.as_str(), REFUSED_CONVERSATION],
+        )
+        .map_err(state)?;
+    Ok(())
+}
+
 /// Reads the harness conversation a project's master session continues. Takes the engine
 /// database, the project and the session. Returns it, or none when none was kept.
 pub fn session_conversation(
