@@ -1,6 +1,7 @@
 use super::*;
-use crate::agent_home::TEXT_BYTES_MAX;
+use crate::agent_home::{PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
 use crate::protocol::encode_frame;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
@@ -9,6 +10,10 @@ const PAYLOAD_TIME: Duration = Duration::from_secs(5);
 /// Every code a Process request can answer an owner client with: the instruction
 /// store's refusals, this protocol's own, and the owner connection's it travels on.
 pub const PROCESS_CODES: &[&str] = &[
+    "agent_instructions_invalid",
+    "agent_instructions_too_large",
+    "agent_instructions_unreadable",
+    "agent_instructions_unsafe",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
@@ -22,6 +27,8 @@ pub const PROCESS_CODES: &[&str] = &[
     "owner_socket_replaced",
     "owner_socket_unsafe",
     "peer_owner_mismatch",
+    "process_agent_unknown",
+    "process_agent_unsupported",
     "process_folder_missing",
     "process_folder_unsafe",
     "process_import_missing",
@@ -43,10 +50,18 @@ pub const PROCESS_CODES: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    Read { project: Option<ProjectId> },
-    Save { project: Option<ProjectId> },
+    Read {
+        project: Option<ProjectId>,
+    },
+    Save {
+        project: Option<ProjectId>,
+    },
     ImportGlobal,
     Default,
+    Agent {
+        project: ProjectId,
+        agent: Option<i64>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,9 +74,39 @@ struct Envelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Text { bytes: u32 },
+    Text {
+        bytes: u32,
+    },
     Saved,
-    Rejected { code: String },
+    Received {
+        agent: i64,
+        harness: String,
+        launched: bool,
+        skills: Vec<String>,
+        bytes: u32,
+    },
+    Rejected {
+        code: String,
+    },
+}
+
+/// What one team agent received at its last launch, read back from its private home: the
+/// agent id, its harness, whether it has launched, the text of its harness's instruction
+/// file (empty when none was given) and the names of the skills installed for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentInstructions {
+    pub agent: i64,
+    pub harness: String,
+    pub launched: bool,
+    pub text: String,
+    pub skills: Vec<String>,
+}
+
+enum Answer {
+    Text(String),
+    Saved,
+    Agent(AgentInstructions),
 }
 
 fn unknown() -> EngineError {
@@ -103,6 +148,38 @@ impl OwnerClient {
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
     pub async fn default_process(&self) -> Result<String, EngineError> {
         self.process_text_reply(Action::Default).await
+    }
+
+    /// Reads what one team agent of a project received at its last launch. Inputs: the
+    /// project and the agent id, or none for the project's newest master. Output: the
+    /// read-only view, or a `PROCESS_CODES` refusal such as `agent_instructions_unsafe`.
+    pub async fn agent_instructions(
+        &self,
+        project: ProjectId,
+        agent: Option<i64>,
+    ) -> Result<AgentInstructions, EngineError> {
+        match self
+            .process_exchange(Action::Agent { project, agent }, None)
+            .await?
+        {
+            (
+                Reply::Received {
+                    agent,
+                    harness,
+                    launched,
+                    skills,
+                    ..
+                },
+                Some(text),
+            ) => Ok(AgentInstructions {
+                agent,
+                harness,
+                launched,
+                text,
+                skills,
+            }),
+            _ => Err(unknown()),
+        }
     }
 
     async fn process_text_reply(&self, action: Action) -> Result<String, EngineError> {
@@ -154,6 +231,28 @@ impl OwnerClient {
                     let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
                     Ok((Reply::Text { bytes }, Some(text)))
                 }
+                Reply::Received {
+                    agent,
+                    harness,
+                    launched,
+                    skills,
+                    bytes,
+                } => {
+                    let text = read_payload(&mut stream, bytes, PROCESS_BYTES_MAX)
+                        .await
+                        .map_err(|_| unknown())?;
+                    if text.contains('\0') {
+                        return Err(unknown());
+                    }
+                    let reply = Reply::Received {
+                        agent,
+                        harness,
+                        launched,
+                        skills,
+                        bytes,
+                    };
+                    Ok((reply, Some(text)))
+                }
                 reply => Ok((reply, None)),
             }
         })
@@ -162,14 +261,28 @@ impl OwnerClient {
     }
 }
 
-/// Reads one text payload that follows a frame: exactly `bytes` bytes of UTF-8, at most
-/// `TEXT_BYTES_MAX`. Inputs: the stream and the announced size. Output: the text.
+/// Reads one owner text payload that follows a frame: exactly `bytes` bytes of UTF-8, at
+/// most `TEXT_BYTES_MAX`, with no NUL. Inputs: the stream and the announced size.
+/// Output: the text.
 async fn read_text<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     bytes: u32,
 ) -> Result<String, EngineError> {
+    let text = read_payload(stream, bytes, TEXT_BYTES_MAX).await?;
+    crate::agent_home::validate(&text).map_err(|problem| EngineError(problem.0))?;
+    Ok(text)
+}
+
+/// Reads one payload that follows a frame: exactly `bytes` bytes of UTF-8 within `bytes_max`,
+/// waiting at most `PAYLOAD_TIME`. Inputs: the stream, the announced size and the bound.
+/// Output: the text.
+async fn read_payload<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    bytes: u32,
+    bytes_max: usize,
+) -> Result<String, EngineError> {
     let size = bytes as usize;
-    if size > TEXT_BYTES_MAX {
+    if size > bytes_max {
         return Err(failure("process_text_too_large"));
     }
     let mut buffer = vec![0; size];
@@ -177,9 +290,7 @@ async fn read_text<S: tokio::io::AsyncRead + Unpin>(
         .await
         .map_err(|_| failure("process_request_invalid"))?
         .map_err(|_| failure("process_request_invalid"))?;
-    let text = String::from_utf8(buffer).map_err(|_| failure("process_text_invalid"))?;
-    crate::agent_home::validate(&text).map_err(|problem| EngineError(problem.0))?;
-    Ok(text)
+    String::from_utf8(buffer).map_err(|_| failure("process_text_invalid"))
 }
 
 /// Encodes this protocol's refusal of a request the engine did not run.
@@ -197,13 +308,24 @@ pub(super) async fn serve(
     bytes: &[u8],
 ) -> Result<(), EngineError> {
     let (reply, text) = match handle(stream, engine, authority, packet, admission, bytes).await {
-        Ok(Some(text)) => (
+        Ok(Answer::Text(text)) => (
             Reply::Text {
                 bytes: text.len() as u32,
             },
             Some(text),
         ),
-        Ok(None) => (Reply::Saved, None),
+        Ok(Answer::Saved) => (Reply::Saved, None),
+        Ok(Answer::Agent(view)) => {
+            assert!(view.text.len() <= PROCESS_BYTES_MAX);
+            let reply = Reply::Received {
+                agent: view.agent,
+                harness: view.harness,
+                launched: view.launched,
+                skills: view.skills,
+                bytes: view.text.len() as u32,
+            };
+            (reply, Some(view.text))
+        }
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -234,7 +356,7 @@ async fn handle(
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
-) -> Result<Option<String>, EngineError> {
+) -> Result<Answer, EngineError> {
     if bytes.len() > REQUEST_BYTES_MAX {
         return Err(failure("process_request_bounds"));
     }
@@ -263,9 +385,15 @@ async fn handle(
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("process_unavailable"))?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    tokio::task::spawn_blocking(move || run(&root, home.as_deref(), action, text))
-        .await
-        .map_err(|_| failure("process_unavailable"))?
+    tokio::task::spawn_blocking(move || match action {
+        Action::Agent { project, agent } if text.is_none() => {
+            agent_instructions(&root, &project, agent).map(Answer::Agent)
+        }
+        action => run(&root, home.as_deref(), action, text)
+            .map(|text| text.map_or(Answer::Saved, Answer::Text)),
+    })
+    .await
+    .map_err(|_| failure("process_unavailable"))?
 }
 
 /// Runs one Process request against the engine root. Inputs: the root holding
@@ -311,9 +439,57 @@ fn run(
     })
 }
 
-/// Finds one project's folder from its stored setup. Inputs: the engine root and the
-/// project. Output: the folder, or `process_project_unknown`.
-fn project_folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> {
+/// Reads what one team agent of a project received at its last launch from its private
+/// home under `<root>/team`. Inputs: the engine root, the project and the agent id, none
+/// for the project's newest master. Output: the view, or a plain code.
+fn agent_instructions(
+    root: &Path,
+    project: &ProjectId,
+    agent: Option<i64>,
+) -> Result<AgentInstructions, EngineError> {
+    if agent.is_some_and(|id| id <= 0) {
+        return Err(failure("process_request_invalid"));
+    }
+    let unavailable = |_| failure("process_unavailable");
+    let connection = read_only(root)?;
+    let team: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'team_agents')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !team {
+        return Err(failure("process_agent_unknown"));
+    }
+    let (id, harness): (i64, String) = connection
+        .query_row(
+            "SELECT id, harness FROM team_agents WHERE project = ?1
+             AND (id = ?2 OR (?2 IS NULL AND role = 'master')) ORDER BY id DESC LIMIT 1",
+            rusqlite::params![project.as_str(), agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(unavailable)?
+        .ok_or_else(|| failure("process_agent_unknown"))?;
+    assert!(id > 0 && agent.is_none_or(|asked| asked == id));
+    let kind = crate::agent_home::Harness::from_id(&harness)
+        .ok_or_else(|| failure("process_agent_unsupported"))?;
+    let home = crate::team::runtime::agent_home(&root.join("team"), id);
+    let received =
+        crate::agent_home::received(&home, kind).map_err(|problem| EngineError(problem.0))?;
+    let launched = received.is_some();
+    let received = received.unwrap_or_default();
+    Ok(AgentInstructions {
+        agent: id,
+        harness,
+        launched,
+        text: received.text,
+        skills: received.skills,
+    })
+}
+
+fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {
     let connection = rusqlite::Connection::open_with_flags(
         root.join("engine.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -324,6 +500,13 @@ fn project_folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineErr
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|_| failure("process_unavailable"))?;
+    Ok(connection)
+}
+
+/// Finds one project's folder from its stored setup. Inputs: the engine root and the
+/// project. Output: the folder, or `process_project_unknown`.
+fn project_folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> {
+    let connection = read_only(root)?;
     let tx = connection
         .unchecked_transaction()
         .map_err(|_| failure("process_unavailable"))?;
