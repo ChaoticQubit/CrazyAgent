@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Done           
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+──━━━━━━━━──────────────────────────────────────────────────────────────────────
   ✓ Key saved                                                                   
                                                                                 
   CrazyAgent will check it the first time an agent uses it. It is in your       

@@ -17,6 +17,7 @@ fn glyph(section: SettingsSection) -> Section {
         SettingsSection::Pools => Section::Pools,
         SettingsSection::Harnesses => Section::Harnesses,
         SettingsSection::Plugins => Section::Plugins,
+        SettingsSection::Process => Section::Process,
         SettingsSection::Memory => Section::Memory,
         SettingsSection::Profile => Section::Profile,
     }
@@ -44,7 +45,9 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
                     format!("{found} of {all}")
                 }),
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
-                SettingsSection::Plugins | SettingsSection::Profile => String::new(),
+                SettingsSection::Plugins | SettingsSection::Process | SettingsSection::Profile => {
+                    String::new()
+                }
             },
         })
         .collect();
@@ -88,6 +91,9 @@ pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
         SettingsSection::Harnesses => Box::new(super::settings_harnesses::Harnesses::new()),
         SettingsSection::Memory => Box::new(super::settings_memory::Memory::new()),
         SettingsSection::Plugins => Box::new(super::settings_plugins::Plugins::new()),
+        SettingsSection::Process => {
+            Box::new(super::process::ProcessPage::new(super::process::Scope::App))
+        }
         SettingsSection::Profile => Box::new(profile::ProfilePage::new(ctx)),
     }
 }

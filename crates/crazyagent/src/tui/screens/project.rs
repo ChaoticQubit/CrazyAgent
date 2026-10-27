@@ -472,6 +472,7 @@ pub(in crate::tui) enum ProjectReply {
     EndConversation,
     Retry,
     Team,
+    Process,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -1619,6 +1620,7 @@ impl ProjectScreen {
                 self.confirm_remove = true;
                 ProjectReply::Handled
             }
+            KeyCode::Char('i') => ProjectReply::Process,
             _ => ProjectReply::Ignored,
         }
     }

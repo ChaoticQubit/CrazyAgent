@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts                                    
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+──━━━━━━━━──────────────────────────────────────────────────────────────────────
   Accounts                                     240 accounts   3 need attention  
   /  Filter by name, provider, status or pool                                   
                                                                                 
