@@ -26,6 +26,12 @@ pub mod windows;
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
+/// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
+/// matches a local address by port only (`localhost` there matches every local address), so
+/// it cannot keep an agent's listener on loopback; it can keep these ports free.
+pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
+
 /// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
@@ -404,8 +410,9 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
-/// Network reach of a sandboxed agent: open when the agent's tools are on,
-/// otherwise only the listed model endpoints.
+/// Network reach of a sandboxed agent: open when the agent's tools are on, except that
+/// it never binds or listens on an [`OWNER_PORTS`] port, otherwise only the listed model
+/// endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -927,6 +934,13 @@ impl ProjectSandbox {
                 text.push_str(
                     "(allow network-outbound (remote ip \"*:*\"))\n(allow network-inbound (local ip \"*:*\"))\n(allow network-bind (local ip \"*:*\"))\n(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
                 );
+                let owner = OWNER_PORTS
+                    .iter()
+                    .map(|port| format!(" (local ip \"*:{port}\")"))
+                    .collect::<String>();
+                text.push_str(&format!(
+                    "(deny network-bind{owner})\n(deny network-inbound{owner})\n"
+                ));
                 text.push_str(
                     "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n",
                 );

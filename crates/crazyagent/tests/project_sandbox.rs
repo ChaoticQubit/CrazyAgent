@@ -463,6 +463,67 @@ fn network_is_open_only_when_tools_are_on() {
     assert!(!connect(&model, "model-b.sb", other_port));
 }
 
+/// Starts `nc -l` on one address and port inside the sandbox, sends it a line from inside
+/// the sandbox when `connect` is set, and stops it. Returns what the listener received and
+/// what it reported.
+fn listen(
+    sandbox: &ProjectSandbox,
+    case: &Case,
+    name: &str,
+    host: &str,
+    port: u16,
+    connect: bool,
+) -> (String, String) {
+    let got = case.tmp.join(format!("{name}.got"));
+    let said = case.tmp.join(format!("{name}.err"));
+    let client = if connect {
+        format!("printf hello | /usr/bin/nc -w 2 {host} {port}; ")
+    } else {
+        String::new()
+    };
+    let script = format!(
+        "/usr/bin/nc -l {host} {port} > {} 2> {} & pid=$!; /bin/sleep 1; {client}/bin/sleep 0.3; kill $pid 2>/dev/null; wait $pid; exit 0",
+        quoted(&got),
+        quoted(&said)
+    );
+    let output = run(sandbox, &case.profiles.join(name), &script);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        fs::read_to_string(&got).unwrap_or_default(),
+        fs::read_to_string(&said).unwrap_or_default(),
+    )
+}
+
+#[test]
+fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port() {
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    assert_eq!(
+        listen(&open, &case, "dev-server.sb", "127.0.0.1", port, true),
+        ("hello".to_owned(), String::new()),
+        "an agent's dev server on loopback takes connections"
+    );
+    assert_eq!(crazyagent::sandbox::OWNER_PORTS, [1455, 11434]);
+    for port in crazyagent::sandbox::OWNER_PORTS {
+        for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+            let name = format!("owner-{port}-{}.sb", host.replace([':', '.'], "-"));
+            let (got, said) = listen(&open, &case, &name, host, port, false);
+            assert_eq!(got, "", "{host} {port}");
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from the owner's tool: {said}"
+            );
+        }
+    }
+}
+
 #[test]
 fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     let case = case();
