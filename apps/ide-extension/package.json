@@ -16,7 +16,20 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
-  "contributes": {},
+  "contributes": {
+    "themes": [
+      {
+        "label": "CrazyAgent Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/crazyagent-dark.json"
+      },
+      {
+        "label": "CrazyAgent Light",
+        "uiTheme": "vs",
+        "path": "./themes/crazyagent-light.json"
+      }
+    ]
+  },
   "scripts": {
     "build": "node ../desktop/node_modules/typescript/bin/tsc -p tsconfig.json"
   },

@@ -145,3 +145,16 @@ test("the themes take their grounds, text and accent from the desktop palette", 
     }
   }
 });
+
+test("the extension contributes both themes under their fixed labels", () => {
+  const manifest = JSON.parse(read("../package.json"));
+  assert.deepEqual(manifest.contributes.themes, [
+    { label: "CrazyAgent Dark", uiTheme: "vs-dark", path: "./themes/crazyagent-dark.json" },
+    { label: "CrazyAgent Light", uiTheme: "vs", path: "./themes/crazyagent-light.json" },
+  ]);
+  for (const entry of manifest.contributes.themes) {
+    const theme = JSON.parse(read(`.${entry.path}`));
+    assert.equal(theme.name, entry.label);
+    assert.equal(theme.type, entry.uiTheme === "vs-dark" ? "dark" : "light");
+  }
+});
