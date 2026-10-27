@@ -408,3 +408,46 @@
 .tg-hand h4 {
   margin: 0;
 }
+
+.tg-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.tg-instructions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tg-instructions-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tg-instructions-note {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.tg-instructions-file {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.tg-instructions-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

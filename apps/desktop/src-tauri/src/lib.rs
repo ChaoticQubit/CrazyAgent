@@ -1844,6 +1844,18 @@ async fn desktop_import_global_instructions(
 }
 
 #[tauri::command]
+async fn desktop_agent_instructions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    agent: Option<i64>,
+) -> Result<crazyagent::engine::owner::AgentInstructions, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.agent_instructions(project_id, agent)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_default_process(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2229,6 +2241,7 @@ pub fn run() {
             desktop_save_process_text,
             desktop_import_global_instructions,
             desktop_default_process,
+            desktop_agent_instructions,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

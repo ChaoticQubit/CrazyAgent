@@ -9,6 +9,7 @@ import {
   graphLive, graphSummary, groupTitle, layoutCards, layoutGraph, namedAccounts, nodeDetail, nodeStatus, panView, questionCount,
   tipPlace, viewKey, wheelZoom, zoomView, type Link, type PlacedCard, type PlacedGroup, type Size, type View,
 } from "./graph";
+import { AgentInstructions } from "./agent-instructions";
 import { TerminalPanel } from "./terminal-panel";
 import "./team-graph.css";
 
@@ -271,7 +272,10 @@ export function TeamGraphView({ projectId, harness, account }: {
           </div>}
         </div>
       </div>
-      {openNode && <TerminalPanel key={openNode.id} node={openNode} harness={harness} onClose={() => setOpen(null)} />}
+      {openNode && <div className="tg-side">
+        <TerminalPanel key={openNode.id} node={openNode} harness={harness} onClose={() => setOpen(null)} />
+        <AgentInstructions key={openNode.id} projectId={projectId} node={openNode} />
+      </div>}
     </div>
   </section>;
 }

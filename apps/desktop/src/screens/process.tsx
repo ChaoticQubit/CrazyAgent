@@ -23,12 +23,19 @@ export function TaggedText({ text, skills }: { text: string; skills: readonly Sk
   return <div className="process-text">
     {skillSegments(text, skills).map((segment, index) => segment.kind === "text"
       ? <span key={index}>{segment.text}</span>
-      : <a key={index} className="skill-tag" href={skillHref(segment.id)} title={segment.description || segment.name}
-        aria-label={segment.description ? `Skill ${segment.name}: ${segment.description}` : `Skill ${segment.name}`}>{segment.name}</a>)}
+      : <SkillTag key={index} skill={segment} />)}
   </div>;
 }
 
-function size(bytes: number): string {
+/** One catalog skill as a tag: hovering shows its one-line description and clicking opens it
+ * in Settings. Input: the skill's id, name and description. */
+export function SkillTag({ skill }: { skill: SkillEntry }) {
+  return <a className="skill-tag" href={skillHref(skill.id)} title={skill.description || skill.name}
+    aria-label={skill.description ? `Skill ${skill.name}: ${skill.description}` : `Skill ${skill.name}`}>{skill.name}</a>;
+}
+
+/** Writes a byte count the way the Process pages show sizes. Input: bytes. Output: the words. */
+export function byteSize(bytes: number): string {
   return bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixed(1)} KB`;
 }
 
@@ -71,7 +78,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
     <Panel title="Instructions">
       <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed) onSave(); }}>
         <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid}
-          helper={`${size(textBytes(draft))} of ${size(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
+          helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
         <span className="row">
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
             disabled={Boolean(invalid) || !changed || busy !== null}>Save</Button>
