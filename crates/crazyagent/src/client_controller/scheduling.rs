@@ -1,5 +1,5 @@
 use super::*;
-use crate::scheduling::{Schedule, ScheduleChange};
+use crate::scheduling::{PoolRanking, Schedule, ScheduleChange};
 
 impl OwnerController {
     /// Reads the owner's account scheduling choices: the app strategy, pool strategies,
@@ -8,6 +8,16 @@ impl OwnerController {
     pub async fn account_schedule(&mut self) -> Result<Schedule, EngineError> {
         match self.read(OwnerRead::AccountSchedule).await?.data {
             OwnerData::AccountSchedule { schedule } => Ok(schedule),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Reads each pool's account ranking: the order work would try its accounts now and
+    /// why each held account waits.
+    /// Returns one ranking per pool, or the engine's plain rejection code.
+    pub async fn account_ranking(&mut self) -> Result<Vec<PoolRanking>, EngineError> {
+        match self.read(OwnerRead::AccountRanking).await?.data {
+            OwnerData::AccountRanking { pools } => Ok(pools),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
