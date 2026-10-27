@@ -1330,6 +1330,76 @@ fn project_rows(root: &Path, table: &str) -> i64 {
         .unwrap()
 }
 
+/// Leaves an onboarding row for `PROJECT` at `folder` with no project row, as a
+/// project removal made before removals took the onboarding with them.
+fn leftover_onboarding(root: &Path, folder: &Path) {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES (?1,?2,?3,'done','done','{}',1,1)",
+            [PROJECT, folder.to_str().unwrap(), POOL],
+        )
+        .unwrap();
+}
+
+fn onboarding_repo(root: &Path) -> String {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .query_row(
+            "SELECT repo FROM onboarding WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_onboarding_of_a_vanished_folder_with_the_same_name_is_replaced() {
+    let mut bench = Bench::start(|_| {}).await;
+    let gone = bench
+        .repo
+        .parent()
+        .unwrap()
+        .join("moved-away")
+        .join(PROJECT);
+    assert!(!gone.exists());
+    leftover_onboarding(&bench.root, &gone);
+    assert_eq!(project_rows(&bench.root, "project_setups"), 0);
+
+    let project = bench.start_onboarding().await;
+    assert_eq!(onboarding_repo(&bench.root), bench.repo.to_str().unwrap());
+    assert_eq!(project_rows(&bench.root, "onboarding"), 1);
+    let setup = bench.owner.project_setup(project.clone()).await.unwrap();
+    assert_eq!(setup.map(|setup| setup.project_id), Some(project.clone()));
+    let view = bench.view(&project).await;
+    assert_eq!(view.project_id, project);
+    assert!(!view.finished, "{view:?}");
+    assert!(bench.repo.join(".crazyagent/context/brief.md").is_file());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_onboarding_of_another_folder_still_there_refuses_with_a_plain_code() {
+    let mut bench = Bench::start(|_| {}).await;
+    let other = bench.repo.parent().unwrap().join("elsewhere").join(PROJECT);
+    fs::create_dir_all(&other).unwrap();
+    leftover_onboarding(&bench.root, &other);
+
+    let repo = bench.repo.clone();
+    let response = bench.start_onboarding_at(&repo).await;
+    assert_eq!(
+        rejection(&response).as_deref(),
+        Some("onboarding_project_mismatch"),
+        "{response:?}"
+    );
+    assert_eq!(onboarding_repo(&bench.root), other.to_str().unwrap());
+    assert_eq!(project_rows(&bench.root, "project_setups"), 0);
+    assert!(!bench.repo.join(".crazyagent").exists());
+    assert!(other.is_dir());
+    bench.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_working_project() {
     let mut bench = Bench::start(|_| {}).await;
