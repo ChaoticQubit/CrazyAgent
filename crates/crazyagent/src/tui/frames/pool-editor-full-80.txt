@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Pools  /  New pool                          
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──────────────━━━━━━━───────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+─────────────━━━━━──────────────────────────────────────────────────────────────
   New pool                                                   15 of 15 selected  
   Pool name                                                                     
   [ Build team                                                   ]              

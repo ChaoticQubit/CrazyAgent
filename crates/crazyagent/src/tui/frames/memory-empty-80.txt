@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Memory                                      
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──────────────────────────────────────────────────────────━━━━━━━━──────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+────────────────────────────────────────────────────────────────━━━━━━──────────
   Memory                                                                        
                                                                                 
   No memories yet.                                                              
