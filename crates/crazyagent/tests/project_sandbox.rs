@@ -558,20 +558,34 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
     ] {
         write_refused(&confined, &profile, &script, &target);
     }
-    let committed = run(
+    let worked = run(
         &confined,
         &profile,
         &format!(
-            "cd {} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
+            "cd {} && echo work > work.txt && git reset -q && git status --porcelain && echo ok",
             quoted(&worktree)
         ),
     );
     assert!(
-        committed.status.success(),
+        worked.status.success(),
         "{}",
-        String::from_utf8_lossy(&committed.stderr)
+        String::from_utf8_lossy(&worked.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&committed.stdout), "ok\n");
+    assert_eq!(String::from_utf8_lossy(&worked.stdout), "?? work.txt\nok\n");
+    let objects = case.project.join(".git").join("objects");
+    let before = object_entries(&objects);
+    let added = run(
+        &confined,
+        &profile,
+        &format!("cd {} && git add work.txt", quoted(&worktree)),
+    );
+    assert!(!added.status.success(), "the agent added an object");
+    assert!(
+        String::from_utf8_lossy(&added.stderr).contains("failed to insert into database"),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert_eq!(object_entries(&objects), before);
 }
 
 #[test]
