@@ -9,10 +9,11 @@ import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
-import { basicsErrors, draftOf, editRequest, poolName, teamValid, wireTeam } from "../new-project/wizard";
+import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamValid, wireTeam } from "../new-project/wizard";
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
+import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { PluginsAndSkills } from "../settings/plugins";
@@ -119,7 +120,7 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
   }
   return <div className="pj-stack">
     <h2>Team</h2>
-    <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={setup.research} onChange={setTeam} />
+    <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={researchChoices(setup.research).research} onChange={setTeam} />
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div className="pj-summary"><span>Running agents keep their current harness. Changes apply to agents started after you save; waiting research moves to the new team.</span>
       <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
@@ -176,7 +177,7 @@ function GeneralSection({ data, setup }: { data: ProjectData; setup: StoredSetup
   const [note, setNote] = useState("");
   useEffect(() => {
     let live = true;
-    void loadProjectCatalog(setup.pool, setup.research).then((result) => { if (live) setCatalog(result); });
+    void loadProjectCatalog(setup.pool, researchChoices(setup.research).research).then((result) => { if (live) setCatalog(result); });
     void loadProjects().then((result) => { if (live && result.kind === "ok") setNames(result.value.filter((item) => item.id !== data.id).map((item) => item.name)); });
     return () => { live = false; };
   }, [data.id]);
@@ -308,7 +309,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {SECTIONS.map((item) => <button type="button" key={item.id} aria-current={active === item.id ? "page" : undefined} onClick={() => setActive(item.id)}>{item.label}</button>)}
     </nav>
     <div className="pj-settings-body">
-      {active === "general" && needsSetup(() => <GeneralSection data={data} setup={setup!} />)}
+      {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} /></>)}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
       {active === "plugins" && <div className="pj-stack">

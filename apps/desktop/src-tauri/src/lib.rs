@@ -967,6 +967,17 @@ async fn desktop_retry_research(
 }
 
 #[tauri::command]
+async fn desktop_plan_roadmap(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.plan_roadmap(&id, generation).await
+}
+
+#[tauri::command]
 async fn desktop_research_log(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2397,6 +2408,7 @@ pub fn run() {
             desktop_remove_project,
             desktop_cancel_research,
             desktop_retry_research,
+            desktop_plan_roadmap,
             desktop_research_log,
             desktop_projects_home,
             desktop_set_projects_home,

@@ -12,7 +12,7 @@ import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
 import { PoolPicker } from "./pool-picker";
-import { BasicsFields, ResearchSwitches } from "./fields";
+import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, emptyDraft, poolName, preselectPool,
@@ -246,6 +246,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           <h2 id="pj-step-title">What should agents start on?</h2>
           <p className="pj-secondary">Each one starts a research agent as soon as the project is created. Results land in the project folder as Markdown with links and sources.</p>
           <ResearchSwitches prefix="np" catalog={catalog} value={draft.research} onChange={(research) => setDraft({ ...draft, research })} />
+          <RoadmapSwitch prefix="np" value={draft.roadmap} onChange={(roadmap) => setDraft({ ...draft, roadmap })} />
         </div>}
         {step === "pool" && <div className="pj-stack">
           <h2 id="pj-step-title">Which accounts should this project use?</h2>

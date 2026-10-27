@@ -120,6 +120,9 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 SetupAction::RetryResearch { project_id, job } => {
                     controller.retry_research(project_id, job, generation).await
                 }
+                SetupAction::PlanRoadmap { project_id } => {
+                    controller.plan_roadmap(project_id, generation).await
+                }
                 other => panic!("the project screen never sends {other:?}"),
             }
             .map_err(problem)?,
@@ -2477,5 +2480,150 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
         screen.project_folder(),
         Some(std::path::PathBuf::from("/private/tmp/ca-notes-cli")),
         "changed files are the owner's copies in the project folder, never in the state folder"
+    );
+}
+
+#[tokio::test]
+async fn settings_plan_roadmap_now_starts_the_job() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-roadmap-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let project = ProjectId::new("roadmap-later").unwrap();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Roadmap later".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "A notes app made before roadmap planning.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let start = 1_793_000_000_000;
+    settle(&mut screen, &mut controller, start).await;
+    assert!(
+        screen
+            .jobs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|job| job.kind != ResearchKind::RoadmapPlanning),
+        "the toggle was off, so nothing planned on its own"
+    );
+    screen.open(Tab::Settings);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(
+        text(&drawn.rows).contains("Roadmap   Not planned   p Plan roadmap now"),
+        "{}",
+        text(&drawn.rows)
+    );
+
+    let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
+        panic!("p asks the engine to plan");
+    };
+    assert_eq!(
+        *action,
+        SetupAction::PlanRoadmap {
+            project_id: project.clone(),
+        }
+    );
+    send(
+        &mut screen,
+        &mut controller,
+        SetupQuery::Change {
+            action: *action,
+            generation: 2,
+        },
+    )
+    .await;
+    assert_eq!(screen.problem, None);
+    settle(&mut screen, &mut controller, start + 1_000).await;
+    let planned: Vec<_> = screen
+        .jobs
+        .as_ref()
+        .unwrap()
+        .iter()
+        .filter(|job| job.kind == ResearchKind::RoadmapPlanning)
+        .map(|job| job.status)
+        .collect();
+    assert_eq!(planned.len(), 1, "one planning job is queued");
+    assert!(
+        matches!(
+            planned[0],
+            ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running
+        ),
+        "{planned:?}"
+    );
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(
+        text(&drawn.rows).contains("Roadmap   Planning"),
+        "{}",
+        text(&drawn.rows)
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("A roadmap is already being planned for this project. Wait for it to finish.")
+    );
+    let again = serve(
+        &mut controller,
+        SetupQuery::Change {
+            action: SetupAction::PlanRoadmap {
+                project_id: project.clone(),
+            },
+            generation: 3,
+        },
+    )
+    .await;
+    assert_eq!(
+        again,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "planning_busy".into()
+        })),
+        "the engine refuses a second job while one is queued"
+    );
+    let stored = controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .expect("the setup is saved");
+    assert_eq!(
+        (stored.research, stored.revision),
+        (vec![ResearchKind::RoadmapPlanning], 1),
+        "the setup records planning so a later edit keeps the job, without counting as an owner save"
     );
 }

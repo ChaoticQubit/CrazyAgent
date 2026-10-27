@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 18] = [
+const COMMANDS: [&str; 19] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -32,6 +32,7 @@ const COMMANDS: [&str; 18] = [
     "desktop_remove_project",
     "desktop_cancel_research",
     "desktop_retry_research",
+    "desktop_plan_roadmap",
     "desktop_research_log",
 ];
 
@@ -283,6 +284,24 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         bridge.research_jobs(&id).await?.jobs[0].status,
         ResearchStatus::NeedsPool
     );
+    let planned = bridge.plan_roadmap(&id, 12).await?;
+    assert!(
+        matches!(planned.outcome, ActionOutcome::Applied),
+        "{planned:?}"
+    );
+    assert_eq!(planned.intent.kind, "plan_roadmap");
+    assert_eq!(
+        bridge
+            .research_jobs(&id)
+            .await?
+            .jobs
+            .iter()
+            .filter(|row| row.kind == ResearchKind::RoadmapPlanning)
+            .count(),
+        1
+    );
+    let busy = bridge.plan_roadmap(&id, 13).await?;
+    assert_eq!(busy.rejection.as_deref(), Some("planning_busy"));
 
     let edited = ProjectSetup {
         about: "Tracks shared chores for two.".into(),
@@ -294,7 +313,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             edited.clone(),
             Some("Chore board two".into()),
             None,
-            12,
+            14,
         )
         .await?;
     assert!(
@@ -316,11 +335,11 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             .any(|row| row.id == id && row.name == "Chore board two")
     );
     let stale = bridge
-        .update_project_setup(&id, edited, None, Some(1), 13)
+        .update_project_setup(&id, edited, None, Some(1), 15)
         .await?;
     assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 
-    let removed = bridge.remove_project(&id, 14).await?;
+    let removed = bridge.remove_project(&id, 16).await?;
     assert!(
         matches!(removed.outcome, ActionOutcome::Applied),
         "{removed:?}"

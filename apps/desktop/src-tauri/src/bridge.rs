@@ -655,6 +655,9 @@ impl NativeBridge {
             OwnerMutation::RetryResearch { project_id, .. } => {
                 ("research_retry", Some(project_id.as_str().to_owned()), None)
             }
+            OwnerMutation::PlanRoadmap { project_id } => {
+                ("plan_roadmap", Some(project_id.as_str().to_owned()), None)
+            }
             OwnerMutation::RunSetup { .. } => ("run_setup", None, None),
             OwnerMutation::SetPackEntry { .. } => ("pack_set", None, None),
             OwnerMutation::RemovePackEntry { .. } => ("pack_remove", None, None),

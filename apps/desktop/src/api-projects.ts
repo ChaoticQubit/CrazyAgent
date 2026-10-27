@@ -11,6 +11,7 @@ import type {
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
 export type ResearchKind = "market_research" | "competitor_research" | "design_research" | "front_end_design" | "tech_stack_research";
 export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+export type JobKind = ResearchKind | "roadmap_planning";
 
 export interface HarnessSlot {
   harness: string;
@@ -35,7 +36,7 @@ export interface ProjectSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan | null;
   documents: string[];
@@ -64,7 +65,7 @@ export interface StoredSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan;
   documents: { name: string; bytes: number }[];
@@ -76,7 +77,7 @@ export interface StoredSetup {
 export interface ResearchJob {
   id: number;
   project_id: string;
-  kind: ResearchKind;
+  kind: JobKind;
   kind_label: string;
   status: ResearchStatus;
   status_label: string;
@@ -96,7 +97,7 @@ export interface ResearchJob {
 
 export interface ContextItem {
   path: string;
-  kind: "brief" | "document" | "research";
+  kind: "brief" | "document" | "research" | "plan";
   bytes: number;
 }
 
@@ -139,6 +140,7 @@ const copy: Record<string, string> = {
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
+  planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
   project_spec_bounds: "Enter a project name of at most 80 characters.",
@@ -393,6 +395,13 @@ export function cancelResearch(id: string, job: number, generation: number): Pro
  * Inputs: the project id, the job id and a draft generation. Output: the engine receipt. */
 export function retryResearch(id: string, job: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_retry_research", { id, job, generation });
+}
+
+/** Asks the engine to plan a roadmap and release process for the project now, from what it knows.
+ * Inputs: the project id and a draft generation. Output: the engine receipt; `planning_busy` while
+ * a planning job of the project is queued or running. */
+export function planRoadmap(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_plan_roadmap", { id, generation });
 }
 
 export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";

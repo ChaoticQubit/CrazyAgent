@@ -454,6 +454,10 @@ fn radio(on: bool, label: &str) -> String {
     format!("{} {label}", if on { "(*)" } else { "( )" })
 }
 
+/// The words of the roadmap planning toggle on New project and on the import and clone
+/// setup review.
+pub(in crate::tui) const ROADMAP_LABEL: &str = "Plan a roadmap after research";
+
 /// Gives the glyph of a research kind.
 /// Takes the kind.
 /// Returns its Unicode glyph from DESIGN.md section 6.3.
@@ -917,6 +921,26 @@ fn work(draw: &mut Draw) {
             &look,
         ));
     }
+    let roadmap = columns(
+        &[26, content.saturating_sub(32)],
+        vec![
+            Row::of(
+                checkbox(
+                    wizard.roadmap,
+                    &format!("{} Roadmap", look.glyph("\u{2630}")),
+                ),
+                look.fg,
+            ),
+            Row::of(ROADMAP_LABEL, look.muted),
+        ],
+    );
+    draw.add(list_row(
+        roadmap,
+        content,
+        focus && wizard.work_cursor == ResearchKind::ALL.len(),
+        focus,
+        &look,
+    ));
     draw.add(Row::default());
     let count = wizard.research.len();
     draw.add(Row::of(

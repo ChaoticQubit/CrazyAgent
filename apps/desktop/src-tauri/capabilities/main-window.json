@@ -52,6 +52,7 @@
     "allow-desktop-remove-project",
     "allow-desktop-cancel-research",
     "allow-desktop-retry-research",
+    "allow-desktop-plan-roadmap",
     "allow-desktop-research-log",
     "allow-desktop-projects-home",
     "allow-desktop-set-projects-home",

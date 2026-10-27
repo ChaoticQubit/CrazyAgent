@@ -484,6 +484,26 @@ impl NativeBridge {
         .await
     }
 
+    /// Queues the project's roadmap and release process planning job now.
+    /// Takes the project id and the client generation.
+    /// Returns the actual commit receipt; `planning_busy` while a planning job of the
+    /// project is queued or running.
+    pub async fn plan_roadmap(
+        &mut self,
+        id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.research_change(
+            OwnerMutation::PlanRoadmap {
+                project_id: project_id.clone(),
+            },
+            project_id,
+            generation,
+        )
+        .await
+    }
+
     async fn research_change(
         &mut self,
         mutation: OwnerMutation,

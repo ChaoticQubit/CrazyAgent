@@ -3,6 +3,7 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
+use super::planning_line::{planning, planning_key};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
@@ -810,7 +811,9 @@ impl ProjectScreen {
                     SetupQuery::Log { job, .. } => self.log_read(*job, None),
                     SetupQuery::Change {
                         action:
-                            SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                            SetupAction::CancelResearch { .. }
+                            | SetupAction::RetryResearch { .. }
+                            | SetupAction::PlanRoadmap { .. },
                         ..
                     } => self.jobs_read_ms = None,
                     _ => {}
@@ -965,7 +968,10 @@ impl ProjectScreen {
                 self.context = None;
             }
             SetupQuery::Change {
-                action: SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                action:
+                    SetupAction::CancelResearch { .. }
+                    | SetupAction::RetryResearch { .. }
+                    | SetupAction::PlanRoadmap { .. },
                 ..
             } => {
                 self.jobs_read_ms = None;
@@ -1580,6 +1586,9 @@ impl ProjectScreen {
         let work = self.setup.as_ref().map_or(0, |s| s.research.len());
         let rows = suggested.len() + work;
         let focused = suggested.get(self.overview_cursor).cloned();
+        if let Some(reply) = self.planning_reply(key.code) {
+            return reply;
+        }
         match key.code {
             KeyCode::Up => self.overview_cursor = self.overview_cursor.saturating_sub(1),
             KeyCode::Down => {
@@ -1886,6 +1895,9 @@ impl ProjectScreen {
     }
 
     fn settings_key(&mut self, key: KeyEvent) -> ProjectReply {
+        if let Some(reply) = self.planning_reply(key.code) {
+            return reply;
+        }
         match key.code {
             KeyCode::Enter => self.pool_reply(),
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
@@ -1940,6 +1952,20 @@ impl ProjectScreen {
                 }
             },
             _ => ProjectReply::Ignored,
+        }
+    }
+
+    /// Answers Plan roadmap now and Retry for the roadmap planning line once the jobs are
+    /// read. Takes the key. Returns the change or the handled reply with its plain line, or
+    /// none for a key the planning line does not use.
+    fn planning_reply(&mut self, key: KeyCode) -> Option<ProjectReply> {
+        let state = planning(self.jobs.as_ref()?);
+        match planning_key(&state, &self.project, key)? {
+            Ok(action) => Some(ProjectReply::Change(Box::new(action))),
+            Err(line) => {
+                self.problem = Some(line.into());
+                Some(ProjectReply::Handled)
+            }
         }
     }
 
@@ -2233,6 +2259,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "planning_busy" => {
+            "A roadmap is already being planned for this project. Wait for it to finish."
+        }
         "research_job_missing" => "That research is gone. The list is up to date now.",
         "research_log_unreadable" => "The agent's output could not be read.",
         "documents_empty" => "Type the full path of a file on this computer.",

@@ -1,5 +1,5 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
-import type { HarnessSlot, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
+import type { HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
@@ -58,6 +58,7 @@ export interface ProjectDraft {
   otherPlatform: string;
   documents: DocumentPick[];
   research: ResearchKind[];
+  roadmap: boolean;
   pool: string | null;
   poolChosen: boolean;
   team: TeamDraft | null;
@@ -71,12 +72,12 @@ export type SlotDraft = HarnessSlot & { tools_wanted?: boolean };
  * kept beside the forced value so switching back restores it. `wireTeam` drops it before sending. */
 export type TeamDraft = Omit<TeamPlan, "sub_harnesses"> & { master_tools_wanted?: boolean; sub_harnesses: SlotDraft[] };
 
-/** Starts a New Project draft with the design's default research toggles.
+/** Starts a New Project draft with the design's default research toggles and roadmap planning on.
  * Input: none. Output: an empty draft. */
 export function emptyDraft(): ProjectDraft {
   return {
     name: "", about: "", stack: [], platforms: [], otherPlatform: "", documents: [],
-    research: ["market_research", "competitor_research", "design_research"], pool: null, poolChosen: false, team: null,
+    research: ["market_research", "competitor_research", "design_research"], roadmap: true, pool: null, poolChosen: false, team: null,
   };
 }
 
@@ -418,7 +419,7 @@ export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: P
       about,
       tech_stack: [...draft.stack],
       platforms: [...draft.platforms],
-      research: [...draft.research],
+      research: draft.roadmap ? [...draft.research, ROADMAP_PLANNING] : [...draft.research],
       pool: draft.pool,
       team: draft.team && wireTeam(draft.team),
       documents: draft.documents.map((document) => document.path),
@@ -426,12 +427,22 @@ export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: P
   };
 }
 
+/** The setup kind that turns roadmap planning on: the engine queues it with the research and
+ * runs it once the project's other jobs end. */
+export const ROADMAP_PLANNING = "roadmap_planning";
+
+/** Splits a saved research list into the research toggles and the roadmap planning toggle.
+ * Input: the saved kinds. Output: the research kinds in order and whether planning is on. */
+export function researchChoices(kinds: JobKind[]): { research: ResearchKind[]; roadmap: boolean } {
+  return { research: kinds.filter((kind): kind is ResearchKind => kind !== ROADMAP_PLANNING), roadmap: kinds.includes(ROADMAP_PLANNING) };
+}
+
 /** Starts a Project Settings, General draft from the saved project.
- * Input: the saved setup. Output: a draft with its details, research, pool and team. */
+ * Input: the saved setup. Output: a draft with its details, research, roadmap toggle, pool and team. */
 export function draftOf(stored: StoredSetup): ProjectDraft {
   return {
     name: stored.name, about: stored.about, stack: [...stored.tech_stack], platforms: [...stored.platforms], otherPlatform: "", documents: [],
-    research: [...stored.research], pool: stored.pool, poolChosen: true, team: stored.team,
+    ...researchChoices(stored.research), pool: stored.pool, poolChosen: true, team: stored.team,
   };
 }
 

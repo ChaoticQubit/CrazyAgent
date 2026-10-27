@@ -7,7 +7,7 @@ import {
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, StatusBadge, navigate } from "../../ui";
-import { BasicsFields, ResearchSwitches } from "../new-project/fields";
+import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ONBOARDING_POLL_MS, confirmReady, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
@@ -70,6 +70,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
         <p className="pj-help">Research is off for existing code. Turn on what you want; it runs on the project's pool.</p>
         <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} />
       </fieldset>
+      {!finished && <RoadmapSwitch prefix="ob" value={draft.roadmap} onChange={(roadmap) => onDraft({ ...draft, roadmap })} />}
     </form>}
     <p className="pj-secondary" role="status">{gate.line}</p>
     {problem && <p className="pj-error" role="alert">{problem}</p>}

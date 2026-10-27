@@ -12,6 +12,7 @@ mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
+pub(in crate::tui) mod planning_line;
 pub(in crate::tui) mod process;
 pub mod profile_form;
 pub(in crate::tui) mod project;
@@ -48,6 +49,8 @@ mod intake_tests;
 mod new_project_frames;
 #[cfg(all(test, unix))]
 mod new_project_tests;
+#[cfg(all(test, unix))]
+mod planning_line_tests;
 #[cfg(all(test, unix))]
 mod project_frames;
 #[cfg(all(test, unix))]

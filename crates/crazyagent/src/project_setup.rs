@@ -707,6 +707,9 @@ pub enum SetupAction {
         project_id: ProjectId,
         job: i64,
     },
+    PlanRoadmap {
+        project_id: ProjectId,
+    },
     SetReadPaths {
         project_id: ProjectId,
         paths: Vec<String>,
@@ -776,7 +779,7 @@ impl SetupAction {
                 }
                 setup.validate()
             }
-            Self::Remove { .. } => Ok(()),
+            Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -1766,6 +1769,7 @@ pub(crate) fn execute(
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
+        SetupAction::PlanRoadmap { project_id } => plan_roadmap(tx, config, project_id),
         SetupAction::SaveToMemory {
             project_id,
             research,
@@ -2153,6 +2157,56 @@ fn retry_research(
     if changed != 1 {
         return Ok(rejected("research_job_not_retryable"));
     }
+    Ok(Outcome::Applied)
+}
+
+/// Queues the project's roadmap planning job for Plan roadmap now: its finished or stopped job
+/// runs again, so a project keeps one planning row, or a first one is added. The toggle is
+/// recorded in the setup without raising its revision, so a later edit keeps the job.
+/// Takes the transaction, configuration and project. Returns Applied, `project_setup_missing`,
+/// or `planning_busy` while the planning job waits or runs.
+fn plan_roadmap(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    let kind = ResearchKind::RoadmapPlanning;
+    let jobs = load_jobs(tx, "project", &project_id.as_str())?;
+    let waiting = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
+    match jobs.iter().rev().find(|job| job.kind == kind) {
+        Some(job)
+            if matches!(
+                job.status,
+                ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running
+            ) =>
+        {
+            return Ok(rejected("planning_busy"));
+        }
+        Some(job) => {
+            let changed = tx
+                .execute(
+                    "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                    cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                    finished_ms=NULL WHERE id=?1 AND status IN ('done','failed','cancelled')",
+                    params![job.id, waiting.stored()],
+                )
+                .map_err(error)?;
+            assert_eq!(changed, 1);
+        }
+        None => {
+            let harnesses = stored.team.research_harnesses();
+            assert!(!harnesses.is_empty());
+            insert_job(tx, project_id, kind, harnesses[0], waiting, now_ms())?;
+        }
+    }
+    if !stored.research.contains(&kind) {
+        stored.research.push(kind);
+        save_setup(tx, &stored)?;
+    }
+    assert!(stored.research.contains(&kind));
     Ok(Outcome::Applied)
 }
 
