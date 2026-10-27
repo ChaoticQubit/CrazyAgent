@@ -52,6 +52,9 @@ impl Fixture {
         let tmux = installed(&base).expect("tmux must be installed on this machine");
         let connection = Connection::open(base.join("engine.db")).unwrap();
         crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
         super::super::initialize(&connection).unwrap();
         crate::project_setup::initialize(&connection).unwrap();
         let folder = base.join("project");
