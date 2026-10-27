@@ -34,6 +34,25 @@ export function keyOverride(event: { type: string; key: string; shiftKey: boolea
   return { typed: event.type === "keydown" ? NEW_LINE : null, xterm: false };
 }
 
+/** Whether a key copies the terminal's selection instead of reaching the agent: Cmd+C on a
+ * Mac, Ctrl+C or Ctrl+Shift+C elsewhere, and only while text is selected, so Ctrl+C with
+ * nothing selected still interrupts the agent and Ctrl+C on a Mac always does. Every event of
+ * the key matches, so none of them reaches xterm. Inputs: the key event, whether text is
+ * selected and whether this is a Mac. Output: true when the key copies. */
+export function copyKey(event: { key: string; altKey: boolean; ctrlKey: boolean; metaKey: boolean }, selected: boolean, mac: boolean): boolean {
+  if (!selected || event.altKey || event.key.toLowerCase() !== "c") return false;
+  return mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+}
+
+/** The text Copy output puts on the clipboard: every line of the terminal's buffer, without
+ * trailing spaces or the blank rows under the last written line. Input: the buffer's lines.
+ * Output: the text, lines joined by new lines. */
+export function outputText(lines: string[]): string {
+  const kept = lines.map((line) => line.trimEnd());
+  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
+  return kept.join("\n");
+}
+
 /** Encodes xterm's binary event, one byte per character code, such as some mouse reports.
  * Input: the binary string. Output: the bytes, each code kept to its low eight bits. */
 export function encodeBinary(data: string): Uint8Array {

@@ -3,11 +3,12 @@ import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
-import { Button, Icon, NotReady, sendsMessage } from "../../ui";
+import { Button, Icon, NotReady, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeLine } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, inputLanes, jobQueue, keyOverride, muteQueries, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, jobQueue, keyOverride, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
+const COPIED_MS = 2000;
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
@@ -20,14 +21,16 @@ function token(name: string, fallback: string): string {
 }
 
 /** The view's xterm settings: the app's mono font, the terminal tokens for every ANSI color
- * and the scrollbar, Option as Meta and `SCROLLBACK_LINES` of scrollback for the history the
- * engine sends on attach. Output: the options for a new terminal. */
+ * and the scrollbar, Option as Meta, Option-drag selecting text even while a full-screen app
+ * reads the mouse, and `SCROLLBACK_LINES` of scrollback for the history the engine sends on
+ * attach. Output: the options for a new terminal. */
 export function terminalOptions(): ITerminalOptions {
   return {
     cursorBlink: true,
     fontFamily: token("--mono", "ui-monospace, Menlo, monospace"),
     fontSize: 13,
     macOptionIsMeta: true,
+    macOptionClickForcesSelection: true,
     scrollback: SCROLLBACK_LINES,
     theme: {
       background: token("--terminal-bg", "#161513"),
@@ -100,15 +103,39 @@ export function Composer({ node, live, onSend }: { node: GraphNode; live: boolea
   </form>;
 }
 
+/** Puts text on the system clipboard. Input: the text. Output: whether the clipboard took it. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The text of a terminal's whole buffer, as Copy output takes it. Input: the terminal.
+ * Output: the text. */
+export function terminalOutput(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let row = 0; row < buffer.length; row += 1) lines.push(buffer.getLine(row)?.translateToString(true) ?? "");
+  return outputText(lines);
+}
+
 /** Routes an opened terminal's keys to the agent: what xterm types, Shift+Enter as one new
- * line that xterm never also reads as Enter, and clipboard pastes with their control
- * characters dropped before xterm brackets them. Inputs: the terminal and the typing action.
- * Output: the subscription for typed text and pastes. */
-export function typeKeys(terminal: Terminal, type: (data: string) => void): IDisposable {
+ * line that xterm never also reads as Enter, the copy key copying a selection instead of
+ * typing, and clipboard pastes with their control characters dropped before xterm brackets
+ * them. Inputs: the terminal, the typing action and whether this is a Mac. Output: the
+ * subscription for typed text and pastes. */
+export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: boolean = isMac()): IDisposable {
   const element = terminal.element;
   if (!element) throw new Error("typeKeys needs an opened terminal");
   const typed = terminal.onData(type);
   terminal.attachCustomKeyEventHandler((event) => {
+    if (copyKey(event, terminal.hasSelection(), mac)) {
+      if (event.type === "keydown") void copyText(terminal.getSelection());
+      return false;
+    }
     const override = keyOverride(event);
     if (override.typed !== null) type(override.typed);
     return override.xterm;
@@ -153,7 +180,8 @@ export function connectInput(terminal: Terminal, run: (job: () => Promise<boolea
 
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel, with a way back to
- * the latest output once scrolled up. Closing it detaches the view; the agent keeps running.
+ * the latest output once scrolled up, and Copy and Copy output on right-click and in its
+ * status line. Closing it detaches the view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
  * closed, and `embedded` when a console around it owns the head and typing goes to the
  * terminal alone. Output: the panel. */
@@ -166,8 +194,31 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
   const screen = useRef<HTMLDivElement>(null);
   const prompt = useRef<((text: string) => boolean) | null>(null);
   const latest = useRef<(() => void) | null>(null);
+  const texts = useRef<{ selection: () => string; output: () => string } | null>(null);
+  const menuList = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
   const [behind, setBehind] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!menu) return;
+    menuList.current?.querySelector<HTMLElement>("[role=menuitem]:not(:disabled)")?.focus();
+    const outside = (event: PointerEvent) => { if (!(event.target instanceof Node && menuList.current?.contains(event.target))) setMenu(null); };
+    document.addEventListener("pointerdown", outside, true);
+    return () => document.removeEventListener("pointerdown", outside, true);
+  }, [menu]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(null), COPIED_MS);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const copy = async (text: string, done: string) => {
+    setMenu(null);
+    setCopied(await copyText(text) ? done : "The clipboard refused the copy.");
+  };
   const [round, setRound] = useState(0);
   const name = node.terminal;
 
@@ -232,6 +283,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
         terminal.scrollToBottom();
         terminal.focus();
       };
+      texts.current = { selection: () => terminal.getSelection(), output: () => terminalOutput(terminal) };
       const resized = terminal.onResize(() => {
         window.clearTimeout(timer);
         timer = window.setTimeout(sendSize, RESIZE_PAUSE_MS);
@@ -256,6 +308,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
       release = () => {
         prompt.current = null;
         latest.current = null;
+        texts.current = null;
         channel.onmessage = () => {};
         observer.disconnect();
         input.dispose();
@@ -295,10 +348,21 @@ export function TerminalPanel({ node, harness, onClose, embedded = false }: {
       <span>{view.copy}</span>
       <Button size="small" icon="refresh-cw" onClick={() => setRound((value) => value + 1)}>Open again</Button>
     </div>}
-    <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} />
+    <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} onContextMenu={(event) => {
+      if (!texts.current) return;
+      event.preventDefault();
+      const box = (event.currentTarget.parentElement ?? event.currentTarget).getBoundingClientRect();
+      setMenu({ x: event.clientX - box.left, y: event.clientY - box.top, selection: texts.current.selection() });
+    }} />
+    {menu && <div ref={menuList} className="menu-list tg-terminal-menu" role="menu" aria-label="Terminal" style={{ left: menu.x, top: menu.y }}
+      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setMenu(null); } }}>
+      <button type="button" role="menuitem" className="menu-item" disabled={!menu.selection} onClick={() => void copy(menu.selection, "Copied the selection.")}><Icon name="copy" size={14} />Copy</button>
+      <button type="button" role="menuitem" className="menu-item" onClick={() => void copy(texts.current?.output() ?? "", "Copied the output.")}><Icon name="file-text" size={14} />Copy output</button>
+    </div>}
     {view.kind === "live" && <div className="tg-terminal-note">
-      <span>{embedded ? `${typingNote(node)} Enter sends, Shift+Enter adds a line.` : typingNote(node)}</span>
+      <span role="status">{copied ?? (embedded ? `${typingNote(node)} Enter sends, Shift+Enter adds a line.` : typingNote(node))}</span>
       {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
+      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(texts.current?.output() ?? "", "Copied the output.")}>Copy output</Button>
     </div>}
     {!embedded && name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
   </section>;

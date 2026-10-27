@@ -299,6 +299,7 @@
 }
 
 .tg-terminal {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -364,8 +365,22 @@
   font-size: 12px;
 }
 
-.tg-terminal-note .btn {
+.tg-terminal-note .btn:first-of-type {
   margin-left: auto;
+}
+
+.tg-terminal-menu {
+  right: auto;
+}
+
+.tg-terminal-menu .menu-item:disabled {
+  background: none;
+  color: var(--text-3);
+  cursor: default;
+}
+
+.tg-terminal.embedded .tg-terminal-note .btn {
+  font-family: var(--font);
 }
 
 .tg-terminal-note {

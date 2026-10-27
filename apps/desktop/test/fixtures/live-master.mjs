@@ -141,6 +141,21 @@ export function paste(text) {
   terminal.textarea.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
 }
 
+/** Selects everything in the terminal, as a drag over all of it does. */
+export function selectAll() {
+  terminal.selectAll();
+}
+
+/** The text xterm holds as the selection. */
+export function selection() {
+  return terminal.getSelection();
+}
+
+/** Clears the terminal's selection. */
+export function clearSelection() {
+  terminal.clearSelection();
+}
+
 /** The text the routed keys typed, in order. */
 export function typedText() {
   return [...typed];
