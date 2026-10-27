@@ -54,6 +54,7 @@ export interface StepHealth {
   step: UsageStep;
   panics: number;
   last_ms: number;
+  recovered_ms: number | null;
 }
 
 export interface AccountLimits {

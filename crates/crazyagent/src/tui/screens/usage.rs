@@ -128,12 +128,16 @@ pub fn poll_failure(code: &str) -> String {
     }
 }
 
-/// One plain sentence for a usage step kind that panicked since the engine started.
-/// Inputs: the step's health, now and the local offset in seconds. Output: the sentence.
+/// One plain sentence for a usage step kind that panicked since the engine started: what
+/// may be missing while it keeps failing, or when it worked again. Inputs: the step's
+/// health, now and the local offset in seconds. Output: the sentence.
 pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
     let (what, missing) = match health.step {
         UsageStep::Poll => ("Checking account limits", "limits shown may be out of date"),
-        UsageStep::Team => ("Counting agent tokens", "agent token totals may be low"),
+        UsageStep::Team => (
+            "Counting agent tokens",
+            "agent and research run token totals may be low",
+        ),
         UsageStep::Runs => (
             "Counting research run tokens",
             "research token totals may be low",
@@ -143,10 +147,14 @@ pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
         1 => "once".to_owned(),
         count => format!("{count} times"),
     };
-    format!(
-        "{what} hit an internal error {times} since the engine started, last {}. CrazyAgent keeps retrying; {missing}.",
+    let said = format!(
+        "{what} hit an internal error {times} since the engine started, last {}.",
         ago(health.last_ms, now_ms, offset)
-    )
+    );
+    match health.recovered_ms {
+        None => format!("{said} CrazyAgent keeps retrying; {missing}."),
+        Some(recovered) => format!("{said} It worked again {}.", ago(recovered, now_ms, offset)),
+    }
 }
 
 fn refusal(code: &str) -> &'static str {
@@ -367,11 +375,11 @@ pub fn summary(
         }
     }
     for health in &report.health {
-        lines.push(styled(
-            health_line(health, now_ms, offset),
-            Role::Warning,
-            theme,
-        ));
+        let role = match health.recovered_ms {
+            None => Role::Warning,
+            Some(_) => Role::Muted,
+        };
+        lines.push(styled(health_line(health, now_ms, offset), role, theme));
     }
     lines.push(Line::default());
     lines.push(styled("Account limits", Role::Heading, theme));

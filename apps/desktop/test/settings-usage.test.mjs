@@ -229,13 +229,23 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
 test("a usage step that panicked shows one plain warning with its count and last time", () => {
   assert.doesNotMatch(text(render()), /internal error/u);
   const shown = text(render({ report: { kind: "ok", value: report({ health: [
-    { step: "poll", panics: 1, last_ms: NOW - 30_000 },
-    { step: "runs", panics: 4, last_ms: NOW - 3 * HOUR },
+    { step: "poll", panics: 1, last_ms: NOW - 30_000, recovered_ms: null },
+    { step: "runs", panics: 4, last_ms: NOW - 3 * HOUR, recovered_ms: null },
   ] }) } }));
   assert.match(shown, /Checking account limits hit an internal error once since the engine started, last just now\. CrazyAgent keeps retrying; limits shown may be out of date\./u);
   assert.match(shown, /Counting research run tokens hit an internal error 4 times since the engine started, last 3 h ago\. CrazyAgent keeps retrying; research token totals may be low\./u);
   assert.equal(
-    usage.healthText({ step: "team", panics: 2, last_ms: NOW - 5 * MINUTE }, NOW),
-    "Counting agent tokens hit an internal error 2 times since the engine started, last 5 min ago. CrazyAgent keeps retrying; agent token totals may be low.",
+    usage.healthText({ step: "team", panics: 2, last_ms: NOW - 5 * MINUTE, recovered_ms: null }, NOW),
+    "Counting agent tokens hit an internal error 2 times since the engine started, last 5 min ago. CrazyAgent keeps retrying; agent and research run token totals may be low.",
   );
+});
+
+test("a usage step kind that worked again after its last panic says when, without a retry warning", () => {
+  const line = usage.healthText({ step: "poll", panics: 1, last_ms: NOW - 3 * HOUR, recovered_ms: NOW - 2 * HOUR }, NOW);
+  assert.equal(line, "Checking account limits hit an internal error once since the engine started, last 3 h ago. It worked again 2 h ago.");
+  const shown = text(render({ report: { kind: "ok", value: report({ health: [
+    { step: "poll", panics: 1, last_ms: NOW - 3 * HOUR, recovered_ms: NOW - 2 * HOUR },
+  ] }) } }));
+  assert.ok(shown.includes(line), shown);
+  assert.doesNotMatch(shown, /keeps retrying|may be out of date/u);
 });
