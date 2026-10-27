@@ -1,0 +1,81 @@
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+
+/// The variable that hands the IDE server's extension host the path of its engine
+/// capability file. Only the path travels in the environment, never the capability.
+pub const CAPABILITY_VARIABLE: &str = "CRAZYAGENT_IDE_CAPABILITY_FILE";
+
+/// Every variable the IDE server may inherit from the engine, besides the `LC_` locale
+/// variables: what an owner shell and the owner's own git credentials need, and nothing a
+/// provider, pool or engine secret travels in.
+pub const ALLOWED: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "SSH_AUTH_SOCK",
+];
+
+const LOCALE_PREFIX: &str = "LC_";
+const LOCALE_NAME_BYTES_MAX: usize = 32;
+const LOCALES_MAX: usize = 16;
+const VALUE_BYTES_MAX: usize = 16 * 1024;
+
+/// The most variables the IDE server's environment holds.
+pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 1;
+
+/// Tells whether the IDE server may inherit a variable of this name: one of [`ALLOWED`], or
+/// `LC_` followed by capital letters. Input: the name. Output: the answer.
+pub fn allowed(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    ALLOWED.contains(&name)
+        || name.strip_prefix(LOCALE_PREFIX).is_some_and(|rest| {
+            !rest.is_empty()
+                && name.len() <= LOCALE_NAME_BYTES_MAX
+                && rest.bytes().all(|byte| byte.is_ascii_uppercase())
+        })
+}
+
+/// Builds the IDE server's whole environment from the engine's own: only the variables
+/// [`allowed`] passes, each value at most 16 KiB, at most 16 locale variables, then
+/// [`CAPABILITY_VARIABLE`] naming the capability file. The server starts from a cleared
+/// environment holding exactly this. Inputs: the engine's variables, such as
+/// `std::env::vars_os()`, and the capability file path. Output: the variables in order.
+pub fn server_env(
+    source: impl IntoIterator<Item = (OsString, OsString)>,
+    capability: &Path,
+) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = Vec::new();
+    let mut locales = 0;
+    for (name, value) in source {
+        if !allowed(&name)
+            || value.len() > VALUE_BYTES_MAX
+            || env.iter().any(|(known, _)| *known == name)
+        {
+            continue;
+        }
+        if !ALLOWED.contains(&name.to_str().unwrap_or_default()) {
+            if locales == LOCALES_MAX {
+                continue;
+            }
+            locales += 1;
+        }
+        env.push((name, value));
+    }
+    env.push((
+        OsString::from(CAPABILITY_VARIABLE),
+        capability.as_os_str().to_owned(),
+    ));
+    assert!(env.len() <= ENV_MAX);
+    assert!(
+        env.iter()
+            .all(|(name, _)| allowed(name) || name == CAPABILITY_VARIABLE)
+    );
+    env
+}

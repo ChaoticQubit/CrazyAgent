@@ -473,6 +473,8 @@ struct Authority {
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
     ide: crate::ide::bridge::Grants,
+    #[cfg(unix)]
+    ide_servers: crate::ide::server::Servers,
 }
 
 impl Authority {
@@ -879,6 +881,15 @@ pub struct OwnerRuntimeHandle {
     authority: Arc<Authority>,
 }
 
+#[cfg(unix)]
+impl OwnerRuntimeHandle {
+    /// The engine's IDE servers, one per open project, all stopped when the owner server
+    /// stops. Output: the register.
+    pub fn ide(&self) -> &crate::ide::server::Servers {
+        &self.authority.ide_servers
+    }
+}
+
 impl OwnerRuntimeHandle {
     pub async fn prepare_native_profile(
         &self,
@@ -1207,6 +1218,13 @@ impl OwnerServer {
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
+            let ide_servers = crate::ide::server::Servers::new(
+                root.path
+                    .parent()
+                    .ok_or_else(|| failure("owner_root_unavailable"))?,
+                crate::ide::server::IDLE_LIMIT,
+            );
+            ide_servers.sweep_left().await;
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1221,6 +1239,8 @@ impl OwnerServer {
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
                 ide: crate::ide::bridge::Grants::default(),
+                #[cfg(unix)]
+                ide_servers,
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1436,6 +1456,8 @@ impl OwnerServer {
             assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         upkeep.abort();
+        #[cfg(unix)]
+        self.authority.ide_servers.stop_all().await;
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
