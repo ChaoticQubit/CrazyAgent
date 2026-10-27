@@ -1,5 +1,6 @@
 use super::settings::connection_lost;
 use super::*;
+use crate::engine::owner::{ProcessText, SavedText};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -7,6 +8,8 @@ mod tests;
 /// One Process request the TUI sends.
 /// Reads or saves the app-wide or one project's instructions, reads a seed for a preview,
 /// or reads what one team agent received at its last launch (none for the newest master).
+/// A save names the version it read and, only for "Keep mine" after a stale reply, the
+/// older version the owner opened.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -16,6 +19,8 @@ pub(in crate::tui) enum ProcessQuery {
     Save {
         project: Option<ProjectId>,
         text: String,
+        version: u64,
+        opened: Option<u64>,
     },
     ImportGlobal,
     Default,
@@ -25,11 +30,14 @@ pub(in crate::tui) enum ProcessQuery {
     },
 }
 
-/// What one Process request returned: the text read (empty for a save), or what one team
-/// agent received at its last launch.
+/// What one Process request returned: a seed text, the saved text with its version, what a
+/// save did (saved, or stale with the newer text), or what one team agent received at its
+/// last launch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
+    Current(ProcessText),
+    Saved(SavedText),
     Agent(Box<crate::engine::owner::AgentInstructions>),
 }
 
@@ -98,11 +106,16 @@ impl NativeOwner {
             ProcessQuery::Read { project } => controller
                 .process_text(project)
                 .await
-                .map(ProcessReply::Text),
-            ProcessQuery::Save { project, text } => controller
-                .save_process_text(project, text)
+                .map(ProcessReply::Current),
+            ProcessQuery::Save {
+                project,
+                text,
+                version,
+                opened,
+            } => controller
+                .save_process_text(project, text, version, opened)
                 .await
-                .map(|()| ProcessReply::Text(String::new())),
+                .map(ProcessReply::Saved),
             ProcessQuery::ImportGlobal => controller
                 .import_global_instructions()
                 .await

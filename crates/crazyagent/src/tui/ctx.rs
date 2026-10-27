@@ -80,8 +80,8 @@ impl Default for Store {
 
 /// Everything a screen needs besides its own state: look, size, engine data,
 /// the owner identity of the current trusted connection, whether loading lines
-/// are still in their quiet first 150 ms, and the queues for requests and
-/// messages.
+/// are still in their quiet first 150 ms, the owner's EDITOR, the one file waiting
+/// for it and whether it runs now, and the queues for requests and messages.
 /// Input: owned by the shell and lent to screens. Output: requests and the
 /// latest message are drained by the shell.
 pub struct Ctx {
@@ -100,6 +100,9 @@ pub struct Ctx {
     pub socket: String,
     pub home: Option<String>,
     pub prefs: Option<std::path::PathBuf>,
+    pub editor: Option<String>,
+    pub editing: Option<super::client::editor::Edit>,
+    pub editor_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     requests: VecDeque<Request>,
     reconnect: bool,
     message: Option<Message>,
@@ -133,6 +136,9 @@ impl Ctx {
             socket,
             home: None,
             prefs: None,
+            editor: None,
+            editing: None,
+            editor_running: std::sync::Arc::default(),
             requests: VecDeque::new(),
             reconnect: false,
             message: None,

@@ -556,12 +556,13 @@ async fn desktop_forget_memory(
     state: State<'_, NativeState>,
     project: String,
     memory: String,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .forget_memory(&project, &memory, generation)
+        .forget_memory(&project, &memory, version, generation)
         .await
 }
 
@@ -2058,7 +2059,7 @@ async fn desktop_process_text(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     project_id: Option<String>,
-) -> Result<String, BridgeError> {
+) -> Result<crazyagent::engine::owner::ProcessText, BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.process_text(project_id)?;
     call.await
@@ -2070,9 +2071,13 @@ async fn desktop_save_process_text(
     state: State<'_, NativeState>,
     project_id: Option<String>,
     text: String,
-) -> Result<(), BridgeError> {
+    version: u64,
+    opened: Option<u64>,
+) -> Result<crazyagent::engine::owner::SavedText, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.save_process_text(project_id, text)?;
+    let call = lock(&state)
+        .await?
+        .save_process_text(project_id, text, version, opened)?;
     call.await
 }
 

@@ -28,11 +28,13 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
+pub(crate) mod agent_text;
 mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
+pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]

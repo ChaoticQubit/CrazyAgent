@@ -2,6 +2,7 @@
 /// connection token, ports, capability, log and server data. Every agent sandbox denies it.
 pub const FOLDER: &str = "ide";
 
+pub mod bridge;
 pub mod env;
 #[cfg(unix)]
 pub mod ports;
@@ -9,7 +10,9 @@ pub mod ports;
 pub mod sandbox;
 #[cfg(unix)]
 pub mod server;
+pub mod settings;
 #[cfg(unix)]
 pub mod token;
 #[cfg(unix)]
 pub mod webview;
+pub mod workspace;

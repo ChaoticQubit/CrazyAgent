@@ -26,6 +26,8 @@ pub(super) mod app_setup;
 pub(super) mod changes;
 mod claude_code;
 pub(super) mod cleanup;
+pub(super) mod conflict;
+pub(super) mod editor;
 pub(super) mod intake;
 pub(super) mod process;
 mod project_setup;

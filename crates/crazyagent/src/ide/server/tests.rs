@@ -418,7 +418,7 @@ async fn no_ide_server_process_survives_engine_stop() {
     .await
     .unwrap();
     let project = project("engine-stop");
-    let servers = service.owner_runtime().unwrap().ide();
+    let servers = service.owner_runtime().unwrap().ide_servers();
     let info = servers
         .open(&project, checkout.path(), &cached_build())
         .await

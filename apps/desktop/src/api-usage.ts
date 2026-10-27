@@ -13,6 +13,7 @@ export interface UsageRow {
   tokens: Tokens;
   runs: number;
   last_ms: number;
+  not_reported_by?: string | null;
 }
 
 export interface DayTokens {
@@ -72,6 +73,7 @@ export interface UsageReport {
   lines: LinesRow[];
   agent_lines: AgentLinesRow[];
   limits: AccountLimits[];
+  not_reported_by?: string[];
 }
 
 const REFUSALS: Record<string, string> = {

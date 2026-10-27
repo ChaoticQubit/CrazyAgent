@@ -3,7 +3,7 @@ use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
-use super::project_page::{Opening, opening};
+use super::project_page::{Opening, changed_file, opening};
 use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -371,6 +371,41 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
     assert_eq!(
         (gemini.state, gemini.limited.as_deref()),
         (HarnessState::NotInstalled, None)
+    );
+}
+
+#[test]
+fn a_changed_file_goes_to_the_editor_only_as_the_owners_copy_inside_the_project_folder() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-changed-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let folder = home.join("notes");
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(folder.join("src/app.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(home.join("outside.rs"), "kept outside").unwrap();
+    std::os::unix::fs::symlink(home.join("outside.rs"), folder.join("src/escape.rs")).unwrap();
+    assert_eq!(
+        changed_file(&folder, "src/app.rs"),
+        Ok(folder.join("src/app.rs"))
+    );
+    assert_eq!(
+        changed_file(&folder, "src/added.rs"),
+        Err(
+            "That file isn't in your project folder yet. It lands there when you accept the change."
+        )
+    );
+    for refused in ["src/escape.rs", "../outside.rs", "src"] {
+        assert_eq!(
+            changed_file(&folder, refused),
+            Err("CrazyAgent opens only files inside the project folder."),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        changed_file(&home.join("gone"), "src/app.rs"),
+        Err("That file or folder is not there any more.")
     );
 }
 
