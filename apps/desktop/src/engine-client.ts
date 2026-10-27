@@ -1633,6 +1633,7 @@ export interface MasterTurn {
   tasks?: MasterTask[];
   changes?: string | null;
   engine_request?: MasterEngineRequest | null;
+  input_cursor?: string;
 }
 
 /** What the engine asked the master in a turn Ask agent to update started: the change set,
@@ -1652,7 +1653,70 @@ export interface MasterTask {
 export interface MasterState {
   project_id: string;
   ticket: string;
-  session: { session_id: string; phase: "configured" | "closing" | "closed"; current_turn: string | null } | null;
+  session: { session_id: string; phase: MasterPhase; current_turn: string | null } | null;
+}
+
+/** Where a master session stands: live ("configured"), parked and resumable, or closed with its project. */
+export type MasterPhase = "configured" | "parked" | "closing" | "closed";
+
+/** One master session in the Sessions list. `created` and `last_activity` are engine revisions;
+ * the `_ms` times are absent for sessions older than the marks. `agents` names its own sub-agents. */
+export interface MasterSessionSummary {
+  session_id: string;
+  phase: MasterPhase;
+  created: string;
+  last_activity: string;
+  started_ms: number | null;
+  active_ms: number | null;
+  turns: number;
+  first_line: string | null;
+  last_line: string | null;
+  agents: string[];
+  results_waiting: number;
+}
+
+export interface MasterSessions {
+  ticket: string;
+  revision: string;
+  sessions: MasterSessionSummary[];
+}
+
+/** Lists the selected project's master sessions, the live one first, then newest activity first. */
+export function masterSessions(ticket: string): Promise<MasterSessions> {
+  return invoke<MasterSessions>("desktop_master_sessions", { ticket });
+}
+
+/** One owner message behind a master turn, keyed by the turn's input cursor. */
+export interface OwnerLine {
+  input_cursor: string;
+  text: string;
+}
+
+/** The owner messages read for some turns of a session. */
+export interface MasterInputs {
+  ticket: string;
+  revision: string;
+  entries: OwnerLine[];
+}
+
+/** Reads the owner messages behind at most 32 turns of a session of the selected project. */
+export function masterInputs(ticket: string, sessionId: string, cursors: string[]): Promise<MasterInputs> {
+  return invoke<MasterInputs>("desktop_master_inputs", { ticket, sessionId, cursors });
+}
+
+/** Reads one page of any session of the selected project, live or parked. */
+export function sessionTurns(ticket: string, sessionId: string, cursor: unknown = null): Promise<MasterTurns> {
+  return invoke<MasterTurns>("desktop_master_session_turns", { ticket, sessionId, cursor });
+}
+
+/** Parks the live session and opens a fresh one in one engine action; a running turn needs `cancelRunning`. */
+export function newMasterSession(ticket: string, cancelRunning: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_new_master_session", { ticket, cancelRunning, generation });
+}
+
+/** Makes a parked session live again, parking the live one; a running turn needs `cancelRunning`. */
+export function resumeMasterSession(ticket: string, sessionId: string, cancelRunning: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_resume_master_session", { ticket, sessionId, cancelRunning, generation });
 }
 
 export interface MasterTurns {

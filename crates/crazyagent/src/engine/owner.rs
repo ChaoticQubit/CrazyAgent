@@ -543,6 +543,14 @@ pub enum OwnerRead {
         cursor: Option<crate::master_session::MasterCursor>,
         limit: u8,
     },
+    ProjectMasterSessions {
+        project_id: ProjectId,
+    },
+    ProjectMasterInputs {
+        project_id: ProjectId,
+        session_id: SessionId,
+        cursors: Vec<Cursor>,
+    },
     WorkerDispatch {
         dispatch_id: RequestId,
     },
@@ -677,6 +685,8 @@ impl OwnerRead {
             Self::WorkerDispatch { .. }
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
+            | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
             | Self::ModelAccessRecord { .. }
@@ -996,6 +1006,12 @@ pub enum OwnerData {
     },
     ProjectMasterTurns {
         page: crate::master_session::MasterTurnPage,
+    },
+    ProjectMasterSessions {
+        sessions: Vec<crate::master_sessions::MasterSessionSummary>,
+    },
+    ProjectMasterInputs {
+        entries: Vec<crate::conversation::ConversationEntry>,
     },
     WorkerDispatch {
         dispatch: Option<Box<crate::worker_dispatch::DispatchView>>,

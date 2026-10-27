@@ -43,6 +43,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 3,
         run: widen_empty_team_plans,
     },
+    Step {
+        to: 4,
+        run: master_sessions_parked,
+    },
 ];
 
 /// Step 3 (DEC-096 addendum 3): an empty sub-harness list now means any harness, so a saved
@@ -72,6 +76,13 @@ fn widen_empty_team_plans(tx: &Transaction<'_>) -> Result<(), EngineError> {
     )
     .map_err(error)?;
     Ok(())
+}
+
+/// Step 4: master sessions can be parked and resumed, and team tasks and agents record
+/// the session that owns them (DEC-096 addendum 4b).
+fn master_sessions_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    super::master_session::allow_parked(tx)?;
+    crate::master_sessions::add_ownership_columns(tx)
 }
 
 /// Step 2: makes `PRAGMA user_version` the database version of record. owner_meta
