@@ -957,3 +957,166 @@ async fn a_real_engine_takes_a_task_from_the_owner() {
     assert!(row.contains("Write the readings API") && row.contains("You"));
     assert!(find(&frame(&view, 80, 24), "Needs a pool").contains("Write the readings API"));
 }
+
+#[test]
+fn a_waiting_sub_agent_a_paused_wake_and_a_new_notification_show_and_s_marks_it_seen() {
+    use crate::team::events::{Notification, NotificationKind, WaitingAgent};
+    let mut status = team();
+    status.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed? | 1. Yes | 2. No".into(),
+    }];
+    status.events.paused = true;
+    status.events.notifications = [(8, None), (7, None), (5, Some(NOW))]
+        .into_iter()
+        .map(|(id, seen_ms)| Notification {
+            id,
+            project_id: project(),
+            kind: NotificationKind::Escalation,
+            text: format!("Pick the database {id}"),
+            created_ms: NOW,
+            seen_ms,
+        })
+        .collect();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Down));
+    let rows = frame(&view, 120, 36);
+    let summary = find(&rows, "Team");
+    assert!(summary.contains("1 waiting for an answer"), "{summary}");
+    assert!(summary.contains("auto-wake paused"), "{summary}");
+    assert!(find(&rows, "Asks:").contains("Do you want to proceed? | 1. Yes | 2. No"));
+    assert!(rows.iter().any(|row| row.contains("Pick the database 8")));
+    assert!(view.help().contains(&("s", "Seen")));
+    assert_eq!(
+        view.key(press(KeyCode::Char('s'))),
+        TeamReply::Change(TeamAction::Seen {
+            project_id: project(),
+            upto: 8
+        })
+    );
+    let mut quiet = loaded();
+    assert_eq!(quiet.key(press(KeyCode::Char('s'))), TeamReply::Handled);
+    assert_eq!(
+        quiet.notice,
+        Some(Notice::plain("There are no new notifications."))
+    );
+}
+
+async fn wake_change(
+    view: &mut TeamView,
+    controller: &mut OwnerController,
+    key: KeyCode,
+    now: i64,
+) {
+    let TeamReply::Change(action) = view.key(press(key)) else {
+        panic!("the key must ask the engine");
+    };
+    let generation = u64::try_from(now - NOW).unwrap() + 2;
+    let response = controller
+        .team_action(action.clone(), generation)
+        .await
+        .unwrap();
+    let result = match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            SetupView::Changed(operation.result)
+        }
+        other => panic!("wake change not applied: {other:?}"),
+    };
+    view.apply(&SetupQuery::TeamChange { action, generation }, Ok(result));
+    assert!(!view.notice.as_ref().unwrap().error, "{:?}", view.notice);
+    read_team(controller, view, now).await;
+}
+
+#[tokio::test]
+async fn a_real_engine_keeps_the_wake_rules_the_owner_sets_at_each_level() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-wake-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let mut view = TeamView::new(project());
+    read_team(&mut controller, &mut view, NOW).await;
+    assert_eq!(view.key(press(KeyCode::Char('e'))), TeamReply::Handled);
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Wake the master for this project").contains("Uses the app rule"));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("[ ] A sub-agent reports progress"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Wakes an hour before pausing  30"))
+    );
+
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    wake_change(&mut view, &mut controller, KeyCode::Char(' '), NOW + 1).await;
+    let wake = &view.status.as_ref().unwrap().events.wake;
+    assert_eq!(
+        wake.project,
+        Some(WakeRule {
+            progress: true,
+            ..WakeRule::default()
+        })
+    );
+    assert!(find(&frame(&view, 120, 36), "Wake the master for this project").contains("Set here"));
+
+    assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
+    view.key(press(KeyCode::Down));
+    wake_change(&mut view, &mut controller, KeyCode::Right, NOW + 2).await;
+    assert_eq!(
+        controller.team_events().await.unwrap().rule,
+        Some(WakeRule {
+            hourly_cap: 31,
+            ..WakeRule::default()
+        })
+    );
+    assert!(find(&frame(&view, 120, 36), "Wake the master for every project").contains("Set here"));
+    wake_change(&mut view, &mut controller, KeyCode::Char('r'), NOW + 3).await;
+    assert_eq!(controller.team_events().await.unwrap().rule, None);
+    assert_eq!(view.status.as_ref().unwrap().events.wake.app, None);
+    assert_eq!(view.key(press(KeyCode::Char('r'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("This level already uses the rule above it."))
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.wake.is_none());
+}
