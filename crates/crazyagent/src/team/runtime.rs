@@ -1029,8 +1029,8 @@ impl TeamRuntime {
     }
 
     fn sync_pool(&mut self, stored: &StoredSetup, access: &ModelAccess) -> Result<(), EngineError> {
-        for slot in &stored.team.sub_harnesses {
-            let Some(launch) = launch_harness(&slot.harness) else {
+        for harness in super::plan_harnesses(&stored.team) {
+            let Some(launch) = launch_harness(&harness) else {
                 continue;
             };
             let usable = matches!(
@@ -1045,7 +1045,7 @@ impl TeamRuntime {
             self.connection
                 .execute(
                     "UPDATE team_tasks SET status=?3 WHERE project=?1 AND harness=?2 AND status=?4",
-                    params![stored.project_id.as_str(), slot.harness, to, from],
+                    params![stored.project_id.as_str(), harness, to, from],
                 )
                 .map_err(error)?;
         }
@@ -1452,7 +1452,11 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&framing(stored, team_tool));
+            prompt.push_str(&framing(
+                stored,
+                team_tool,
+                &super::available_harnesses(access, project),
+            ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -1628,7 +1632,11 @@ impl TeamRuntime {
         } else {
             None
         };
-        let framing = live_framing(stored, self.workers[&id].team_tool);
+        let framing = live_framing(
+            stored,
+            self.workers[&id].team_tool,
+            &super::available_harnesses(access, &stored.project_id),
+        );
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(framing, grant)).is_ok() {
             worker.briefed = true;
@@ -1896,12 +1904,17 @@ impl TeamRuntime {
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         for (task, harness, prompt, pin) in queued {
-            let Some(slot) = stored
-                .team
-                .sub_harnesses
-                .iter()
-                .find(|s| s.harness == harness)
-            else {
+            let slot = if stored.team.sub_harnesses.is_empty() {
+                super::slot(&stored.team, &harness)
+            } else {
+                stored
+                    .team
+                    .sub_harnesses
+                    .iter()
+                    .find(|s| s.harness == harness)
+                    .cloned()
+            };
+            let Some(slot) = slot else {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
@@ -3328,24 +3341,12 @@ impl TeamRuntime {
 }
 
 /// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup and whether the team tool is on.
+/// and the project brief. Input: the setup, whether the team tool is on and, for an
+/// empty plan, the harnesses with an eligible account now.
 /// Output: the frame text, with the brief from `master_brief`.
-fn framing(stored: &StoredSetup, team_tool: bool) -> String {
+fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
     let brief = master_brief(stored);
-    let team = stored
-        .team
-        .sub_harnesses
-        .iter()
-        .map(|slot| {
-            format!(
-                "- {}: up to {} agents, tools {}",
-                slot.harness,
-                slot.agents,
-                if slot.tools { "on" } else { "off" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
@@ -3361,11 +3362,16 @@ fn framing(stored: &StoredSetup, team_tool: bool) -> String {
     )
 }
 
-/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
-/// how team events arrive and when to ask the owner. Takes the setup and whether it has
-/// the engine's team tools. Returns the text.
-fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
-    let team = stored
+/// Lists a master's sub-agents: each plan slot with its count and tools, or for an empty
+/// plan the harnesses it can use now under the team maximum. Takes the setup and the
+/// harnesses with an eligible account. Returns lines without a trailing newline.
+fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
+    if stored.team.sub_harnesses.is_empty() {
+        return super::any_harness_text(&stored.team, available)
+            .trim_end()
+            .to_owned();
+    }
+    stored
         .team
         .sub_harnesses
         .iter()
@@ -3378,7 +3384,15 @@ fn live_framing(stored: &StoredSetup, team_tool: bool) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
+/// how team events arrive and when to ask the owner. Takes the setup, whether it has the
+/// engine's team tools and, for an empty plan, the harnesses with an eligible account now.
+/// Returns the text.
+fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
+    let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
             "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team and {}() lists the change sets waiting for the owner. Name sub-agents by their @role handle.\n",

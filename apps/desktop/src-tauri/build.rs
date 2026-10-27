@@ -22,6 +22,7 @@ fn main() {
         "desktop_delete_project_context",
         "desktop_project_read_paths",
         "desktop_set_project_read_paths",
+        "desktop_project_files",
         "desktop_team_status",
         "desktop_team_message",
         "desktop_team_delegate",

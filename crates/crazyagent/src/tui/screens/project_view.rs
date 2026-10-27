@@ -1,5 +1,5 @@
 use super::console;
-use super::new_project::{display_path, harness_name, size_label, team_summary};
+use super::new_project::{any_harness_total, display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
@@ -742,6 +742,13 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
                     .pad(12)
                     .push(harness_name(&team.master, None), look.fg),
             );
+            if team.sub_harnesses.is_empty() {
+                right.push(
+                    Row::of("Sub-agents", look.muted)
+                        .pad(12)
+                        .push(any_harness_total(team), look.fg),
+                );
+            }
             for (index, slot) in team.sub_harnesses.iter().enumerate() {
                 right.push(
                     Row::of(if index == 0 { "Sub-agents" } else { "" }, look.muted)

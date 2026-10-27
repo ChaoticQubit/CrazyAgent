@@ -824,6 +824,41 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
 }
 
 #[test]
+fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let listed = "Your sub-agents:\nThe team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\nThere is no per-harness limit, only the team maximum of 64 agents, counting you.\n";
+    for text in [
+        framing(&setup, true, &["codex", "claude-code"]),
+        live_framing(&setup, true, &["codex", "claude-code"]),
+    ] {
+        assert!(text.contains(listed), "{text}");
+    }
+}
+
+#[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let base = root.path().canonicalize().unwrap();
@@ -859,7 +894,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let frame = || {
         let (sent, got) = channel();
         let setup = setup.clone();
-        std::thread::spawn(move || sent.send(framing(&setup, false)));
+        std::thread::spawn(move || sent.send(framing(&setup, false, &[])));
         got.recv_timeout(Duration::from_secs(5)).ok()
     };
     let mut wrong = Vec::new();
