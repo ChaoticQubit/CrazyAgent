@@ -20,6 +20,11 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(5);
 pub const POLL_EVERY_MS: i64 = 10 * 60 * 1000;
 const STOPPED_SCAN_MS: i64 = 10 * 60 * 1000;
 const AGENTS_PER_SCAN_MAX: i64 = 256;
+const STEP_PANICKED: &str = "usage_step_panicked";
+const PANIC_PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
+const PANIC_DOUBLINGS_MAX: u32 = 8;
+
+const _: () = assert!(SCAN_EVERY.as_millis() <= PANIC_PAUSE_MAX.as_millis());
 
 /// Reads the live model access; none means no pool is configured.
 pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
@@ -388,13 +393,54 @@ fn guarded(step: impl FnOnce() -> Result<(), EngineError>) -> Option<String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)) {
         Ok(Ok(())) => None,
         Ok(Err(problem)) => Some(problem.0),
-        Err(_) => Some("usage_step_panicked".to_owned()),
+        Err(_) => Some(STEP_PANICKED.to_owned()),
     }
 }
 
-/// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, reading the
-/// pools live from the engine's settings files. Inputs: the runtime folder, both settings
-/// files and the harness executables by harness id. Output: the service, or a reason.
+/// The upkeep thread's log and pace. A problem code is logged when it first appears. A
+/// step that panics again right after a panic is counted, not logged, and the wait before
+/// the next step doubles up to `PANIC_PAUSE_MAX`. The default panic hook still reports
+/// every panic on its own, so the longer wait is what bounds that report.
+#[derive(Debug, Default)]
+struct Pace {
+    last: Option<String>,
+    panics: u32,
+}
+
+impl Pace {
+    /// Takes one step's outcome. Input: its problem code, none when it succeeded.
+    /// Output: the lines to log, at most two, and the wait before the next step.
+    fn after(&mut self, problem: Option<String>) -> (Vec<String>, Duration) {
+        let panicked = problem.as_deref() == Some(STEP_PANICKED);
+        let mut lines = Vec::new();
+        if !panicked && self.panics > 1 {
+            lines.push(format!(
+                "usage: {} steps in a row panicked before this one",
+                self.panics
+            ));
+        }
+        self.panics = if panicked {
+            self.panics.saturating_add(1)
+        } else {
+            0
+        };
+        if problem.is_some() && problem != self.last {
+            lines.push(format!("usage: {}", problem.as_deref().unwrap_or_default()));
+        }
+        self.last = problem;
+        let pause = SCAN_EVERY
+            .saturating_mul(1 << self.panics.min(PANIC_DOUBLINGS_MAX))
+            .min(PANIC_PAUSE_MAX);
+        assert!(lines.len() <= 2);
+        assert!((SCAN_EVERY..=PANIC_PAUSE_MAX).contains(&pause));
+        (lines, pause)
+    }
+}
+
+/// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, and less
+/// often while its steps keep panicking, reading the pools live from the engine's settings
+/// files. Inputs: the runtime folder, both settings files and the harness executables by
+/// harness id. Output: the service, or a reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
@@ -423,15 +469,14 @@ pub fn start_for_engine(
     let thread = std::thread::Builder::new()
         .name("usage".into())
         .spawn(move || {
-            let mut last = None;
+            let mut pace = Pace::default();
             while !flag.load(Ordering::SeqCst) {
-                let problem = guarded(|| usage.step(now_ms()));
-                if problem.is_some() && problem != last {
-                    eprintln!("usage: {}", problem.as_deref().unwrap_or_default());
+                let (lines, pause) = pace.after(guarded(|| usage.step(now_ms())));
+                for line in lines {
+                    eprintln!("{line}");
                 }
-                last = problem;
                 let mut waited = Duration::ZERO;
-                while waited < SCAN_EVERY && !flag.load(Ordering::SeqCst) {
+                while waited < pause && !flag.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(100));
                     waited += Duration::from_millis(100);
                 }
