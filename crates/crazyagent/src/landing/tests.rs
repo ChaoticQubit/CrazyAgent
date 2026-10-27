@@ -807,6 +807,42 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
 }
 
 #[test]
+fn an_embedded_repository_left_in_the_worktree_is_refused_when_the_turn_is_committed() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let embedded = worktree.join("vendored");
+    std::fs::create_dir(&embedded).unwrap();
+    git_in(
+        &case.home,
+        &embedded,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(&case.home, &embedded, &["config", "user.name", "Vendor"]);
+    git_in(
+        &case.home,
+        &embedded,
+        &["config", "user.email", "vendor@example.invalid"],
+    );
+    write(&embedded.join("code.rs"), "fn main() {}\n");
+    git_in(&case.home, &embedded, &["add", "code.rs"]);
+    git_in(
+        &case.home,
+        &embedded,
+        &["commit", "-q", "-m", "Vendor start"],
+    );
+
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Vendor a dependency".into(),
+    };
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_embedded_repository"
+    );
+}
+
+#[test]
 fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() {
     for step in [
         owner::Step::Recorded,

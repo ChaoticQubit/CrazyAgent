@@ -500,6 +500,14 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
                 .join("nested")
                 .join(".git"),
         ),
+        (
+            format!("mkdir -p {h}/proj/.git", h = quoted(&case.home)),
+            case.home.join("proj").join(".git"),
+        ),
+        (
+            format!("cd {t} && git init -q box", t = quoted(&case.tmp)),
+            case.tmp.join("box").join(".git"),
+        ),
     ] {
         write_refused(&sandbox, &profile, &script, &target);
     }
@@ -554,6 +562,26 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
                 wt = quoted(&worktree)
             ),
             worktree.join("filed").join(".git"),
+        ),
+        (
+            format!("cd {t} && git init -q box", t = quoted(&case.tmp)),
+            case.tmp.join("box").join(".git"),
+        ),
+        (
+            format!("mkdir -p {h}/proj/.git", h = quoted(&case.home)),
+            case.home.join("proj").join(".git"),
+        ),
+        (
+            format!(
+                "mkdir -p {a}/evil/.git",
+                a = quoted(&case.project.join(".git").join("worktrees").join("one"))
+            ),
+            case.project
+                .join(".git")
+                .join("worktrees")
+                .join("one")
+                .join("evil")
+                .join(".git"),
         ),
     ] {
         write_refused(&confined, &profile, &script, &target);

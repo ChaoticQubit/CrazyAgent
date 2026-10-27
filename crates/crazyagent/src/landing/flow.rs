@@ -389,8 +389,10 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
 
 /// Refuses a change set past the bounds `check_bounds` applies to a worktree, whatever
 /// put the change in git: too many changed paths, a path too deep, too long or not
-/// UTF-8, too many bytes in the changed files, or a file added since `fresh` that the
-/// owner's ignore rules exclude, which `add -A` never takes.
+/// UTF-8, too many bytes in the changed files, a file added since `fresh` that the
+/// owner's ignore rules exclude, which `add -A` never takes, or a gitlink (mode 160000)
+/// that `add -A` recorded from an embedded repository, which no lease tree starts with
+/// and the owner's own git would enter unsandboxed (SM1-R backstop to the sandbox deny).
 /// Inputs: the repository, the owner's checkout, the trees the set spans, the tree its
 /// newest part starts from and the bounds. Output: Ok within the bounds.
 fn check_change(
@@ -434,6 +436,9 @@ fn check_change(
         let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
         if path.len() > PATH_BYTES_MAX || path.split('/').count() > bounds.components {
             return Err(failure("changes_too_large"));
+        }
+        if mode == "160000" {
+            return Err(failure("changes_embedded_repository"));
         }
         if matches!(mode, "100644" | "100755" | "120000") {
             blobs.push(id);

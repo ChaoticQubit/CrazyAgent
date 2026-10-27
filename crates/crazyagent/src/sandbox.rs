@@ -1018,24 +1018,25 @@ impl ProjectSandbox {
     /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
     /// below a writable working tree, except that tree's own top-level `.git` and the
     /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
-    /// at a tree's root, not below it, so the `.+/` guard never matches them. A `.git`
-    /// placed directly or by renaming onto that name is denied; renaming a whole folder
-    /// that already holds a `.git` in is a path-blind move Seatbelt cannot see and stays a
-    /// residual. Input: the policy. Output: the rule text.
+    /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
+    /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
+    /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
+    /// included, in every non-working-tree writable root (the admin folder, object store,
+    /// home, temp and scratch), so no agent can create a repository anywhere to rename from
+    /// (SM1-R). Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
         let dot_git = "\\.[gG][iI][tT]";
-        let roots: Vec<&Path> = match &self.checkout {
-            Some(checkout) => std::iter::once(checkout.worktree.as_path())
-                .chain(self.worktrees.iter().map(PathBuf::as_path))
-                .collect(),
-            None => std::iter::once(self.project_root.as_path())
-                .chain(self.worktrees.iter().map(PathBuf::as_path))
-                .collect(),
-        };
+        let (working, other) = self.git_deny_roots();
         let mut nested = String::new();
-        for root in &roots {
+        for root in &working {
             nested.push_str(&format!(
                 "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
+        }
+        for root in &other {
+            nested.push_str(&format!(
+                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
                 seatbelt_pattern(root)
             ));
         }
@@ -1050,9 +1051,37 @@ impl ProjectSandbox {
         }
         let text =
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
-        assert!(text.matches("(regex #\"^/").count() == roots.len() + 1);
+        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
         assert!(text.ends_with(")\n"));
         text
+    }
+
+    /// Splits the agent's writable roots into the working-tree roots, where the root's own
+    /// top-level `.git` is a legitimate repository link the engine adds, and every other
+    /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
+    /// tree, and a `.git` at any depth (top level included) in an admin folder, object
+    /// store, home, temp or scratch root, is denied so no agent can create a repository to
+    /// rename whole into a worktree.
+    fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
+        let mut working: Vec<&Path> = Vec::new();
+        let mut other: Vec<&Path> = Vec::new();
+        match &self.checkout {
+            Some(checkout) => {
+                working.push(checkout.worktree.as_path());
+                other.push(checkout.admin.as_path());
+                other.push(checkout.objects.as_path());
+            }
+            None => working.push(self.project_root.as_path()),
+        }
+        other.push(self.agent_home.as_path());
+        other.push(self.agent_tmp.as_path());
+        if let Some(scratch) = &self.scratch {
+            other.push(scratch.as_path());
+        }
+        for worktree in &self.worktrees {
+            working.push(worktree.as_path());
+        }
+        (working, other)
     }
 
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
