@@ -2713,3 +2713,304 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
 }
+
+#[cfg(target_os = "macos")]
+const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// Runs git as the owner on the test project: no system or global config, the test's own
+/// home. Inputs: the folder, the home and the arguments. Output: git's output.
+#[cfg(target_os = "macos")]
+fn level_git(folder: &Path, home: &Path, arguments: &[&str]) -> std::process::Output {
+    crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(arguments)
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap()
+}
+
+/// One sub-agent run at an access level through the production pane launch.
+#[cfg(target_os = "macos")]
+struct LevelRun {
+    fixture: Fixture,
+    team: TeamRuntime,
+    agents: Arc<Agents>,
+    member: i64,
+    worktree: PathBuf,
+    codes: BTreeMap<String, i32>,
+}
+
+/// Starts one tools-on sub-agent of a project saved at `access`, through `TeamRuntime`
+/// and real sandbox-exec (none at Full access). The project is a committed tiny crate; the
+/// stand-in codex script edits a file, builds the crate offline with the owner's
+/// toolchain, commits with real git, lists an owner credential folder and writes outside
+/// the project, all output to /dev/null, and records only each exit code. Input: the
+/// level. Output: the run, once the script has finished.
+#[cfg(target_os = "macos")]
+fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.sub_harnesses[0].tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let host = fixture.host();
+    let project = fixture.base.join("project");
+    std::fs::create_dir(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"levelprobe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        project.join(".gitignore"),
+        "target/\nCargo.lock\ncodes.txt\n",
+    )
+    .unwrap();
+    let home = fixture.base.join("owner-home");
+    std::fs::create_dir(&home).unwrap();
+    for arguments in [
+        &["init", "-q"][..],
+        &["config", "user.email", "owner@local"],
+        &["config", "user.name", "owner"],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "start"],
+    ] {
+        let done = level_git(&project, &home, arguments);
+        assert!(done.status.success(), "{done:?}");
+    }
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access,
+            toolchains: Vec::new(),
+        },
+    )
+    .unwrap();
+    let owner = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let secret = [".claude", ".codex", ".ssh"]
+        .into_iter()
+        .map(|name| owner.join(name))
+        .find(|folder| folder.is_dir())
+        .expect("the owner has a credential folder");
+    let outside = fixture.base.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let quoted = |path: &Path| {
+        let text = path.to_str().unwrap();
+        assert!(!text.contains('\''));
+        format!("'{text}'")
+    };
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let script = [
+        "#!/bin/sh".to_owned(),
+        "echo 'Written by the agent.' > page.md".to_owned(),
+        "cargo build --offline -q > /dev/null 2>&1; echo build=$? >> codes.txt".to_owned(),
+        format!("{git} add page.md > /dev/null 2>&1; echo add=$? >> codes.txt"),
+        format!("{git} commit -q -m work > /dev/null 2>&1; echo commit=$? >> codes.txt"),
+        format!(
+            "ls {} > /dev/null 2>&1; echo secret=$? >> codes.txt",
+            quoted(&secret)
+        ),
+        format!(
+            "echo x > {} 2> /dev/null; echo outside=$? >> codes.txt",
+            quoted(&outside.join("planted"))
+        ),
+        "echo done=0 >> codes.txt".to_owned(),
+        "exec /bin/sleep 300".to_owned(),
+    ]
+    .join("\n");
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, format!("{script}\n")).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let model = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(model.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone())
+    .with_terminal(host)
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let member = fixture.status().agents.remove(0).id;
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_agents WHERE id=?1",
+            [member],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let worktree = project.join(worktree);
+    let file = worktree.join("codes.txt");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let text = loop {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        if text.contains("done=0") {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the agent script never finished: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let codes = text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, code)| (name.to_owned(), code.trim().parse::<i32>().unwrap()))
+        .collect();
+    LevelRun {
+        fixture,
+        team,
+        agents,
+        member,
+        worktree,
+        codes,
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl LevelRun {
+    fn code(&self, name: &str) -> i32 {
+        *self
+            .codes
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing: {:?}", self.codes))
+    }
+
+    fn stop(&mut self) {
+        let listed = self
+            .agents
+            .list(
+                Some(&self.fixture.setup.project_id),
+                0,
+                crate::agents::LIST_MAX,
+            )
+            .unwrap();
+        self.agents.stop(&listed[0].id).unwrap();
+        let member = self.member;
+        self.fixture
+            .until(&mut self.team, "the stopped sub-agent's task ends", |f| {
+                f.agent_status(member).0 == AgentStatus::Stopped
+            });
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
+    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_ne!(run.code("add") + run.code("commit"), 0, "{:?}", run.codes);
+    assert_ne!(run.code("secret"), 0, "{:?}", run.codes);
+    assert_ne!(run.code("outside"), 0, "{:?}", run.codes);
+    assert!(!run.fixture.base.join("outside").join("planted").exists());
+    assert!(
+        std::fs::symlink_metadata(run.worktree.join(".git")).is_ok_and(|found| found.is_file()),
+        "a Sandboxed agent works in a linked worktree"
+    );
+    assert!(run.worktree.join("target").is_dir());
+    run.stop();
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
+    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("add"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
+    assert_ne!(run.code("secret"), 0, "{:?}", run.codes);
+    assert_ne!(run.code("outside"), 0, "{:?}", run.codes);
+    assert!(!run.fixture.base.join("outside").join("planted").exists());
+    assert!(
+        std::fs::symlink_metadata(run.worktree.join(".git")).is_ok_and(|found| found.is_dir()),
+        "an Own branch agent works in its own clone"
+    );
+    let project = run.fixture.base.join("project");
+    let home = run.fixture.base.join("owner-home");
+    let before = level_git(&project, &home, &["rev-parse", "HEAD"]);
+    run.stop();
+    let landing = crate::landing::open(&run.fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &run.fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(
+        level_git(&project, &home, &["rev-parse", "HEAD"]).stdout,
+        before.stdout,
+        "nothing lands before Accept"
+    );
+    let crate::landing::AcceptOutcome::Landed { commit, .. } =
+        crate::landing::accept(&landing, &home, &sets[0].id, &sets[0].head, None).unwrap()
+    else {
+        panic!("Accept lands the agent's commit");
+    };
+    let shown = level_git(&project, &home, &["show", &format!("{commit}:page.md")]);
+    assert!(shown.status.success(), "{shown:?}");
+    assert_eq!(shown.stdout, b"Written by the agent.\n");
+    let head = level_git(&project, &home, &["rev-parse", "HEAD"]);
+    assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), commit);
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
+    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("add"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("secret"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("outside"), 0, "{:?}", run.codes);
+    assert!(run.fixture.base.join("outside").join("planted").is_file());
+    assert!(
+        std::fs::symlink_metadata(run.worktree.join(".git")).is_ok_and(|found| found.is_dir()),
+        "a Full access agent still gets its own clone"
+    );
+    run.stop();
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
