@@ -135,6 +135,12 @@
         "command": "crazyagent.comments.send",
         "title": "Send to the agent",
         "category": "CrazyAgent"
+      },
+      {
+        "command": "crazyagent.editAnyway",
+        "title": "Edit anyway",
+        "category": "CrazyAgent",
+        "icon": "$(unlock)"
       }
     ],
     "menus": {
@@ -218,6 +224,10 @@
         {
           "command": "crazyagent.comments.send",
           "when": "false"
+        },
+        {
+          "command": "crazyagent.editAnyway",
+          "when": "activeEditorIsReadonly"
         }
       ],
       "comments/commentThread/context": [
@@ -249,6 +259,13 @@
           "command": "crazyagent.changes.restore",
           "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.restorable$/",
           "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "crazyagent.editAnyway",
+          "when": "activeEditorIsReadonly && resourcePath =~ /\\/worktrees\\/agent-[1-9][0-9]*\\//",
+          "group": "navigation"
         }
       ]
     }

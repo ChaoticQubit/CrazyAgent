@@ -15,6 +15,7 @@ mod git;
 pub(crate) mod ide;
 #[cfg(unix)]
 mod owner;
+pub mod owner_edit;
 #[cfg(unix)]
 mod retire;
 #[cfg(unix)]
@@ -179,7 +180,8 @@ pub enum FileKind {
 }
 
 /// A property of a changed path the owner should look at before accepting: an
-/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, or a mode change.
+/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
+/// an edit the owner made in the agent's worktree while the agent ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -188,6 +190,7 @@ pub enum FileMark {
     Attributes,
     Modules,
     Mode,
+    OwnerEdited,
 }
 
 /// One changed path. `old_path` is set for a rename.
@@ -315,14 +318,25 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, 
 }
 
 /// Reads one page of a change set's diff between its base and head, produced by the
-/// engine with no external diff or text conversion. Inputs: the store, the change set
-/// and the page. Output: the page.
+/// engine with no external diff or text conversion; files the owner edited in the agent's
+/// worktree carry `OwnerEdited`. Inputs: the store, the change set and the page.
+/// Output: the page.
 pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
-        diff::page(&record.repository, &record.base, &record.head, page)
+        let mut shown = diff::page(&record.repository, &record.base, &record.head, page)?;
+        let closed = matches!(record.state, ChangeState::Accepted | ChangeState::Discarded)
+            .then_some(record.updated_ms);
+        owner_edit::mark(
+            db,
+            &record.worktree,
+            record.created_ms,
+            closed,
+            &mut shown.files,
+        )?;
+        Ok(shown)
     }
     #[cfg(not(unix))]
     {

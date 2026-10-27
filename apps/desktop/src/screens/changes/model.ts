@@ -32,6 +32,7 @@ const MARKS: Record<string, string> = {
   mode: "File mode changed",
   attributes: ".gitattributes: changes how Git treats files",
   modules: ".gitmodules: changes the project's submodules",
+  owner_edited: "Edited by you",
 };
 
 const MESSAGE_BYTES_MAX = 4096;

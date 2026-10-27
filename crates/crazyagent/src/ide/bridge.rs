@@ -16,6 +16,7 @@ use tokio::time::Instant;
 
 pub mod agents;
 pub mod memory;
+mod owner_edit;
 
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
@@ -34,7 +35,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 13] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 15] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -86,6 +87,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 13] = [
     (
         "out/scm.js",
         include_bytes!("../../../../apps/ide-extension/out/scm.js"),
+    ),
+    (
+        "out/readonly.js",
+        include_bytes!("../../../../apps/ide-extension/out/readonly.js"),
+    ),
+    (
+        "out/worktree.js",
+        include_bytes!("../../../../apps/ide-extension/out/worktree.js"),
     ),
 ];
 
@@ -615,6 +624,9 @@ async fn answer(
         IdeCall::AgentMessage { agent, text } => {
             agents::sent(runtime, project, agent, text).await?
         }
+        IdeCall::OwnerEdit { agent, path } => {
+            owner_edit::answer(runtime, project, agent, path).await?
+        }
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
@@ -622,8 +634,7 @@ async fn answer(
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
-        IdeCall::OwnerEdit { .. }
-        | IdeCall::ExtensionRequest { .. }
+        IdeCall::ExtensionRequest { .. }
         | IdeCall::ExtensionDecide { .. }
         | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
