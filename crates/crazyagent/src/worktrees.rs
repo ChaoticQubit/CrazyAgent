@@ -23,6 +23,7 @@ const OBJECT_ENTRIES_MAX: usize = 262_144;
 const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
 const SHOWN_ENTRY_BYTES_MAX: usize = 160;
 const SHARED_WORKTREE_FILES: &[&str] = &["HEAD", "commondir", "gitdir", "locked"];
+const HEAD_BYTES_MAX: usize = 512;
 #[cfg(unix)]
 pub(crate) const TREE_BOUNDS: TreeBounds = TreeBounds {
     files: 262_144,
@@ -179,11 +180,14 @@ fn bounded_read(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
     Err(error("worktree_filesystem_unavailable"))
 }
 
+/// Reads a small file an agent may have replaced: opened without following a link and
+/// without waiting on a FIFO or device, kept only when it is a regular file, at most
+/// `limit` bytes. Inputs: the path and the limit. Output: the bytes, or the refusal.
 #[cfg(unix)]
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
         .map_err(error)?;
     if !file.metadata().map_err(error)?.is_file() {
@@ -430,7 +434,8 @@ fn fan_out(metadata: &Path, folder: &Path, room: usize) -> Result<usize, EngineE
 
 /// Checks the files of another worktree's admin folder that Git reads for every worktree,
 /// as `git worktree add` does: each must be a plain file when present, so no read follows
-/// a link or waits on a pipe. The rest of that folder is checked with its own lease.
+/// a link or waits on a pipe, and HEAD must pass [`plain_head`], so Git resolves no ref of
+/// that folder. The rest of that folder is checked with its own lease.
 /// Inputs: the .git folder and the admin folder. Output: nothing, or the refusal code.
 fn shared_worktree_files(metadata: &Path, admin: &Path) -> Result<(), EngineError> {
     let folder = std::fs::symlink_metadata(admin).map_err(error)?;
@@ -444,11 +449,52 @@ fn shared_worktree_files(metadata: &Path, admin: &Path) -> Result<(), EngineErro
         let path = admin.join(name);
         match std::fs::symlink_metadata(&path) {
             Err(failed) if failed.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(entry) if entry.is_file() => {}
+            Ok(entry) if entry.is_file() && (*name != "HEAD" || plain_head(&path)) => {}
             _ => return Err(untrusted(metadata, &path)),
         }
     }
     Ok(())
+}
+
+/// Whether a worktree's HEAD names only what Git resolves outside that worktree's own
+/// folder: a detached object id, or a branch in `refs/heads/`, whose ref the walk of the
+/// shared refs checks. Per-worktree refs such as `refs/worktree/` or `refs/bisect/` and
+/// pseudo refs are refused. It is read with [`bounded_read`], so a FIFO swapped in is
+/// never waited on. Input: the HEAD file. Output: the answer.
+fn plain_head(path: &Path) -> bool {
+    let Ok(bytes) = bounded_read(path, HEAD_BYTES_MAX) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    match line.strip_prefix("ref: refs/heads/") {
+        Some(branch) => branch_name(branch),
+        None => {
+            matches!(line.len(), 40 | 64)
+                && line
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        }
+    }
+}
+
+/// Whether text is a branch name Git accepts after `refs/heads/`, by the rules of
+/// `git check-ref-format`: no control character, space or any of `~^:?*[\`, no `..` or
+/// `@{`, not `@`, no empty component or one starting with `.` or ending in `.lock`, and no
+/// trailing `.`. Input: the name. Output: the answer.
+fn branch_name(name: &str) -> bool {
+    name != "@"
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name
+            .bytes()
+            .any(|byte| byte < 0x20 || byte == 0x7f || b" ~^:?*[\\".contains(&byte))
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
 /// Whether a file name is made only of hex digits, in either case, since a folder that
@@ -1897,7 +1943,7 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     if registration.get(index + 1).copied() != Some(format!("HEAD {oid}").as_bytes()) {
         return Err(error("worktree_revision_mismatch"));
     }
-    let head = bounded_read(&metadata.join("HEAD"), 512)?;
+    let head = bounded_read(&metadata.join("HEAD"), HEAD_BYTES_MAX)?;
     if head != format!("ref: refs/heads/{}\n", record.lease.branch).as_bytes() {
         return Err(error("worktree_head_mismatch"));
     }

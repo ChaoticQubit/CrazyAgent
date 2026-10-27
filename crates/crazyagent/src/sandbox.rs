@@ -593,7 +593,8 @@ impl ProjectSandbox {
     }
 
     /// Confines the agent's writes to its own git worktree of the project: the worktree,
-    /// its admin folder in `.git/worktrees` and the shared object store, beside its home,
+    /// its admin folder in `.git/worktrees` except its HEAD, which only the engine moves,
+    /// and the shared object store, beside its home,
     /// temp dir and extra worktrees. The project folder stays readable. Input: a canonical
     /// worktree in the project's `worktrees/` folder whose `.git` link and admin folder
     /// name each other. Output: the confined sandbox, or `Invalid`.
@@ -912,6 +913,10 @@ impl ProjectSandbox {
         text.push_str(&self.git_link_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
+            text.push_str(&format!(
+                "(deny file-write*\n  (literal \"{}/HEAD\"))\n",
+                checkout.admin.display()
+            ));
         }
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
