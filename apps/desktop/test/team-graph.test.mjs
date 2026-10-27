@@ -16,7 +16,7 @@ const edge = (task_id, from, to, state, extra = {}) => ({ from, to, task_id, sou
 const team = {
   project_id: "chores",
   nodes: [
-    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "Work ChatGPT", terminal: "team-2" }),
+    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "acct-work", terminal: "team-2" }),
     node("g-codex", "harness_group", { parent: "m", label: "Codex", agents: 2 }),
     node("m", "master", { label: "Master", status: "idle", terminal: "team-9" }),
     node("team-1", "agent", { parent: "g-codex", label: "codex-1", status: "idle", terminal: "team-1" }),
@@ -29,6 +29,15 @@ const team = {
   ],
 };
 
+const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? "An account in the pool");
+
+test("graph nodes name their account as the Team panel does, never by its id", () => {
+  assert.deepEqual(named.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
+  assert.equal(team.nodes[0].account, "acct-work", "the engine's graph is left as it was");
+  assert.deepEqual(graph.namedAccounts(team, () => "x").edges, team.edges);
+  assert.equal(view.nodeLabel(named.nodes[0]), "codex-2, codex, Work ChatGPT, Working. No task yet. Opens its terminal.");
+});
+
 test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.deepEqual(graph.nodeStatus(team.nodes[0]), { word: "Working", tone: "info" });
   assert.deepEqual(graph.nodeStatus(node("a", "agent", { status: "failed", status_label: " " })), { word: "Failed", tone: "danger" });
@@ -40,7 +49,8 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[1], name), "Codex, 2 agents");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1 })), "codex, 1 agent");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1, status_label: "1 of 2 agents" }), name), "Codex, 1 of 2 agents");
-  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, Work ChatGPT");
+  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, acct-work");
+  assert.equal(graph.nodeDetail(named.nodes[0], name), "Codex, Work ChatGPT");
   assert.equal(graph.nodeDetail(team.nodes[3], name), "Codex");
 });
 

@@ -24,7 +24,7 @@ impl NativeBridge {
             return Err(failure("not_connected"));
         }
         self.allow_new_auth()?;
-        if self.status().pending {
+        if self.blocked() {
             return Err(failure("pending_intent"));
         }
         let author = match provider {
