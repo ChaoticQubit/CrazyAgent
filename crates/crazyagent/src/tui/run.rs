@@ -1,3 +1,4 @@
+use super::client::editor;
 use super::client::terminal::Terminals;
 use super::client::{Connection, OwnerEvent};
 use super::ctx::{Ctx, Link};
@@ -87,6 +88,7 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     let mut ctx = Ctx::new(depth, colors, appearance, Glyphs::detect(&var), socket);
     ctx.prefs = prefs;
     ctx.home = var("HOME").filter(|home| home.starts_with('/'));
+    ctx.editor = editor::configured(var("EDITOR"));
     Ok(ctx)
 }
 
@@ -192,6 +194,20 @@ fn drive(
         if shell.busy() && now.duration_since(tick) >= TICK {
             shell.ctx.tick = shell.ctx.tick.wrapping_add(1);
             tick = now;
+            dirty = true;
+        }
+        if editor::open_waiting(&mut shell.ctx, &mut std::io::stdout())
+            .map_err(|error| TuiError(error.to_string()))?
+        {
+            let (width, height) =
+                crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
+            shell.resize(width, height);
+            terminal
+                .resize(bounded_area(width, height))
+                .map_err(|error| TuiError(error.to_string()))?;
+            terminal
+                .clear()
+                .map_err(|error| TuiError(error.to_string()))?;
             dirty = true;
         }
         if dirty {

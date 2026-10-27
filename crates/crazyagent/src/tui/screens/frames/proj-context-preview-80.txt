@@ -21,4 +21,4 @@
 
 
 
- m Save to memory  o Open in editor  PgDn Scroll  Esc Back to files      ? Help
+ m Save to memory  o Open in app  PgDn Scroll  Esc Back to files         ? Help

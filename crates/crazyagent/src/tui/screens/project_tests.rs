@@ -2405,3 +2405,77 @@ fn a_project_sets_its_own_account_order_or_follows_its_pool() {
         ProjectReply::AccountOrder(None)
     );
 }
+
+#[test]
+fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder_its_path_starts_in()
+ {
+    use super::project::OpenRequest;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    assert_eq!(
+        screen.project_folder(),
+        Some(std::path::PathBuf::from("/private/tmp/ca-notes-cli"))
+    );
+    screen.open(Tab::Context);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Handled,
+        "nothing is listed yet"
+    );
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![
+            ContextItem {
+                path: "context/brief.md".into(),
+                kind: ContextKind::Brief,
+                bytes: 10,
+            },
+            ContextItem {
+                path: "context/documents/spec.md".into(),
+                kind: ContextKind::Document,
+                bytes: 20,
+            },
+        ],
+    });
+    let spec = OpenRequest::Context {
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        path: "context/documents/spec.md".into(),
+    };
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(spec.clone()),
+        "context paths start in the state folder the engine listed them from, not the project folder"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('o'))),
+        ProjectReply::Open(spec.clone())
+    );
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert!(screen.reading);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(spec),
+        "the file being read opens too"
+    );
+    let look = Look::plain();
+    screen.key(key(KeyCode::Esc));
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(drawn.help.contains(&("v", "$EDITOR")), "{:?}", drawn.help);
+    assert!(
+        drawn.help.contains(&("o", "Open in app")),
+        "{:?}",
+        drawn.help
+    );
+
+    let mut moved = stored(&project);
+    moved.folder = "/private/tmp/ca-notes-cli/.crazyagent".into();
+    screen.setup = Some(moved);
+    assert_eq!(
+        screen.project_folder(),
+        Some(std::path::PathBuf::from("/private/tmp/ca-notes-cli")),
+        "changed files are the owner's copies in the project folder, never in the state folder"
+    );
+}
