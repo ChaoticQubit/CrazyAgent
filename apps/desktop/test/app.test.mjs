@@ -100,6 +100,15 @@ test("an unconfirmed change shows a banner naming it, with Check again and Retry
   assert.doesNotMatch(render({}), /class="banner"/);
 });
 
+test("an unconfirmed account set-up for agents shows its own banner whose Check again reads it", () => {
+  const markup = render({ profileCheck: { busy: false } });
+  assert.match(markup, /We couldn&#x27;t confirm an account&#x27;s set-up for agents\. Account, pool and project changes wait until it&#x27;s checked\./);
+  assert.match(markup, />Check again<\/button>/);
+  assert.doesNotMatch(markup, />Retry<\/button>/);
+  assert.match(render({ profileCheck: { busy: true } }), /Checking\.\.\./);
+  assert.doesNotMatch(render({ profileCheck: null }), /set-up for agents/);
+});
+
 test("routes reach Settings tabs and the project screens", () => {
   const settings = render({}, { name: "settings", tab: "pools" });
   assert.match(settings, /<h1>Settings<\/h1>/);

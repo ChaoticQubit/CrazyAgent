@@ -5,7 +5,7 @@ import type { EngineState } from "./ui/shell";
 import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
-  revokeBaseline, sendMessage, status, watchUnconfirmed,
+  revokeBaseline, sendMessage, status, watchUnconfirmed, leavesProfileUnconfirmed,
   modelAccessPage, inspectModelAccess, editModelAccess, createProject,
   startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth, submitClaudeAuthCode,
   prepareManagedAccount, prepareConfiguredAccount, accountAuthCapabilities,
@@ -1013,12 +1013,14 @@ export interface Unconfirmed {
 export interface Session {
   engine: EngineState;
   unconfirmed: Unconfirmed | null;
+  profileCheck: { busy: boolean } | null;
   profile: Loaded<OwnerProfile | null>;
   projects: Loaded<ProjectRow[]>;
   toast: string;
   revision: number;
   retry: () => void;
   checkUnconfirmed: () => Promise<void>;
+  checkProfile: () => Promise<void>;
   retryUnconfirmed: () => Promise<void>;
   dropUnconfirmed: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -1035,6 +1037,8 @@ export function useSession(): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
   const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
   const tracking = useRef(false);
+  const [profileCheck, setProfileCheck] = useState<{ busy: boolean } | null>(null);
+  const profileTracking = useRef(false);
   const [profile, setProfile] = useState<Loaded<OwnerProfile | null>>({ kind: "loading" });
   const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
   const [toast, setToast] = useState("");
@@ -1090,6 +1094,33 @@ export function useSession(): Session {
     }
   }
 
+  async function checkProfile(): Promise<boolean> {
+    setProfileCheck((old) => old && { busy: true });
+    const check = await api.checkAccountProfile();
+    if (check === "pending" || check === "failed") {
+      setProfileCheck({ busy: false });
+      return false;
+    }
+    setProfileCheck(null);
+    const line = api.profileSettledLine(check);
+    if (line) showToast(line);
+    return true;
+  }
+
+  async function trackProfile() {
+    if (profileTracking.current) return;
+    profileTracking.current = true;
+    try {
+      if (await checkProfile()) return;
+      for (const pause of api.UNCONFIRMED_CHECKS_MS) {
+        await new Promise((resolve) => setTimeout(resolve, pause));
+        if (await checkProfile()) return;
+      }
+    } finally {
+      profileTracking.current = false;
+    }
+  }
+
   async function refreshProfile() {
     setProfile(noteResult(await api.getProfile()));
   }
@@ -1111,15 +1142,16 @@ export function useSession(): Session {
   }
 
   useEffect(() => {
-    const stop = watchUnconfirmed(() => { void track(); });
+    const stop = watchUnconfirmed((settled) => { void (leavesProfileUnconfirmed(settled) ? trackProfile() : track()); });
     void start();
     return stop;
   }, []);
 
   return {
-    engine, unconfirmed, profile, projects, toast, revision,
+    engine, unconfirmed, profileCheck, profile, projects, toast, revision,
     retry: () => { void start(); },
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
+    checkProfile: async () => { await checkProfile(); },
     retryUnconfirmed: async () => { await settle(api.retryUnconfirmed); },
     dropUnconfirmed: async () => {
       setUnconfirmed((old) => old && { ...old, busy: true });

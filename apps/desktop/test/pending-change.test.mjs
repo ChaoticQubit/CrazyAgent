@@ -20,6 +20,26 @@ test("a bridge reply that keeps a change pending, or a refusal because one is pe
   assert.equal(client.leavesUnconfirmed({ ok: false, failure: new TypeError("no bridge") }), false);
 });
 
+test("an account set-up for agents that timed out or blocks a change is read again, and no other reply is", () => {
+  const view = (pending) => ({ ticket: "t", generation: "1", reply: { request_id: "r", outcome: "not_recorded" }, pending });
+  assert.equal(client.leavesProfileUnconfirmed({ ok: true, value: view(true) }), true);
+  assert.equal(client.leavesProfileUnconfirmed({ ok: true, value: view(false) }), false);
+  assert.equal(client.leavesProfileUnconfirmed({ ok: true, value: receipt("setup_project", "unknown", true) }), false);
+  for (const code of ["account_profile_outcome_unknown_read_same_request", "account_profile_recovery_required"]) {
+    assert.equal(client.leavesProfileUnconfirmed({ ok: false, failure: { code } }), true, code);
+    assert.equal(client.leavesUnconfirmed({ ok: false, failure: { code } }), true, code);
+  }
+  assert.equal(client.leavesProfileUnconfirmed({ ok: false, failure: { code: "pending_intent" } }), false);
+  assert.equal(client.leavesProfileUnconfirmed({ ok: false, failure: new TypeError("no bridge") }), false);
+  const heard = [];
+  const stop = client.watchUnconfirmed((settled) => { heard.push(client.leavesProfileUnconfirmed(settled)); });
+  client.reportReply({ ok: false, failure: { code: "account_profile_recovery_required" } });
+  client.reportReply({ ok: false, failure: { code: "pending_intent" } });
+  stop();
+  client.reportReply({ ok: false, failure: { code: "account_profile_recovery_required" } });
+  assert.deepEqual(heard, [true, false]);
+});
+
 test("the app hears about every reply that leaves a change unconfirmed until it stops watching", () => {
   let heard = 0;
   const stop = client.watchUnconfirmed(() => { heard += 1; });
