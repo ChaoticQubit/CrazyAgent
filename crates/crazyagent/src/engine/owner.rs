@@ -24,6 +24,7 @@ pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
 pub use transport::process::{AgentInstructions, PROCESS_CODES, ProcessText, SavedText};
+pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
     BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
     RecoveryBanner, RunShown,
