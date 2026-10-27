@@ -29,7 +29,9 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
             .arg("-C")
             .arg(dir)
             .args(args)
-            .stdin(Stdio::null()),
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
     )
     .unwrap();
     assert!(
