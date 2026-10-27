@@ -582,6 +582,100 @@ fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results()
 }
 
 #[test]
+fn a_parked_session_s_sub_agent_results_wait_for_it_and_reach_it_once_resumed() {
+    let fixture = Fixture::new(1);
+    let db = &fixture.connection;
+    for (id, created, phase) in [("first", 1, "parked"), ("second", 2, "configured")] {
+        db.execute(
+            "INSERT INTO master_sessions(id,project,created,version,phase,body) VALUES (?1,?2,?3,?3,?4,'{}')",
+            params![id, PROJECT, created, phase],
+        )
+        .unwrap();
+    }
+    for (session, result) in [
+        ("first", "parked copy drafted"),
+        ("second", "live page built"),
+    ] {
+        db.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,result,created_ms,finished_ms,session) VALUES (?1,'master','codex',0,'Work',?2,?3,1,2,?4)",
+            params![PROJECT, "done", result, session],
+        )
+        .unwrap();
+    }
+    let delivered = |db: &Connection| -> Vec<String> {
+        let mut statement = db
+            .prepare(
+                "SELECT text FROM team_messages WHERE project=?1 AND author='engine' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([PROJECT], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let waiting = |id: &str| crate::protocol::SessionId::new(id).unwrap();
+    let mut team = fixture.runtime();
+    team.deliver(&fixture.setup).unwrap();
+    let texts = delivered(db);
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("live page built"), "{}", texts[0]);
+    assert!(!texts[0].contains("parked copy drafted"), "{}", texts[0]);
+    assert_eq!(
+        crate::master_sessions::results_waiting(db, &waiting("first")).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::master_sessions::results_waiting(db, &waiting("second")).unwrap(),
+        0
+    );
+
+    db.execute(
+        "UPDATE team_messages SET state='answered' WHERE project=?1 AND author='engine'",
+        [PROJECT],
+    )
+    .unwrap();
+    team.deliver(&fixture.setup).unwrap();
+    assert_eq!(
+        delivered(db).len(),
+        1,
+        "nothing more reaches the live session"
+    );
+    assert!(
+        !team
+            .active_projects()
+            .unwrap()
+            .contains(&fixture.setup.project_id),
+        "results waiting only for a parked session do not wake the project every tick"
+    );
+
+    db.execute(
+        "UPDATE master_sessions SET phase='parked' WHERE id='second'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE master_sessions SET phase='configured' WHERE id='first'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        team.active_projects()
+            .unwrap()
+            .contains(&fixture.setup.project_id)
+    );
+    team.deliver(&fixture.setup).unwrap();
+    let texts = delivered(db);
+    assert_eq!(texts.len(), 2);
+    assert!(texts[1].contains("parked copy drafted"), "{}", texts[1]);
+    assert!(!texts[1].contains("live page built"), "{}", texts[1]);
+    assert_eq!(
+        crate::master_sessions::results_waiting(db, &waiting("first")).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
     let fixture = Fixture::new(1);
     let project = fixture.setup.project_id.clone();
@@ -1560,8 +1654,8 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap();
     fixture.until(
         &mut team,
-        "the same sub-agent works on the resolve task",
-        |f| f.agent_status(member.id).0 == AgentStatus::Working,
+        "the same sub-agent works on the resolve task in its recorded pane",
+        |f| f.agent_status(member.id).0 == AgentStatus::Working && f.recorded(member.id),
     );
     ran(2);
     let (agent, status, sent): (Option<i64>, String, String) = fixture
@@ -1598,7 +1692,11 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
         .unwrap()
         .to_path_buf();
     assert_eq!(std::fs::read_dir(worktrees).unwrap().count(), 1);
-    assert!(team.shutdown().unwrap().is_empty());
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[member.id]),
+        "the working sub-agent's pane outlives the engine"
+    );
 }
 
 const LIVE_CODEX: &str = r#"#!/bin/sh
@@ -1855,10 +1953,16 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert_eq!(sets[0].files, 1);
 
     let input = Connection::open(fixture.base.join("engine.db")).unwrap();
-    super::super::master::master_input(&input, host.as_ref(), &project, "[owner] status please")
-        .unwrap();
+    super::super::master::master_input(
+        &input,
+        host.as_ref(),
+        None,
+        &project,
+        "[owner] status please",
+    )
+    .unwrap();
     assert_eq!(
-        super::super::master::master_input(&input, host.as_ref(), &project, "[owner] again"),
+        super::super::master::master_input(&input, host.as_ref(), None, &project, "[owner] again"),
         Err(super::super::master::InputRefused::Busy),
         "engine input waits while its last input settles"
     );

@@ -270,6 +270,31 @@ pub fn tab_strip(
     ]
 }
 
+/// Whether a character changes the direction text is shown in: the Arabic letter mark, the
+/// left-to-right and right-to-left marks, and the embedding, override and isolate controls.
+/// Input: the character. Output: true for those characters.
+pub fn bidi_control(character: char) -> bool {
+    matches!(character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Removes direction-changing characters from every cell of a drawn frame, so untrusted text
+/// drawn on any path cannot reorder what the owner reads. Input: the frame buffer. Output: none.
+pub fn strip_bidi(buffer: &mut Buffer) {
+    for cell in &mut buffer.content {
+        let symbol = cell.symbol();
+        if symbol.is_ascii() || !symbol.chars().any(bidi_control) {
+            continue;
+        }
+        let kept: String = symbol
+            .chars()
+            .filter(|character| !bidi_control(*character))
+            .collect();
+        cell.set_symbol(if kept.is_empty() { " " } else { &kept });
+        assert!(!cell.symbol().chars().any(bidi_control));
+    }
+}
+
 /// Draws lines into an area, one per row, cut at the area's width.
 /// Inputs: buffer, area and lines. Output: the rows drawn; extra lines are
 /// dropped.
@@ -574,5 +599,46 @@ mod tests {
         assert!(added.visible(added.at + Duration::from_secs(5)));
         assert!(!added.visible(added.at + Duration::from_secs(6)));
         assert!(lost.visible(lost.at + Duration::from_secs(600)));
+    }
+
+    const BIDI: [char; 12] = [
+        '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+        '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ];
+
+    fn cells(buffer: &Buffer) -> String {
+        buffer.content.iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn a_line_drawn_as_a_widget_keeps_direction_characters_until_the_frame_is_swept() {
+        use ratatui::widgets::Widget;
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buffer = Buffer::empty(area);
+        let shown: String = BIDI.iter().map(|bidi| format!("a{bidi}")).collect();
+        Line::raw(format!("Ada\u{202e}txt.exe {shown}"))
+            .render(Rect::new(0, 0, 40, 1), &mut buffer);
+        Line::raw("\u{202e}\u{1f469}\u{200d}\u{1f4bb} \u{6f22}\u{5b57}")
+            .render(Rect::new(0, 1, 40, 1), &mut buffer);
+        assert!(
+            cells(&buffer).contains('\u{202e}'),
+            "the widget path keeps the character"
+        );
+        strip_bidi(&mut buffer);
+        let after = cells(&buffer);
+        assert!(
+            !after.chars().any(|character| BIDI.contains(&character)),
+            "{after:?}"
+        );
+        assert!(after.starts_with("Adatxt.exe aaaaaaaaaaaa "), "{after:?}");
+        for kept in ["\u{1f469}\u{200d}\u{1f4bb}", "\u{6f22}", "\u{5b57}"] {
+            assert!(after.contains(kept), "{kept:?} in {after:?}");
+        }
+        for bidi in BIDI {
+            assert!(bidi_control(bidi), "{bidi:?}");
+        }
+        for kept in ['\u{200d}', '\u{200c}', 'a', '\u{6f22}', '\u{fe0f}'] {
+            assert!(!bidi_control(kept), "{kept:?}");
+        }
     }
 }

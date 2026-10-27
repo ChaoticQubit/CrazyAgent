@@ -165,6 +165,7 @@ fn team() -> TeamStatus {
         tasks: vec![setup, charts, api],
         messages: Vec::new(),
         plan: Vec::new(),
+        events: Default::default(),
     }
 }
 
@@ -1031,4 +1032,286 @@ async fn a_real_engine_takes_a_task_from_the_owner() {
     let row = find(&frame(&view, 120, 36), "Needs a pool").to_owned();
     assert!(row.contains("Write the readings API") && row.contains("You"));
     assert!(find(&frame(&view, 80, 24), "Needs a pool").contains("Write the readings API"));
+}
+
+#[test]
+fn a_waiting_sub_agent_a_paused_wake_and_a_new_notification_show_and_s_marks_it_seen() {
+    use crate::team::events::{Notification, NotificationKind, WaitingAgent};
+    let mut status = team();
+    status.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed? | 1. Yes | 2. No".into(),
+    }];
+    status.events.paused = true;
+    status.events.notifications = [(8, None), (7, None), (5, Some(NOW))]
+        .into_iter()
+        .map(|(id, seen_ms)| Notification {
+            id,
+            project_id: project(),
+            kind: NotificationKind::Escalation,
+            text: format!("Pick the database {id}"),
+            created_ms: NOW,
+            seen_ms,
+        })
+        .collect();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Down));
+    let rows = frame(&view, 120, 36);
+    let summary = find(&rows, "Team");
+    assert!(summary.contains("1 waiting for an answer"), "{summary}");
+    assert!(summary.contains("auto-wake paused"), "{summary}");
+    assert!(find(&rows, "Asks:").contains("Do you want to proceed? | 1. Yes | 2. No"));
+    assert!(rows.iter().any(|row| row.contains("Pick the database 8")));
+    assert!(view.help().contains(&("s", "Seen")));
+    assert_eq!(
+        view.key(press(KeyCode::Char('s'))),
+        TeamReply::Change(TeamAction::Seen {
+            project_id: project(),
+            upto: 8
+        })
+    );
+    let mut quiet = loaded();
+    assert_eq!(quiet.key(press(KeyCode::Char('s'))), TeamReply::Handled);
+    assert_eq!(
+        quiet.notice,
+        Some(Notice::plain("There are no new notifications."))
+    );
+}
+
+#[test]
+fn a_opens_the_notifications_newest_first_with_their_age_and_s_marks_them_seen() {
+    use crate::team::events::{Notification, NotificationKind};
+    let mut status = team();
+    status.events.notifications = [
+        (9, None, 3 * MINUTE),
+        (6, None, 120 * MINUTE),
+        (4, Some(NOW), 3 * 24 * 60 * MINUTE),
+    ]
+    .into_iter()
+    .map(|(id, seen_ms, age)| Notification {
+        id,
+        project_id: project(),
+        kind: if id == 6 {
+            NotificationKind::WakePaused
+        } else {
+            NotificationKind::Escalation
+        },
+        text: format!("Pick the database {id}\nsecond line"),
+        created_ms: NOW - age,
+        seen_ms,
+    })
+    .collect();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    assert!(view.help().contains(&("a", "Notifications")));
+    let closed = frame(&view, 120, 36);
+    assert!(!closed.iter().any(|row| row.contains("Pick the database 4")));
+
+    assert_eq!(view.key(press(KeyCode::Char('a'))), TeamReply::Handled);
+    for (width, height) in [(120, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        assert!(find(&rows, "Notifications").contains("2 new"), "{rows:?}");
+        let at: Vec<usize> = [9, 6, 4]
+            .iter()
+            .map(|id| {
+                let needle = format!("Pick the database {id}");
+                assert_eq!(
+                    rows.iter().filter(|row| row.contains(&needle)).count(),
+                    1,
+                    "{needle} shows once"
+                );
+                rows.iter().position(|row| row.contains(&needle)).unwrap()
+            })
+            .collect();
+        assert!(at[0] < at[1] && at[1] < at[2], "newest first: {at:?}");
+        let newest = find(&rows, "Pick the database 9");
+        assert!(
+            newest.contains("New") && newest.contains("3 min ago"),
+            "{newest}"
+        );
+        assert!(find(&rows, "Pick the database 6").contains("2 h ago"));
+        let seen = find(&rows, "Pick the database 4");
+        assert!(
+            seen.contains("Seen") && seen.contains("3 days ago"),
+            "{seen}"
+        );
+        assert!(!rows.iter().any(|row| row.contains("second line")));
+    }
+    assert_eq!(view.help(), vec![("s", "Seen"), ("Esc", "Close")]);
+    assert_eq!(
+        view.key(press(KeyCode::Char('s'))),
+        TeamReply::Change(TeamAction::Seen {
+            project_id: project(),
+            upto: 9
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(
+        !frame(&view, 120, 36)
+            .iter()
+            .any(|row| row.contains("Pick the database 4"))
+    );
+    assert!(view.help().contains(&("e", "Wake rules")));
+
+    let mut quiet = loaded();
+    assert!(!quiet.help().contains(&("a", "Notifications")));
+    assert_eq!(quiet.key(press(KeyCode::Char('a'))), TeamReply::Handled);
+    assert!(find(&frame(&quiet, 80, 24), "No notifications yet.").contains("No notifications"));
+    assert_eq!(quiet.help(), vec![("Esc", "Close")]);
+}
+
+#[test]
+fn a_long_notification_list_stays_inside_a_short_window() {
+    use crate::team::events::{Notification, NotificationKind};
+    let mut status = team();
+    status.events.notifications = (1..=20)
+        .rev()
+        .map(|id| Notification {
+            id,
+            project_id: project(),
+            kind: NotificationKind::Escalation,
+            text: format!("Question number {id:02}"),
+            created_ms: NOW - id * MINUTE,
+            seen_ms: None,
+        })
+        .collect();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    view.key(press(KeyCode::Char('a')));
+    let room = 24 - 4 - 2;
+    let look = Look::plain();
+    let (lines, _) = view.rows(76, room, &accounts(), &look);
+    assert!(lines.len() <= room, "{} rows for {room}", lines.len());
+    let text: Vec<String> = lines.iter().map(Row::text).collect();
+    assert!(text.iter().any(|row| row.contains("Question number 20")));
+    let more = text
+        .iter()
+        .find(|row| row.contains("older"))
+        .unwrap_or_else(|| panic!("{text:?}"));
+    let shown = text
+        .iter()
+        .filter(|row| row.contains("Question number"))
+        .count();
+    assert!(more.contains(&format!("{} older", 20 - shown)), "{more}");
+}
+
+async fn wake_change(
+    view: &mut TeamView,
+    controller: &mut OwnerController,
+    key: KeyCode,
+    now: i64,
+) {
+    let TeamReply::Change(action) = view.key(press(key)) else {
+        panic!("the key must ask the engine");
+    };
+    let generation = u64::try_from(now - NOW).unwrap() + 2;
+    let response = controller
+        .team_action(action.clone(), generation)
+        .await
+        .unwrap();
+    let result = match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            SetupView::Changed(operation.result)
+        }
+        other => panic!("wake change not applied: {other:?}"),
+    };
+    view.apply(&SetupQuery::TeamChange { action, generation }, Ok(result));
+    assert!(!view.notice.as_ref().unwrap().error, "{:?}", view.notice);
+    read_team(controller, view, now).await;
+}
+
+#[tokio::test]
+async fn a_real_engine_keeps_the_wake_rules_the_owner_sets_at_each_level() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-wake-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let mut view = TeamView::new(project());
+    read_team(&mut controller, &mut view, NOW).await;
+    assert_eq!(view.key(press(KeyCode::Char('e'))), TeamReply::Handled);
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Wake the master for this project").contains("Uses the app rule"));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("[ ] A sub-agent reports progress"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Wakes an hour before pausing  30"))
+    );
+
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    wake_change(&mut view, &mut controller, KeyCode::Char(' '), NOW + 1).await;
+    let wake = &view.status.as_ref().unwrap().events.wake;
+    assert_eq!(
+        wake.project,
+        Some(WakeRule {
+            progress: true,
+            ..WakeRule::default()
+        })
+    );
+    assert!(find(&frame(&view, 120, 36), "Wake the master for this project").contains("Set here"));
+
+    assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
+    view.key(press(KeyCode::Down));
+    wake_change(&mut view, &mut controller, KeyCode::Right, NOW + 2).await;
+    assert_eq!(
+        controller.team_events().await.unwrap().rule,
+        Some(WakeRule {
+            hourly_cap: 31,
+            ..WakeRule::default()
+        })
+    );
+    assert!(find(&frame(&view, 120, 36), "Wake the master for every project").contains("Set here"));
+    wake_change(&mut view, &mut controller, KeyCode::Char('r'), NOW + 3).await;
+    assert_eq!(controller.team_events().await.unwrap().rule, None);
+    assert_eq!(view.status.as_ref().unwrap().events.wake.app, None);
+    assert_eq!(view.key(press(KeyCode::Char('r'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("This level already uses the rule above it."))
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.wake.is_none());
 }

@@ -1,6 +1,7 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, type EngineVersions } from "./api";
+import { loadTeamEvents, teamAttention } from "./api-projects";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -10,6 +11,7 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
+import { freshAlerts, unseenByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
@@ -117,9 +119,9 @@ function Launching() {
 
 /** The routed screen inside the shell. Each project page and onboarding review is keyed by its
  * project id, so a switch to another project starts a fresh page and never keeps the last
- * project's master ticket, name, settings or late reads. Inputs: the route and the session.
- * Output: the screen element. */
-export function Screen({ route, session }: { route: Route; session: Session }) {
+ * project's master ticket, name, settings or late reads. Inputs: the route, the session and
+ * each project's unseen team notification count for Home. Output: the screen element. */
+export function Screen({ route, session, alerts }: { route: Route; session: Session; alerts?: Map<string, number> }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
     case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
@@ -127,7 +129,7 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
-    default: return <Home />;
+    default: return <Home alerts={alerts} />;
   }
 }
 
@@ -135,7 +137,7 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
  * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
  * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
  * session and the current route. */
-export function AppView({ session, route }: { session: Session; route: Route }) {
+export function AppView({ session, route, alerts }: { session: Session; route: Route; alerts?: Map<string, number> }) {
   const updates = route.name === "settings" && route.tab === "updates";
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
@@ -148,7 +150,10 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
         onSkip={(next) => navigate(next ?? { name: "home" }, true)} />
     </SessionContext.Provider>;
   }
-  const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => ({ id: project.id, name: project.name })) : undefined;
+  const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
+    const unseen = alerts?.get(project.id) ?? 0;
+    return { id: project.id, name: project.name, flag: unseen > 0 ? String(unseen) : undefined };
+  }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} />}
       sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
@@ -160,7 +165,7 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
       </span>}>
         {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}
-      <Screen route={route} session={session} />
+      <Screen route={route} session={session} alerts={alerts} />
       <GoToLayer projects={projects ?? []} />
     </AppShell>
   </SessionContext.Provider>;
@@ -180,11 +185,51 @@ function useShortcuts() {
   }, []);
 }
 
-/** The desktop app: one engine session, the hash route and the app-wide shortcuts. */
+export const ALERT_READ_MS = 10_000;
+
+/** Watches the owner's team notifications while the engine runs: every 10 s it reads them,
+ * shows a new one as a toast, keeps the app icon badge at the unseen count and asks for
+ * attention when one is new. Inputs: whether the engine runs and the toast action. Output:
+ * the unseen count of each project for the sidebar. */
+function useTeamAlerts(running: boolean, showToast: (message: string) => void): Map<string, number> {
+  const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
+  const toast = useRef(showToast);
+  toast.current = showToast;
+  useEffect(() => {
+    if (!running) return;
+    let live = true;
+    let last: number | null = null;
+    let shown = 0;
+    let timer = 0;
+    const read = async () => {
+      const result = await loadTeamEvents();
+      if (!live || result.kind === "not_ready") return;
+      if (result.kind === "ok") {
+        const next = freshAlerts(last, result.value);
+        last = next.last;
+        setCounts(unseenByProject(result.value));
+        if (next.fresh[0]) toast.current(displayText(next.fresh[0].text));
+        if (next.fresh.length > 0 || result.value.unseen !== shown) void teamAttention(result.value.unseen, next.fresh.length > 0);
+        shown = result.value.unseen;
+      }
+      timer = window.setTimeout(read, ALERT_READ_MS);
+    };
+    void read();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [running]);
+  return counts;
+}
+
+/** The desktop app: one engine session, the hash route, the app-wide shortcuts and the team
+ * notification watch. */
 export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
-  return <AppView session={session} route={route} />;
+  const alerts = useTeamAlerts(session.engine === "running", session.showToast);
+  return <AppView session={session} route={route} alerts={alerts} />;
 }

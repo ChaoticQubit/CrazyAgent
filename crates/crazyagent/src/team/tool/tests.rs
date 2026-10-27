@@ -324,6 +324,28 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             "{arguments}"
         );
     }
+    assert_eq!(
+        live_call(
+            ESCALATE_TOOL,
+            Some(&json!({"text": " Ada wants to force-push main. Allow it? "}))
+        )
+        .unwrap(),
+        Ok(Call::Escalate {
+            text: "Ada wants to force-push main. Allow it?".into(),
+        })
+    );
+    for arguments in [
+        json!({"text": "  "}),
+        json!({"text": "x".repeat(super::super::events::ESCALATION_BYTES_MAX + 1)}),
+        json!({"text": "bell \u{7}"}),
+        json!({}),
+    ] {
+        assert_eq!(
+            live_call(ESCALATE_TOOL, Some(&arguments)).unwrap(),
+            Err(ESCALATE_INVALID),
+            "{arguments}"
+        );
+    }
     assert_eq!(live_call(STATUS_TOOL, None).unwrap(), Ok(Call::Status));
     assert_eq!(
         live_call(CHANGES_TOOL, Some(&json!({}))).unwrap(),
@@ -416,7 +438,48 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
 }
 
 #[test]
-fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_five_tools() {
+fn the_engine_never_takes_a_call_its_server_is_still_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let askers: Vec<_> = (0..8)
+        .map(|_| {
+            let mailbox = mailbox.clone();
+            std::thread::spawn(move || {
+                (0..16)
+                    .map(|_| ask(&mailbox, &Call::Status, REPLY_WAIT))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut unread = 0;
+    while askers.iter().any(|asker| !asker.is_finished()) {
+        for (id, call) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
+            unread += usize::from(call.is_none());
+            answer_call(&mailbox, &id, "Taken.", call.is_none()).unwrap();
+        }
+    }
+    let answers: Vec<(String, bool)> = askers
+        .into_iter()
+        .flat_map(|asker| asker.join().unwrap())
+        .collect();
+    assert_eq!(unread, 0, "calls were taken before they were written whole");
+    assert_eq!(answers.len(), 8 * 16);
+    assert!(
+        answers
+            .iter()
+            .all(|answer| *answer == ("Taken.".to_owned(), false)),
+        "{answers:?}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
+
+#[test]
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
@@ -440,7 +503,48 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_five_tools() {
             MESSAGE_TOOL,
             ANSWER_TOOL,
             STATUS_TOOL,
-            CHANGES_TOOL
+            CHANGES_TOOL,
+            ESCALATE_TOOL
         ]
     );
+}
+
+#[test]
+fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_untaken() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let blocked = "c".repeat(32);
+    std::fs::write(
+        mailbox.join(format!("{blocked}{CALL_SUFFIX}")),
+        br#"{"tool":"status"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir(mailbox.join(format!("{blocked}{TAKEN_SUFFIX}"))).unwrap();
+    assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
+    assert!(mailbox.join(format!("{blocked}{CALL_SUFFIX}")).is_file());
+    std::fs::remove_file(mailbox.join(format!("{blocked}{CALL_SUFFIX}"))).unwrap();
+    std::fs::remove_dir(mailbox.join(format!("{blocked}{TAKEN_SUFFIX}"))).unwrap();
+
+    let served = mailbox.clone();
+    let server = std::thread::spawn(move || {
+        ask(
+            &served,
+            &Call::Status,
+            std::time::Duration::from_millis(800),
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let id = loop {
+        if let Some((_, id)) = calls(&mailbox, CALL_SUFFIX).pop() {
+            break id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no call was written");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    std::fs::rename(
+        mailbox.join(format!("{id}{CALL_SUFFIX}")),
+        mailbox.join(format!("{id}{TAKEN_SUFFIX}")),
+    )
+    .unwrap();
+    assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
 }

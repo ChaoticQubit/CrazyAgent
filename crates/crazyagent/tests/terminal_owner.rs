@@ -465,3 +465,90 @@ async fn a_sent_prompt_is_one_submission_and_the_only_text_kept_for_the_master()
     assert_eq!(closed(&mut output).await, "terminal_detached");
     sub.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_keys_keep_echoing_while_another_writer_holds_the_engine_database() {
+    let mut sub = SubAgent::start().await;
+    let database = sub.root.path().join("engine.db");
+    let member = sub.agent.team_agent().unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    crazyagent::team::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_live_masters(project,live,agent) VALUES ('alpha',1,?1)",
+            [member],
+        )
+        .unwrap();
+    let agents = sub
+        .service
+        .owner_runtime()
+        .unwrap()
+        .agents()
+        .expect("the engine opens its agent register as a running team does");
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    for word in ["first", "second", "third"] {
+        control
+            .input(format!("echo {word}-key\r").into_bytes())
+            .await
+            .unwrap();
+        let wanted = format!("\r\n{word}-key\r\n");
+        assert!(read_until(&mut output, &mut seen, wanted.as_bytes()).await);
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "keys echo at once while another writer holds the engine database: {:?}",
+        started.elapsed()
+    );
+    connection.execute_batch("ROLLBACK").unwrap();
+
+    let host = sub.service.owner_runtime().unwrap().terminal().unwrap();
+    let project = crazyagent::protocol::ProjectId::new("alpha").unwrap();
+    assert_eq!(
+        crazyagent::team::master::master_input(
+            &connection,
+            host.as_ref(),
+            Some(agents.typing()),
+            &project,
+            "engine news",
+        ),
+        Err(crazyagent::team::master::InputRefused::OwnerTyping),
+        "engine input waits while the owner typed within ten seconds"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let stored = loop {
+        let stored: Option<i64> = connection
+            .query_row(
+                "SELECT typed_ms FROM team_live_masters WHERE project='alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if stored.is_some() || std::time::Instant::now() > deadline {
+            break stored;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        stored.is_some(),
+        "the signal reaches the engine database once the lock is free"
+    );
+
+    drop(agents);
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
+}

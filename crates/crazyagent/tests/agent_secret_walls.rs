@@ -311,7 +311,7 @@ fn owner_library_is_refused_as_a_read_root_and_its_keychains_stay_hidden() {
 }
 
 #[test]
-fn shared_builder_refuses_owner_secrets_and_keeps_the_agent_model_key() {
+fn shared_builder_refuses_owner_secrets_and_relay_tokens_and_keeps_the_local_placeholder() {
     for name in [
         "GH_TOKEN",
         "GITHUB_TOKEN",
@@ -340,15 +340,33 @@ fn shared_builder_refuses_owner_secrets_and_keeps_the_agent_model_key() {
         assert!(agent_env_refused(OsStr::new(name)), "{name}");
     }
     let token = format!("{TOKEN_PREFIX}{}", "c".repeat(64));
+    let anthropic = OsStr::new("ANTHROPIC_API_KEY");
+    assert!(agent_variable_allowed(
+        anthropic,
+        OsStr::new(LOCAL_PLACEHOLDER)
+    ));
     for name in ["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"] {
         let name = OsStr::new(name);
-        assert!(agent_variable_allowed(name, OsStr::new(LOCAL_PLACEHOLDER)));
-        assert!(agent_variable_allowed(name, OsStr::new(&token)));
+        assert!(!agent_variable_allowed(name, OsStr::new(&token)));
         assert!(!agent_variable_allowed(
             name,
             OsStr::new("sk-ant-api03-planted")
         ));
         assert!(!agent_variable_allowed(name, OsStr::new("")));
+    }
+    assert!(!agent_variable_allowed(
+        OsStr::new("CRAZYAGENT_API_KEY"),
+        OsStr::new(LOCAL_PLACEHOLDER)
+    ));
+    for name in ["TERM", "ANTHROPIC_BASE_URL", "CODEX_HOME"] {
+        assert!(!agent_variable_allowed(
+            OsStr::new(name),
+            OsStr::new(&token)
+        ));
+        assert!(!agent_variable_allowed(
+            OsStr::new(name),
+            OsStr::new(&format!("Bearer {token}"))
+        ));
     }
     for (name, value) in AGENT_GIT_ENV {
         assert!(agent_variable_allowed(OsStr::new(name), OsStr::new(value)));
@@ -398,6 +416,87 @@ fn shared_builder_refuses_owner_secrets_and_keeps_the_agent_model_key() {
         );
         assert!(refused.is_err(), "{name}");
     }
+}
+
+#[test]
+fn no_agent_process_starts_with_a_relay_token_in_its_environment() {
+    let case = case();
+    let profile = case.profiles.join("token.sb");
+    let sandbox = sandbox(&case);
+    sandbox.install(&profile).unwrap();
+    let token = format!("{TOKEN_PREFIX}{}", "d".repeat(64));
+    for name in ["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY", "TERM"] {
+        let mut harness = Command::new("/usr/bin/env");
+        harness.env(name, &token).current_dir(&case.project);
+        assert!(sandbox.wrap(&profile, &harness).is_err(), "{name}");
+        assert!(
+            agent_command(
+                &profile,
+                Path::new("/usr/bin/env"),
+                &[("HOME", case.home.as_os_str())],
+                [(OsStr::new(name), Some(OsStr::new(&token)))],
+            )
+            .is_err(),
+            "{name}"
+        );
+    }
+}
+
+/// Two tools-on team agents of one engine, each with its key file in its own home: the
+/// second agent's sandbox, network open as for every tools-on agent, reads its own key file
+/// and is denied the first agent's, which lives outside every other agent's read roots.
+#[test]
+fn a_tools_on_agent_cannot_read_another_agents_key_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let agents = case.runtime.join("team").join("agents");
+    let other_home = agents.join("b").join("home");
+    let other_tmp = agents.join("b").join("tmp");
+    for directory in [&other_home, &other_tmp] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    for home in [&case.home, &other_home] {
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let first_token = format!("{TOKEN_PREFIX}{}", "e".repeat(64));
+    let second_token = format!("{TOKEN_PREFIX}{}", "f".repeat(64));
+    let first = crazyagent::harnesses::interactive::write_key(
+        &case.home,
+        &crazyagent::harnesses::launch::Secret::new(first_token.clone()).unwrap(),
+    )
+    .unwrap();
+    let second = crazyagent::harnesses::interactive::write_key(
+        &other_home,
+        &crazyagent::harnesses::launch::Secret::new(second_token.clone()).unwrap(),
+    )
+    .unwrap();
+    let profile = case.profiles.join("other-agent.sb");
+    let other = ProjectSandbox::new(&case.project, &other_home, &other_tmp, SandboxNetwork::Open)
+        .unwrap()
+        .guard_engine(&case.runtime)
+        .unwrap();
+    let own = run(&other, &profile, "/bin/cat", &[second.to_str().unwrap()]);
+    assert!(
+        own.status.success(),
+        "{}",
+        String::from_utf8_lossy(&own.stderr)
+    );
+    assert_eq!(String::from_utf8(own.stdout).unwrap(), second_token);
+    let theirs = run(&other, &profile, "/bin/cat", &[first.to_str().unwrap()]);
+    assert!(!theirs.status.success());
+    assert!(!holds(&theirs.stdout, &first_token));
+    assert!(
+        String::from_utf8_lossy(&theirs.stderr).contains("Operation not permitted"),
+        "{}",
+        String::from_utf8_lossy(&theirs.stderr)
+    );
+    let mut owner = Command::new("/bin/cat");
+    owner
+        .arg(&first)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let unsandboxed = crazyagent::spawn_gate::output(&mut owner).unwrap();
+    assert_eq!(String::from_utf8(unsandboxed.stdout).unwrap(), first_token);
 }
 
 #[test]

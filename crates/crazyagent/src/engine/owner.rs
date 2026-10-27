@@ -544,6 +544,14 @@ pub enum OwnerRead {
         cursor: Option<crate::master_session::MasterCursor>,
         limit: u8,
     },
+    ProjectMasterSessions {
+        project_id: ProjectId,
+    },
+    ProjectMasterInputs {
+        project_id: ProjectId,
+        session_id: SessionId,
+        cursors: Vec<Cursor>,
+    },
     WorkerDispatch {
         dispatch_id: RequestId,
     },
@@ -592,6 +600,7 @@ pub enum OwnerRead {
         query: String,
         limit: u16,
     },
+    TeamEvents,
     ProjectContext {
         project_id: ProjectId,
     },
@@ -677,6 +686,8 @@ impl OwnerRead {
             Self::WorkerDispatch { .. }
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
+            | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
             | Self::ModelAccessRecord { .. }
@@ -690,6 +701,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -996,6 +1008,12 @@ pub enum OwnerData {
     ProjectMasterTurns {
         page: crate::master_session::MasterTurnPage,
     },
+    ProjectMasterSessions {
+        sessions: Vec<crate::master_sessions::MasterSessionSummary>,
+    },
+    ProjectMasterInputs {
+        entries: Vec<crate::conversation::ConversationEntry>,
+    },
     WorkerDispatch {
         dispatch: Option<Box<crate::worker_dispatch::DispatchView>>,
     },
@@ -1048,6 +1066,9 @@ pub enum OwnerData {
     ProjectFiles {
         project_id: ProjectId,
         paths: Vec<String>,
+    },
+    TeamEvents {
+        events: Box<crate::team::events::AppEvents>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,
