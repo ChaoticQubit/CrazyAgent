@@ -301,7 +301,7 @@ fn no_repository_hook_runs_during_commit_diff_or_accept() {
     let _ = landing::diff(&db, &id, 0).expect("diff");
     fx.assert_marker_absent("diff");
     let head = reviewed_head(&db, &fx.project, &id);
-    let _ = landing::accept(&db, &fx.owner_home, &id, &head).expect("accept");
+    let _ = landing::accept(&db, &fx.owner_home, &id, &head, None).expect("accept");
     fx.assert_marker_absent("accept");
 }
 
@@ -318,7 +318,7 @@ fn no_filter_driver_runs_during_commit_diff_or_accept() {
     let _ = landing::diff(&db, &id, 0).expect("diff");
     fx.assert_marker_absent("diff");
     let head = reviewed_head(&db, &fx.project, &id);
-    match landing::accept(&db, &fx.owner_home, &id, &head) {
+    match landing::accept(&db, &fx.owner_home, &id, &head, None) {
         Ok(_) => {}
         Err(EngineError(code)) => assert_eq!(
             code, "changes_git_unsupported",
@@ -486,7 +486,7 @@ fn accept_refuses_a_dirty_owner_checkout_and_changes_nothing() {
     let expected = reviewed_head(&db, &fx.project, &id);
     std::fs::write(fx.repo.join("tracked.txt"), "owner uncommitted\n").unwrap();
     let before = checkout_state(&fx.repo);
-    let err = landing::accept(&db, &fx.owner_home, &id, &expected).unwrap_err();
+    let err = landing::accept(&db, &fx.owner_home, &id, &expected, None).unwrap_err();
     assert_eq!(err.0, "changes_owner_dirty");
     assert_eq!(
         checkout_state(&fx.repo),
@@ -505,7 +505,7 @@ fn accept_refuses_a_detached_owner_head_and_changes_nothing() {
     let expected = reviewed_head(&db, &fx.project, &id);
     git(&fx.repo, &["checkout", "--detach"]);
     let before = checkout_state(&fx.repo);
-    let err = landing::accept(&db, &fx.owner_home, &id, &expected).unwrap_err();
+    let err = landing::accept(&db, &fx.owner_home, &id, &expected, None).unwrap_err();
     assert_eq!(err.0, "changes_detached_head");
     assert_eq!(
         checkout_state(&fx.repo),
@@ -528,7 +528,7 @@ fn accept_refuses_a_mid_operation_owner_checkout_and_changes_nothing() {
     )
     .unwrap();
     let before = checkout_state(&fx.repo);
-    let err = landing::accept(&db, &fx.owner_home, &id, &expected).unwrap_err();
+    let err = landing::accept(&db, &fx.owner_home, &id, &expected, None).unwrap_err();
     assert_eq!(err.0, "changes_git_busy");
     assert_eq!(
         checkout_state(&fx.repo),
@@ -551,7 +551,7 @@ fn accept_moves_the_branch_only_by_compare_and_swap() {
     git(&fx.repo, &["commit", "-m", "owner commit"]);
     let moved = fx.head();
     assert_ne!(expected, unreviewed);
-    let err = landing::accept(&db, &fx.owner_home, &id, &unreviewed).unwrap_err();
+    let err = landing::accept(&db, &fx.owner_home, &id, &unreviewed, None).unwrap_err();
     assert!(
         err.0 == "changes_stale" || err.0 == "changes_branch_moved",
         "an expected head the owner did not review must be refused, got {}",
@@ -562,7 +562,9 @@ fn accept_moves_the_branch_only_by_compare_and_swap() {
         moved,
         "a refused compare-and-swap moved the branch"
     );
-    match landing::accept(&db, &fx.owner_home, &id, &expected).expect("accept at the real tip") {
+    match landing::accept(&db, &fx.owner_home, &id, &expected, None)
+        .expect("accept at the real tip")
+    {
         landing::AcceptOutcome::Landed { commit, branch } => {
             assert_eq!(branch, "main");
             assert_eq!(fx.head(), commit, "the branch moved to the squash commit");

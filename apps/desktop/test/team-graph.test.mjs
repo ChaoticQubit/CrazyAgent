@@ -52,6 +52,12 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, acct-work");
   assert.equal(graph.nodeDetail(named.nodes[0], name), "Codex, Work ChatGPT");
   assert.equal(graph.nodeDetail(team.nodes[3], name), "Codex");
+  const ada = node("team-7", "agent", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
+  assert.equal(graph.nodeLine(ada, name), "Ada (@onboarding-fix) \u00b7 Claude Code \u00b7 working");
+  assert.equal(graph.cardText(ada, [], name).title, "Ada (@onboarding-fix)");
+  assert.equal(graph.cardTip(ada, [], name)[0], "Ada (@onboarding-fix)");
+  assert.equal(graph.nodeLine(team.nodes[2], name), "Master \u00b7 Codex \u00b7 idle");
+  assert.equal(graph.nodeLine(node("team-8", "agent", { label: "Grace" })), "Grace \u00b7 codex");
 });
 
 test("the graph reads again quickly only while work is live", () => {
@@ -156,7 +162,7 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.match(html, /aria-label="codex-2 terminal"/);
   assert.match(html, /aria-label="Close terminal"/);
   assert.match(html, /Connecting to the terminal\.\.\./);
-  assert.match(html, /Working/);
+  assert.match(html, /codex-2 \u00b7 codex \u00b7 working<\/span><span class="tg-terminal-detail">acct-work</);
   const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "agent"), onClose() {} }));
   assert.match(none, /This agent has no terminal yet/);
   assert.doesNotMatch(none, /Connecting/);
