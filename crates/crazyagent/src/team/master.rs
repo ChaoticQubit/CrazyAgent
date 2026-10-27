@@ -792,6 +792,7 @@ fn answer(
         Call::Answer { agent, text } => {
             typed(answering.events.map(|events| events.answer), &agent, &text)
         }
+        Call::Wake { agent, text } => return wake(connection, answering, &agent, &text),
         Call::Status => match answering.events {
             None => (NOT_WIRED.to_owned(), true),
             Some(events) => match (events.status)(connection, project) {
@@ -856,6 +857,60 @@ fn delegate(
         ),
         false,
     ))
+}
+
+/// Wakes the finished sub-agent a live master names (DEC-102) by pinning its text to that
+/// agent as a task, which the runtime hands to the same agent once it starts again under
+/// its name in its own worktree. A name that reaches a running sub-agent, none or one
+/// whose worktree is gone is refused in plain words. Takes the database, what the answers
+/// need, the name and the text. Returns the sentence the master reads and whether it is a
+/// refusal, or a SQLite failure.
+fn wake(
+    connection: &mut Connection,
+    answering: &Answering<'_>,
+    agent: &str,
+    text: &str,
+) -> Result<(String, bool), EngineError> {
+    let project = &answering.stored.project_id;
+    let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
+    let unknown = format!(
+        "Not woken: no finished sub-agent of this project is called {shown}. Call {}() for their names.",
+        tool::STATUS_TOOL
+    );
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(state)?;
+    let found = match super::events::resolve(&tx, project, agent)? {
+        Some(id) => Some(id),
+        None => super::names::resolve_finished(&tx, project, agent)?,
+    };
+    let Some(id) = found else {
+        return Ok((unknown, true));
+    };
+    let label = super::events::label(&tx, id)?;
+    let admitted = super::admit_wake(&tx, answering.access, answering.stored, id, text, now_ms())?;
+    let reason = match admitted {
+        Ok(_) => {
+            tx.commit().map_err(state)?;
+            return Ok((
+                format!(
+                    "Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends."
+                ),
+                false,
+            ));
+        }
+        Err("team_agent_not_found") => return Ok((unknown, true)),
+        Err("team_agent_running") => format!(
+            "{label} is running. Reach it with {}().",
+            tool::MESSAGE_TOOL
+        ),
+        Err("team_agent_no_worktree") => format!(
+            "the worktree of {label} was cleaned up. Hand the work out with {}() instead.",
+            tool::TOOL_NAME
+        ),
+        Err(code) => format!("{}.", super::runtime::refusal(code)),
+    };
+    Ok((format!("Not woken: {reason}"), true))
 }
 
 /// Raises an app notification for a decision only the owner makes, at most

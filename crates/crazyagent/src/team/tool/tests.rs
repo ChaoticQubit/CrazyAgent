@@ -346,6 +346,21 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             "{arguments}"
         );
     }
+    assert_eq!(
+        live_call(
+            WAKE_TOOL,
+            Some(&json!({"agent": " Ada ", "text": "Add a footer.\n"}))
+        )
+        .unwrap(),
+        Ok(Call::Wake {
+            agent: "Ada".into(),
+            text: "Add a footer.".into(),
+        })
+    );
+    assert_eq!(
+        live_call(WAKE_TOOL, Some(&json!({"agent": "Ada"}))).unwrap(),
+        Err(TYPED_INVALID)
+    );
     assert_eq!(live_call(STATUS_TOOL, None).unwrap(), Ok(Call::Status));
     assert_eq!(
         live_call(CHANGES_TOOL, Some(&json!({}))).unwrap(),
@@ -556,7 +571,7 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
 }
 
 #[test]
-fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_seven_tools() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
@@ -579,6 +594,7 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_six_tools() {
             TOOL_NAME,
             MESSAGE_TOOL,
             ANSWER_TOOL,
+            WAKE_TOOL,
             STATUS_TOOL,
             CHANGES_TOOL,
             ESCALATE_TOOL

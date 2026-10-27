@@ -777,6 +777,14 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 worktree TEXT NOT NULL,
                 git_dir TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_agent_conversations (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                connection TEXT NOT NULL,
+                conversation TEXT NOT NULL CHECK(length(conversation) BETWEEN 1 AND 128),
+                record TEXT NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)
+            );
             CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -1133,6 +1141,69 @@ pub fn admit_resolve(
     )
     .map_err(error)?;
     Ok(Ok(()))
+}
+
+/// Wakes a finished sub-agent for its master (DEC-102): the message becomes a task pinned
+/// to that agent, so the runtime starts the same agent again under its own id and name, in
+/// its own worktree, with the message as its first input, and the master hears how it ends.
+/// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes.
+/// Takes the transaction, live access, the setup, the agent, the message and the time.
+/// Returns the task id, or a plain refusal code: `team_agent_not_found`,
+/// `team_agent_running`, `team_agent_no_worktree`, or one of `admit`'s.
+pub fn admit_wake(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    agent: i64,
+    prompt: &str,
+    now: i64,
+) -> Result<Result<i64, &'static str>, EngineError> {
+    let project = &stored.project_id;
+    let found: Option<(String, String, String, bool)> = tx
+        .query_row(
+            "SELECT a.role,a.harness,a.status,EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+             FROM team_agents a WHERE a.id=?1 AND a.project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((role, harness, status, kept)) = found else {
+        return Ok(Err("team_agent_not_found"));
+    };
+    if AgentRole::parse(&role) != Some(AgentRole::Sub) {
+        return Ok(Err("team_agent_not_found"));
+    }
+    if AgentStatus::parse(&status).is_none_or(AgentStatus::live) {
+        return Ok(Err("team_agent_running"));
+    }
+    if !kept {
+        return Ok(Err("team_agent_no_worktree"));
+    }
+    let task = match admit(
+        tx,
+        access,
+        stored,
+        Some(&harness),
+        prompt,
+        TaskSource::Master,
+        None,
+        now,
+    )? {
+        Ok(task) => task,
+        Err(code) => return Ok(Err(code)),
+    };
+    tx.execute(
+        "DELETE FROM team_task_pins WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        params![task, project.as_str(), agent],
+    )
+    .map_err(error)?;
+    Ok(Ok(task))
 }
 
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
