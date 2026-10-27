@@ -1302,3 +1302,47 @@ fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt
     };
     assert_eq!(case.landed_message(&commit), "Add the fourth line");
 }
+
+#[test]
+fn a_second_open_change_set_for_one_worktree_is_refused_and_both_rows_stay() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let first = store::load(&case.db, &id).unwrap();
+    assert!(first.is_open());
+    let mut second = first.clone();
+    second.id = ChangeSetId::new("f".repeat(32)).unwrap();
+    assert_ne!(second.id, first.id);
+    second.prompt_line = "A second turn".into();
+    assert_eq!(
+        refused(store::save(&case.db, &second)),
+        "changes_agent_has_pending"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), first);
+    assert_eq!(
+        refused(store::load(&case.db, &second.id)),
+        "changes_not_found"
+    );
+    second.state = ChangeState::Discarded;
+    second.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    store::save(&case.db, &second).unwrap();
+    assert_eq!(store::load(&case.db, &second.id).unwrap(), second);
+    let mut reopened = second.clone();
+    reopened.state = ChangeState::Pending;
+    reopened.restorable_until_ms = None;
+    assert_eq!(
+        refused(store::save(&case.db, &reopened)),
+        "changes_agent_has_pending"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), first);
+    assert_eq!(store::load(&case.db, &second.id).unwrap(), second);
+    let mut updated = first.clone();
+    updated.prompt_line = "Updated in place".into();
+    updated.updated_ms += 1;
+    store::save(&case.db, &updated).unwrap();
+    assert_eq!(store::load(&case.db, &id).unwrap(), updated);
+    assert_eq!(
+        store::open_for(&case.db, first.worktree.to_str().unwrap()).unwrap(),
+        Some(updated)
+    );
+}
