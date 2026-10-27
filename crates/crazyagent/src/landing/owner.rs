@@ -1,3 +1,4 @@
+use super::clone;
 use super::diff::{self, plain};
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
@@ -381,11 +382,21 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let agent = flow::agent(db, &record)?;
-    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
-        return Err(failure("changes_agent_busy"));
-    }
     let git_dir = repository.join(".git");
+    let agent = if flow::in_clone(&record) {
+        flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
+        let fetched = clone::fetch(&shared(&repository)?, &repository, &record.worktree)?;
+        if fetched != record.head {
+            return Err(failure("changes_agent_busy"));
+        }
+        None
+    } else {
+        let agent = flow::agent(db, &record)?;
+        if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
+            return Err(failure("changes_agent_busy"));
+        }
+        Some(agent)
+    };
     let owner = Repo::open(&git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
     verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
@@ -406,6 +417,9 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
     flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
+    let Some(agent) = agent else {
+        return store::save(db, &record);
+    };
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });

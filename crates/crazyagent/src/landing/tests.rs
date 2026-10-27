@@ -2074,3 +2074,254 @@ fn accept_refuses_a_merge_whose_predicted_object_was_planted_first() {
         "ONE\ntwo\nthree\nfour\n"
     );
 }
+
+impl Case {
+    /// The same owner repository with the agent in its own clone (DEC-102 Own branch)
+    /// instead of a linked worktree, its start recorded. Output: the case.
+    fn own_branch() -> Self {
+        let mut case = Self::new();
+        let worktree = case.repo.parent().unwrap().join("agent-own");
+        add_agent_clone(&case.repo, &worktree).unwrap();
+        case.workspace.git_dir = crate::agent_git::git_dir(&worktree);
+        case.workspace.worktree = worktree;
+        case.start();
+        case
+    }
+
+    /// The owner repository's refs under one prefix, name and commit, one per line.
+    /// Input: the prefix. Output: the listing.
+    fn owner_refs(&self, prefix: &str) -> String {
+        self.owner(&["for-each-ref", "--format=%(refname) %(objectname)", prefix])
+    }
+
+    /// Plants in the agent's own clone, under a blob id its commit stored there, the
+    /// stored bytes of another text, as an agent with full git in its clone can.
+    /// Inputs: the id and the text.
+    fn plant_in_clone(&self, id: &str, text: &str) {
+        let source = self._tmp.path().join("clone-planted.txt");
+        std::fs::write(&source, text).unwrap();
+        let other = self.agent(&["hash-object", "-w", source.to_str().unwrap()]);
+        let objects = self.workspace.git_dir.join("objects");
+        let other = other.trim();
+        let bytes = std::fs::read(objects.join(&other[..2]).join(&other[2..])).unwrap();
+        let target = objects.join(&id[..2]).join(&id[2..]);
+        assert!(
+            target.exists(),
+            "the agent's commit stored no blob in its clone"
+        );
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&target, bytes).unwrap();
+        assert_ne!(id, other);
+    }
+}
+
+fn own_branch_turn() -> TurnEnd {
+    TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add the fourth line".into(),
+    }
+}
+
+#[test]
+fn an_own_branch_agent_commits_on_its_branch_and_the_project_refs_stay_as_they_were() {
+    let case = Case::own_branch();
+    let base = case.tip();
+    let clone = case.workspace.git_dir.clone();
+    assert!(std::fs::symlink_metadata(&clone).unwrap().is_dir());
+    assert_eq!(
+        std::fs::read_to_string(clone.join("HEAD")).unwrap(),
+        "ref: refs/heads/agent/agent-own\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("objects/info/alternates")).unwrap(),
+        format!("{}\n", case.repo.join(".git/objects").display())
+    );
+    assert_eq!(
+        (case.agent_head(), case.agent(&["status", "--porcelain"])),
+        (base.clone(), String::new())
+    );
+    let heads = case.owner_refs("refs/heads");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.agent_commit("Add the fourth line");
+    case.agent(&["branch", "side"]);
+    case.agent(&["tag", "v1"]);
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/tags"), "");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (base.as_str(), first.as_str(), 1)
+    );
+    assert_eq!(case.owner(&["cat-file", "-t", &first]), "commit\n");
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/tags"), "");
+    assert_eq!(
+        case.owner_refs("refs/crazyagent"),
+        format!("refs/crazyagent/pending/{} {first}\n", id.as_str())
+    );
+    case.edit("README", "uncommitted\n");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(
+        case.view(&id).head,
+        first,
+        "uncommitted work entered the change set"
+    );
+    assert_eq!(case.tip(), base);
+}
+
+#[test]
+fn accept_lands_the_commits_an_own_branch_agent_made_and_leaves_its_branch_alone() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let head = case.agent_commit("Add main");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let before = case.owner_commit("other.txt", "owner work\n", "Owner work");
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>", &commit])
+            .trim(),
+        format!("{before}|Repo Owner <owner@example.invalid>")
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\nother.txt\nsrc/new.rs\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+    assert_eq!(case.agent_head(), head, "Accept moved the agent's branch");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), None);
+    case.edit("README", "one\ntwo\nthree\nfour\nfive\n");
+    case.agent_commit("Add the fifth line");
+    let next = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&next).base, head);
+    let AcceptOutcome::Landed { commit: second, .. } = case.accept(&next).unwrap() else {
+        panic!("the second accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{second}:README")]),
+        "one\ntwo\nthree\nfour\nfive\n"
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &second]),
+        "README\nother.txt\nsrc/new.rs\n"
+    );
+}
+
+#[test]
+fn an_own_branch_agent_resolves_an_update_on_its_branch_and_accept_lands_it() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let head = case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    update(&case.db, &id).unwrap();
+    let merged = case.view(&id).head;
+    assert_eq!(case.agent_head(), head, "update moved the agent's branch");
+    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
+    assert!(
+        prompt.contains(&format!("git merge --ff-only {merged}")),
+        "{prompt}"
+    );
+    case.agent(&["merge", "-q", "--ff-only", &merged]);
+    case.edit("README", "one\ntwo\nTHREE\nfour\n");
+    case.agent_commit("Resolve the owner's edit");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.base.as_str()),
+        (ChangeState::Pending, tip.as_str())
+    );
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the resolved accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nTHREE\nfour\n"
+    );
+}
+
+#[test]
+fn an_own_branch_agent_cannot_move_the_owner_branch_or_change_what_accept_lands() {
+    let case = Case::own_branch();
+    let tip = case.tip();
+    let heads = case.owner_refs("refs/heads");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let reviewed = case.agent_commit("Add the fourth line");
+    case.agent(&["update-ref", "refs/heads/main", &reviewed]);
+    case.agent(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    case.agent(&[
+        "symbolic-ref",
+        "refs/heads/agent/agent-own",
+        "refs/heads/main",
+    ]);
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).head, reviewed);
+    assert_eq!(
+        case.owner_refs("refs/heads"),
+        heads,
+        "a clone ref moved an owner ref"
+    );
+    case.edit("README", "one\ntwo\nthree\nfour\nunreviewed\n");
+    let swapped = case.agent_commit("Swap after review");
+    assert_ne!(swapped, reviewed);
+    assert_eq!(case.tip(), tip);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nthree\nfour\n",
+        "Accept landed what the agent swapped in after review"
+    );
+    let git_dir = case.workspace.git_dir.clone();
+    std::fs::rename(&git_dir, case.repo.parent().unwrap().join("moved-git")).unwrap();
+    std::os::unix::fs::symlink(case.repo.join(".git"), &git_dir).unwrap();
+    let heads = case.owner_refs("refs/heads");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+}
+
+#[test]
+fn objects_planted_in_an_own_branch_clone_never_reach_a_change_set() {
+    let case = Case::own_branch();
+    let tip = case.tip();
+    case.edit("README", "one\ntwo\nthree\nreviewed four\n");
+    case.agent_commit("Add the fourth line");
+    let blob = case.blob_id("one\ntwo\nthree\nreviewed four\n");
+    case.plant_in_clone(&blob, "one\ntwo\nthree\nunreviewed four\n");
+    let before = case.checkout();
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_agent_branch_invalid"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.tip(), tip);
+    assert_eq!(
+        case.checkout(),
+        before,
+        "a refused fetch changed the checkout"
+    );
+}
