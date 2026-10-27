@@ -120,3 +120,34 @@ fn owner_edits_stop_at_their_bound_per_worktree() {
     );
     record(&db, &agent.worktree, "file-0", now()).unwrap();
 }
+
+#[test]
+fn owner_edit_marks_the_change_set_its_turn_end_records_not_one_closed_before() {
+    let mut case = Case::new();
+    let agent = case.agent("sub", "working");
+    std::fs::write(agent.worktree.join("README"), "one\nby the agent\n").unwrap();
+    let first = case.change(&agent);
+    let db = crate::landing::open(&case.root).unwrap();
+    std::fs::write(agent.worktree.join("README"), "one\nby the owner\n").unwrap();
+    record(&db, &agent.worktree, "README", now()).unwrap();
+    let head = crate::landing::list(&db, &case.project)
+        .unwrap()
+        .into_iter()
+        .find(|set| set.id == first)
+        .unwrap()
+        .head;
+    crate::landing::discard(&db, &first, &head, now()).unwrap();
+    let second = case.change(&agent);
+    assert_ne!(second, first);
+    assert_eq!(
+        marks(&case, &first),
+        vec![
+            ("README".to_owned(), vec![]),
+            ("notes.txt".to_owned(), vec![])
+        ]
+    );
+    assert_eq!(
+        marks(&case, &second),
+        vec![("README".to_owned(), vec![FileMark::OwnerEdited])]
+    );
+}
