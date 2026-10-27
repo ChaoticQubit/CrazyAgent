@@ -80,21 +80,47 @@ fn the_attach_screen_first_turns_on_the_input_modes_the_app_set() {
     let both = Modes {
         bracketed_paste: true,
         cursor_keys: true,
+        ..Modes::default()
     };
     assert!(
         render(&[b"x".to_vec()], 80, 24, (0, 0), both).starts_with(b"\x1b[?2004h\x1b[?1h\x1b[0m")
     );
     let paste = Modes {
         bracketed_paste: true,
-        cursor_keys: false,
+        ..Modes::default()
     };
     assert!(render(&[], 80, 24, (0, 0), paste).starts_with(b"\x1b[?2004h\x1b[0m"));
     assert!(render(&[], 80, 24, (0, 0), Modes::default()).starts_with(b"\x1b[0m"));
 }
 
 #[test]
+fn the_attach_screen_puts_a_full_screen_app_back_on_its_alternate_screen_with_its_mouse_modes() {
+    let full_screen = Modes {
+        bracketed_paste: true,
+        alternate_screen: true,
+        mouse_button: true,
+        mouse_sgr: true,
+        ..Modes::default()
+    };
+    assert!(
+        render(&[b"x".to_vec()], 80, 24, (0, 0), full_screen)
+            .starts_with(b"\x1b[?1049h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b[0m\x1b[H\x1b[2Jx"),
+        "the screen is drawn on the alternate screen, with the wheel reported to the app"
+    );
+    let every = Modes {
+        mouse_standard: true,
+        mouse_all: true,
+        mouse_utf8: true,
+        ..Modes::default()
+    };
+    assert!(
+        render(&[], 80, 24, (0, 0), every).starts_with(b"\x1b[?1000h\x1b[?1003h\x1b[?1005h\x1b[0m")
+    );
+}
+
+#[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).unwrap();
+    let found = located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -109,11 +135,38 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         found.modes,
         Modes {
             bracketed_paste: true,
-            cursor_keys: false
+            ..Modes::default()
         }
     );
     assert_eq!(found.history, 312);
-    let full = format!("%2 @2 8 0 80 24 1 0 {}", u64::from(SCROLLBACK_LINES) * 3);
+    assert_eq!(
+        located(&[b"%2 @2 8 0 80 24 0 1 0 1 0 1 0 1 0".to_vec()])
+            .unwrap()
+            .modes,
+        Modes {
+            cursor_keys: true,
+            alternate_screen: true,
+            mouse_button: true,
+            mouse_sgr: true,
+            ..Modes::default()
+        }
+    );
+    assert_eq!(
+        located(&[b"%2 @2 8 0 80 24 0 0 0 1 1   1 ".to_vec()])
+            .unwrap()
+            .modes,
+        Modes {
+            alternate_screen: true,
+            mouse_standard: true,
+            mouse_sgr: true,
+            ..Modes::default()
+        },
+        "a mode flag an older tmux leaves empty reads as off"
+    );
+    let full = format!(
+        "%2 @2 8 0 80 24 1 0 {} 0 0 0 0 0 0",
+        u64::from(SCROLLBACK_LINES) * 3
+    );
     assert_eq!(
         located(&[full.into_bytes()]).unwrap().history,
         HISTORY_ROWS_MAX,
@@ -123,6 +176,9 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
     assert!(located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).is_none());
     assert!(located(&[b"%2 @2 8 0 80 24 1 x 0".to_vec()]).is_none());
     assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 2 0 0 0 0 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 0".to_vec()]).is_none());
     assert!(located(&[b"  0 0 80 24 0 0 0".to_vec()]).is_none());
     assert!(located(&[]).is_none());
 }
@@ -335,6 +391,66 @@ fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn an_attach_to_a_full_screen_app_reports_the_wheel_to_it_on_its_alternate_screen() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'before\\n\\033[?1049h\\033[?1002h\\033[?1006h\\033[Hfull screen'; exec /bin/sleep 30"
+                .into(),
+        ],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let stream = loop {
+        let stream = host.attach(&agent).unwrap();
+        if String::from_utf8_lossy(&stream.screen).contains("full screen") {
+            break stream;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app drew its full screen in time"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut parser = vt100::Parser::new(stream.rows, stream.cols, SCROLLBACK_LINES as usize);
+    parser.process(&stream.history);
+    parser.process(&stream.screen);
+    let screen = parser.screen();
+    assert!(
+        screen.alternate_screen(),
+        "the view draws the app on its alternate screen, which has no history to scroll"
+    );
+    assert_eq!(
+        (
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding()
+        ),
+        (
+            vt100::MouseProtocolMode::ButtonMotion,
+            vt100::MouseProtocolEncoding::Sgr
+        ),
+        "the view reports the wheel to the app in the app's own encoding"
+    );
+    assert!(screen.contents().starts_with("full screen"));
+}
+
 #[test]
 fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
     use std::os::unix::fs::PermissionsExt;

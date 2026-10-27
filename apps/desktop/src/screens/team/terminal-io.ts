@@ -107,6 +107,33 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
   };
 }
 
+/** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Wheel
+ * reports that arrive while earlier input is still being sent wait as one batch that later
+ * reports join, so a fast scroll costs a few sends rather than one per wheel event and never
+ * fills the queue. Typed bytes close the batch, so keys and scrolling keep their order.
+ * Inputs: the queue and the send call for one chunk. Output: the two lanes. */
+export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
+  const keys = keyQueue(run, send);
+  let batch: number[] | null = null;
+  const typed = (bytes: Uint8Array) => {
+    batch = null;
+    keys(bytes);
+  };
+  const wheel = (bytes: Uint8Array) => {
+    if (bytes.length > INPUT_BYTES_MAX) return typed(bytes);
+    if (batch && batch.length + bytes.length <= INPUT_BYTES_MAX) {
+      batch.push(...bytes);
+      return;
+    }
+    const waiting = Array.from(bytes);
+    batch = run(() => {
+      if (batch === waiting) batch = null;
+      return send(waiting);
+    }) ? waiting : null;
+  };
+  return { typed, wheel };
+}
+
 /** Sends typed input in order, one chunk at a time, on a queue of its own. Inputs: the send
  * call, which resolves false once input can no longer be delivered, and a callback for that
  * stop. Output: a function that queues bytes; after a stop it drops input. */

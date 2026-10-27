@@ -6,7 +6,7 @@ import type { GraphNode, TerminalMessage } from "../../engine-client";
 import { Button, Icon, NotReady, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeLine } from "./graph";
-import { encodeBinary, encodeTyped, endCopy, jobQueue, keyOverride, keyQueue, muteQueries, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { encodeBinary, encodeTyped, endCopy, inputLanes, jobQueue, keyOverride, muteQueries, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
@@ -104,6 +104,34 @@ export function typeKeys(terminal: Terminal, type: (data: string) => void): IDis
   return { dispose: () => { typed.dispose(); element.removeEventListener("paste", paste, true); } };
 }
 
+/** Routes an opened terminal's input to its send queue while the view is live: typed keys,
+ * pastes and mouse reports in order, with the reports xterm makes from a wheel event sent on
+ * the wheel lane, so a fast scroll on a full-screen agent is batched. Inputs: the terminal,
+ * the send queue, the send call for one chunk and the live check. Output: the subscription. */
+export function connectInput(terminal: Terminal, run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>, live: () => boolean): IDisposable {
+  const lanes = inputLanes(run, send);
+  let wheeling = false;
+  terminal.attachCustomWheelEventHandler(() => {
+    wheeling = true;
+    queueMicrotask(() => { wheeling = false; });
+    return true;
+  });
+  const route = (bytes: Uint8Array) => {
+    if (!live()) return;
+    if (wheeling) lanes.wheel(bytes);
+    else lanes.typed(bytes);
+  };
+  const typed = typeKeys(terminal, (data) => route(encodeTyped(data)));
+  const binary = terminal.onBinary((data) => route(encodeBinary(data)));
+  return {
+    dispose: () => {
+      typed.dispose();
+      binary.dispose();
+      terminal.attachCustomWheelEventHandler(() => true);
+    },
+  };
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel. Closing it detaches
  * the view; the agent keeps running. Inputs: the graph node, a harness name lookup and the
@@ -166,14 +194,12 @@ export function TerminalPanel({ node, harness, onClose }: {
         sendSize();
       });
       const run = jobQueue(() => end(STOPPED_TYPING));
-      const type = keyQueue(run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok");
-      const typed = typeKeys(terminal, (data) => { if (live) type(encodeTyped(data)); });
+      const input = connectInput(terminal, run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok", () => live);
       prompt.current = (text) => {
         if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();
         return true;
       };
-      const binary = terminal.onBinary((data) => { if (live) type(encodeBinary(data)); });
       const resized = terminal.onResize(() => {
         window.clearTimeout(timer);
         timer = window.setTimeout(sendSize, RESIZE_PAUSE_MS);
@@ -199,8 +225,7 @@ export function TerminalPanel({ node, harness, onClose }: {
         prompt.current = null;
         channel.onmessage = () => {};
         observer.disconnect();
-        typed.dispose();
-        binary.dispose();
+        input.dispose();
         resized.dispose();
         window.clearTimeout(timer);
         window.cancelAnimationFrame(frame);
