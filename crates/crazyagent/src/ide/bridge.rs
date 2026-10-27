@@ -55,7 +55,6 @@ const TEXT_BYTES_MAX: usize = 16384;
 const NAME_BYTES_MAX: usize = 128;
 const VERSION_BYTES_MAX: usize = 64;
 const CAPABILITY: &str = "capability";
-const WORKSPACE: &str = "crazyagent.code-workspace";
 
 /// The path of a capability file: `<engine root>/ide/<project>/capability`.
 pub type CapabilityPath = PathBuf;
@@ -536,9 +535,9 @@ async fn answer(
     call: IdeCall,
 ) -> Result<IdeReply, EngineError> {
     let data = match call {
-        IdeCall::Workspace {} => workspace(&runtime.ide()?.root, project)?,
-        IdeCall::ShowAllAgents { .. }
-        | IdeCall::ChangeSets {}
+        IdeCall::Workspace {} => workspace(runtime, project, None).await?,
+        IdeCall::ShowAllAgents { on } => workspace(runtime, project, Some(on)).await?,
+        IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
         | IdeCall::Accept { .. }
@@ -557,14 +556,31 @@ async fn answer(
     Ok(IdeReply::Ok { data })
 }
 
-/// The project's generated workspace file path, `<root>/ide/<project>/` plus
-/// `crazyagent.code-workspace`. Inputs: the engine root and project. Output: `{path}`.
-fn workspace(root: &Path, project: &ProjectId) -> Result<serde_json::Value, EngineError> {
-    let path = root.join("ide").join(project.as_str()).join(WORKSPACE);
-    let path = path
+/// Writes the project's generated workspace file on a blocking thread, setting the
+/// show-all switch first when given. Inputs: the owner runtime, project and switch.
+/// Output: `{path, hidden, show_all}`, `hidden` counting the agents the cap left out.
+async fn workspace(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    show_all: Option<bool>,
+) -> Result<serde_json::Value, EngineError> {
+    let root = runtime.ide()?.root;
+    let project = project.clone();
+    let written = tokio::task::spawn_blocking(move || match show_all {
+        Some(on) => super::workspace::show_all(&root, &project, on),
+        None => super::workspace::write(&root, &project),
+    })
+    .await
+    .map_err(|_| failure("ide_workspace_unavailable"))??;
+    let path = written
+        .path
         .to_str()
         .ok_or_else(|| failure("ide_path_unreadable"))?;
-    Ok(serde_json::json!({ "path": path }))
+    Ok(serde_json::json!({
+        "path": path,
+        "hidden": written.hidden,
+        "show_all": written.show_all,
+    }))
 }
 
 /// Streams the project's events to a subscribed connection: `ok` first, then one frame
@@ -634,7 +650,7 @@ fn hex(bytes: &[u8]) -> String {
 /// Makes sure a folder exists as a private directory of this user, creating it 0700.
 /// Input: the path. Output: Ok, or `ide_folder_unavailable` or `ide_folder_unsafe`.
 #[cfg(unix)]
-fn private_folder(path: &Path) -> Result<(), EngineError> {
+pub(super) fn private_folder(path: &Path) -> Result<(), EngineError> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -655,7 +671,7 @@ fn private_folder(path: &Path) -> Result<(), EngineError> {
 /// Refuses IDE folders where the engine has no Unix owner and mode checks.
 /// Takes the path, unused. Returns `ide_unavailable`.
 #[cfg(not(unix))]
-fn private_folder(_path: &Path) -> Result<(), EngineError> {
+pub(super) fn private_folder(_path: &Path) -> Result<(), EngineError> {
     Err(failure("ide_unavailable"))
 }
 
