@@ -182,7 +182,7 @@ const RUNTIME_ENTRIES_MAX: usize = 1024;
 /// cannot carve the secret back out of a granted root.
 pub const SECRET_ROOT_REFUSED: &str = "sandbox roots must not hold or sit in a secret path";
 
-const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY", "CRAZYAGENT_API_KEY"];
+const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY"];
 
 const AGENT_ENV_MAX: usize = 128;
 
@@ -244,8 +244,8 @@ pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
 /// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
-/// names `ANTHROPIC_API_KEY` and `CRAZYAGENT_API_KEY`, which pass only with a placeholder
-/// (see [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
+/// name `ANTHROPIC_API_KEY`, which passes only with the local placeholder (see
+/// [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
 pub fn agent_env_refused(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return true;
@@ -262,23 +262,30 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 
 /// Tells whether one variable may reach an agent process with this value: a name
 /// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, or a model key
-/// name holding a CrazyAgent placeholder (the local placeholder or a key relay token),
-/// never a real provider key. Inputs: the name and value. Output: true when allowed.
+/// name holding the local placeholder, never a real provider key. No variable may hold a
+/// key relay token: any process of the owner's user can read another's environment, so a
+/// harness reads its token from the key file in its own home. Inputs: the name and value.
+/// Output: true when allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
+    let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
+    if value
+        .as_encoded_bytes()
+        .windows(token.len())
+        .any(|window| window == token)
+    {
+        return false;
+    }
     if AGENT_GIT_ENV
         .iter()
         .any(|(git, fixed)| name == *git && value == *fixed)
     {
         return true;
     }
-    let placeholder = value
-        .to_str()
-        .is_some_and(crate::model_gateway::relay::is_placeholder);
     if name
         .to_str()
         .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
     {
-        return placeholder;
+        return value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
     }
     !agent_env_refused(name)
 }
@@ -337,15 +344,16 @@ pub fn agent_env<'a>(
 /// The session shim a headless agent starts through inside `sandbox-exec`, followed by the
 /// harness program and its arguments. It joins the engine's process group, starts a new
 /// session and replaces itself with the harness, so the agent holds no controlling terminal
-/// and its pid stays its process group. When the session cannot start it exits unstarted.
-/// Handed a [`warden::WARDEN_FD`], it first forks the run's warden (see [`warden::Warden`])
-/// and keeps that descriptor and variable from the harness.
+/// and its pid stays its process group. macOS can still see the group it just left for a
+/// moment under load, so a refused new session is asked again for about a second before
+/// it exits unstarted. Handed a [`warden::WARDEN_FD`], it first forks the run's warden
+/// (see [`warden::Warden`]) and keeps that descriptor and variable from the harness.
 #[cfg(unix)]
 pub const SESSION_SHIM: [&str; 5] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-e",
-    r#"setpgrp(0, getpgrp(getppid())) && POSIX::setsid() > 0 or die "crazyagent: no new session: $!\n"; if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#,
+    r#"setpgrp(0, getpgrp(getppid())) or die "crazyagent: no new session: $!\n"; my $tries = 0; until (POSIX::setsid() > 0) { $!{EPERM} && ++$tries < 200 or die "crazyagent: no new session: $!\n"; select(undef, undef, undef, 0.005) } if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#,
     "--",
 ];
 

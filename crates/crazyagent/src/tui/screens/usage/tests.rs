@@ -47,6 +47,14 @@ fn limits(failure: Option<&str>) -> AccountLimits {
             used_percent: 90.0,
             resets_at_ms: Some(NOW - MINUTE),
         }),
+        polled_five_hour: Some(LimitWindow {
+            used_percent: 34.4,
+            resets_at_ms: Some(NOW + 2 * HOUR),
+        }),
+        polled_weekly: Some(LimitWindow {
+            used_percent: 90.0,
+            resets_at_ms: Some(NOW - MINUTE),
+        }),
         five_hour_reset_override_ms: None,
         weekly_reset_override_ms: None,
         source: Some(LimitSource::Poll),

@@ -543,6 +543,14 @@ pub enum OwnerRead {
         cursor: Option<crate::master_session::MasterCursor>,
         limit: u8,
     },
+    ProjectMasterSessions {
+        project_id: ProjectId,
+    },
+    ProjectMasterInputs {
+        project_id: ProjectId,
+        session_id: SessionId,
+        cursors: Vec<Cursor>,
+    },
     WorkerDispatch {
         dispatch_id: RequestId,
     },
@@ -586,6 +594,12 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    ProjectFiles {
+        project_id: ProjectId,
+        query: String,
+        limit: u16,
+    },
+    TeamEvents,
     ProjectContext {
         project_id: ProjectId,
     },
@@ -671,6 +685,8 @@ impl OwnerRead {
             Self::WorkerDispatch { .. }
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
+            | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
             | Self::ModelAccessRecord { .. }
@@ -684,6 +700,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -713,6 +730,10 @@ impl OwnerRead {
             }
             Self::FolderSize { path } => {
                 crate::projects_home::path_text(path, "folder_size_path_invalid")?;
+                return Ok(None);
+            }
+            Self::ProjectFiles { query, limit, .. } => {
+                crate::project_files::validate(query, *limit)?;
                 return Ok(None);
             }
             Self::ResearchLog { job, .. } => {
@@ -986,6 +1007,12 @@ pub enum OwnerData {
     ProjectMasterTurns {
         page: crate::master_session::MasterTurnPage,
     },
+    ProjectMasterSessions {
+        sessions: Vec<crate::master_sessions::MasterSessionSummary>,
+    },
+    ProjectMasterInputs {
+        entries: Vec<crate::conversation::ConversationEntry>,
+    },
     WorkerDispatch {
         dispatch: Option<Box<crate::worker_dispatch::DispatchView>>,
     },
@@ -1034,6 +1061,13 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    ProjectFiles {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
+    TeamEvents {
+        events: Box<crate::team::events::AppEvents>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,

@@ -29,6 +29,7 @@ pub const MESSAGE_TOOL: &str = "message";
 pub const ANSWER_TOOL: &str = "answer";
 pub const STATUS_TOOL: &str = "status";
 pub const CHANGES_TOOL: &str = "changes";
+pub const ESCALATE_TOOL: &str = "escalate";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -38,6 +39,7 @@ const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
 const CALL_SUFFIX: &str = ".call";
+const TAKEN_SUFFIX: &str = ".taken";
 const REPLY_SUFFIX: &str = ".reply";
 const PART_SUFFIX: &str = ".part";
 const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -45,6 +47,7 @@ const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
 const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
+const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
 const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -54,10 +57,12 @@ const NOT_ANSWERED: &str = "The engine took the call but did not answer within a
 
 const _: () = assert!(REPLY_BYTES_MAX < REQUEST_BYTES_MAX as u64);
 const _: () = assert!(CALLS_PER_TICK_MAX <= CALLS_PENDING_MAX);
+const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
-/// sub-agent's terminal, `status` and `changes` read the team and its pending change sets.
+/// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
+/// and `escalate` raises an app notification for a decision only the owner makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -76,6 +81,9 @@ pub enum Call {
     },
     Status,
     Changes,
+    Escalate {
+        text: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -247,6 +255,11 @@ fn live_tools() -> Value {
             "description": "List the change sets waiting for the owner's review in Changes.",
             "inputSchema": none,
         },
+        {
+            "name": ESCALATE_TOOL,
+            "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
+        },
     ]})
 }
 
@@ -265,7 +278,7 @@ fn answer_live(request: &Value, mailbox: &Path) -> Option<Value> {
             let arguments = params.and_then(|params| params.get("arguments"));
             match name.map(|name| live_call(name, arguments)) {
                 Some(Some(Ok(call))) => {
-                    let (text, error) = ask(mailbox, &call);
+                    let (text, error) = ask(mailbox, &call, REPLY_WAIT);
                     tool_result(&text, error)
                 }
                 Some(Some(Err(refused))) => tool_result(refused, true),
@@ -319,6 +332,14 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             .map(|(agent, text)| Call::Answer { agent, text }),
         STATUS_TOOL => Ok(Call::Status),
         CHANGES_TOOL => Ok(Call::Changes),
+        ESCALATE_TOOL => match argument("text") {
+            Some(text) if super::text_valid(text, super::events::ESCALATION_BYTES_MAX) => {
+                Ok(Call::Escalate {
+                    text: text.trim().to_owned(),
+                })
+            }
+            _ => Err(ESCALATE_INVALID),
+        },
         _ => return None,
     })
 }
@@ -339,6 +360,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Answer { agent, text } => (ANSWER_TOOL, json!({"agent": agent, "text": text})),
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
+        Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {
@@ -368,9 +390,11 @@ fn role_handle(text: &str) -> Result<Option<String>, ()> {
 }
 
 /// Writes one call into the mailbox under a part name and renames it into place, so the
-/// engine never takes half a call, then waits for the engine's answer.
-/// Takes the mailbox and the call. Returns the answer text and whether it is an error.
-fn ask(mailbox: &Path, call: &Call) -> (String, bool) {
+/// engine never takes half a call, then waits for the engine's answer. A call still in the
+/// mailbox at the deadline is withdrawn, so the engine never runs it; one the engine has
+/// claimed is reported as taken but unanswered. Takes the mailbox, the call and the wait.
+/// Returns the answer text and whether it is an error.
+fn ask(mailbox: &Path, call: &Call, wait: std::time::Duration) -> (String, bool) {
     let pending = calls(mailbox, CALL_SUFFIX).len();
     if pending >= CALLS_PENDING_MAX {
         return (BUSY.into(), true);
@@ -393,7 +417,7 @@ fn ask(mailbox: &Path, call: &Call) -> (String, bool) {
         return (UNSENT.into(), true);
     }
     let answered = mailbox.join(format!("{id}{REPLY_SUFFIX}"));
-    let deadline = std::time::Instant::now() + REPLY_WAIT;
+    let deadline = std::time::Instant::now() + wait;
     while std::time::Instant::now() < deadline {
         if let Some(found) = read_reply(&answered) {
             let _ = std::fs::remove_file(&answered);
@@ -465,28 +489,34 @@ fn calls(mailbox: &Path, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
     found
 }
 
-/// Takes the oldest calls a live master's server left in its mailbox, removing each one
-/// read, and removes answers nobody collected for `REPLY_STALE`. Links and other non-files
-/// are never read; a call past `CALL_BYTES_MAX` is removed unread. Takes the mailbox and
-/// how many to take.
+/// Takes the oldest calls a live master's server left in its mailbox, each claimed by
+/// renaming it before it is read so a server that withdraws it at its deadline cannot
+/// report a call the engine runs as never taken, and removes answers and claims nobody
+/// collected for `REPLY_STALE`. Links and other non-files are never read; a call past
+/// `CALL_BYTES_MAX` is removed unread. Takes the mailbox and how many to take.
 /// Returns each call id with its call, or none when the file did not hold a valid call.
 pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
     if !std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir()) {
         return Vec::new();
     }
     let now = std::time::SystemTime::now();
-    for (modified, id) in calls(mailbox, REPLY_SUFFIX) {
-        if now
-            .duration_since(modified)
-            .is_ok_and(|age| age >= REPLY_STALE)
-        {
-            let _ = std::fs::remove_file(mailbox.join(format!("{id}{REPLY_SUFFIX}")));
+    for suffix in [REPLY_SUFFIX, TAKEN_SUFFIX] {
+        for (modified, id) in calls(mailbox, suffix) {
+            if now
+                .duration_since(modified)
+                .is_ok_and(|age| age >= REPLY_STALE)
+            {
+                let _ = std::fs::remove_file(mailbox.join(format!("{id}{suffix}")));
+            }
         }
     }
     let mut taken = Vec::new();
     for (_, id) in calls(mailbox, CALL_SUFFIX).into_iter().take(max) {
-        let path = mailbox.join(format!("{id}{CALL_SUFFIX}"));
-        let call = open_recorded(&path).ok().and_then(|file| {
+        let claimed = mailbox.join(format!("{id}{TAKEN_SUFFIX}"));
+        if std::fs::rename(mailbox.join(format!("{id}{CALL_SUFFIX}")), &claimed).is_err() {
+            continue;
+        }
+        let call = open_recorded(&claimed).ok().and_then(|file| {
             let metadata = file.metadata().ok()?;
             if !metadata.is_file() || metadata.len() > CALL_BYTES_MAX {
                 return None;
@@ -495,7 +525,7 @@ pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
             (&file).take(CALL_BYTES_MAX).read_to_end(&mut bytes).ok()?;
             serde_json::from_slice::<Call>(bytes.trim_ascii()).ok()
         });
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&claimed);
         taken.push((id, call));
     }
     assert!(taken.len() <= max);

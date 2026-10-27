@@ -53,12 +53,28 @@ pub struct TerminalSession {
     _relay: Option<Relay>,
 }
 
-struct KeyFile(PathBuf);
+/// An account's key file, removed when the agent session holding it ends.
+pub(super) struct KeyFile(pub(super) PathBuf);
 
 impl Drop for KeyFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// Writes a routed launch's relay token to the 0600 key file in its account home, the only
+/// place its harness reads it from, so the token is in no argument or variable of any agent
+/// process. Input: the request after [`route`]. Output: the file's guard, none for a
+/// keyless launch, or a plain refusal code.
+pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>, LaunchError> {
+    request
+        .account
+        .key()
+        .map(|key| {
+            assert!(is_placeholder(key.reveal()));
+            interactive::write_key(request.account.home(), key).map(KeyFile)
+        })
+        .transpose()
 }
 
 fn host_failure(error: HostError) -> LaunchError {
@@ -109,18 +125,8 @@ impl TerminalSession {
             return Err(failure("launch_terminal_unsupported"));
         }
         let (request, relay) = route(request)?;
-        assert!(
-            request
-                .account
-                .key()
-                .is_none_or(|key| is_placeholder(key.reveal()))
-        );
         let home = request.account.home().to_path_buf();
-        let key = request
-            .account
-            .key()
-            .map(|key| interactive::write_key(&home, key).map(KeyFile))
-            .transpose()?;
+        let key = write_key_file(&request)?;
         let cwd = request
             .working_dir
             .canonicalize()

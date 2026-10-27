@@ -428,7 +428,8 @@ impl ProjectPlugins {
         PluginsReply::Send(SettingsJob::Plugin(change))
     }
 
-    /// Draws the Skills and MCP servers sections of the project's Settings tab.
+    /// Draws the Skills and MCP servers sections of the project's Settings tab; a short window
+    /// cuts the details panel first, so the notice and any question always show.
     /// Takes the content width, the rows available and the look.
     /// Returns the rows and the help keys.
     pub fn rows(&self, content: usize, room: usize, look: &Look) -> (Vec<Row>, Help) {
@@ -439,8 +440,9 @@ impl ProjectPlugins {
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
             return (lines, self.help());
         }
-        let panel = self.panel(content, look);
         let footer = self.footer(content, look);
+        let mut panel = self.panel(content, look);
+        panel.truncate(room.saturating_sub(6 + footer.len()));
         let fixed = 6 + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(2);
         let wanted_servers = self.servers.len().max(1).min(free / 2);

@@ -379,12 +379,150 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
     Ok(())
 }
 
+/// Refuses a change set past the bounds `check_bounds` applies to a worktree, whatever
+/// put the change in git: too many changed paths, a path too deep, too long or not
+/// UTF-8, too many bytes in the changed files, or a file added since `fresh` that the
+/// owner's ignore rules exclude, which `add -A` never takes.
+/// Inputs: the repository, the owner's checkout, the trees the set spans, the tree its
+/// newest part starts from and the bounds. Output: Ok within the bounds.
+fn check_change(
+    repo: &Repo,
+    checkout: &Path,
+    from: &str,
+    to: &str,
+    fresh: &str,
+    bounds: &TreeBounds,
+) -> Result<(), EngineError> {
+    let output = repo.exec(
+        &["diff-tree", "-r", "-z", "--no-renames", from, to],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Err(failure("changes_too_large"));
+    }
+    let mut fields = output.stdout.split(|byte| *byte == 0);
+    let (mut blobs, mut added) = (Vec::new(), Vec::new());
+    let mut paths: usize = 0;
+    while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
+        let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
+        let header = std::str::from_utf8(header).map_err(|_| failure("changes_git_failed"))?;
+        let parts: Vec<&str> = header
+            .strip_prefix(':')
+            .unwrap_or_default()
+            .split(' ')
+            .collect();
+        let [_, mode, _, id, status] = parts[..] else {
+            return Err(failure("changes_git_failed"));
+        };
+        paths += 1;
+        if paths > bounds.files {
+            return Err(failure("changes_too_large"));
+        }
+        let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
+        if path.len() > PATH_BYTES_MAX || path.split('/').count() > bounds.components {
+            return Err(failure("changes_too_large"));
+        }
+        if matches!(mode, "100644" | "100755" | "120000") {
+            blobs.push(id);
+        }
+        if status == "A" {
+            added.push(path);
+        }
+    }
+    assert!(paths <= bounds.files && blobs.len() <= paths && added.len() <= paths);
+    if blob_bytes(repo, &blobs)? > bounds.bytes {
+        return Err(failure("changes_too_large"));
+    }
+    if fresh != from && !added.is_empty() {
+        let since = repo.run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--name-only",
+            "--diff-filter=A",
+            fresh,
+            to,
+        ])?;
+        let since: BTreeSet<&[u8]> = since.split(|byte| *byte == 0).collect();
+        added.retain(|path| since.contains(path.as_bytes()));
+    }
+    if ignores_any(checkout, &added)? {
+        return Err(failure("changes_ignored_files"));
+    }
+    Ok(())
+}
+
+/// Sums the sizes of blobs as git stores them. Inputs: the repository and the blob ids.
+/// Output: the bytes, or `changes_git_failed` when one is missing.
+fn blob_bytes(repo: &Repo, blobs: &[&str]) -> Result<u64, EngineError> {
+    if blobs.is_empty() {
+        return Ok(0);
+    }
+    let mut input = blobs.join("\n");
+    input.push('\n');
+    let output = repo.exec(
+        &["cat-file", "--batch-check=%(objectsize)"],
+        Some(input.as_bytes()),
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if output.code != 0 || output.overflow {
+        return Err(failure("changes_git_failed"));
+    }
+    let sizes = std::str::from_utf8(&output.stdout)
+        .map_err(|_| failure("changes_git_failed"))?
+        .lines()
+        .map(|line| {
+            line.parse::<u64>()
+                .map_err(|_| failure("changes_git_failed"))
+        })
+        .collect::<Result<Vec<u64>, EngineError>>()?;
+    if sizes.len() != blobs.len() {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(sizes.into_iter().fold(0, u64::saturating_add))
+}
+
+/// Tells whether the owner's ignore rules exclude any of `paths`, tracked or not: the
+/// rules in the owner's checkout, never files in the agent's worktree, which the agent
+/// can rewrite and hide with skip-worktree. Each name goes in behind `./`, since
+/// check-ignore takes no literal magic and would read a name starting with `:` as
+/// pathspec magic. Inputs: the owner's checkout and the paths. Output: the answer.
+fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let owner = Repo::open(&checkout.join(".git"), Some(checkout))?;
+    let input: String = paths.iter().map(|path| format!("./{path}\0")).collect();
+    let output = owner.exec(
+        &["check-ignore", "-z", "--stdin", "--no-index"],
+        Some(input.as_bytes()),
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    match output.code {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(failure("changes_git_failed")),
+    }
+}
+
 /// Stages everything in an agent worktree and makes it a commit object above `head`
-/// without moving any ref, or nothing when the tree equals `head`'s.
-/// Inputs: the worktree, its root, HEAD, the bounds and the message. Output: the commit.
+/// without moving any ref, or nothing when the tree equals `head`'s. The whole change
+/// set from `above` must stay within the bounds, staged files included.
+/// Inputs: the worktree, its root, the owner's checkout, the set's start, HEAD, the
+/// bounds and the message. Output: the commit.
 fn commit_worktree(
     repo: &Repo,
     worktree: &Path,
+    checkout: &Path,
+    above: &str,
     head: &str,
     bounds: &TreeBounds,
     message: &str,
@@ -395,10 +533,9 @@ fn commit_worktree(
     if tree == repo.tree_of(head)? {
         return Ok(None);
     }
-    let changed = diff::changed_paths(repo, head, &tree)?;
-    if changed.len() > bounds.files {
+    if let Err(refusal) = check_change(repo, checkout, above, &tree, head, bounds) {
         repo.run(&["read-tree", head])?;
-        return Err(failure("changes_too_large"));
+        return Err(refusal);
     }
     repo.commit_tree(&tree, &[head], message, ENGINE).map(Some)
 }
@@ -423,9 +560,10 @@ pub(super) fn start(
 
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
 /// one above the base recorded for the worktree, else its HEAD, so commits the agent
-/// made itself are part of it; their changed paths count against the bounds too. The
-/// change set is stored before HEAD moves, so a stop between the two loses nothing: the
-/// next turn end commits the same tree again.
+/// made itself are part of it. The whole set, agent commits and staged files included,
+/// must stay within the bounds before anything is stored. The change set is stored
+/// before HEAD moves, so a stop between the two loses nothing: the next turn end
+/// commits the same tree again.
 /// Inputs: the store, the workspace, the turn end, the bounds and the time now.
 /// Output: the open change set, None when nothing is pending.
 pub(super) fn record(
@@ -463,8 +601,11 @@ pub(super) fn record(
     let above = open
         .as_ref()
         .map_or(base.as_str(), |record| record.base.as_str());
-    if above != head && diff::changed_paths(&repo, above, &head)?.len() > bounds.files {
-        return Err(failure("changes_too_large"));
+    let fresh = open
+        .as_ref()
+        .map_or(base.as_str(), |record| record.head.as_str());
+    if above != head {
+        check_change(&repo, &workspace.repository, above, &head, fresh, bounds)?;
     }
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
     let line = subject(&turn.prompt_line, &roots);
@@ -473,7 +614,15 @@ pub(super) fn record(
         if line.is_empty() { "Agent turn" } else { &line },
         store::outcome_name(turn.outcome)
     );
-    let committed = commit_worktree(&repo, &workspace.worktree, &head, bounds, &message)?;
+    let committed = commit_worktree(
+        &repo,
+        &workspace.worktree,
+        &workspace.repository,
+        above,
+        &head,
+        bounds,
+        &message,
+    )?;
     let mut record = match open {
         None if committed.is_none() && head == base => return Ok(None),
         None => Record {
