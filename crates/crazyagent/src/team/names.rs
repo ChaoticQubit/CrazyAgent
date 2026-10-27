@@ -256,6 +256,53 @@ pub fn assign_persona(
     Ok(persona.to_owned())
 }
 
+/// Reads a name in one of a sub-agent's id forms, `team-7`, `<harness>-7` or a bare `7`,
+/// the id a positive number written without leading zeros. Takes the name with no `@`.
+/// Returns the prefix, None for bare digits, and the id, or None for any other name.
+pub fn id_form(name: &str) -> Option<(Option<&str>, i64)> {
+    let (prefix, digits) = match name.rsplit_once('-') {
+        Some((prefix, digits)) => (Some(prefix), digits),
+        None => (None, name),
+    };
+    let id = digits
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0 && id.to_string() == digits)?;
+    Some((prefix, id))
+}
+
+/// The prefixes that make `<prefix>-<n>` an id form for some agent of a project: `team`,
+/// every catalog harness and every harness the project's agents run, all lower case.
+/// Takes the connection and project. Returns the prefixes.
+fn id_prefixes(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<BTreeSet<String>, EngineError> {
+    let mut statement = connection
+        .prepare("SELECT DISTINCT lower(harness) FROM team_agents WHERE project=?1")
+        .map_err(error)?;
+    let mut prefixes = statement
+        .query_map([project.as_str()], |row| row.get::<_, String>(0))
+        .map_err(error)?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(error)?;
+    prefixes.insert("team".to_owned());
+    prefixes.extend(
+        crate::harnesses::specs()
+            .iter()
+            .map(|spec| spec.id.to_ascii_lowercase()),
+    );
+    Ok(prefixes)
+}
+
+/// Whether a handle reads as an agent's id form, so `events::resolve` would take it for
+/// another agent's id. Takes the id prefixes and the handle. Returns true for such a handle.
+fn id_shaped(prefixes: &BTreeSet<String>, handle: &str) -> bool {
+    id_form(handle).is_some_and(|(prefix, _)| {
+        prefix.is_none_or(|prefix| prefixes.contains(&prefix.to_ascii_lowercase()))
+    })
+}
+
 fn suffixed(base: &str, attempt: usize) -> String {
     assert!(attempt >= 1 && !base.is_empty() && base.len() <= HANDLE_CHARS_MAX);
     if attempt == 1 {
@@ -282,8 +329,14 @@ fn store_handle(
     if name(connection, agent)?.is_none() {
         assign_persona(connection, project, agent)?;
     }
+    let prefixes = id_prefixes(connection, project)?;
+    if id_shaped(&prefixes, wanted) {
+        return Ok(Err("team_handle_invalid"));
+    }
     let taken = held(connection, project, agent, "handle")?;
-    let free = |candidate: &str| candidate != MASTER_HANDLE && !taken.contains(candidate);
+    let free = |candidate: &str| {
+        candidate != MASTER_HANDLE && !taken.contains(candidate) && !id_shaped(&prefixes, candidate)
+    };
     let attempts = if suffix { SUFFIXES_MAX } else { 1 };
     let Some(chosen) = (1..=attempts)
         .map(|attempt| suffixed(wanted, attempt))
@@ -303,8 +356,9 @@ fn store_handle(
 
 /// Sets the role handle of a sub-agent's current job, as the master asked for it; a handle
 /// another live agent of the project holds, or `@master`, gets the first free `-2`, `-3`
-/// suffix. Takes the connection, project, team agent id and the role in free text.
-/// Returns the handle, or a plain refusal code for an unusable role or unknown agent.
+/// suffix that is no agent's id form. Takes the connection, project, team agent id and the
+/// role in free text. Returns the handle, or a plain refusal code for an unusable role, one
+/// shaped like an agent's id form such as `team-7`, a taken one or an unknown agent.
 pub fn assign_role(
     connection: &Connection,
     project: &ProjectId,
@@ -345,8 +399,9 @@ pub fn set_task_role(
 
 /// Gives a sub-agent the handle for the task it takes: the task's role, or for a task pinned
 /// to it the handle it already has, or else `task-<id>`, so a reused agent never keeps the
-/// handle of an earlier job. Takes the connection, project, team agent and task ids.
-/// Returns the handle, or None when the agent is unknown or every candidate is taken.
+/// handle of an earlier job and no handle reads as an agent's id form. Takes the
+/// connection, project, team agent and task ids. Returns the handle, or None when the agent
+/// is unknown or every candidate is taken.
 pub fn assign_task_role(
     connection: &Connection,
     project: &ProjectId,
@@ -372,17 +427,21 @@ pub fn assign_task_role(
         .map_err(error)?
         .is_some();
     let current = name(connection, agent)?.and_then(|name| name.handle);
+    let prefixes = id_prefixes(connection, project)?;
+    let usable = |wanted: &String| !id_shaped(&prefixes, wanted);
     let wanted = role
         .as_deref()
         .and_then(handle)
-        .or(current.filter(|_| pinned))
+        .filter(|wanted| usable(wanted))
+        .or(current.filter(|current| pinned && usable(current)))
         .unwrap_or_else(|| format!("task-{task}"));
     Ok(store_handle(connection, project, agent, &wanted, true)?.ok())
 }
 
 /// The owner's rename of a live sub-agent's role handle. Takes the connection, project,
 /// team agent id and the new handle, already kebab case, a leading `@` allowed. Returns the
-/// handle, or `team_handle_invalid`, `team_handle_taken` or `team_agent_unknown`.
+/// handle, or `team_handle_invalid` (also for an id form such as `team-7`, `codex-7` or
+/// `7`), `team_handle_taken` or `team_agent_unknown`.
 pub fn rename(
     connection: &Connection,
     project: &ProjectId,

@@ -930,7 +930,7 @@ fn deliver(
                 answer,
                 &format!("agent {agent}'s question {}", question.id),
                 &format!(
-                    "\nCrazyAgent types this into agent {agent}'s terminal while it runs. If agent {agent} has stopped, pass it on when its work resumes."
+                    "\nCrazyAgent types this into agent {agent}'s terminal itself, now while it runs or once its work resumes, so do not send it to agent {agent} yourself."
                 ),
             ),
             true,

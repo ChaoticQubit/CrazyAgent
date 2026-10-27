@@ -370,6 +370,48 @@ fn the_owner_renames_a_live_sub_agent_s_handle() {
     );
 }
 
+/// A handle shaped like an agent's id form, `team-7`, `<harness>-7` or `7`, is refused from
+/// the owner and never given from a role, so no handle can stand for another agent's id.
+#[test]
+fn no_handle_takes_the_shape_of_an_agent_id() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let sub = agent(&connection, "alpha", "sub", "working");
+    for shaped in ["team-7", "@team-7", "7", "codex-7", "claude-code-12"] {
+        assert_eq!(
+            rename(&connection, &alpha, sub, shaped).unwrap(),
+            Err("team_handle_invalid"),
+            "{shaped}"
+        );
+    }
+    for kept in ["task-7", "team-07", "team-7a", "codex"] {
+        assert_eq!(
+            rename(&connection, &alpha, sub, kept).unwrap(),
+            Ok(kept.to_owned()),
+            "{kept}"
+        );
+    }
+    assert_eq!(
+        assign_role(&connection, &alpha, sub, "Team 7").unwrap(),
+        Err("team_handle_invalid")
+    );
+    let delegated = task(&connection, "alpha");
+    set_task_role(&connection, &alpha, delegated, "Team 7").unwrap();
+    assert_eq!(
+        assign_task_role(&connection, &alpha, sub, delegated).unwrap(),
+        Some(format!("task-{delegated}"))
+    );
+    let other = agent(&connection, "alpha", "sub", "idle");
+    assign_role(&connection, &alpha, other, "codex")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        assign_role(&connection, &alpha, sub, "codex").unwrap(),
+        Err("team_handle_taken"),
+        "a taken role never falls back to an id form such as codex-2"
+    );
+}
+
 #[test]
 fn resolve_finds_a_live_agent_by_handle_or_persona_within_its_project() {
     let (_directory, connection) = engine();

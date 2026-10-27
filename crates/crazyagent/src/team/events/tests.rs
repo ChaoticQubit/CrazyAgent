@@ -533,6 +533,85 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
     assert_eq!(send(live.to_string(), "hi"), Ok(live));
 }
 
+/// An id form names only the agent with that id: agent 8 holding the handle `team-7` from
+/// before handles were checked cannot take agent 7's messages, and `send_to_id` types into
+/// agent 7 alone.
+#[test]
+fn an_id_form_reaches_its_own_agent_even_when_another_agent_holds_it_as_a_handle() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    for id in [7, 8] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,?2,'sub','codex',1,'idle',1,1)",
+                params![id, PROJECT],
+            )
+            .unwrap();
+        fixture.pane(&host, id, &["/bin/sh", "-c", "exec cat"]);
+    }
+    super::super::names::assign_persona(&fixture.connection, &project(), 8).unwrap();
+    fixture
+        .connection
+        .execute("UPDATE team_names SET handle='team-7' WHERE agent=8", [])
+        .unwrap();
+    for name in ["team-7", "@team-7", "7", "codex-7", "Sub-agent 7"] {
+        assert_eq!(
+            resolve(&fixture.connection, &project(), name).unwrap(),
+            Some(7),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            "team-7",
+            "first"
+        )
+        .unwrap(),
+        Ok(7)
+    );
+    assert_eq!(
+        send_to_id(&fixture.connection, host.as_ref(), &project(), 7, "second").unwrap(),
+        Ok(())
+    );
+    for (id, refused) in [
+        (8, Ok(())),
+        (9, Err("team_agent_not_found")),
+        (0, Err("team_agent_not_found")),
+    ] {
+        assert_eq!(
+            send_to_id(&fixture.connection, host.as_ref(), &project(), id, "third").unwrap(),
+            refused,
+            "{id}"
+        );
+    }
+    assert_eq!(
+        send_to_id(
+            &fixture.connection,
+            host.as_ref(),
+            &ProjectId::new(OTHER).unwrap(),
+            7,
+            "fourth"
+        )
+        .unwrap(),
+        Err("team_agent_not_found")
+    );
+    let screen = |id: i64| {
+        String::from_utf8_lossy(&host.screen(&AgentId::team(id).unwrap()).unwrap()).into_owned()
+    };
+    let deadline = Instant::now() + WAIT;
+    while !(screen(7).contains("second") && screen(8).contains("third")) {
+        assert!(Instant::now() < deadline, "{}\n{}", screen(7), screen(8));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(screen(7).contains("first"));
+    assert!(!screen(8).contains("first") && !screen(8).contains("second"));
+    assert!(!screen(7).contains("third") && !screen(7).contains("fourth"));
+}
+
 #[test]
 fn a_task_end_records_finished_or_failed_whatever_its_last_line_asks_and_master_delegations_are_carried()
  {

@@ -1876,17 +1876,8 @@ impl TeamRuntime {
                         note.question
                     )
                 };
-                match super::events::send_to_agent(
-                    &self.connection,
-                    host,
-                    project,
-                    &format!("team-{id}"),
-                    &text,
-                ) {
-                    Ok(Ok(typed_to)) => {
-                        assert_eq!(typed_to, id);
-                        typed.push(note.question);
-                    }
+                match super::events::send_to_id(&self.connection, host, project, id, &text) {
+                    Ok(Ok(())) => typed.push(note.question),
                     Ok(Err(_)) | Err(_) => break,
                 }
             }

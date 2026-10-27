@@ -399,13 +399,13 @@ fn a_sub_agent_question_reaches_it_typed_and_its_master_hears_it_by_number() {
         [
             (
                 "owner".to_owned(),
-                "The owner answered agent 7's question 1:\nUse Postgres 16.\nCrazyAgent types this into agent 7's terminal while it runs. If agent 7 has stopped, pass it on when its work resumes."
+                "The owner answered agent 7's question 1:\nUse Postgres 16.\nCrazyAgent types this into agent 7's terminal itself, now while it runs or once its work resumes, so do not send it to agent 7 yourself."
                     .to_owned(),
                 "pending".to_owned()
             ),
             (
                 "owner".to_owned(),
-                "The owner dismissed agent 7's question 2. No answer comes.\nCrazyAgent types this into agent 7's terminal while it runs. If agent 7 has stopped, pass it on when its work resumes."
+                "The owner dismissed agent 7's question 2. No answer comes.\nCrazyAgent types this into agent 7's terminal itself, now while it runs or once its work resumes, so do not send it to agent 7 yourself."
                     .to_owned(),
                 "pending".to_owned()
             ),
