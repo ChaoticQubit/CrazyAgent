@@ -1,5 +1,5 @@
 use super::diff::{self, plain};
-use super::git::{Repo, failure, object_id};
+use super::git::{Repo, failure, is_object_id, object_id};
 use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::engine::EngineError;
@@ -32,6 +32,7 @@ const LOCAL_ROOTS: [&str; 10] = [
 const LINK_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: usize = 512;
 const CONFLICTS_SHOWN_MAX: usize = 50;
+const INDEX_BYTES_MAX: u64 = 256 * 1024 * 1024;
 static BUSY: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 static FREED: Condvar = Condvar::new();
 
@@ -99,14 +100,127 @@ pub(super) fn check_places(
     Ok(())
 }
 
-fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+/// Checks that every object the `wanted` commits hold beyond the `trusted` ones has the
+/// bytes its id names: packs them into a private folder and has git index that pack,
+/// which hashes each object again from its bytes, and refuses unless every listed id is
+/// in that index. Git reads a loose object as stored without checking it, so this is the
+/// check before the engine writes from objects a confined agent could have planted. The
+/// pack is never installed. Inputs: the owner repository's git folder and the commits.
+/// Output: Ok, else `changes_workspace_invalid` for an object whose bytes do not match.
+pub(super) fn verify_objects(
+    git_dir: &Path,
+    wanted: &[&str],
+    trusted: &[&str],
+) -> Result<(), EngineError> {
+    assert!(!wanted.is_empty());
+    let shared = Repo::open(git_dir, None)?;
+    let mut args = vec!["rev-list", "--objects", "--no-object-names"];
+    args.extend(wanted);
+    args.push("--not");
+    args.extend(trusted);
+    let listed = shared.run(&args)?;
+    let ids = listed
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(object_id)
+        .collect::<Result<BTreeSet<String>, EngineError>>()?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let folder = git_dir.join(format!(
+        "crazyagent-verify-{}",
+        &crate::engine::owner::random_id()?[..24]
+    ));
+    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
+    let verified = verify_into(&shared, &folder, &ids);
+    let _ = std::fs::remove_dir_all(&folder);
+    verified
+}
+
+fn verify_into(shared: &Repo, folder: &Path, ids: &BTreeSet<String>) -> Result<(), EngineError> {
+    let refused = || failure("changes_workspace_invalid");
+    let text = |path: &Path| path.to_str().map(str::to_owned).ok_or_else(refused);
+    let mut input = String::new();
+    for id in ids {
+        input.push_str(id);
+        input.push('\n');
+    }
+    let packed = shared.exec(
+        &["pack-objects", "-q", &text(&folder.join("check"))?],
+        Some(input.as_bytes()),
+        &[],
+        256,
+    )?;
+    if packed.code != 0 || packed.overflow {
+        return Err(refused());
+    }
+    let checksum = object_id(&packed.stdout)?;
+    let pack = folder.join(format!("check-{checksum}.pack"));
+    let index = folder.join("verified.idx");
+    let indexed = shared.exec(
+        &["index-pack", "-o", &text(&index)?, &text(&pack)?],
+        None,
+        &[],
+        256,
+    )?;
+    if indexed.code != 0 || indexed.overflow {
+        return Err(refused());
+    }
+    let bytes = bounded_bytes(&index, INDEX_BYTES_MAX)?;
+    let shown = shared.exec(&["show-index"], Some(&bytes), &[], LISTING_BYTES_MAX)?;
+    if shown.code != 0 || shown.overflow {
+        return Err(refused());
+    }
+    let mut found = BTreeSet::new();
+    for line in shown
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let id = line
+            .split(|byte| *byte == b' ')
+            .nth(1)
+            .ok_or_else(refused)?;
+        found.insert(object_id(id)?);
+    }
+    if !ids.is_subset(&found) {
+        return Err(refused());
+    }
+    assert!(found.len() >= ids.len());
+    Ok(())
+}
+
+fn bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
+    let mut bytes = Vec::new();
+    open_plain(path)
+        .map_err(|_| failure("changes_git_failed"))?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| failure("changes_git_failed"))?;
+    if bytes.len() as u64 > limit {
+        return Err(failure("changes_workspace_invalid"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)
-        .map_err(|_| invalid())?;
+}
+
+#[cfg(not(unix))]
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+    use std::io::Read;
+    let file = open_plain(path).map_err(|_| invalid())?;
     if !file.metadata().is_ok_and(|found| found.is_file()) {
         return Err(invalid());
     }
@@ -328,7 +442,7 @@ impl Agent {
         new: &str,
         message: &str,
     ) -> Result<(), EngineError> {
-        assert!(super::git::is_object_id(new));
+        assert!(is_object_id(new));
         let branch = match &self.pointer {
             Pointer::Detached => return move_detached(&self.git_dir, old, new),
             Pointer::Branch(branch) => format!("refs/heads/{branch}"),
@@ -360,7 +474,7 @@ impl Agent {
 /// `changes_workspace_invalid` for a symbolic or malformed HEAD.
 fn detached(text: &str) -> Result<&str, EngineError> {
     text.strip_suffix('\n')
-        .filter(|id| super::git::is_object_id(id))
+        .filter(|id| is_object_id(id))
         .ok_or_else(invalid)
 }
 
@@ -446,11 +560,7 @@ pub(super) fn open_agent(
         AgentKind::Sub => Pointer::Detached,
         AgentKind::Master => crate::worktrees::lease_branch(db, worktree)
             .ok()
-            .filter(|branch| {
-                branch
-                    .strip_prefix("crazyagent/")
-                    .is_some_and(super::git::is_object_id)
-            })
+            .filter(|branch| branch.strip_prefix("crazyagent/").is_some_and(is_object_id))
             .map(Pointer::Branch)
             .ok_or_else(invalid)?,
     };
@@ -495,12 +605,19 @@ pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError>
 }
 
 /// Points an agent worktree at a commit: its index and tracked files first, then its
-/// HEAD, so a stop between the two leaves a state an engine start can finish.
+/// HEAD, so a stop between the two leaves a state an engine start can finish. A detached
+/// HEAD the agent moved again meanwhile is `changes_agent_busy`, never a crash.
 /// Inputs: the worktree and the commit. Output: Ok once it holds the commit.
 pub(super) fn reset_agent(agent: &Agent, target: &str) -> Result<(), EngineError> {
     agent.repo.run(&["read-tree", "-u", "--reset", target])?;
     agent.move_head(None, target, "CrazyAgent: reset")?;
-    assert_eq!(agent.head()?, target);
+    match &agent.pointer {
+        Pointer::Branch(_) => assert_eq!(agent.head()?, target),
+        Pointer::Detached if agent.head().ok().as_deref() != Some(target) => {
+            return Err(failure("changes_agent_busy"));
+        }
+        Pointer::Detached => {}
+    }
     Ok(())
 }
 

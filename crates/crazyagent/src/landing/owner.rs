@@ -1,5 +1,5 @@
 use super::diff::{self, plain};
-use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared};
+use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
 use super::{AcceptOutcome, ChangeSetId, ChangeState, MESSAGE_BYTES_MAX};
@@ -282,8 +282,10 @@ pub(super) fn accept(
         return Err(failure("changes_stale"));
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
-    let owner = Repo::open(&repository.join(".git"), Some(&repository))?;
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&git_dir, Some(&repository))?;
     let (reference, tip) = owner_branch(&owner, &repository)?;
+    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -312,6 +314,7 @@ pub(super) fn accept(
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
     let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
+    verify_objects(&git_dir, &[&commit], &[&tip, &record.head, &record.base])?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),
         old: tip.clone(),
@@ -370,13 +373,13 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
         return Err(failure("changes_stale"));
     }
     let agent = flow::agent(db, &record)?;
-    if agent.head().ok().as_deref() != Some(record.head.as_str())
-        || !flow::holds_only(&agent.repo, &record.head)?
-    {
+    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
         return Err(failure("changes_agent_busy"));
     }
-    let owner = Repo::open(&repository.join(".git"), Some(&repository))?;
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
+    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -384,6 +387,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let (tree, conflicts) = merge(&owner, &record.base, &tip, &record.head)?;
     let message = "Merge the owner's branch into this agent's work\n";
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], message, ENGINE)?;
+    verify_objects(&git_dir, &[&merged], &[&record.head, &tip, &record.base])?;
     record.state = ChangeState::Updating;
     record.waiting = true;
     record.base = tip;
