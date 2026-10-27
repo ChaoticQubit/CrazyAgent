@@ -8,6 +8,7 @@ import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
 import { terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
+import { muteQueries } from "../../src/screens/team/terminal-io.ts";
 
 let root = null;
 let terminal = null;
@@ -115,13 +116,27 @@ export function typeAndEnter(text) {
   flushSync(() => field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })));
 }
 
-/** Opens a real xterm whose keys go through the panel's key routing, and focuses it. */
+/** Opens a real xterm set up as the panel sets it up: queries muted and keys going through
+ * the panel's key routing, and focuses it. */
 export function mountKeys() {
   page().innerHTML = '<section class="tg-terminal"><div class="tg-terminal-screen" id="screen"></div></section>';
   terminal = new Terminal({ ...terminalOptions(), rows: 10, cols: 80 });
+  muteQueries(terminal);
   terminal.open(document.getElementById("screen"));
   typeKeys(terminal, (data) => typed.push(data));
   terminal.focus();
+}
+
+/** Writes agent output into the terminal and waits until xterm parsed it. */
+export function write(text) {
+  return new Promise((done) => terminal.write(text, done));
+}
+
+/** Pastes clipboard text into the focused terminal as the browser does for Cmd+V. */
+export function paste(text) {
+  const data = new DataTransfer();
+  data.setData("text/plain", text);
+  terminal.textarea.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
 }
 
 /** The text the routed keys typed, in order. */

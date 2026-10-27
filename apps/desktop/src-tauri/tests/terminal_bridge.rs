@@ -231,8 +231,8 @@ async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempote
         .send(&team, TerminalRequest::Resize { cols: 0, rows: 24 })
         .await;
     assert_eq!(resized.unwrap_err().code, "terminal_request_invalid");
-    terminals.detach(&team).unwrap();
-    terminals.detach(&team).unwrap();
+    terminals.detach(&team, u64::MAX).unwrap();
+    terminals.detach(&team, u64::MAX).unwrap();
 }
 
 #[test]
