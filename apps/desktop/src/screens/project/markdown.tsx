@@ -25,6 +25,7 @@ const TABLE_COLUMNS_MAX = 32;
 const URL_CHARS_MAX = 2048;
 const PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 const URL_LIKE = /^(?:https?:\/\/)?(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]{2,}(?::\d+)?(?:[/?#]\S*)?$/iu;
+const URL_EDGE = /^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu;
 
 /** Accepts only absolute http and https links without spaces or control characters.
  * Input: a link target from untrusted Markdown. Output: the same target, or null. */
@@ -40,16 +41,23 @@ export function safeHref(url: string): string | null {
 }
 
 /** Names the target host when a link's visible text looks like a URL on a different host, as
- * in [https://docs.example](https://other.example). A leading www. is ignored on both sides.
- * Inputs: the visible text and the target. Output: the target host, or null. */
+ * in [https://docs.example](https://other.example). Brackets, quotes and punctuation around the
+ * text and a leading www. are ignored; long text is judged by its first URL_CHARS_MAX characters;
+ * URL-like text that does not parse names the target too. Inputs: the visible text and the
+ * target. Output: the target host, or null when the target is not a URL. */
 export function linkTargetHost(text: string, href: string): string | null {
-  const shown = text.trim();
-  if (shown.length > URL_CHARS_MAX || !URL_LIKE.test(shown)) return null;
+  const shown = text.slice(0, URL_CHARS_MAX).replace(URL_EDGE, "");
+  if (!URL_LIKE.test(shown)) return null;
+  const target = urlHost(href);
+  if (target === null) return null;
+  const seen = urlHost(/^https?:\/\//iu.test(shown) ? shown : `https://${shown}`);
   const bare = (host: string) => host.replace(/^www\./u, "");
+  return seen !== null && bare(seen) === bare(target) ? null : target;
+}
+
+function urlHost(url: string): string | null {
   try {
-    const seen = new URL(/^https?:\/\//iu.test(shown) ? shown : `https://${shown}`).hostname;
-    const target = new URL(href).hostname;
-    return bare(seen) === bare(target) ? null : target;
+    return new URL(url).hostname;
   } catch {
     return null;
   }

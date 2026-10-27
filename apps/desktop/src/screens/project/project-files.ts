@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { Result } from "../../api";
 import { loadProjectFiles } from "../../api-projects";
 import { useLoad } from "../../state";
 
@@ -22,22 +23,30 @@ export function filesQuery(query: string | null): string | null {
 }
 
 /** The project's files for the console's `@` completion, read again FILES_DEBOUNCE_MS after the
- * tag text stops changing. The bare `@` list is cached across mounts; typed queries are not, so
+ * tag text stops changing. One read is out at a time: text typed meanwhile is sent once it
+ * returns, latest only. The bare `@` list is cached across mounts; typed queries are not, so
  * typing never pushes other screens' reads out of the shared cache. Keeps the last list while a
  * new query loads; null once a read fails, so the console says it completes agents only.
- * Inputs: the project id and the tag text after `@`, or null when none is typed.
+ * Inputs: the project id, the tag text after `@` (null when none is typed) and the file read.
  * Output: at most 200 paths, or null. */
-export function useProjectFiles(projectId: string, query: string | null): readonly string[] | null {
+export function useProjectFiles(projectId: string, query: string | null,
+  read: (id: string, query: string) => Promise<Result<string[]>> = loadProjectFiles): readonly string[] | null {
   const wanted = filesQuery(query);
   const [asked, setAsked] = useState(wanted);
+  const [reading, setReading] = useState(0);
   useEffect(() => {
-    if (wanted === asked) return;
+    if (wanted === asked || reading > 0) return;
     const timer = window.setTimeout(() => setAsked(wanted), FILES_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [wanted, asked]);
-  const [loaded] = useLoad(
-    () => asked === null ? Promise.resolve({ kind: "ok" as const, value: [] as string[] }) : loadProjectFiles(projectId, asked),
-    [projectId, asked], asked === "" ? "project-files" : undefined);
+  }, [wanted, asked, reading]);
+  const [loaded] = useLoad(() => {
+    if (asked === null) return Promise.resolve({ kind: "ok" as const, value: [] as string[] });
+    const started = read(projectId, asked);
+    const done = () => setReading((count) => count - 1);
+    setReading((count) => count + 1);
+    started.then(done, done);
+    return started;
+  }, [projectId, asked], asked === "" ? "project-files" : undefined);
   const [files, setFiles] = useState<readonly string[] | null>([]);
   useEffect(() => {
     if (loaded.kind === "ok") setFiles(loaded.value);

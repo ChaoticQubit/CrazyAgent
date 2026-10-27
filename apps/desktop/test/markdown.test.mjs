@@ -212,6 +212,25 @@ test("a link whose text looks like a URL on another host names the target host; 
   assert.equal(md.linkTargetHost("", "https://other.example/"), null);
 });
 
+test("URL text in brackets, quotes or before punctuation still names another host, and URL text that cannot be read asks", () => {
+  assert.equal(md.linkTargetHost("github.com.", "https://evil.example/login"), "evil.example");
+  assert.equal(md.linkTargetHost("(https://github.com/login)", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("<github.com>,", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("“github.com”", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("( github.com )", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("https://github.com:99999", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("https://github.com:99999", "https://github.com/"), "github.com", "text that cannot be read as a URL never passes as the target");
+  assert.equal(md.linkTargetHost(`github.com/${"a".repeat(3000)}`, "https://evil.example/"), "evil.example", "long URL text is checked by its start");
+  assert.equal(md.linkTargetHost(`github.com/${"a".repeat(3000)}`, "https://github.com/a"), null);
+  assert.equal(md.linkTargetHost("github.com.", "https://github.com/"), null);
+  assert.equal(md.linkTargetHost("[acme.dev]", "https://www.acme.dev/"), null);
+  assert.equal(md.linkTargetHost("the docs.", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("e.g.", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("(see below)", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("...", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("github.com", "not a url"), null, "a target that is not a URL has no host to name");
+});
+
 test("every link shows its target on hover", () => {
   const markup = render("[https://docs.example](https://other.example/x) and [docs](https://acme.dev/a)");
   assert.match(markup, /<a href="https:\/\/other.example\/x" title="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a>/);
