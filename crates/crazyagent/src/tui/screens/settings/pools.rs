@@ -33,6 +33,7 @@ pub struct Pools {
     confirm: Option<Confirm>,
     deleting: Option<bool>,
     schedule: Option<Schedule>,
+    saving: usize,
     ranking: Option<Result<Vec<PoolRanking>, String>>,
     choice: Option<ChoiceEditor>,
 }
@@ -61,6 +62,7 @@ impl Pools {
             confirm: None,
             deleting: None,
             schedule: None,
+            saving: 0,
             ranking: None,
             choice: None,
         }
@@ -75,17 +77,31 @@ impl Pools {
             .find(|pool| pool.id == editor.pool)
     }
 
+    /// Handles a key in the account choice editor: Esc closes it, and a change the key makes
+    /// is applied to the cached schedule at once and sent to the engine, so the next quick
+    /// key builds on it instead of on the schedule last read. Takes the key and the context.
+    /// Returns whether the key was handled.
     fn choice_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        let (Some(schedule), Some(pool)) = (self.schedule.clone(), self.chosen_pool(ctx).cloned())
-        else {
+        let pool = self.chosen_pool(ctx).cloned();
+        let (Some(schedule), Some(pool)) = (self.schedule.as_mut(), pool) else {
             self.choice = None;
             return Flow::Handled;
         };
         let Some(editor) = self.choice.as_mut() else {
             return Flow::Ignored;
         };
-        if !editor.key(key, &schedule, &pool, ctx) {
+        if *key == Key::Esc {
             self.choice = None;
+            return Flow::Handled;
+        }
+        if let Some(change) = editor.key(key, schedule, &pool) {
+            schedule.update(&change);
+            self.saving += 1;
+            let generation = ctx.next_generation();
+            ctx.request(Request::Settings(Box::new(SettingsJob::SetSchedule {
+                change,
+                generation,
+            })));
         }
         Flow::Handled
     }
@@ -322,7 +338,9 @@ impl Screen for Pools {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match settings_event(arrival) {
-            Some(SettingsEvent::Schedule(Ok(schedule))) => self.schedule = Some(schedule.clone()),
+            Some(SettingsEvent::Schedule(Ok(schedule))) if self.saving == 0 => {
+                self.schedule = Some(schedule.clone());
+            }
             Some(SettingsEvent::Schedule(Err(code))) if self.choice.is_some() => {
                 ctx.say(Message::error(
                     plain_problem(code).unwrap_or("Could not read the account choice."),
@@ -330,6 +348,7 @@ impl Screen for Pools {
                 ));
             }
             Some(SettingsEvent::ScheduleSet(result)) => {
+                self.saving = self.saving.saturating_sub(1);
                 if let Err(code) = result {
                     ctx.say(Message::error(
                         plain_problem(code).unwrap_or("Could not save the account choice."),
@@ -417,6 +436,7 @@ impl Screen for Pools {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        self.saving = 0;
         ctx.request(Request::Pools);
         ctx.request(Request::Projects);
         ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
@@ -748,15 +768,25 @@ mod tests {
             (
                 Key::Char('>'),
                 AccountPlan {
+                    rank: Some(1),
                     reserve_percent: 5,
-                    ..AccountPlan::default()
+                    pin: None,
                 },
             ),
             (
                 Key::Char('p'),
                 AccountPlan {
+                    rank: Some(1),
+                    reserve_percent: 5,
                     pin: Some(Pin::UseLast),
-                    ..AccountPlan::default()
+                },
+            ),
+            (
+                Key::Char('<'),
+                AccountPlan {
+                    rank: Some(1),
+                    reserve_percent: 0,
+                    pin: Some(Pin::UseLast),
                 },
             ),
         ] {
@@ -769,6 +799,8 @@ mod tests {
                 }
             );
         }
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(shown.contains("Rank 1, used to 100%, used last"), "{shown}");
         screen.key(&Key::Char('<'), &mut ctx);
         assert_eq!(ctx.queued(), 0, "a reserve already at 0 sends nothing");
         screen.arrive(
@@ -784,6 +816,80 @@ mod tests {
         ));
         screen.key(&Key::Esc, &mut ctx);
         assert!(screen.modal(&ctx).is_none());
+    }
+
+    #[test]
+    fn quick_choice_edits_keep_each_other_until_every_save_is_read_back() {
+        use crate::scheduling::{AccountEntry, AccountPlan, Pin, ScheduleChange};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        let member = CredentialRef::new("member-1").unwrap();
+        let stored = |plan: AccountPlan| Schedule {
+            accounts: vec![AccountEntry {
+                connection: member.clone(),
+                plan,
+            }],
+            ..Schedule::default()
+        };
+        let use_last = AccountPlan {
+            pin: Some(Pin::UseLast),
+            ..AccountPlan::default()
+        };
+        let never = |reserve_percent| AccountPlan {
+            reserve_percent,
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        };
+        let account = |plan| ScheduleChange::Account {
+            connection: member.clone(),
+            plan,
+        };
+        let drain = |ctx: &mut Ctx| while ctx.next_request().is_some() {};
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(stored(use_last)))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        drain(&mut ctx);
+
+        screen.key(&Key::Char('p'), &mut ctx);
+        assert_eq!(change(&mut ctx), account(never(0)));
+        screen.key(&Key::Char('>'), &mut ctx);
+        assert_eq!(
+            change(&mut ctx),
+            account(never(5)),
+            "a reserve edit right after the pin keeps Never use"
+        );
+
+        screen.arrive(&settings(SettingsEvent::ScheduleSet(Ok(()))), &mut ctx);
+        drain(&mut ctx);
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(stored(never(0))))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('>'), &mut ctx);
+        assert_eq!(
+            change(&mut ctx),
+            account(never(10)),
+            "a read that misses a save still in flight does not replace the edits"
+        );
+
+        screen.arrive(&settings(SettingsEvent::ScheduleSet(Ok(()))), &mut ctx);
+        screen.arrive(&settings(SettingsEvent::ScheduleSet(Ok(()))), &mut ctx);
+        drain(&mut ctx);
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(stored(use_last)))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(
+            shown.contains("No rank, used to 100%, used last"),
+            "once every save is answered the engine's read is shown: {shown}"
+        );
+        screen.key(&Key::Char('p'), &mut ctx);
+        assert_eq!(change(&mut ctx), account(never(0)));
     }
 
     #[test]
