@@ -183,6 +183,15 @@ export class Engine implements Disposable {
     return { dispose: () => handlers.delete(listener) };
   }
 
+  /**
+   * Opens a long-lived connection for one streaming call, such as `ide.terminal`, and
+   * sends the call. Input: the call name and its arguments. Output: the connected socket,
+   * which the caller reads and closes. Throws on a bad capability file.
+   */
+  stream(name: string, args: Record<string, unknown>): Socket {
+    return this.#connect(name, args);
+  }
+
   /** Closes the event subscription and stops reconnecting. */
   dispose(): void {
     this.#closed = true;

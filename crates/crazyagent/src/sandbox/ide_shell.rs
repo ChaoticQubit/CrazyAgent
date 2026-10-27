@@ -1,21 +1,18 @@
-use super::{SandboxError, clean_absolute};
+use super::SandboxError;
+use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::protocol::ProjectId;
-use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// The engine subcommand a Sandboxed IDE terminal starts: `crazyagent ide-shell`.
-pub const COMMAND: &str = "ide-shell";
+/// What a Sandboxed IDE terminal shows on a system with no qualified sandbox for it,
+/// naming the IDE's own shell profile the owner can choose instead.
+pub const UNAVAILABLE: &str = "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. \"IDE shell\" in the terminal menu runs inside the IDE's own sandbox instead.";
 
-/// What a Sandboxed IDE terminal prints before it exits on a system with no qualified
-/// sandbox for it, naming the labelled profile the owner can choose instead.
-pub const UNAVAILABLE: &str = "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. Open \"Your shell\" from the terminal menu for an unsandboxed terminal.";
-
-/// The variables a Sandboxed IDE terminal takes from the IDE's terminal host. One the host
-/// did not set is removed, and every other variable is dropped, so the IDE capability and
-/// socket and the owner's tokens never reach the shell.
+/// The variables a Sandboxed IDE terminal takes from the engine's own environment. One the
+/// engine does not have is removed, and every other variable is dropped, so the IDE
+/// capability and socket and the owner's tokens never reach the shell.
 pub const TERMINAL_VARIABLES: [&str; 7] = [
     "TERM",
     "COLORTERM",
@@ -26,7 +23,7 @@ pub const TERMINAL_VARIABLES: [&str; 7] = [
     "LC_CTYPE",
 ];
 
-const USAGE: &str = "usage: crazyagent ide-shell --project PROJECT [--cwd DIR] [SHELL_ARGUMENT...]";
+#[cfg(target_os = "macos")]
 const SHELL_ARGUMENTS_MAX: usize = 16;
 #[cfg(target_os = "macos")]
 const FOLDER: &str = "ide-shell";
@@ -34,15 +31,6 @@ const FOLDER: &str = "ide-shell";
 const SHELLS: &str = "/etc/shells";
 #[cfg(target_os = "macos")]
 const SHELLS_BYTES_MAX: u64 = 16 * 1024;
-
-/// The `ide-shell` command line: the project, the folder to start in (none keeps the
-/// working folder the terminal host gave) and the arguments for the shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Arguments {
-    pub project: ProjectId,
-    pub cwd: Option<PathBuf>,
-    pub shell: Vec<OsString>,
-}
 
 /// Where a project lives for its IDE terminal: its canonical folder and the extra
 /// read-only folders the owner saved for its agents.
@@ -54,7 +42,7 @@ pub struct Place {
 
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
-/// variables the terminal host passed and the project's extra read-only folders.
+/// terminal variables the engine passes and the project's extra read-only folders.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -65,55 +53,6 @@ pub struct Launch<'a> {
     pub arguments: &'a [OsString],
     pub incoming: &'a [(OsString, OsString)],
     pub extra_reads: &'a [PathBuf],
-}
-
-/// Reads `ide-shell --project PROJECT [--cwd DIR] [SHELL_ARGUMENT...]`: its own options
-/// first, then every remaining argument, such as the `-c COMMAND` a task adds, goes to the
-/// shell. Input: the arguments, starting with the subcommand. Output: the arguments, or a
-/// usage error for a missing or repeated option, an unsafe project, a relative folder or
-/// too many shell arguments.
-pub fn parse(args: &[OsString]) -> Result<Arguments, String> {
-    if args.first().map(OsString::as_os_str) != Some(OsStr::new(COMMAND)) {
-        return Err(USAGE.into());
-    }
-    let mut project: Option<OsString> = None;
-    let mut cwd: Option<OsString> = None;
-    let mut index = 1;
-    while index < args.len() {
-        let slot = match args[index].to_str() {
-            Some("--project") => &mut project,
-            Some("--cwd") => &mut cwd,
-            _ => break,
-        };
-        let value = args.get(index + 1).ok_or(USAGE)?;
-        if slot.is_some() {
-            return Err(USAGE.into());
-        }
-        *slot = Some(value.clone());
-        index += 2;
-    }
-    assert!(index <= args.len());
-    let project = project
-        .ok_or(USAGE)?
-        .into_string()
-        .map_err(|_| USAGE.to_owned())?;
-    if project == "." {
-        return Err("the project id is not a folder name".into());
-    }
-    let project = ProjectId::new(project).map_err(|error| error.to_string())?;
-    let cwd = cwd.map(PathBuf::from);
-    if cwd.as_deref().is_some_and(|cwd| !clean_absolute(cwd)) {
-        return Err("--cwd must be an absolute plain folder path".into());
-    }
-    let shell = args[index..].to_vec();
-    if shell.len() > SHELL_ARGUMENTS_MAX {
-        return Err("too many shell arguments".into());
-    }
-    Ok(Arguments {
-        project,
-        cwd,
-        shell,
-    })
 }
 
 /// Reads the project's folder and its extra read-only folders from the engine database,
@@ -154,16 +93,16 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// with open network, the engine runtime guarded (its IDE folder with each capability and
 /// server token lies outside every allowed root), the project's toolchains and extra
 /// folders readable, its own home and temp folders, and only the
-/// [`TERMINAL_VARIABLES`] the host passed. The shell keeps the terminal's session and
-/// controlling terminal, so job control and Ctrl-C work. Input: the launch. Output: the
-/// command to exec, or a refusal for an unlisted shell, a start outside the project
-/// folder or an unsafe root.
+/// [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
+/// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
+/// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
+/// outside the project folder or an unsafe root.
 #[cfg(target_os = "macos")]
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use super::toolchains::{self, ToolHomes, Toolchains};
     use super::{
         ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, agent_env, agent_variable_allowed, borrowed,
-        canonical, invalid,
+        canonical, clean_absolute, invalid,
     };
     if launch.project.as_str() == "." {
         return Err(invalid("the project id is not a folder name"));
@@ -237,55 +176,50 @@ pub fn command(_launch: &Launch<'_>) -> Result<Command, SandboxError> {
     Err(SandboxError::Unavailable(UNAVAILABLE.into()))
 }
 
-/// Starts a Sandboxed IDE terminal in place of this process: finds the engine data root
-/// and the project, then execs the owner's login shell under the project's sandbox.
-/// Input: the arguments, starting with the subcommand. Output: only an error, since a
-/// started terminal replaces this process; [`UNAVAILABLE`] where no sandbox qualifies.
-pub fn run(args: &[OsString]) -> Result<Infallible, String> {
-    let arguments = parse(args)?;
-    start(&arguments)
-}
-
-#[cfg(target_os = "macos")]
-fn start(arguments: &Arguments) -> Result<Infallible, String> {
-    use std::os::unix::process::CommandExt;
-    let layout = crate::paths::Layout::current().map_err(|error| error.to_string())?;
-    let root = super::canonical(layout.root())
-        .map_err(|_| "the engine data folder is missing".to_owned())?;
-    let place = project_place(&root, &arguments.project)?;
-    let cwd = match &arguments.cwd {
-        Some(cwd) => cwd.clone(),
-        None => std::env::current_dir().map_err(|error| error.to_string())?,
+/// Builds the Sandboxed terminal as the engine's terminal host runs it in a pane: the same
+/// argument list, working folder and environment as [`command`], as text. Input: the
+/// launch. Output: the pane command, or [`command`]'s refusal, or `Invalid` for a part
+/// that is not UTF-8.
+pub fn interactive(launch: &Launch<'_>) -> Result<InteractiveCommand, SandboxError> {
+    let command = command(launch)?;
+    let text = |value: &OsStr| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| super::invalid("the Sandboxed terminal command is not plain text"))
     };
-    let shell = nix::unistd::User::from_uid(nix::unistd::getuid())
-        .map_err(|error| error.to_string())?
-        .ok_or("the owner account is unknown")?
-        .shell;
-    let incoming: Vec<(OsString, OsString)> = std::env::vars_os()
-        .filter(|(name, _)| {
-            TERMINAL_VARIABLES
-                .iter()
-                .any(|known| name.as_os_str() == OsStr::new(known))
-        })
-        .collect();
-    let mut command = command(&Launch {
-        root: &root,
-        project: &arguments.project,
-        folder: &place.folder,
-        cwd: &cwd,
-        shell: &shell,
-        arguments: &arguments.shell,
-        incoming: &incoming,
-        extra_reads: &place.extra_reads,
+    let mut argv = vec![text(command.get_program())?];
+    for arg in command.get_args() {
+        argv.push(text(arg)?);
+    }
+    let mut env = Vec::new();
+    for (name, value) in command.get_envs() {
+        let value =
+            value.ok_or_else(|| super::invalid("the Sandboxed terminal unsets a variable"))?;
+        env.push((text(name)?, text(value)?));
+    }
+    let cwd = command
+        .get_current_dir()
+        .ok_or_else(|| super::invalid("the Sandboxed terminal has no working folder"))?
+        .to_path_buf();
+    assert_eq!(argv.len(), command.get_args().count() + 1);
+    assert_eq!(env.len(), command.get_envs().count());
+    Ok(InteractiveCommand {
+        argv,
+        cwd,
+        env,
+        transcript: Transcript::Unavailable,
     })
-    .map_err(|error| error.to_string())?;
-    let error = command.exec();
-    Err(format!("the Sandboxed terminal could not start: {error}"))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn start(_arguments: &Arguments) -> Result<Infallible, String> {
-    Err(UNAVAILABLE.into())
+/// Reads the owner's login shell from the account database, never from `SHELL`.
+/// Output: the shell's path, or the plain reason it is unknown.
+#[cfg(unix)]
+pub fn owner_shell() -> Result<PathBuf, String> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .map_err(|error| error.to_string())?
+        .map(|user| user.shell)
+        .ok_or_else(|| "the owner account is unknown".to_owned())
 }
 
 /// Accepts only a shell named in `/etc/shells`, as login shells are. Input: the shell.
@@ -293,7 +227,7 @@ fn start(_arguments: &Arguments) -> Result<Infallible, String> {
 #[cfg(target_os = "macos")]
 fn listed_shell(shell: &Path) -> Result<(), SandboxError> {
     use std::io::Read;
-    if !clean_absolute(shell) {
+    if !super::clean_absolute(shell) {
         return Err(super::invalid("the shell must be an absolute plain path"));
     }
     let mut text = String::new();

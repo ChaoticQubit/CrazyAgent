@@ -3,7 +3,7 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
-use crate::terminal::AgentId;
+use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 5] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -43,6 +43,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
     (
         "out/extension.js",
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
+    ),
+    (
+        "out/pty.js",
+        include_bytes!("../../../../apps/ide-extension/out/pty.js"),
+    ),
+    (
+        "out/terminal.js",
+        include_bytes!("../../../../apps/ide-extension/out/terminal.js"),
     ),
 ];
 
@@ -119,6 +127,8 @@ pub enum IdeCall {
     RevealAck { request: RequestId },
     #[serde(rename = "ide.events")]
     Events {},
+    #[serde(rename = "ide.terminal")]
+    Terminal { cols: u16, rows: u16 },
 }
 
 /// The owner's decision on a memory nomination.
@@ -181,6 +191,9 @@ impl IdeRequest {
                     && !text.trim().is_empty()
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
+            IdeCall::Terminal { cols, rows } => {
+                (SIZE_MIN..=SIZE_MAX).contains(cols) && (SIZE_MIN..=SIZE_MAX).contains(rows)
+            }
             IdeCall::ExtensionRequest { id, version }
             | IdeCall::ExtensionDecide { id, version, .. } => {
                 extension_id(id) && extension_version(version)
@@ -247,10 +260,13 @@ pub(crate) struct IdeHost<'a> {
 
 /// The live IDE capabilities of one owner server, at most one per project and
 /// `GRANTS_MAX` in all. Each holds its token, its file and the sender of its project's
-/// events; dropping a grant kills its token and ends its subscriptions.
+/// events; dropping a grant kills its token and ends its subscriptions. Beside them, the
+/// Sandboxed IDE terminals the owner server runs.
 #[derive(Default)]
 pub(crate) struct Grants {
     live: Mutex<Vec<Grant>>,
+    #[cfg(unix)]
+    terminals: std::sync::Arc<Mutex<terminal::Terminals>>,
 }
 
 /// One project's capability for one IDE server launch.
@@ -469,8 +485,9 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 
 /// Serves one IDE capability connection after its handshake: admits the token, reads one
 /// request for the capability's own project and answers it, or turns the connection into
-/// the project's event subscription. The handshake deadline bounds everything but the
-/// subscription. Inputs: the stream, handshake packet, owner runtime and deadline.
+/// the project's event subscription or a Sandboxed terminal. The handshake deadline bounds
+/// everything but the subscription and the terminal. Inputs: the stream, handshake packet,
+/// owner runtime and deadline.
 pub(crate) async fn serve(
     mut stream: UnixStream,
     packet: [u8; 37],
@@ -484,6 +501,15 @@ pub(crate) async fn serve(
         Ok(Ok((_, IdeCall::Events {}))) => {
             events(&mut stream, &packet, &runtime).await;
             None
+        }
+        #[cfg(unix)]
+        Ok(Ok((project, IdeCall::Terminal { cols, rows }))) => {
+            terminal::serve(stream, packet, runtime, project, (cols, rows)).await;
+            return;
+        }
+        #[cfg(not(unix))]
+        Ok(Ok((_, IdeCall::Terminal { .. }))) => {
+            Some(refusal(&failure("ide_terminal_unavailable")))
         }
         Ok(Ok((project, call))) => {
             let answered =
@@ -551,7 +577,9 @@ async fn answer(
         | IdeCall::ExtensionRequest { .. }
         | IdeCall::ExtensionDecide { .. }
         | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
-        IdeCall::Events {} => return Err(failure("ide_request_invalid")),
+        IdeCall::Events {} | IdeCall::Terminal { .. } => {
+            return Err(failure("ide_request_invalid"));
+        }
     };
     Ok(IdeReply::Ok { data })
 }
@@ -734,6 +762,9 @@ fn remove_capability(path: &Path, identity: (u64, u64)) -> Result<(), EngineErro
 fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineError> {
     Ok(())
 }
+
+#[cfg(unix)]
+mod terminal;
 
 #[cfg(all(test, unix))]
 mod tests;

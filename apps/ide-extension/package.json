@@ -13,10 +13,20 @@
     "workspace"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onTerminalProfile:crazyagent.sandboxed"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "terminal": {
+      "profiles": [
+        {
+          "id": "crazyagent.sandboxed",
+          "title": "Sandboxed",
+          "icon": "shield"
+        }
+      ]
+    },
     "themes": [
       {
         "label": "CrazyAgent Dark",

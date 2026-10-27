@@ -1,11 +1,17 @@
 use super::*;
-use crate::sandbox::ide_shell::{self, COMMAND, UNAVAILABLE};
+#[cfg(unix)]
+use crate::protocol::ProjectId;
+#[cfg(unix)]
+use crate::sandbox::ide_shell;
 use serde_json::json;
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[cfg(unix)]
 const PROJECT: &str = "alpha";
 
+#[cfg(unix)]
 fn arguments(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
@@ -132,6 +138,28 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
+    let pane = ide_shell::interactive(&launch).unwrap();
+    let argv: Vec<&std::ffi::OsStr> = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .collect();
+    assert_eq!(
+        pane.argv
+            .iter()
+            .map(std::ffi::OsStr::new)
+            .collect::<Vec<_>>(),
+        argv
+    );
+    assert_eq!(Some(pane.cwd.as_path()), command.get_current_dir());
+    assert_eq!(pane.env.len(), command.get_envs().count());
+    assert!(
+        pane.env
+            .iter()
+            .all(|(name, _)| !name.starts_with("CRAZYAGENT_") && name != "GH_TOKEN")
+    );
+    assert_eq!(
+        pane.transcript,
+        crate::harnesses::interactive::Transcript::Unavailable
+    );
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -185,9 +213,6 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
 #[cfg(target_os = "linux")]
 #[test]
 fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
-    let error = ide_shell::run(&arguments(&[COMMAND, "--project", PROJECT])).unwrap_err();
-    assert_eq!(error, UNAVAILABLE);
-    assert!(error.contains(YOUR_SHELL), "{error}");
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonicalize().unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
@@ -203,29 +228,28 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         extra_reads: &[],
     };
     match ide_shell::command(&launch) {
-        Err(crate::sandbox::SandboxError::Unavailable(reason)) => assert_eq!(reason, UNAVAILABLE),
+        Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
+            assert_eq!(reason, ide_shell::UNAVAILABLE)
+        }
+        other => panic!("expected the unavailable refusal, got {other:?}"),
+    }
+    match ide_shell::interactive(&launch) {
+        Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
+            assert_eq!(reason, ide_shell::UNAVAILABLE)
+        }
         other => panic!("expected the unavailable refusal, got {other:?}"),
     }
     assert!(!base.join("ide-shell").exists());
 }
 
+/// The terminal settings hide every detected shell, offer only the labelled IDE shell as a
+/// local profile, run tasks there, start no task on its own, and default to the
+/// extension's Sandboxed profile, which the built-in extension's manifest contributes under
+/// the same id and title and activates on.
 #[test]
-fn terminal_profiles_label_your_shell_and_default_to_sandboxed() {
-    let project = ProjectId::new(PROJECT).unwrap();
-    let executable = PathBuf::from("/Applications/CrazyAgent.app/Contents/MacOS/crazyagent");
+fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_profile() {
     let owner_shell = PathBuf::from("/bin/zsh");
-    let launch = ShellLaunch {
-        executable: &executable,
-        project: &project,
-        owner_shell: &owner_shell,
-    };
-    let sandboxed = json!({
-        "path": executable.to_str().unwrap(),
-        "args": [COMMAND, "--project", PROJECT],
-        "icon": "shield",
-        "overrideName": true,
-    });
-    for (platform, os, your_shell) in [
+    for (platform, os, ide_shell) in [
         (
             Platform::MacOs,
             "osx",
@@ -242,28 +266,29 @@ fn terminal_profiles_label_your_shell_and_default_to_sandboxed() {
             json!({"source": "PowerShell", "icon": "terminal", "overrideName": true}),
         ),
     ] {
-        let settings = profiles(platform, &launch);
+        let settings = profiles(platform, &owner_shell);
         assert_eq!(
             settings[&format!("terminal.integrated.defaultProfile.{os}")],
             json!(SANDBOXED)
         );
         assert_eq!(
             settings[&format!("terminal.integrated.automationProfile.{os}")],
-            sandboxed
+            ide_shell
         );
+        assert_eq!(settings["task.allowAutomaticTasks"], json!("off"));
         let listed = settings[&format!("terminal.integrated.profiles.{os}")]
             .as_object()
             .unwrap();
-        assert_eq!(listed[SANDBOXED], sandboxed);
-        assert_eq!(listed[YOUR_SHELL], your_shell);
+        assert_eq!(listed[IDE_SHELL], ide_shell);
+        assert!(!listed.contains_key(SANDBOXED), "{os}");
         let offered: Vec<&String> = listed
             .iter()
             .filter(|(_, profile)| !profile.is_null())
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(offered.len(), 2, "{os}: {offered:?}");
-        assert!(listed.len() > 2, "{os}: detected shells must be hidden");
-        let keys = if platform == Platform::Windows { 4 } else { 3 };
+        assert_eq!(offered, vec![IDE_SHELL], "{os}");
+        assert!(listed.len() > 1, "{os}: detected shells must be hidden");
+        let keys = if platform == Platform::Windows { 5 } else { 4 };
         assert_eq!(settings.len(), keys, "{os}");
         for other in ["osx", "linux", "windows"]
             .iter()
@@ -277,47 +302,45 @@ fn terminal_profiles_label_your_shell_and_default_to_sandboxed() {
             );
         }
     }
-    assert!(UNAVAILABLE.contains(YOUR_SHELL), "{UNAVAILABLE}");
-    let windows = profiles(Platform::Windows, &launch);
+    assert!(IDE_SHELL.starts_with("IDE shell"), "{IDE_SHELL}");
+    let unavailable = crate::sandbox::ide_shell::UNAVAILABLE;
+    assert!(unavailable.contains("\"IDE shell\""), "{unavailable}");
+    assert!(IDE_SHELL.contains("IDE sandbox"), "{IDE_SHELL}");
+    let windows = profiles(Platform::Windows, &owner_shell);
     assert_eq!(windows["terminal.integrated.useWslProfiles"], json!(false));
-}
-
-#[test]
-fn ide_shell_keeps_the_shell_arguments_after_its_own_options() {
-    let parsed = ide_shell::parse(&arguments(&[
-        COMMAND,
-        "--project",
-        PROJECT,
-        "--cwd",
-        "/tmp/work",
-        "-c",
-        "npm test --cwd x",
-    ]))
-    .unwrap();
-    assert_eq!(parsed.project.as_str(), PROJECT);
-    assert_eq!(parsed.cwd, Some(PathBuf::from("/tmp/work")));
-    assert_eq!(parsed.shell, arguments(&["-c", "npm test --cwd x"]));
-    let plain = ide_shell::parse(&arguments(&[COMMAND, "--project", PROJECT])).unwrap();
-    assert_eq!(plain.cwd, None);
-    assert!(plain.shell.is_empty());
-    for refused in [
-        vec![COMMAND],
-        vec![COMMAND, "--project"],
-        vec![COMMAND, "--project", "."],
-        vec![COMMAND, "--project", "a/b"],
-        vec![COMMAND, "--project", PROJECT, "--project", "beta"],
-        vec![COMMAND, "--project", PROJECT, "--cwd", "relative"],
-        vec![COMMAND, "--cwd", "/tmp", "-c", "true"],
-        vec!["engine", "--project", PROJECT],
-    ] {
-        assert!(
-            ide_shell::parse(&arguments(&refused)).is_err(),
-            "{refused:?}"
+    let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
+    assert_eq!(name, "package.json");
+    let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    assert_eq!(
+        manifest["contributes"]["terminal"]["profiles"],
+        json!([{ "id": SANDBOXED_PROFILE, "title": SANDBOXED, "icon": "shield" }])
+    );
+    assert!(
+        manifest["activationEvents"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("onTerminalProfile:{SANDBOXED_PROFILE}")))
+    );
+    let embedded = |wanted: &str| {
+        crate::ide::bridge::EXTENSION_FILES
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap()
+    };
+    let pty = embedded("out/pty.js");
+    assert!(pty.contains(&format!(
+        "exports.UNAVAILABLE = {};",
+        serde_json::to_string(unavailable).unwrap()
+    )));
+    let provider = embedded("out/terminal.js");
+    for (export, literal) in [("PROFILE", SANDBOXED_PROFILE), ("TITLE", SANDBOXED)] {
+        let line = format!(
+            "exports.{export} = {};",
+            serde_json::to_string(literal).unwrap()
         );
+        assert!(provider.contains(&line), "{line}");
     }
-    let mut long = vec![COMMAND, "--project", PROJECT];
-    long.extend(std::iter::repeat_n("-x", 17));
-    assert!(ide_shell::parse(&arguments(&long)).is_err());
 }
 
 #[cfg(unix)]

@@ -23,7 +23,6 @@ crazyagent service install|uninstall|status|start|stop|link-cli\n\
 crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE\n\
 crazyagent team-mcp-live MAILBOX_DIR\n\
-crazyagent ide-shell --project PROJECT [--cwd DIR] [SHELL_ARGUMENT...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -134,18 +133,6 @@ fn main() -> ExitCode {
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    if args
-        .first()
-        .is_some_and(|arg| arg == crazyagent::sandbox::ide_shell::COMMAND)
-    {
-        return match crazyagent::sandbox::ide_shell::run(&args) {
-            Ok(started) => match started {},
             Err(error) => {
                 eprintln!("{error}");
                 ExitCode::FAILURE

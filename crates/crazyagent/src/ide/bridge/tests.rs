@@ -433,6 +433,49 @@ fn ide_frames_match_the_extension_fixture() {
     }
 }
 
+/// The extension's Sandboxed terminal fixture is exactly what the engine encodes: the
+/// `ide.terminal` call, the input, resize and detach requests, the `ok` reply, then the
+/// output and closing frames.
+#[test]
+fn ide_terminal_frames_match_the_extension_fixture() {
+    use crate::terminal::{TerminalFrame, TerminalRequest};
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../apps/ide-extension/test/frames.json"
+    ))
+    .unwrap();
+    let terminal = &fixture["terminal"];
+    let open = unhex(terminal["open"]["frame"].as_str().unwrap());
+    let request: IdeRequest = serde_json::from_slice(&open[4..]).unwrap();
+    request.validate().unwrap();
+    assert_eq!(request.call, IdeCall::Terminal { cols: 80, rows: 24 });
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        terminal["open"]["value"]
+    );
+    assert_eq!(encode_frame(&request).unwrap(), open);
+    let requests = terminal["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 3);
+    for entry in requests {
+        let frame = unhex(entry["frame"].as_str().unwrap());
+        let request: TerminalRequest = serde_json::from_slice(&frame[4..]).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), entry["value"]);
+        assert_eq!(encode_frame(&request).unwrap(), frame);
+    }
+    let frames = terminal["frames"].as_array().unwrap();
+    let (opened, rest) = frames.split_first().unwrap();
+    let frame = unhex(opened["frame"].as_str().unwrap());
+    let reply: IdeReply = serde_json::from_slice(&frame[4..]).unwrap();
+    assert_eq!(serde_json::to_value(&reply).unwrap(), opened["value"]);
+    assert_eq!(encode_frame(&reply).unwrap(), frame);
+    assert_eq!(rest.len(), 3);
+    for entry in rest {
+        let frame = unhex(entry["frame"].as_str().unwrap());
+        let pushed: TerminalFrame = serde_json::from_slice(&frame[4..]).unwrap();
+        assert_eq!(serde_json::to_value(&pushed).unwrap(), entry["value"]);
+        assert_eq!(encode_frame(&pushed).unwrap(), frame);
+    }
+}
+
 /// Request fields past their bounds are refused before any handler runs.
 #[test]
 fn ide_request_bounds_are_refused() {
@@ -446,6 +489,8 @@ fn ide_request_bounds_are_refused() {
         json!({ "name": "ide.accept", "args": { "id": id, "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.extension_request", "args": { "id": "../evil", "version": "1.0.0" } }),
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),
+        json!({ "name": "ide.terminal", "args": { "cols": SIZE_MIN - 1, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": SIZE_MAX + 1 } }),
     ];
     for call in refused {
         let request: IdeRequest = serde_json::from_slice(&request("alpha", call.clone())).unwrap();
@@ -461,11 +506,22 @@ fn ide_request_bounds_are_refused() {
     ))
     .unwrap();
     fine.validate().unwrap();
+    let terminal: IdeRequest = serde_json::from_slice(&request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+    ))
+    .unwrap();
+    terminal.validate().unwrap();
+    let elsewhere = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "cwd": "/tmp" } }),
+    );
+    assert!(serde_json::from_slice::<IdeRequest>(&elsewhere).is_err());
 }
 
 /// The extension installs as one folder named `publisher.name-version` from its
-/// `package.json`, holding exactly the embedded files; a changed file is put back and an
-/// unchanged folder is left as it is.
+/// `package.json`, holding exactly the embedded files, which are every file tsc compiled;
+/// a changed file is put back and an unchanged folder is left as it is.
 #[test]
 fn extension_installs_as_one_folder_with_the_embedded_files() {
     let manifest: serde_json::Value = serde_json::from_slice(EXTENSION_FILES[0].1).unwrap();
@@ -481,6 +537,19 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
     );
     let main = manifest["main"].as_str().unwrap().trim_start_matches("./");
     assert!(EXTENSION_FILES.iter().any(|(name, _)| *name == main));
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension/out");
+    let mut compiled: Vec<String> = std::fs::read_dir(out)
+        .unwrap()
+        .map(|entry| format!("out/{}", entry.unwrap().file_name().to_str().unwrap()))
+        .collect();
+    compiled.sort();
+    let mut embedded: Vec<&str> = EXTENSION_FILES
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.starts_with("out/"))
+        .collect();
+    embedded.sort_unstable();
+    assert_eq!(compiled, embedded);
     let extensions = tempfile::tempdir().unwrap();
     let folder = install_extension(extensions.path()).unwrap();
     assert_eq!(folder, extensions.path().join(EXTENSION));
@@ -497,4 +566,165 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
         EXTENSION_FILES[1].1
     );
     assert_eq!(std::fs::read_dir(extensions.path()).unwrap().count(), 1);
+}
+
+/// Reads one frame of any kind as JSON, or none once the engine closed the connection.
+#[cfg(target_os = "macos")]
+async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {
+    let length = stream.read_u32().await.ok()? as usize;
+    assert!(length > 0 && length <= FRAME_BYTES_MAX);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.ok()?;
+    Some(serde_json::from_slice(&body).unwrap())
+}
+
+/// Sends one control frame on an open terminal connection.
+#[cfg(target_os = "macos")]
+async fn control(stream: &mut UnixStream, request: &crate::terminal::TerminalRequest) {
+    let body = serde_json::to_vec(request).unwrap();
+    let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+    frame.extend(body);
+    stream.write_all(&frame).await.unwrap();
+}
+
+/// Reads terminal output until it holds `wanted`, or with no `wanted` until the shell
+/// printed anything that is not blank, within 20 seconds. Returns everything read.
+#[cfg(target_os = "macos")]
+async fn output_until(stream: &mut UnixStream, wanted: Option<&str>) -> String {
+    let mut seen = Vec::new();
+    let read = async {
+        loop {
+            let frame = read_value(stream).await.expect("the terminal closed early");
+            assert_eq!(frame["kind"], "output", "{frame}");
+            for byte in frame["bytes"].as_array().unwrap() {
+                seen.push(u8::try_from(byte.as_u64().unwrap()).unwrap());
+            }
+            let done = match wanted {
+                Some(wanted) => String::from_utf8_lossy(&seen).contains(wanted),
+                None => seen.iter().any(|byte| !byte.is_ascii_whitespace()),
+            };
+            if done {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), read)
+        .await
+        .expect("the wanted output never came");
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// Skips output frames until the terminal's final frame, within 20 seconds.
+#[cfg(target_os = "macos")]
+async fn closing(stream: &mut UnixStream) -> serde_json::Value {
+    let read = async {
+        loop {
+            let frame = read_value(stream).await.expect("no closing frame");
+            if frame["kind"] != "output" {
+                return frame;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), read)
+        .await
+        .expect("the terminal never closed")
+}
+
+/// Opens a Sandboxed terminal and reads its `ok`. Returns the stream and the pane's name.
+#[cfg(target_os = "macos")]
+async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStream, AgentId) {
+    let mut stream = send(socket, packet, body).await;
+    let opened = read_value(&mut stream).await.unwrap();
+    assert_eq!(opened["kind"], "ok", "{opened}");
+    let name = AgentId::new(opened["data"]["terminal"].as_str().unwrap()).unwrap();
+    (stream, name)
+}
+
+/// The Sandboxed terminal runs in a pane the engine itself starts, outside the IDE
+/// server's sandbox, under the project's agent profile: typed input runs, the project's
+/// own IDE capability cannot be read, at most `TERMINALS_MAX` run at once, a detached
+/// terminal's pane ends, and revoking the capability ends the rest.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capability() {
+    use crate::terminal::TerminalRequest;
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let secret = std::fs::read_to_string(&path).unwrap();
+    let ide = packet(MAGIC, 0, &token(&path));
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 100, "rows": 30 } }),
+    );
+    let mut stream = send(&socket, ide, &body).await;
+    let opened = read_value(&mut stream).await.unwrap();
+    assert_eq!(opened["kind"], "ok", "{opened}");
+    assert_eq!(opened["data"]["cols"], 100);
+    assert_eq!(opened["data"]["rows"], 30);
+    let name = AgentId::new(opened["data"]["terminal"].as_str().unwrap()).unwrap();
+    assert!(name.as_str().starts_with("ide-"));
+    let host = case.runtime.terminal().unwrap();
+    assert!(host.alive().unwrap().contains(&name));
+    output_until(&mut stream, None).await;
+    let typed = format!("cat '{}'; echo ide-$((40+2))\r", path.display());
+    control(
+        &mut stream,
+        &TerminalRequest::Input {
+            bytes: typed.into_bytes(),
+        },
+    )
+    .await;
+    let seen = output_until(&mut stream, Some("ide-42")).await;
+    assert!(seen.contains("Operation not permitted"), "{seen}");
+    assert!(!seen.contains(&secret), "{seen}");
+    control(&mut stream, &TerminalRequest::Resize { cols: 90, rows: 20 }).await;
+    let mut more = Vec::new();
+    for _ in 1..terminal::TERMINALS_MAX {
+        more.push(open_terminal(&socket, ide, &body).await);
+    }
+    assert_eq!(
+        exchange(&socket, ide, &body).await,
+        rejected("ide_terminals_busy")
+    );
+    for (mut other, other_name) in more {
+        control(&mut other, &TerminalRequest::Detach).await;
+        assert_eq!(
+            closing(&mut other).await,
+            json!({ "kind": "closed", "reason": "terminal_detached" })
+        );
+        assert!(!host.alive().unwrap().contains(&other_name));
+    }
+    let (mut again, again_name) = open_terminal(&socket, ide, &body).await;
+    revoke(&case.runtime, &alpha).unwrap();
+    for (open, open_name) in [(&mut stream, &name), (&mut again, &again_name)] {
+        assert_eq!(
+            closing(open).await,
+            json!({ "kind": "closed", "reason": "ide_capability_revoked" })
+        );
+        assert!(!host.alive().unwrap().contains(open_name));
+    }
+    case.stop().await;
+}
+
+/// Where no sandbox is qualified for the Sandboxed terminal, the call is refused before
+/// any pane starts.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sandboxed_terminal_is_refused_where_the_sandbox_is_not_qualified() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+    );
+    assert_eq!(
+        exchange(&socket, packet(MAGIC, 0, &token(&path)), &body).await,
+        rejected("ide_terminal_unavailable")
+    );
+    assert!(!case.root.path().join("ide-shell").exists());
+    case.stop().await;
 }

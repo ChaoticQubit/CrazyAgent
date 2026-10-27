@@ -115,6 +115,9 @@ class Engine {
             this.#subscribe();
         return { dispose: () => handlers.delete(listener) };
     }
+    stream(name, args) {
+        return this.#connect(name, args);
+    }
     dispose() {
         this.#closed = true;
         clearTimeout(this.#retry);
