@@ -1185,6 +1185,7 @@ impl OwnerServer {
                     .ok_or_else(|| failure("owner_root_unavailable"))?,
                 crate::ide::server::IDLE_LIMIT,
             );
+            ide.sweep_left().await;
             let authority = Arc::new(Authority {
                 root,
                 socket,
