@@ -12,22 +12,58 @@ use research_support::{
     EngineRuntime, claude, codex, hanging_endpoint, processes_with, recording_hanging_endpoint,
 };
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const OLLAMA_HOST: &str = "127.0.0.1:11434";
 const OLLAMA: &str = "http://127.0.0.1:11434/v1";
 const OLLAMA_ANTHROPIC: &str = "http://127.0.0.1:11434";
-const OLLAMA_MODEL: &str = "qwen2.5:0.5b";
+const OLLAMA_MODEL: &str = "qwen2.5:7b";
+const OLLAMA_TIME: Duration = Duration::from_secs(10);
+const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
 
 static LOCAL_MODEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Takes the one live local model slot, after [`require_model`]. Input: none. Output: the
+/// guard that keeps the other live tests waiting until it drops.
 fn local_model() -> std::sync::MutexGuard<'static, ()> {
-    LOCAL_MODEL
+    let guard = LOCAL_MODEL
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    require_model();
+    guard
+}
+
+/// Fails the test with the command that fixes it unless the local Ollama the live tests
+/// reach serves their model. Input: none; reads the model list from Ollama's `/api/tags`.
+/// Output: none.
+fn require_model() {
+    assert_eq!(OLLAMA, format!("http://{OLLAMA_HOST}/v1"));
+    assert_eq!(OLLAMA_ANTHROPIC, format!("http://{OLLAMA_HOST}"));
+    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA_HOST).and_then(|mut stream| {
+        stream.set_read_timeout(Some(OLLAMA_TIME))?;
+        stream.set_write_timeout(Some(OLLAMA_TIME))?;
+        stream.write_all(
+            format!("GET /api/tags HTTP/1.1\r\nHost: {OLLAMA_HOST}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )?;
+        let mut reply = String::new();
+        stream
+            .take(OLLAMA_TAGS_BYTES_MAX)
+            .read_to_string(&mut reply)?;
+        Ok(reply)
+    });
+    let reply = listed.unwrap_or_else(|problem| {
+        panic!("the local Ollama at {OLLAMA_HOST} is required and did not answer: {problem}")
+    });
+    assert!(
+        reply.contains(&format!("\"name\":\"{OLLAMA_MODEL}\"")),
+        "the local Ollama does not have {OLLAMA_MODEL}; run: ollama pull {OLLAMA_MODEL}"
+    );
 }
 
 struct Case {

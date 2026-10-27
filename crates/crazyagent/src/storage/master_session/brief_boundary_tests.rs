@@ -452,6 +452,9 @@ async fn prepared_replay_rechecks_latest_without_new_attempt_or_workspace() {
         Ok(MasterRuntimeResult::Checkout(_)) => Err(String::from(
             "variant=Checkout phase=not_applicable reason=not_applicable",
         )),
+        Ok(MasterRuntimeResult::Waiting) => Err(String::from(
+            "variant=Waiting phase=not_applicable reason=not_applicable",
+        )),
         Err(_) => Err(String::from(
             "variant=Err(EngineError) phase=not_applicable reason=not_applicable",
         )),
