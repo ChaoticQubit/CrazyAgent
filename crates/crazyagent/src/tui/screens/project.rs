@@ -1061,6 +1061,22 @@ impl ProjectScreen {
         })
     }
 
+    /// True while a box or question is open: `key` gives it every key before any tab or
+    /// panel, so a panel must offer keys only while this is false.
+    /// Output: whether an edit, review, add, folders or General box, or the remove, pool,
+    /// delete or stop question, is open.
+    pub fn boxed(&self) -> bool {
+        self.edit.is_some()
+            || self.review.is_some()
+            || self.adding.is_some()
+            || self.folders.is_some()
+            || self.general.is_some()
+            || self.confirm_remove
+            || self.pool_picker.is_some()
+            || self.confirm_delete.is_some()
+            || self.confirm_stop.is_some()
+    }
+
     /// Handles one key for the open tab, the edit box or the delete question.
     /// Takes the key event.
     /// Returns what the host should do next.

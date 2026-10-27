@@ -975,3 +975,85 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
     assert!(shown.contains("Project settings"), "{shown}");
     assert!(!shown.contains("Off here"), "{shown}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list() {
+    let engine = engine().await;
+    engine
+        .controller
+        .add_mcp_server(
+            here(),
+            "postgres".into(),
+            ServerSpec::Stdio {
+                command: "/bin/echo".into(),
+                args: vec!["hello".into()],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+    for _ in 0..4 {
+        if render(&mut shell, 100, 40).contains("> postgres") {
+            break;
+        }
+        shell.key(Key::Down);
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("> postgres") && shown.contains("Needs approval"),
+        "{shown}"
+    );
+
+    shell.key(Key::Char('f'));
+    let typed = "/Users/x/st[u]dy?";
+    for character in typed.chars() {
+        shell.key(Key::Char(character));
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains(typed),
+        "every typed key reaches the box: {shown}"
+    );
+    shell.key(Key::Enter);
+    for character in "my".chars() {
+        shell.key(Key::Char(character));
+    }
+    let sent = drive(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"plugin change"), "{sent:?}");
+    assert_eq!(shell.place(), Some(settings));
+    let servers = engine
+        .controller
+        .plugin_servers(Some(project()))
+        .await
+        .unwrap();
+    let postgres = servers
+        .iter()
+        .find(|server| server.name == "postgres")
+        .expect("typing in the box removed no server");
+    assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
+}

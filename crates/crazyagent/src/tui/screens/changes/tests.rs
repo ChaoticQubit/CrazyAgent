@@ -471,3 +471,99 @@ fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_di
     assert!(!help.iter().any(|(key, _)| ["a", "d", "u"].contains(key)));
     assert!(text(&resolving).contains("Agent is updating"));
 }
+
+/// A change set whose agent label carries its digit, so the list rows tell sets apart.
+/// Inputs: the digit and the state. Output: the change set.
+fn named(digit: char, state: ChangeState) -> ChangeSetView {
+    let mut set = set(digit, state);
+    set.agent.label = format!("Agent {digit}");
+    set
+}
+
+/// Answers the poll due after the interval with the sets in a new order.
+/// Inputs: the view and the sets. Output: none.
+fn reordered(view: &mut ProjectChanges, sets: Vec<ChangeSetView>) {
+    let poll = view.next_query(NOW + LIST_POLL_MS).unwrap();
+    assert_eq!(poll, ChangesQuery::List { project: project() });
+    view.apply(&ChangesEvent {
+        query: poll,
+        result: Ok(ChangesView::List(sets)),
+    });
+}
+
+#[test]
+fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the_list() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('2', ChangeState::Pending),
+        named('3', ChangeState::Pending),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    reordered(
+        &mut view,
+        vec![
+            named('3', ChangeState::Pending),
+            named('1', ChangeState::Pending),
+            named('2', ChangeState::Pending),
+        ],
+    );
+    assert!(
+        text(&view).contains("> Sub-agent Agent 2"),
+        "the highlight follows the chosen set, not its old place"
+    );
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Discard {
+            id: id('2'),
+            expected_head: "2".repeat(40),
+        })
+    );
+
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('3', ChangeState::Conflict),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    reordered(
+        &mut view,
+        vec![
+            named('3', ChangeState::Conflict),
+            named('1', ChangeState::Pending),
+        ],
+    );
+    assert!(text(&view).contains("> Sub-agent Agent 3"));
+    assert!(view.key(key(KeyCode::Char('u')), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Update { id: id('3') })
+    );
+
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('2', ChangeState::Pending),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    reordered(
+        &mut view,
+        vec![
+            named('2', ChangeState::Pending),
+            named('1', ChangeState::Pending),
+        ],
+    );
+    assert!(
+        text(&view).contains("> Sub-agent Agent 2"),
+        "an open question keeps the highlight and details on its own set"
+    );
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Discard {
+            id: id('2'),
+            expected_head: "2".repeat(40),
+        })
+    );
+}
