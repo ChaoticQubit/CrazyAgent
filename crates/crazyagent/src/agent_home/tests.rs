@@ -493,7 +493,7 @@ fn a_fifo_swapped_in_for_the_instruction_file_never_blocks_the_read() {
     for outcome in &outcomes {
         assert!(
             matches!(
-                outcome.as_deref(),
+                outcome.as_deref().map_err(String::as_str),
                 Ok("Use TDD.\n") | Err("process_text_unsafe")
             ),
             "{outcome:?}"
