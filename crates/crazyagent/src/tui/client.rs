@@ -31,6 +31,7 @@ pub(super) mod editor;
 pub(super) mod intake;
 pub(super) mod process;
 mod project_setup;
+pub(super) mod recovery;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
@@ -61,6 +62,7 @@ enum Job {
     Intake(Box<intake::IntakeJob>),
     Changes(Box<changes::ChangesQuery>),
     Process(Box<process::ProcessQuery>),
+    Recovery(Box<recovery::RecoveryQuery>),
     Cleanup(Box<cleanup::CleanupQuery>),
     Evidence {
         project: ProjectId,
@@ -183,6 +185,7 @@ pub(super) enum OwnerEvent {
     Intake(Box<intake::IntakeEvent>),
     Changes(Box<changes::ChangesEvent>),
     Process(Box<process::ProcessEvent>),
+    Recovery(Box<recovery::RecoveryEvent>),
     Cleanup(Box<cleanup::CleanupEvent>),
     Access {
         ready: bool,
@@ -716,6 +719,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Process(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Recovery(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.recovery(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => recovery::RecoveryEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Recovery(Box::new(event)),
                                 })
                                 .is_err()
                             {

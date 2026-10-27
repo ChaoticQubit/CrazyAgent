@@ -47,7 +47,11 @@ pub(in crate::tui) fn project_screen(
         })
         .collect();
     let mut rows: Vec<Row> = tab_strip(width, &items, screen.tab as usize, look).into();
-    let room = body_height.saturating_sub(2);
+    let banner = screen.recovery.rows(content, look);
+    let room = body_height.saturating_sub(2 + banner.len());
+    for line in banner {
+        rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
+    }
     let mut crumbs = vec!["Home".to_owned(), screen.name.clone()];
     if screen.tab != Tab::Overview {
         crumbs.push(screen.tab.label().to_owned());
