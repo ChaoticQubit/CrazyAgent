@@ -14,6 +14,9 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
+pub mod agents;
+pub mod memory;
+
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
 
@@ -31,7 +34,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 13] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -43,6 +46,46 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 3] = [
     (
         "out/extension.js",
         include_bytes!("../../../../apps/ide-extension/out/extension.js"),
+    ),
+    (
+        "out/sidebar/agents.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/agents.js"),
+    ),
+    (
+        "out/sidebar/changes.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/changes.js"),
+    ),
+    (
+        "out/sidebar/context.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/context.js"),
+    ),
+    (
+        "out/sidebar/memories.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/memories.js"),
+    ),
+    (
+        "out/sidebar/model.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/model.js"),
+    ),
+    (
+        "out/sidebar/tree.js",
+        include_bytes!("../../../../apps/ide-extension/out/sidebar/tree.js"),
+    ),
+    (
+        "out/base-content.js",
+        include_bytes!("../../../../apps/ide-extension/out/base-content.js"),
+    ),
+    (
+        "out/comments.js",
+        include_bytes!("../../../../apps/ide-extension/out/comments.js"),
+    ),
+    (
+        "out/scm-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm-model.js"),
+    ),
+    (
+        "out/scm.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm.js"),
     ),
 ];
 
@@ -81,11 +124,19 @@ pub enum IdeCall {
     #[serde(rename = "ide.change_diff")]
     ChangeDiff { id: ChangeSetId, page: u16 },
     #[serde(rename = "ide.base_blob")]
-    BaseBlob { id: ChangeSetId, path: String },
+    BaseBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
     #[serde(rename = "ide.accept")]
-    Accept { id: ChangeSetId, message: String },
+    Accept {
+        id: ChangeSetId,
+        head: String,
+        message: String,
+    },
     #[serde(rename = "ide.discard")]
-    Discard { id: ChangeSetId },
+    Discard { id: ChangeSetId, head: String },
     #[serde(rename = "ide.restore")]
     Restore { id: ChangeSetId },
     #[serde(rename = "ide.comment")]
@@ -98,7 +149,10 @@ pub enum IdeCall {
     #[serde(rename = "ide.owner_edit")]
     OwnerEdit { agent: AgentId, path: String },
     #[serde(rename = "ide.memories")]
-    Memories {},
+    Memories {
+        #[serde(default)]
+        after: Option<RequestId>,
+    },
     #[serde(rename = "ide.memory_decide")]
     MemoryDecide {
         id: RequestId,
@@ -107,6 +161,8 @@ pub enum IdeCall {
     },
     #[serde(rename = "ide.agents")]
     Agents {},
+    #[serde(rename = "ide.agent_message")]
+    AgentMessage { agent: i64, text: String },
     #[serde(rename = "ide.extension_request")]
     ExtensionRequest { id: String, version: String },
     #[serde(rename = "ide.extension_decide")]
@@ -181,6 +237,7 @@ impl IdeRequest {
                     && !text.trim().is_empty()
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
+            IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
             IdeCall::ExtensionRequest { id, version }
             | IdeCall::ExtensionDecide { id, version, .. } => {
                 extension_id(id) && extension_version(version)
@@ -191,7 +248,7 @@ impl IdeRequest {
             | IdeCall::ChangeDiff { .. }
             | IdeCall::Discard { .. }
             | IdeCall::Restore { .. }
-            | IdeCall::Memories {}
+            | IdeCall::Memories { .. }
             | IdeCall::MemoryDecide { .. }
             | IdeCall::Agents {}
             | IdeCall::RevealAck { .. }
@@ -537,23 +594,60 @@ async fn answer(
     let data = match call {
         IdeCall::Workspace {} => workspace(runtime, project, None).await?,
         IdeCall::ShowAllAgents { on } => workspace(runtime, project, Some(on)).await?,
+        IdeCall::Memories { after } => memory::memories(runtime, project, after).await?,
+        IdeCall::MemoryDecide {
+            id,
+            revision,
+            decision,
+        } => {
+            let decide = memory::Decide {
+                id,
+                revision,
+                decision,
+            };
+            return memory::decide(runtime, project, &decide).await;
+        }
+        IdeCall::Agents {} => agents::listed(runtime, project).await?,
+        IdeCall::AgentMessage { agent, text } => {
+            agents::sent(runtime, project, agent, text).await?
+        }
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }
-        | IdeCall::Comment { .. }
-        | IdeCall::OwnerEdit { .. }
-        | IdeCall::Memories {}
-        | IdeCall::MemoryDecide { .. }
-        | IdeCall::Agents {}
+        | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
+        IdeCall::OwnerEdit { .. }
         | IdeCall::ExtensionRequest { .. }
         | IdeCall::ExtensionDecide { .. }
         | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
     Ok(IdeReply::Ok { data })
+}
+
+/// Answers a Changes call or a diff comment where the engine lands change sets; elsewhere
+/// it is unavailable. Inputs: the owner runtime, the project and the call. Output: the
+/// reply data.
+async fn change_call(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    call: IdeCall,
+) -> Result<serde_json::Value, EngineError> {
+    #[cfg(unix)]
+    {
+        let root = runtime.ide()?.root;
+        match call {
+            IdeCall::Comment { .. } => comments::answer(root, project.clone(), call).await,
+            call => changes::answer(root, project.clone(), call).await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (runtime, project, call);
+        Err(failure("ide_request_unavailable"))
+    }
 }
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
@@ -735,5 +829,9 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
     Ok(())
 }
 
+#[cfg(unix)]
+mod changes;
+#[cfg(unix)]
+mod comments;
 #[cfg(all(test, unix))]
 mod tests;

@@ -1,11 +1,10 @@
 use super::{Action, ActionId, ActionKind, FINISHED_KEPT, Outcome, PENDING_MAX, failure, storage};
 use crate::engine::EngineError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ledger_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL CHECK(kind IN
-        ('message','dispatch','worktree_create','agent_spawn','landing_accept')),
+    kind TEXT NOT NULL,
     action_key TEXT NOT NULL,
     payload TEXT NOT NULL,
     started_ms INTEGER NOT NULL,
@@ -39,8 +38,10 @@ pub(super) fn insert(
              WHERE (SELECT COUNT(*) FROM ledger_actions WHERE outcome IS NULL) < ?5",
             params![kind.name(), key, payload, now_ms, PENDING_MAX as i64],
         )
-        .map_err(|error| match error.sqlite_error_code() {
-            Some(rusqlite::ErrorCode::ConstraintViolation) => failure("ledger_pending"),
+        .map_err(|error| match error.sqlite_error() {
+            Some(code) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => {
+                failure("ledger_pending")
+            }
             _ => storage(error),
         })?;
     if added == 0 {
@@ -49,34 +50,26 @@ pub(super) fn insert(
     Ok(ActionId(db.last_insert_rowid()))
 }
 
-/// Sets the outcome of a pending action, then deletes finished actions older than the
-/// FINISHED_KEPT newest. Inputs: the ledger, the id, the outcome and the time.
-/// Output: Ok, `ledger_finished`, `ledger_missing` or `ledger_unavailable`.
+/// Sets the outcome of a pending action, of the given kind when one is named, then deletes
+/// finished actions older than the FINISHED_KEPT newest. Inputs: the ledger, the kind or
+/// none, the id, the outcome and the time. Output: Ok, `ledger_finished`,
+/// `ledger_missing` (also for an action of another kind) or `ledger_unavailable`.
 pub(super) fn finish(
     db: &Connection,
+    kind: Option<ActionKind>,
     id: ActionId,
     outcome: Outcome,
     now_ms: i64,
 ) -> Result<(), EngineError> {
     let changed = db
         .execute(
-            "UPDATE ledger_actions SET outcome=?1,finished_ms=?2 WHERE id=?3 AND outcome IS NULL",
-            params![outcome.name(), now_ms, id.0],
+            "UPDATE ledger_actions SET outcome=?1,finished_ms=?2
+             WHERE id=?3 AND outcome IS NULL AND (?4 IS NULL OR kind=?4)",
+            params![outcome.name(), now_ms, id.0, kind.map(ActionKind::name)],
         )
         .map_err(storage)?;
     if changed == 0 {
-        let kept: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM ledger_actions WHERE id=?1)",
-                [id.0],
-                |row| row.get(0),
-            )
-            .map_err(storage)?;
-        return Err(failure(if kept {
-            "ledger_finished"
-        } else {
-            "ledger_missing"
-        }));
+        return Err(ended(db, kind, id)?);
     }
     db.execute(
         "DELETE FROM ledger_actions WHERE outcome IS NOT NULL AND id <=
@@ -86,6 +79,28 @@ pub(super) fn finish(
     )
     .map_err(storage)?;
     Ok(())
+}
+
+/// Names why an action is not pending: `ledger_finished` when it ended, `ledger_missing`
+/// when no action of the kind, any when none is named, has that id. Inputs: the ledger,
+/// the kind or none and the id. Output: that refusal, or `ledger_unavailable`.
+pub(super) fn ended(
+    db: &Connection,
+    kind: Option<ActionKind>,
+    id: ActionId,
+) -> Result<EngineError, EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ledger_actions WHERE id=?1 AND (?2 IS NULL OR kind=?2))",
+            params![id.0, kind.map(ActionKind::name)],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    Ok(failure(if kept {
+        "ledger_finished"
+    } else {
+        "ledger_missing"
+    }))
 }
 
 /// Reads the pending actions of one kind, oldest first, at most PENDING_MAX of them.
@@ -109,4 +124,29 @@ pub(super) fn pending(db: &Connection, kind: ActionKind) -> Result<Vec<Action>, 
         })
         .map_err(storage)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(storage)
+}
+
+/// Reads the pending action of one kind and key. Inputs: the ledger, the kind and the
+/// key. Output: the action or none, or `ledger_unavailable`.
+pub(super) fn pending_key(
+    db: &Connection,
+    kind: ActionKind,
+    key: &str,
+) -> Result<Option<Action>, EngineError> {
+    db.query_row(
+        "SELECT id,payload,started_ms FROM ledger_actions
+         WHERE kind=?1 AND action_key=?2 AND outcome IS NULL",
+        params![kind.name(), key],
+        |row| {
+            Ok(Action {
+                id: ActionId(row.get(0)?),
+                kind,
+                key: key.to_owned(),
+                payload: row.get(1)?,
+                started_ms: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(storage)
 }

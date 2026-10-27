@@ -68,6 +68,7 @@ fn main() {
         "desktop_set_pack_entry",
         "desktop_remove_pack_entry",
         "desktop_project_memories",
+        "desktop_ide_asks",
         "desktop_review_memory",
         "desktop_memories",
         "desktop_memory",
