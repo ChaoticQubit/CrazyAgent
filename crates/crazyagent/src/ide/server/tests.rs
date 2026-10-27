@@ -75,6 +75,13 @@ async fn get(port: u16, host: &str, path: &str, cookie: Option<&str>) -> String 
     .await
 }
 
+fn pinned(info: &ServerInfo) -> String {
+    format!(
+        "/?workspace={}",
+        proxy::encoded(info.workspace.to_str().unwrap())
+    )
+}
+
 fn status(reply: &str) -> &str {
     reply.split("\r\n").next().unwrap_or_default()
 }
@@ -191,9 +198,36 @@ async fn request_without_the_token_is_refused() {
     )
     .await;
     assert!(status(&short).contains(" 403 "), "{}", status(&short));
-    let owner = get(info.port, &host, "/", Some(&format!("vscode-tkn={token}"))).await;
+    let page = pinned(&info);
+    assert_eq!(
+        info.workspace,
+        servers.project_folder(&project).unwrap().join(WORKSPACE)
+    );
+    let owner = get(
+        info.port,
+        &host,
+        &page,
+        Some(&format!("vscode-tkn={token}")),
+    )
+    .await;
     assert!(status(&owner).contains(" 200 "), "{}", status(&owner));
-    let cookie = get(info.port, &host, &format!("/?tkn={token}"), None).await;
+    let elsewhere = get(
+        info.port,
+        &host,
+        "/?folder=/private/tmp",
+        Some(&format!("vscode-tkn={token}")),
+    )
+    .await;
+    assert!(
+        status(&elsewhere).contains(" 302 "),
+        "{}",
+        status(&elsewhere)
+    );
+    assert!(
+        elsewhere.contains(&format!("\r\nLocation: {page}\r\n")),
+        "{elsewhere}"
+    );
+    let cookie = get(info.port, &host, &format!("{page}&tkn={token}"), None).await;
     assert!(status(&cookie).contains(" 302 "), "{}", status(&cookie));
     assert!(cookie.contains(&format!("vscode-tkn={token}")));
     let other = format!("evil.example:{}", info.port);
@@ -296,6 +330,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("AWS_SECRET_ACCESS_KEY", "fixture-cloud-key"),
         ("CRAZYAGENT_POOL_ACCOUNT", "fixture-pool-account"),
         ("CRAZYAGENT_IDE_CAPABILITY_FILE", "/private/tmp/forged"),
+        ("CRAZYAGENT_IDE_LOCKED_FILE", "/private/tmp/forged-locks"),
         ("CODEX_HOME", "/private/tmp/codex"),
         ("GIT_ASKPASS", "/private/tmp/askpass"),
         ("NODE_OPTIONS", "--require /private/tmp/evil.js"),
@@ -307,7 +342,8 @@ fn server_env_holds_only_allowlisted_names() {
         .iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)));
     let capability = Path::new("/private/tmp/ide/project/capability");
-    let built = env::server_env(source, capability);
+    let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
+    let built = env::server_env(source, capability, locked);
     let mut command = Command::new("/usr/bin/env");
     command
         .env_clear()
@@ -323,21 +359,28 @@ fn server_env_holds_only_allowlisted_names() {
         .map(|line| line.split_once('=').unwrap())
         .collect();
     seen.sort();
-    let mut expected: Vec<(&str, &str)> = given[..11].to_vec();
+    let mut expected: Vec<(&str, &str)> = given[..10].to_vec();
     expected.push((
         env::CAPABILITY_VARIABLE,
         "/private/tmp/ide/project/capability",
+    ));
+    expected.push((
+        crate::ide::settings::LOCKED_VARIABLE,
+        "/private/tmp/ide/project/locked-settings.json",
     ));
     expected.sort();
     assert_eq!(seen, expected);
     assert!(
         seen.iter()
             .all(|(name, _)| env::allowed(std::ffi::OsStr::new(name))
-                || *name == env::CAPABILITY_VARIABLE)
+                || *name == env::CAPABILITY_VARIABLE
+                || *name == crate::ide::settings::LOCKED_VARIABLE)
     );
     assert!(
         !printed.contains("fixture-") && !printed.contains("forged") && !printed.contains("evil")
     );
+    assert!(!env::allowed(std::ffi::OsStr::new("SSH_AUTH_SOCK")));
+    assert!(!printed.contains("SSH_AUTH_SOCK") && !printed.contains("agent.sock"));
 }
 
 #[tokio::test]
@@ -447,7 +490,7 @@ async fn no_ide_server_process_survives_engine_stop() {
     .await
     .unwrap();
     let project = project("engine-stop");
-    let servers = service.owner_runtime().unwrap().ide();
+    let servers = service.owner_runtime().unwrap().ide_servers();
     let info = servers
         .open(&project, checkout.path(), &cached_build())
         .await
@@ -579,9 +622,10 @@ async fn the_server_log_never_holds_the_token() {
     );
     let host = format!("127.0.0.1:{}", info.port);
     let cookie = format!("{}={token}", proxy::COOKIE);
-    let page = get(info.port, &host, &format!("/?tkn={token}"), None).await;
+    let target = pinned(&info);
+    let page = get(info.port, &host, &format!("{target}&tkn={token}"), None).await;
     assert!(status(&page).contains(" 302 "), "{}", status(&page));
-    let page = get(info.port, &host, "/", Some(&cookie)).await;
+    let page = get(info.port, &host, &target, Some(&cookie)).await;
     assert!(status(&page).contains(" 200 "), "{}", status(&page));
     servers.stop_all().await;
     let text = fs::read_to_string(&log).unwrap();
@@ -604,8 +648,9 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
     let token = fs::read_to_string(&info.token_path).unwrap();
     let cookie = format!("{}={token}", proxy::COOKIE);
     let port = info.port;
+    let target = pinned(&info);
     for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}")] {
-        let page = get(port, &host, "/", Some(&cookie)).await;
+        let page = get(port, &host, &target, Some(&cookie)).await;
         assert!(status(&page).contains(" 200 "), "{}", status(&page));
         let (head, body) = page.split_once("\r\n\r\n").unwrap();
         let header = |name: &str| {
@@ -673,7 +718,7 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
     let direct = get(
         info.server_port,
         &format!("127.0.0.1:{}", info.server_port),
-        "/",
+        &target,
         Some(&cookie),
     )
     .await;
@@ -766,6 +811,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         server_port: 47_931,
         token_path: token_path.clone(),
         capability_path: folder.join(CAPABILITY),
+        workspace: folder.join(WORKSPACE),
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let command = command(&build, &folder, checkout.path(), &info, writer).unwrap();
@@ -784,7 +830,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         "--server-data-dir".into(),
         folder.join("server-data").into(),
         "--user-data-dir".into(),
-        folder.join("user-data").into(),
+        folder.join("server-data").join("data").into(),
         "--extensions-dir".into(),
         folder.join("extensions").into(),
         "--accept-server-license-terms".into(),
@@ -803,20 +849,38 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     );
     assert_eq!(command.get_current_dir(), Some(folder.as_path()));
     assert_eq!(mode(&token_path), 0o600);
-    for path in ["server-data", "user-data", "extensions"] {
-        assert_eq!(mode(&folder.join(path)), 0o700, "{path}");
+    let home = folder.join("server-data");
+    for path in [
+        home.clone(),
+        home.join("data"),
+        home.join("data").join("Machine"),
+        folder.join("extensions"),
+    ] {
+        assert_eq!(mode(&path), 0o700, "{}", path.display());
     }
+    assert_eq!(
+        settings::machine_folder(&home),
+        home.join("data").join("Machine")
+    );
+    let machine: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.join("data").join("Machine").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(machine["chat.disableAIFeatures"], serde_json::json!(true));
     let text = fs::read_to_string(&profile).unwrap();
     assert!(text.contains("(local ip \"localhost:47931\")"), "{text}");
     assert!(!text.contains("47933"));
-    for writable in ["user-data", "extensions", "server-data"] {
+    assert!(text.contains(&format!("(subpath \"{}\")", home.display())));
+    assert!(!text.contains(&folder.join("user-data").display().to_string()));
+    for file in [
+        &token_path,
+        &info.workspace,
+        &folder.join(settings::LOCKED_FILE),
+    ] {
         assert!(
-            text.contains(&format!(
-                "(subpath \"{}\")",
-                folder.join(writable).display()
-            )),
-            "{writable}"
+            text.contains(&format!("(literal \"{}\")", file.display())),
+            "{}",
+            file.display()
         );
     }
-    assert!(text.contains(&format!("(literal \"{}\")", token_path.display())));
 }

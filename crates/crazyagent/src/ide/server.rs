@@ -1,5 +1,5 @@
 use super::ports::{self, Ports};
-use super::{env, output, proxy, sandbox, token};
+use super::{env, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
@@ -39,12 +39,12 @@ pub const LOG: &str = "server.log";
 /// default is three hours.
 pub const RECONNECTION_GRACE: Duration = Duration::from_secs(30);
 
-/// The workspace file the engine writes in a project's IDE folder for the server to open.
-pub const WORKSPACE: &str = "crazyagent.code-workspace";
+/// The workspace file the engine writes in a project's IDE folder for the server to open,
+/// the only one the proxy lets the workbench open.
+pub const WORKSPACE: &str = super::workspace::FILE;
 
 const GROUP: &str = "server.pid";
 const SERVER_DATA: &str = "server-data";
-const USER_DATA: &str = "user-data";
 const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
@@ -59,9 +59,10 @@ const KILL_WAIT: Duration = Duration::from_secs(2);
 const LISTENERS_BYTES_MAX: usize = 64 * 1024;
 
 /// Where one project's running IDE is reached: the workbench URL on the engine proxy at
-/// 127.0.0.1, the proxy's port, the server's own port behind it, the per-launch token file
-/// the desktop sets the session cookie from, and the capability file the server's extension
-/// host reads.
+/// 127.0.0.1, the proxy's port, which also serves the webview hosts, the server's own port
+/// behind it, the per-launch token file the desktop sets the session cookie from, the
+/// capability file the server's extension host reads, and the workspace file the workbench
+/// is pinned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerInfo {
     pub url: String,
@@ -69,6 +70,7 @@ pub struct ServerInfo {
     pub server_port: u16,
     pub token_path: PathBuf,
     pub capability_path: PathBuf,
+    pub workspace: PathBuf,
 }
 
 /// The engine's IDE servers: at most one per project, each in its own process group on
@@ -218,6 +220,11 @@ impl Servers {
             server_port,
             token_path,
             capability_path: folder.join(CAPABILITY),
+            workspace: folder.join(WORKSPACE),
+        };
+        let Some(workspace) = info.workspace.to_str().map(str::to_owned) else {
+            let _ = token::remove(&folder);
+            return Err(failure("ide_folder_unsafe"));
         };
         let child = output::start(&folder.join(LOG), &token)
             .map_err(|_| failure("ide_state_unavailable"))
@@ -240,6 +247,7 @@ impl Servers {
                 upstream: server_port,
                 pre: build.join(proxy::PRE),
                 token,
+                workspace,
             },
         ));
         *locked(&slot.state) = Some(Running {
@@ -355,7 +363,6 @@ impl Servers {
             self.folder.clone(),
             folder.clone(),
             folder.join(SERVER_DATA),
-            folder.join(USER_DATA),
             folder.join(EXTENSIONS),
         ] {
             token::private_folder(&path).map_err(|_| failure("ide_folder_unsafe"))?;
@@ -530,11 +537,14 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
-/// this launch: the build's launcher on 127.0.0.1 at the server port, the token file (never
-/// the token), separate server data, user data and extensions folders, license accepted,
-/// telemetry off, workspace trust off and a 30 s reconnection grace; a cleared environment
-/// holding only [`env::server_env`] with TMPDIR at its short temp folder, stdout and stderr
-/// into the redacting `output` pipe, and its own process group.
+/// this launch, after the AI lock is written ([`settings::write`]); a lock that cannot be
+/// written stops the start. The build's launcher on 127.0.0.1 at the server port, the token
+/// file (never the token), its own server data folder, the user data folder inside it whose
+/// Remote settings folder is locked, the locked-keys file readable, the extensions folder
+/// read only, license accepted, telemetry off, workspace trust off and a 30 s reconnection
+/// grace; a cleared environment holding only [`env::server_env`] with TMPDIR at its short
+/// temp folder, stdout and stderr into the redacting `output` pipe, and its own process
+/// group.
 fn command(
     build: &Path,
     folder: &Path,
@@ -550,25 +560,27 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
+    let written = settings::write(folder, &home)?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
-    let (user_data, extensions, workspace) = (
-        folder.join(USER_DATA),
-        folder.join(EXTENSIONS),
-        folder.join(WORKSPACE),
-    );
+    let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));
+    let machine = settings::machine_folder(&home);
+    assert!(machine.starts_with(&user_data) && user_data.starts_with(&home));
     let grants = sandbox::Grants {
         data,
         root,
         build,
         home: &home,
         tmp: &tmp,
-        writable: &[user_data.as_path(), extensions.as_path()],
+        writable: &[],
+        read_only: &[extensions.as_path()],
         readable: &[
             info.token_path.as_path(),
             info.capability_path.as_path(),
-            workspace.as_path(),
+            info.workspace.as_path(),
+            written.locked.as_path(),
         ],
+        locked: &[machine.as_path()],
     };
     let profile = sandbox::install(folder, &grants, info.server_port)?;
     let mut command = sandbox::command(&profile, &build.join(LAUNCHER));
@@ -590,7 +602,11 @@ fn command(
         .arg(RECONNECTION_GRACE.as_secs().to_string())
         .current_dir(folder)
         .env_clear()
-        .envs(env::server_env(std::env::vars_os(), &info.capability_path))
+        .envs(env::server_env(
+            std::env::vars_os(),
+            &info.capability_path,
+            &written.locked,
+        ))
         .env("TMPDIR", &tmp)
         .stdin(Stdio::null())
         .stdout(output)

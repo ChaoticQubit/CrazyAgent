@@ -365,13 +365,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 project: String,
                 memory: String,
+                version: u64,
                 generation: u64,
             }
-            let Args { project, memory, generation } = match parse(args) {
+            let Args { project, memory, version, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .forget_memory(&project, &memory, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .forget_memory(&project, &memory, version, generation) .await }.await;
             routed(result)
         }
         "desktop_save_selection_to_memory" => {
@@ -1807,12 +1808,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 project_id: Option<String>,
                 text: String,
+                version: u64,
+                opened: Option<u64>,
             }
-            let Args { project_id, text } = match parse(args) {
+            let Args { project_id, text, version, opened } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.save_process_text(project_id, text)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .save_process_text(project_id, text, version, opened)?; call.await }.await;
             routed(result)
         }
         "desktop_import_global_instructions" => {

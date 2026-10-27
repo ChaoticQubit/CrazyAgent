@@ -1666,16 +1666,18 @@ fn context(
             vec![
                 ("y", "Save to memory"),
                 ("n", "Dismiss"),
-                ("o", "Open in editor"),
+                ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
+                ("v", "$EDITOR"),
             ]
         } else {
             vec![
                 ("m", "Save to memory"),
-                ("o", "Open in editor"),
+                ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
+                ("v", "$EDITOR"),
             ]
         };
         return (preview_rows(screen, content, room, look), None, help);
@@ -1683,9 +1685,10 @@ fn context(
     let help = vec![
         ("Enter", "Open"),
         ("a", "Add file"),
-        ("o", "Open in editor"),
+        ("o", "Open in app"),
         ("d", "Delete"),
         ("m", "Save to memory"),
+        ("v", "$EDITOR"),
         TABS,
         ("Esc", "Home"),
     ];

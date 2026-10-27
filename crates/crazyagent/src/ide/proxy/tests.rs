@@ -2,6 +2,8 @@ use super::*;
 
 const PORT: u16 = 47_933;
 const LABEL: &str = "0123456789abcdefghijklmnopqrstuv0123456789abcdefghij";
+const WORKSPACE: &str = "/private/tmp/ide/p q/crazyagent.code-workspace";
+const PINNED: &str = "/?workspace=/private/tmp/ide/p%20q/crazyagent.code-workspace";
 const SERVER_POLICY: &str = "default-src 'self'; img-src 'self' https: data: blob:; media-src 'self'; script-src 'self' 'unsafe-eval' 'nonce-abc123' 'sha256-x'; child-src 'self'; frame-src 'self' https://*.vscode-cdn.net data:; worker-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: https:; font-src 'self' blob:; manifest-src 'self';";
 
 fn token() -> String {
@@ -10,7 +12,7 @@ fn token() -> String {
 
 fn routed(head: &str) -> Action {
     let request = parse(head.as_bytes()).expect(head);
-    decide(&request, PORT, &token())
+    decide(&request, PORT, &token(), WORKSPACE)
 }
 
 fn unescaped(attribute: &str) -> String {
@@ -112,19 +114,19 @@ fn the_workbench_host_needs_the_token_in_the_query_or_the_cookie() {
     );
     assert_eq!(
         routed(&format!(
-            "GET / HTTP/1.1\r\n{host}Cookie: a=b; {COOKIE}={token}; c=d\r\n\r\n"
+            "GET {PINNED} HTTP/1.1\r\n{host}Cookie: a=b; {COOKIE}={token}; c=d\r\n\r\n"
         )),
         Action::Page
     );
     assert_eq!(
-        routed(&format!("GET /?tkn={token} HTTP/1.1\r\n{host}\r\n")),
+        routed(&format!("GET {PINNED}&tkn={token} HTTP/1.1\r\n{host}\r\n")),
         Action::Page
     );
     assert_eq!(
         routed(&format!(
             "GET /?folder=/p&tkn={token}#x HTTP/1.1\r\nHost: localhost:{PORT}\r\n\r\n"
         )),
-        Action::Page
+        Action::Pin
     );
     let wrong = "cd".repeat(super::super::token::TOKEN_BYTES);
     for credential in [
@@ -249,7 +251,10 @@ fn authorized_requests_are_forwarded_upgraded_or_refused_by_their_framing() {
         routed(&head("GET /", "Content-Length: 3\r\n")),
         Action::Refuse("400 Bad Request")
     );
-    assert_eq!(routed(&head("GET /", "Upgrade: h2c\r\n")), Action::Page);
+    assert_eq!(
+        routed(&head(&format!("GET {PINNED}"), "Upgrade: h2c\r\n")),
+        Action::Page
+    );
 }
 
 #[test]
@@ -348,12 +353,19 @@ fn the_page_configuration_gets_the_webview_endpoint_and_the_defaults_last() {
     assert_eq!(decoded["configurationDefaults"], configuration_defaults());
     assert_eq!(
         configuration_defaults(),
-        serde_json::json!({
-            "workbench.startupEditor": "none",
-            "workbench.welcomePage.extraAnnouncements": false,
-            "task.allowAutomaticTasks": "off",
-        })
+        serde_json::Value::Object(crate::ide::settings::defaults())
     );
+    for (key, value) in [
+        ("workbench.startupEditor", serde_json::json!("none")),
+        (
+            "workbench.welcomePage.extraAnnouncements",
+            serde_json::json!(false),
+        ),
+        ("task.allowAutomaticTasks", serde_json::json!("off")),
+        ("chat.disableAIFeatures", serde_json::json!(true)),
+    ] {
+        assert_eq!(decoded["configurationDefaults"][key], value, "{key}");
+    }
     let attribute = &injected[injected.find(MARKER).unwrap() + MARKER.len()..];
     let attribute = &attribute[..attribute.find('"').unwrap()];
     assert!(
@@ -475,6 +487,7 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
             upstream: closed,
             pre: pre.clone(),
             token: token.clone(),
+            workspace: WORKSPACE.to_owned(),
         },
     ));
     assert_eq!(
@@ -535,6 +548,12 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
         ),
         (
             format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={token}\r\n\r\n"),
+            "302 Found",
+        ),
+        (
+            format!(
+                "GET {PINNED} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={token}\r\n\r\n"
+            ),
             "502 Bad Gateway",
         ),
         (
@@ -564,4 +583,62 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
     proxy.abort();
     let _ = proxy.await;
     assert!(crate::ide::server::listeners(port).unwrap().is_empty());
+}
+
+#[test]
+fn the_workbench_opens_only_the_engine_workspace() {
+    let token = token();
+    let page = |target: &str| {
+        format!(
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nCookie: {COOKIE}={token}\r\n\r\n"
+        )
+    };
+    for target in [
+        PINNED.to_owned(),
+        format!("{PINNED}#frag"),
+        "/?workspace=/private/tmp/ide/p+q/crazyagent.code-workspace".to_owned(),
+        "/?workspace=%2Fprivate%2Ftmp%2Fide%2Fp%20q%2Fcrazyagent.code-workspace".to_owned(),
+        format!("/?tkn={token}&workspace=/private/tmp/ide/p%20q/crazyagent.code-workspace"),
+    ] {
+        assert_eq!(routed(&page(&target)), Action::Page, "{target}");
+    }
+    for target in [
+        "/".to_owned(),
+        "/?".to_owned(),
+        "/?folder=/private/tmp/ide/p%20q".to_owned(),
+        "/?workspace=/private/tmp/other.code-workspace".to_owned(),
+        "/?workspace=/private/tmp/ide/p%20q/crazyagent.code-workspace.x".to_owned(),
+        format!("{PINNED}&workspace=/private/tmp/other.code-workspace"),
+        format!("{PINNED}&{}", &PINNED[2..]),
+        format!("{PINNED}&folder=/private/tmp"),
+        format!("{PINNED}&ew=true"),
+        format!("{PINNED}&payload=%5B%5D"),
+        "/?workspace=/private/tmp/ide/p%ZZq/crazyagent.code-workspace".to_owned(),
+        "/?workspace=/private/tmp/ide/p%FFq/crazyagent.code-workspace".to_owned(),
+        "/?ew=true".to_owned(),
+    ] {
+        assert_eq!(routed(&page(&target)), Action::Pin, "{target}");
+    }
+    let head = page("/?folder=/elsewhere");
+    let request = parse(head.as_bytes()).unwrap();
+    assert_eq!(
+        String::from_utf8(pin_reply(&request, WORKSPACE)).unwrap(),
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {PINNED}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        )
+    );
+    let first = format!("GET /?tkn={token}&folder=/x HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n");
+    let request = parse(first.as_bytes()).unwrap();
+    assert_eq!(decide(&request, PORT, &token, WORKSPACE), Action::Pin);
+    let reply = String::from_utf8(pin_reply(&request, WORKSPACE)).unwrap();
+    assert!(
+        reply.contains(&format!("\r\nLocation: /?tkn={token}&workspace=/private/tmp/ide/p%20q/crazyagent.code-workspace\r\n")),
+        "{reply}"
+    );
+    assert_eq!(encoded("/a b/c%d+e~f"), "/a%20b/c%25d%2Be~f");
+    assert_eq!(
+        decoded("/a%20b/c%25d%2Be~f+g").as_deref(),
+        Some("/a b/c%d+e~f g")
+    );
+    assert_eq!(decoded("%2"), None);
 }

@@ -1,3 +1,4 @@
+use super::client::editor;
 use super::client::terminal::Terminals;
 use super::client::{Connection, OwnerEvent};
 use super::ctx::{Ctx, Link};
@@ -17,6 +18,7 @@ use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -87,20 +89,27 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     let mut ctx = Ctx::new(depth, colors, appearance, Glyphs::detect(&var), socket);
     ctx.prefs = prefs;
     ctx.home = var("HOME").filter(|home| home.starts_with('/'));
+    ctx.editor = editor::configured(var("EDITOR"));
     Ok(ctx)
 }
 
 /// Runs the rebuilt TUI until the owner quits or a signal arrives.
-/// Inputs: the unbound engine client and the stop flag set by signals.
+/// Inputs: the unbound engine client, the stop flag set by signals and the
+/// editor-running flag the signal listener reads.
 /// Output: Ok after a clean exit, or the terminal or connection error.
-pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
+pub fn run(
+    client: Client,
+    stopped: &AtomicBool,
+    editor_running: Arc<AtomicBool>,
+) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
         .map_err(|error| TuiError(error.to_string()))?;
-    let ctx = context(
+    let mut ctx = context(
         |name| std::env::var(name).ok(),
         socket.display().to_string(),
     )?;
+    ctx.editor_running = editor_running;
     let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
@@ -192,6 +201,20 @@ fn drive(
         if shell.busy() && now.duration_since(tick) >= TICK {
             shell.ctx.tick = shell.ctx.tick.wrapping_add(1);
             tick = now;
+            dirty = true;
+        }
+        if editor::open_waiting(&mut shell.ctx, &mut std::io::stdout())
+            .map_err(|error| TuiError(error.to_string()))?
+        {
+            let (width, height) =
+                crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
+            shell.resize(width, height);
+            terminal
+                .resize(bounded_area(width, height))
+                .map_err(|error| TuiError(error.to_string()))?;
+            terminal
+                .clear()
+                .map_err(|error| TuiError(error.to_string()))?;
             dirty = true;
         }
         if dirty {

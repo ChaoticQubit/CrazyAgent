@@ -17,6 +17,7 @@ use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::app::UiEvent;
+use crate::tui::client::editor;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
@@ -32,12 +33,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
 const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
+const CHANGED_MISSING: &str =
+    "That file isn't in your project folder yet. It lands there when you accept the change.";
+const CHANGED_NOTE: &str =
+    "That was your copy in the project folder. The agent's version lands there when you accept.";
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -169,6 +174,19 @@ fn open_request(request: &OpenRequest) -> Result<(), String> {
         Opening::Open(file) => crate::platform::open(file.as_os_str()),
     }
     .map_err(|_| "Could not open it on this computer.".to_owned())
+}
+
+/// Checks one changed file before it goes to the owner's editor: the owner's own copy
+/// in the project folder, never an agent's worktree, any type, and never through a link.
+/// Takes the project folder and the path the change set lists. Returns the file, or the
+/// plain problem.
+pub(in crate::tui) fn changed_file(folder: &Path, path: &str) -> Result<PathBuf, &'static str> {
+    let folder = crate::platform::project_folder(&folder.to_string_lossy())
+        .map_err(|_| "That file or folder is not there any more.")?;
+    crate::platform::project_file(&folder, path).map_err(|code| match code {
+        "project_file_missing" => CHANGED_MISSING,
+        _ => "CrazyAgent opens only files inside the project folder.",
+    })
 }
 
 /// One project as a shell screen.
@@ -819,6 +837,14 @@ impl ProjectPage {
                 }
                 Flow::Handled
             }
+            ProjectReply::Edit(request) => {
+                match opening(&request) {
+                    Ok(Opening::Open(file)) => editor::ask(ctx, file, None),
+                    Ok(Opening::Reveal(_)) => unreachable!("a folder never goes to the editor"),
+                    Err(problem) => ctx.say(Message::error(&problem, "")),
+                }
+                Flow::Handled
+            }
             ProjectReply::Assign(pool) => {
                 self.assign(pool, ctx);
                 Flow::Handled
@@ -913,6 +939,20 @@ impl ProjectPage {
         }
     }
 
+    fn edit_changed(&self, path: &str, ctx: &mut Ctx) {
+        let Some(folder) = self.screen.project_folder() else {
+            ctx.say(Message::error(
+                "The project folder isn't loaded yet.",
+                "Try again in a moment.",
+            ));
+            return;
+        };
+        match changed_file(&folder, path) {
+            Ok(file) => editor::ask(ctx, file, Some(CHANGED_NOTE)),
+            Err(problem) => ctx.say(Message::error(problem, "")),
+        }
+    }
+
     fn changes_have_keys(&self) -> bool {
         self.screen.tab == Tab::Changes
             && self.screen.edit.is_none()
@@ -988,6 +1028,9 @@ impl Screen for ProjectPage {
             && let Some(event) = key_event(key)
             && self.screen.changes.key(event, now_ms())
         {
+            if let Some(path) = self.screen.changes.take_edit() {
+                self.edit_changed(&path, ctx);
+            }
             self.pump(ctx);
             self.redraw(ctx);
             return Flow::Handled;

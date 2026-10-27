@@ -53,13 +53,14 @@ const PAGE_DROPPED: [&str; 5] = [
 ];
 
 /// What one project's proxy serves: its own loopback port, the IDE server's port behind it,
-/// the build's [`PRE`] folder and the launch's connection token, which never leaves the
-/// engine except toward the server.
+/// the build's [`PRE`] folder, the launch's connection token, which never leaves the engine
+/// except toward the server, and the engine's workspace file the workbench is pinned to.
 pub struct Site {
     pub port: u16,
     pub upstream: u16,
     pub pre: PathBuf,
     pub token: String,
+    pub workspace: String,
 }
 
 /// The template the workbench builds each webview's origin from: every webview gets its own
@@ -71,13 +72,11 @@ pub fn template(port: u16) -> String {
 }
 
 /// The settings the workbench starts from before any settings file loads, injected into its
-/// page: no Welcome page, no announcements fetch and automatic tasks off. Output: the object.
+/// page: [`super::settings::defaults`], every locked key and the themes, so no Welcome page,
+/// announcements fetch or automatic task runs before Remote settings load. Output: the
+/// object.
 pub fn configuration_defaults() -> serde_json::Value {
-    serde_json::json!({
-        "workbench.startupEditor": "none",
-        "workbench.welcomePage.extraAnnouncements": false,
-        "task.allowAutomaticTasks": "off",
-    })
+    serde_json::Value::Object(super::settings::defaults())
 }
 
 /// Binds the proxy's loopback listener: on the recorded port while it is free, else on one
@@ -97,13 +96,14 @@ pub async fn bind(recorded: Option<u16>) -> io::Result<(TcpListener, u16)> {
 /// Serves one project's IDE on its proxy port until the task is aborted. A webview host
 /// `<52 base32 hex>.localhost:<port>` gets only the [`PRE_FILES`], without the token. The
 /// workbench host `127.0.0.1:<port>` or `localhost:<port>` needs the token in the `tkn`
-/// query or the [`COOKIE`]; its page gets [`inject`] and [`tighten`], WebSocket upgrades
-/// pass through, and every other request goes to the server one per connection. Any other
-/// host is refused. At most 128 connections are served at once; more are closed. Inputs:
+/// query or the [`COOKIE`]; its page opens only the engine's workspace ([`pinned`]) and gets
+/// [`inject`] and [`tighten`], WebSocket upgrades pass through, and every other request goes
+/// to the server one per connection. Any other host is refused. At most 128 connections are served at once; more are closed. Inputs:
 /// the bound listener and the site.
 pub async fn serve(listener: TcpListener, site: Site) {
     assert!(site.port != 0 && site.upstream != 0 && site.port != site.upstream);
     assert_eq!(site.token.len(), 2 * super::token::TOKEN_BYTES);
+    assert!(site.workspace.starts_with('/'));
     let site = Arc::new(site);
     let mut connections = tokio::task::JoinSet::new();
     loop {
@@ -155,6 +155,7 @@ pub(crate) enum Action {
         head_only: bool,
     },
     Page,
+    Pin,
     Upgrade,
     Forward {
         body: u64,
@@ -205,9 +206,11 @@ pub(crate) fn parse(head: &[u8]) -> Option<Request<'_>> {
     })
 }
 
-/// Decides what to do with one request on a proxy port. Inputs: the request, the proxy port
-/// and the launch token. Output: the action; a refusal names its status line.
-pub(crate) fn decide(request: &Request<'_>, port: u16, token: &str) -> Action {
+/// Decides what to do with one request on a proxy port. A workbench page that opens anything
+/// but the engine's workspace is sent to it instead ([`pinned`]). Inputs: the request, the
+/// proxy port, the launch token and the engine's workspace file. Output: the action; a
+/// refusal names its status line.
+pub(crate) fn decide(request: &Request<'_>, port: u16, token: &str, workspace: &str) -> Action {
     let hosts: Vec<&str> = request.values("host").collect();
     let [host] = hosts[..] else {
         return Action::Refuse("400 Bad Request");
@@ -253,8 +256,10 @@ pub(crate) fn decide(request: &Request<'_>, port: u16, token: &str) -> Action {
         }
         return if upgrade {
             Action::Upgrade
-        } else {
+        } else if pinned(request, workspace) {
             Action::Page
+        } else {
+            Action::Pin
         };
     }
     Action::Forward { body }
@@ -302,6 +307,56 @@ pub(crate) fn carries(request: &Request<'_>, token: &str) -> bool {
         found |= bool::from(candidate.as_bytes().ct_eq(token.as_bytes()));
     }
     found
+}
+
+/// Tells whether a workbench page request opens exactly the engine's workspace: one
+/// `workspace` parameter naming it, besides the `tkn` parameter, and no `folder`, empty
+/// window or other parameter, so neither an extension nor the owner can open another folder
+/// or a workspace file written elsewhere. Inputs: the request and the workspace file.
+/// Output: the answer.
+pub(crate) fn pinned(request: &Request<'_>, workspace: &str) -> bool {
+    assert!(workspace.starts_with('/'));
+    let query = request
+        .target
+        .split('#')
+        .next()
+        .and_then(|target| target.split_once('?'))
+        .map(|(_, query)| query)
+        .unwrap_or_default();
+    let mut named = 0;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match (decoded(key).as_deref(), decoded(value)) {
+            (Some("tkn"), _) => {}
+            (Some("workspace"), Some(value)) if value == workspace => named += 1,
+            _ => return false,
+        }
+    }
+    named == 1
+}
+
+/// The page the workbench is sent to when it asks for anything but the engine's workspace:
+/// the workspace, keeping a `tkn` parameter the request carried so the server still sets the
+/// session cookie. Inputs: the request and the workspace file. Output: the reply bytes.
+pub(crate) fn pin_reply(request: &Request<'_>, workspace: &str) -> Vec<u8> {
+    let tkn = request
+        .target
+        .split('#')
+        .next()
+        .and_then(|target| target.split_once('?'))
+        .map(|(_, query)| query)
+        .unwrap_or_default()
+        .split('&')
+        .find(|pair| pair.starts_with("tkn="));
+    let location = match tkn {
+        Some(pair) => format!("/?{pair}&workspace={}", encoded(workspace)),
+        None => format!("/?workspace={}", encoded(workspace)),
+    };
+    assert!(!location.contains(['\r', '\n']));
+    format!(
+        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 /// Adds the proxy's webview endpoint and [`configuration_defaults`] to the workbench page's
@@ -473,7 +528,7 @@ async fn connection(mut client: TcpStream, site: Arc<Site>) {
         send(&mut client, &refusal("400 Bad Request")).await;
         return;
     };
-    match decide(&request, site.port, &site.token) {
+    match decide(&request, site.port, &site.token, &site.workspace) {
         Action::Refuse(status) => send(&mut client, &refusal(status)).await,
         Action::Pre {
             name,
@@ -481,6 +536,7 @@ async fn connection(mut client: TcpStream, site: Arc<Site>) {
             head_only,
         } => send(&mut client, &pre_file(&site.pre, name, kind, head_only)).await,
         Action::Page => page(client, &request, &site).await,
+        Action::Pin => send(&mut client, &pin_reply(&request, &site.workspace)).await,
         Action::Upgrade => upgrade(client, &head, &rest, &site).await,
         Action::Forward { body } => forward(client, &request, &rest, body, &site).await,
     }
@@ -645,6 +701,44 @@ fn escape(text: &str) -> String {
         }
     }
     escaped
+}
+
+fn decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'%' => {
+                let hex = text.get(at + 1..at + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                at += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                at += 1;
+            }
+            byte => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Percent-encodes a path for a query value, keeping `/` and the unreserved characters.
+/// Input: the path. Output: the encoded text.
+pub(crate) fn encoded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

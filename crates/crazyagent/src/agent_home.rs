@@ -12,8 +12,12 @@ pub const PROJECT_FILE: &str = "instructions.md";
 const TITLE: &str = "# Instructions from CrazyAgent\n";
 const APP_HEADING: &str = "\n## App instructions\n\n";
 const PROJECT_HEADING: &str = "\n## Project instructions\n\n";
-pub const PROCESS_BYTES_MAX: usize =
-    TITLE.len() + APP_HEADING.len() + PROJECT_HEADING.len() + 2 * (TEXT_BYTES_MAX + 1);
+const AGENT_HEADING: &str = "\n## Instructions for this agent\n\n";
+pub const PROCESS_BYTES_MAX: usize = TITLE.len()
+    + APP_HEADING.len()
+    + PROJECT_HEADING.len()
+    + AGENT_HEADING.len()
+    + 3 * (TEXT_BYTES_MAX + 1);
 pub const SKILLS_FILE: &str = "crazyagent-skills";
 pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
 const SKILLS_RECORD_BYTES_MAX: usize =
@@ -205,6 +209,25 @@ pub fn render(app: &str, project: &str) -> String {
         text.push_str(part);
         text.push('\n');
     }
+    assert!(text.len() <= PROCESS_BYTES_MAX);
+    text
+}
+
+/// Adds the owner's own instructions for one agent after the app and project text, under
+/// their heading, leaving a blank part out. Inputs: the text from `render` and the agent's
+/// own text, at most `TEXT_BYTES_MAX` bytes. Output: at most `PROCESS_BYTES_MAX` bytes.
+pub fn with_agent(mut text: String, agent: &str) -> String {
+    assert!(agent.len() <= TEXT_BYTES_MAX);
+    let part = agent.trim();
+    if part.is_empty() {
+        return text;
+    }
+    if text.is_empty() {
+        text.push_str(TITLE);
+    }
+    text.push_str(AGENT_HEADING);
+    text.push_str(part);
+    text.push('\n');
     assert!(text.len() <= PROCESS_BYTES_MAX);
     text
 }

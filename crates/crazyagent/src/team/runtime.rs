@@ -386,6 +386,7 @@ impl TeamRuntime {
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
+        crate::recovery::capture(&connection, None)?;
         let now = now_ms();
         connection
             .execute_batch(&format!(
@@ -700,7 +701,8 @@ impl TeamRuntime {
     /// Runs one step for every project with team work: applies agent reports and the
     /// owner's stop and restart from the agent register, sends pending messages to the
     /// master, delivers finished results, starts or reuses sub-agents within the plan's
-    /// limits, stops idle or cancelled agents and ends team panes no agent owns.
+    /// limits, stops idle or cancelled agents, ends team panes no agent owns and rewrites
+    /// each followed IDE workspace whose sections changed.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.collect()?;
         self.owner_controls()?;
@@ -713,7 +715,8 @@ impl TeamRuntime {
         self.owner_controls()?;
         self.note_conversations()?;
         self.watch_questions()?;
-        self.sweep()
+        self.sweep()?;
+        crate::ide::workspace::follow(&self.connection, &self.root)
     }
 
     /// Reads each busy sub-agent's terminal for a question it waits on, at most once each
@@ -976,6 +979,7 @@ impl TeamRuntime {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        crate::recovery::capture(&tx, Some(now))?;
         for id in ids {
             tx.execute(
                 "UPDATE team_tasks SET status='queued', agent=NULL WHERE agent=?1 AND status='running' AND cancel_requested=0",
@@ -2764,8 +2768,9 @@ impl TeamRuntime {
     ) -> Result<AgentContext, String> {
         let unread =
             |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
-        let context =
-            crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
+        let context = crate::launch_context::for_project(&self.connection, project)
+            .and_then(|context| context.for_agent(&self.connection, project, id))
+            .map_err(unread)?;
         let master = role == AgentRole::Master;
         let live = master
             && self
@@ -4615,6 +4620,12 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
+    let root = state
+        .parent()
+        .expect("the team state is in the runtime folder");
+    if let Err(problem) = crate::recovery::scan(root) {
+        eprintln!("recovery: {}", bound_text(&problem.0, 300));
+    }
     let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
