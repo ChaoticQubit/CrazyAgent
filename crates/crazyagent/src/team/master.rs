@@ -68,7 +68,7 @@ fn state(problem: impl std::fmt::Display) -> EngineError {
 }
 
 /// Creates the live master tables: the per-project live switch with its turn and owner
-/// typing state, the turns a live master ended, and the role a delegation asked for.
+/// typing state and the turns a live master ended. `names` keeps the role a delegation asked for.
 /// Takes the engine database. Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -92,11 +92,6 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 finished_ms INTEGER NOT NULL,
                 outcome TEXT NOT NULL,
                 PRIMARY KEY (agent, turn)
-            );
-            CREATE TABLE IF NOT EXISTS team_task_roles (
-                task INTEGER PRIMARY KEY,
-                project TEXT NOT NULL,
-                role TEXT NOT NULL
             );",
         )
         .map_err(state)
@@ -486,17 +481,8 @@ fn delegate(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(state)?;
-    if let Some(role) = role {
-        tx.execute(
-            "DELETE FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks WHERE project=?1)",
-            [project.as_str()],
-        )
-        .map_err(state)?;
-        tx.execute(
-            "INSERT OR REPLACE INTO team_task_roles(task,project,role) VALUES (?1,?2,?3)",
-            params![id, project.as_str(), role],
-        )
-        .map_err(state)?;
+    if let Some(role) = role.and_then(super::names::handle) {
+        super::names::set_task_role(&tx, project, id, &role)?;
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {
