@@ -343,6 +343,35 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
     }
 }
 
+/// The settings the engine writes for this machine are the current platform's terminal
+/// profiles with the owner's login shell from the real account database as the IDE shell
+/// and the one tasks run in, and the extension's Sandboxed terminal as the default.
+#[cfg(unix)]
+#[test]
+fn machine_profiles_use_this_platform_and_the_owners_login_shell() {
+    let os = if cfg!(target_os = "macos") {
+        "osx"
+    } else {
+        "linux"
+    };
+    let shell = ide_shell::owner_shell().unwrap();
+    assert!(shell.is_absolute(), "{}", shell.display());
+
+    let settings = machine_profiles().unwrap();
+
+    assert_eq!(settings, profiles(Platform::CURRENT, &shell));
+    assert_eq!(
+        settings[&format!("terminal.integrated.defaultProfile.{os}")],
+        json!(SANDBOXED)
+    );
+    let automation = &settings[&format!("terminal.integrated.automationProfile.{os}")];
+    assert_eq!(automation["path"], json!(shell.to_string_lossy()));
+    assert_eq!(
+        &settings[&format!("terminal.integrated.profiles.{os}")][IDE_SHELL],
+        automation
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn ide_shell_finds_the_project_folder_and_its_read_folders_in_the_engine_database() {
