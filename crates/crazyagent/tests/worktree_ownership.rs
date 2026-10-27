@@ -628,6 +628,111 @@ async fn lease_status_detects_replacement_without_restart() {
     engine.close().await.unwrap();
 }
 
+/// Reads the admin folder a worktree's `.git` link names. Takes the worktree path.
+/// Returns the folder inside the repository's `.git/worktrees`.
+fn admin_folder(worktree: &Path) -> PathBuf {
+    let link = std::fs::read_to_string(worktree.join(".git")).unwrap();
+    PathBuf::from(link.strip_prefix("gitdir: ").unwrap().trim_end())
+}
+
+#[tokio::test]
+async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let repo = repository(&root, "repo");
+    let (engine, _) = setup(&root, &repo).await;
+    admit(&engine, &repo).await;
+    assert_eq!(
+        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
+            .await
+            .outcome,
+        Outcome::Applied
+    );
+    let lease = leases(&engine).await.remove(0);
+    assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Ready);
+
+    let blobs = root.join("blobs");
+    std::fs::create_dir(&blobs).unwrap();
+    let mut names = Vec::new();
+    for index in 0..9000 {
+        std::fs::write(blobs.join(index.to_string()), format!("loose {index}\n")).unwrap();
+        names.push(format!("../blobs/{index}"));
+    }
+    let mut hash = vec!["hash-object", "-w"];
+    hash.extend(names.iter().map(String::as_str));
+    let written = git(&repo, &hash);
+    assert_eq!(written.lines().count(), 9000);
+    let first = written.lines().next().unwrap().to_owned();
+    let fan = repo.join(".git/objects").join(&first[..2]);
+    assert!(fan.join(&first[2..]).is_file());
+
+    let outside = root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".git/objects/zz")).unwrap();
+    std::os::unix::fs::symlink(&outside, fan.join("tmp_obj_left")).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "agent",
+            root.join("agent").to_str().unwrap(),
+        ],
+    );
+    let agent = admin_folder(&root.join("agent"));
+    std::os::unix::fs::symlink(&outside, agent.join("planted")).unwrap();
+    std::fs::hard_link(agent.join("index"), agent.join("index-link")).unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Ready
+    );
+
+    let planted = fan.join("f".repeat(first.len() - 2));
+    std::os::unix::fs::symlink(outside.join("object"), &planted).unwrap();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Uncertain
+    );
+    let readmission = apply(
+        &engine,
+        "readmit",
+        4,
+        Command::AdmitRepository {
+            project_id: ProjectId::new("project").unwrap(),
+            repository: repo.to_str().unwrap().into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        readmission.outcome,
+        rejected(&format!(
+            "untrusted_git_entry:objects/{}/{}",
+            &first[..2],
+            "f".repeat(first.len() - 2)
+        ))
+    );
+    std::fs::remove_file(&planted).unwrap();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Ready
+    );
+
+    let own = admin_folder(Path::new(&lease.path));
+    std::os::unix::fs::symlink(&outside, own.join("planted")).unwrap();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Uncertain
+    );
+    std::fs::remove_file(own.join("planted")).unwrap();
+    assert_eq!(
+        leases(&engine).await[0].state,
+        crazyagent::worktrees::LeaseState::Ready
+    );
+    engine.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn ordinary_remote_configuration_does_not_grant_network_authority() {
     let temporary = tempfile::tempdir().unwrap();

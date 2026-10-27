@@ -2475,29 +2475,7 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
 
 #[cfg(unix)]
 fn dispatch_config(path: &Path) -> Result<(), EngineError> {
-    let mut pending = vec![path.join(".git")];
-    let mut visited = 0;
-    while let Some(entry) = pending.pop() {
-        visited += 1;
-        if visited > 8192 {
-            return Err(failure("dispatch_git_metadata_capacity"));
-        }
-        let metadata = std::fs::symlink_metadata(&entry).map_err(io_error)?;
-        if metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.mode() & 0o022 != 0
-            || (!metadata.is_dir() && (!metadata.is_file() || metadata.nlink() != 1))
-        {
-            return Err(failure("dispatch_git_metadata_untrusted"));
-        }
-        if metadata.is_dir() {
-            for child in std::fs::read_dir(&entry).map_err(io_error)? {
-                pending.push(child.map_err(io_error)?.path());
-                if pending.len() > 8192 {
-                    return Err(failure("dispatch_git_metadata_capacity"));
-                }
-            }
-        }
-    }
+    crate::worktrees::validate_metadata(path)?;
     let bytes = dispatch_file(&path.join(".git/config"), 65536)?;
     let text = std::str::from_utf8(&bytes).map_err(io_error)?;
     let mut section = String::new();
@@ -2583,6 +2561,7 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
         return Err(failure("dispatch_git_metadata_escape"));
     }
     dispatch_directory(&metadata, &seal.metadata)?;
+    crate::worktrees::validate_admin(repository, &metadata)?;
     if dispatch_file(&metadata.join("commondir"), 32)? != b"../..\n"
         || dispatch_file(&metadata.join("gitdir"), 4096)?
             != format!("{}/.git\n", seal.path).as_bytes()
@@ -3035,6 +3014,34 @@ mod tests {
     use crate::model_gateway::{Health, Observation, ObservationKind, Quota};
     use std::future::Future;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn the_terminal_host_follows_the_tmux_program_setup_installs_or_removes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+        let first = engine.terminal(root.path()).unwrap();
+        assert!(Arc::ptr_eq(&first, &engine.terminal(root.path()).unwrap()));
+        let bin = root.path().join("setup/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("tmux"), "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let installed = engine.terminal(root.path()).unwrap();
+        assert!(!Arc::ptr_eq(&first, &installed));
+        assert!(Arc::ptr_eq(
+            &installed,
+            &engine.terminal(root.path()).unwrap()
+        ));
+        std::fs::remove_file(bin.join("tmux")).unwrap();
+        let removed = engine.terminal(root.path()).unwrap();
+        assert!(!Arc::ptr_eq(&installed, &removed));
+        assert!(Arc::ptr_eq(
+            &removed,
+            &engine.terminal(root.path()).unwrap()
+        ));
+        engine.close().await.unwrap();
+    }
 
     const GATEWAY_ACTOR_CATALOG: &str = r#"
 allowed_destinations = ["sandbox-profile"]

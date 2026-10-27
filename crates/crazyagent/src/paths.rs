@@ -168,7 +168,10 @@ impl Layout {
     }
 }
 
-fn private_folder(path: &Path) -> Result<(), PathsError> {
+/// Creates a folder and any missing parents private to this user (0700), then refuses
+/// it unless it is a real folder this user owns with exactly mode 0700. Input: the
+/// folder. Output: Ok, or an error naming the path and the fix.
+pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
