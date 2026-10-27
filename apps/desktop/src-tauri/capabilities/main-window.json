@@ -32,6 +32,7 @@
     "allow-desktop-team-delegate",
     "allow-desktop-team-cancel",
     "allow-desktop-team-keep-warm",
+    "allow-desktop-team-live-master",
     "allow-desktop-team-pause",
     "allow-desktop-team-hand-off",
     "allow-desktop-team-rename",
