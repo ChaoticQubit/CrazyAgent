@@ -1,0 +1,34 @@
+.ide-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  height: calc(100vh - 220px);
+}
+
+.ide-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-2);
+}
+
+.ide-status p {
+  margin: 0;
+}
+
+.ide-problem {
+  margin: 0;
+  color: var(--danger);
+}
+
+.ide-panel {
+  flex: 1;
+  min-height: 240px;
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.ide-panel[hidden] {
+  display: none;
+}

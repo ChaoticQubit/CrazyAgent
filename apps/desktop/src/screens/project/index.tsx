@@ -4,9 +4,12 @@ import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, load
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
+import { closeIde, ideView } from "../../api-ide";
+import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
+import { IdeTab } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { IdeConfirm } from "./ide-confirm";
@@ -31,7 +34,15 @@ export const TABS = [
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
-export type TabId = typeof TABS[number]["id"];
+const IDE_TAB = { id: "ide", label: "IDE", icon: "file-code" } as const satisfies { id: string; label: string; icon: IconName };
+
+export type TabId = typeof TABS[number]["id"] | typeof IDE_TAB.id;
+
+/** The project page's tabs: the fixed ones, plus the IDE tab last while the `ide_tab` flag is
+ * on. Input: the IDE view, undefined until it is read. Output: the tabs in order. */
+export function projectTabs(view: IdeView | undefined): readonly { id: TabId; label: string; icon: IconName }[] {
+  return view?.tab === "on" ? [...TABS, IDE_TAB] : TABS;
+}
 
 function shown<T>(read: Loaded<T>): Result<T> | undefined {
   return read.kind === "loading" ? undefined : read;
@@ -146,23 +157,34 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   navigate?: (path: string) => void;
 }) {
   const { data, toast, session } = useProject(projectId, navigate, name);
-  const active: TabId = TABS.some((item) => item.id === tab) ? tab as TabId : "overview";
+  const [ide, setIde] = useState<IdeView>();
+  const tabs = projectTabs(ide);
+  const active: TabId = tabs.some((item) => item.id === tab) ? tab as TabId : "overview";
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
   const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
   useEffect(() => {
+    let live = true;
+    void ideView().then((result) => { if (live && result.kind === "ok") setIde(result.value); });
+    return () => {
+      live = false;
+      void closeIde(projectId);
+    };
+  }, [projectId]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!shortcutKey(event)) return;
       const position = Number(event.key) - 1;
-      if (Number.isInteger(position) && position >= 0 && position < TABS.length) {
+      if (Number.isInteger(position) && position >= 0 && position < tabs.length) {
         event.preventDefault();
-        select(TABS[position].id);
+        select(tabs[position].id);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [projectId]);
+  }, [projectId, tabs.length]);
 
   return <div className="pj pj-project">
     <PageHeader title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
@@ -170,7 +192,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       actions={<ProjectMenu data={data} />} />
     <RecoveryBanner key={projectId} project={projectId} />
     <Tabs label="Project" current={active}
-      tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
+      tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
@@ -179,6 +201,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
+      {active === "ide" && <IdeTab key={data.id} projectId={projectId} />}
     </div>
     <IdeConfirm data={data} />
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}

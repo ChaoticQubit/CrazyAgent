@@ -42,6 +42,7 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
@@ -474,6 +475,8 @@ struct Authority {
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
     ide: crate::ide::bridge::Grants,
+    #[cfg(unix)]
+    ide_servers: crate::ide::server::Servers,
 }
 
 impl Authority {
@@ -880,6 +883,15 @@ pub struct OwnerRuntimeHandle {
     authority: Arc<Authority>,
 }
 
+#[cfg(unix)]
+impl OwnerRuntimeHandle {
+    /// The engine's IDE servers, one per open project, all stopped when the owner server
+    /// stops. Output: the register.
+    pub fn ide(&self) -> &crate::ide::server::Servers {
+        &self.authority.ide_servers
+    }
+}
+
 impl OwnerRuntimeHandle {
     pub async fn prepare_native_profile(
         &self,
@@ -1219,6 +1231,13 @@ impl OwnerServer {
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
+            let ide_servers = crate::ide::server::Servers::new(
+                root.path
+                    .parent()
+                    .ok_or_else(|| failure("owner_root_unavailable"))?,
+                crate::ide::server::IDLE_LIMIT,
+            );
+            ide_servers.sweep_left().await;
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1233,6 +1252,8 @@ impl OwnerServer {
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
                 ide: crate::ide::bridge::Grants::default(),
+                #[cfg(unix)]
+                ide_servers,
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1448,6 +1469,8 @@ impl OwnerServer {
             assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         upkeep.abort();
+        #[cfg(unix)]
+        self.authority.ide_servers.stop_all().await;
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
@@ -1985,6 +2008,7 @@ enum Protocol {
     Recovery,
     NativeAuth,
     Process,
+    IdeTab,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -2013,6 +2037,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("recovery", Protocol::Recovery),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
+        ("ide_tab", Protocol::IdeTab),
     ];
     Ok(named
         .into_iter()
@@ -2102,6 +2127,7 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2238,6 +2264,10 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::IdeTab(a) => {
+            let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2282,15 +2312,17 @@ struct Tasks {
 /// Owner work that may outlast the owner exchange deadline, read and admitted inside it
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
-/// agent's process group or its host to end it, and Changes requests, which run git on
-/// the owner's checkout. Each carries the admission, and the projects home its validated
-/// request; the others read the request frame.
+/// agent's process group or its host to end it, Changes requests, which run git on the
+/// owner's checkout, and IDE tab requests, which wait for an IDE server to start. Each
+/// carries the admission, and the projects home its validated request; the others read the
+/// request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    IdeTab(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2332,6 +2364,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
+        Protocol::IdeTab => ide_tab::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

@@ -173,7 +173,8 @@ const ENGINE_SECRET_FILES: &[&str] = &[
     "github.toml",
 ];
 
-const ENGINE_SECRET_FOLDERS: &[&str] = &["account-keys", crate::terminal::FOLDER];
+const ENGINE_SECRET_FOLDERS: &[&str] =
+    &["account-keys", crate::terminal::FOLDER, crate::ide::FOLDER];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
 
