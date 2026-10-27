@@ -34,6 +34,8 @@ pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
+const ASK_RULE_BYTES_MAX: usize = 1024;
+const ASK_TOOL: &str = "ask";
 const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
@@ -54,6 +56,7 @@ const _: () = assert!(
 const _: () = assert!(
     MASTER_INSTRUCTIONS_BYTES_MAX <= crate::adapters::codex::DEVELOPER_INSTRUCTIONS_BYTES_MAX
 );
+const _: () = assert!(INSTRUCTIONS_BYTES_MAX + ASK_RULE_BYTES_MAX <= MASTER_INSTRUCTIONS_BYTES_MAX);
 
 fn failure(code: &str) -> LaunchError {
     LaunchError(code.into())
@@ -187,7 +190,8 @@ pub fn for_master(
 
 /// Tells a conversation master whose tools are on what it can do and how it starts a
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
-/// to the team, and the team plan's sub-agents, or for an empty plan the harnesses it can use.
+/// to the team, it asks the owner only with the `ask` tool, and the team plan's sub-agents,
+/// or for an empty plan the harnesses it can use.
 /// Input: the project setup and the harnesses with an eligible account now.
 /// Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
 pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> String {
@@ -197,6 +201,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
         crate::team::tool::SERVER_NAME,
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
+    let rule = ask_rule();
     if setup.team.sub_harnesses.is_empty() {
         section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
@@ -209,7 +214,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
                 slot.agents,
                 if slot.tools { "on" } else { "off" }
             );
-            if left > 0 || section.len() + line.len() > TEAM_INDEX_BYTES_MAX {
+            if left > 0 || section.len() + line.len() + rule.len() > TEAM_INDEX_BYTES_MAX {
                 left += 1;
                 continue;
             }
@@ -219,6 +224,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
             section.push_str(&format!("- and {left} more\n"));
         }
     }
+    section.push_str(&rule);
     assert!(section.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     section
 }
@@ -341,6 +347,8 @@ impl AgentContext {
             },
             secrets: Vec::new(),
         });
+        self.instructions.push_str(&ask_rule());
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(self)
     }
 
@@ -465,7 +473,8 @@ impl AgentContext {
             }
             assert!(
                 text.len()
-                    <= INSTRUCTIONS_BYTES_MAX
+                    <= MASTER_INSTRUCTIONS_BYTES_MAX
+                        + 1
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
                         + crate::agent_home::PROCESS_BYTES_MAX
@@ -614,6 +623,19 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
     }
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
     text
+}
+
+/// Tells an agent that holds the engine's team tools how it asks the owner: only with the
+/// `ask` tool, one question per call, with its options and a recommended answer, never in
+/// reply text or with its harness's own question tools. Output: at most
+/// `ASK_RULE_BYTES_MAX` bytes of markdown.
+pub(crate) fn ask_rule() -> String {
+    let rule = format!(
+        "\n## Asking the owner\n\nAsk the owner a question only with the `{ASK_TOOL}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put the choices in `options` and your pick in `recommended`, and say why in `context`. Answer what you can from the code and the project's documents first. The owner answers in CrazyAgent, and the answer comes back to you once.\n",
+        crate::team::tool::SERVER_NAME
+    );
+    assert!(rule.len() <= ASK_RULE_BYTES_MAX);
+    rule
 }
 
 fn skill_description(path: &Path) -> String {

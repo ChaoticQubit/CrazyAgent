@@ -489,6 +489,73 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
 }
 
 #[test]
+fn master_and_agent_instructions_name_the_ask_tool() {
+    use crate::project_setup::HarnessSlot;
+    let rule =
+        "Ask the owner a question only with the `ask` tool of the `crazyagent-team` MCP server";
+    let folder = tempfile::tempdir().unwrap();
+    let mut setup = stored(folder.path());
+
+    let master = master_tools_section(&setup, &["codex"]);
+    assert_eq!(master.matches(rule).count(), 1, "{master}");
+    assert!(master.contains("never in your reply text"));
+    assert!(master.contains("one question per call"));
+    assert!(master.contains("`options`"));
+    assert!(master.contains("`recommended`"));
+    setup.team.sub_harnesses = (0..200)
+        .map(|index| HarnessSlot {
+            harness: format!("{index}-{}", "h".repeat(250)),
+            agents: 1,
+            tools: true,
+        })
+        .collect();
+    let crowded = master_tools_section(&setup, &[]);
+    assert!(
+        crowded.contains(rule),
+        "a crowded team plan never pushes the rule out"
+    );
+    assert!(crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = Path::new("/usr/local/bin/crazyagent");
+    let record = root.join("tmp").join(crate::team::tool::DROP_FILE);
+    let mailbox = root.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let fresh = |instructions: String| AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions,
+        process: None,
+    };
+    let start = "# Project context from CrazyAgent\n";
+    assert!(
+        !fresh(start.into()).instructions().contains(rule),
+        "an agent without the team server has no ask tool to name"
+    );
+    for context in [
+        fresh(start.into()).with_team_tool(engine, &record).unwrap(),
+        fresh(start.into())
+            .with_live_team_tool(engine, &mailbox)
+            .unwrap(),
+    ] {
+        let told = context.instructions();
+        assert!(told.starts_with(start), "{told}");
+        assert_eq!(told.matches(rule).count(), 1, "{told}");
+        assert!(told.contains("one question per call"));
+    }
+    let taken = fresh(start.into()).with_team_tool(engine, &record).unwrap();
+    assert_eq!(
+        taken.with_team_tool(engine, &record).unwrap_err().0,
+        "launch_context_team_tool_taken"
+    );
+
+    let full = fresh("x".repeat(INSTRUCTIONS_BYTES_MAX))
+        .with_live_team_tool(engine, &mailbox)
+        .unwrap();
+    assert!(full.instructions().len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(full.instructions().ends_with(&ask_rule()));
+}
+
+#[test]
 fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
