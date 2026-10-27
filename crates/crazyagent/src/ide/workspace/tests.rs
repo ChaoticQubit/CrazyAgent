@@ -288,7 +288,15 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
         serde_json::from_str(&std::fs::read_to_string(case.file()).unwrap()).unwrap();
     assert_eq!(
         body["settings"],
-        serde_json::json!({ "files.readonlyInclude": {} })
+        serde_json::json!({
+            "chat.mcp.access": "none",
+            "chat.extensionTools.enabled": false,
+            "workbench.settings.showAISearchToggle": false,
+            "extensions.ignoreRecommendations": true,
+            "workbench.startupEditor": "none",
+            "files.readonlyInclude": {},
+        }),
+        "the workspace file carries the lock's workspace keys"
     );
 }
 

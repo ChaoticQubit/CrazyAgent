@@ -231,7 +231,8 @@ fn sections(
     Ok((sections, hidden))
 }
 
-/// Renders the workspace file: its folders in order and its settings.
+/// Renders the workspace file: its folders in order, the lock's workspace keys and its
+/// settings.
 /// Inputs: the sections and settings. Output: the JSON text.
 fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, EngineError> {
     let folders = sections
@@ -249,10 +250,12 @@ fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, 
         .iter()
         .map(|glob| (glob.clone(), serde_json::Value::Bool(true)))
         .collect();
-    let body = serde_json::json!({
-        "folders": folders,
-        "settings": { "files.readonlyInclude": readonly },
-    });
+    let mut locked = super::settings::workspace();
+    locked.insert(
+        "files.readonlyInclude".to_owned(),
+        serde_json::Value::Object(readonly),
+    );
+    let body = serde_json::json!({ "folders": folders, "settings": locked });
     serde_json::to_string_pretty(&body).map_err(unavailable)
 }
 

@@ -1,5 +1,6 @@
 import type * as vscode from "vscode";
 import { Engine } from "./engine.js";
+import { startLock } from "./lock.js";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -10,11 +11,12 @@ export type Feature = (context: vscode.ExtensionContext, engine: Engine) => void
 const features: Feature[] = [];
 
 /**
- * Starts every feature when the CrazyAgent engine launched this IDE server, which it
- * shows by setting the capability and socket variables; otherwise does nothing.
+ * Starts the settings lock, then every feature when the CrazyAgent engine launched this IDE
+ * server, which it shows by setting the capability and socket variables.
  * Input: the extension context. Output: none; the bridge closes with the context.
  */
 export function activate(context: vscode.ExtensionContext): void {
+  startLock(context, process.env);
   const engine = Engine.fromEnv(process.env);
   if (engine === undefined) return;
   context.subscriptions.push(engine);
