@@ -159,13 +159,6 @@ pub fn header(
     row(limit, chosen, right, glyphs)
 }
 
-/// The help line: keys in priority order, then `? Help` at the right edge.
-/// Inputs: width, hints, theme and glyphs. Output: one line that drops trailing
-/// hints that do not fit; `? Help` always stays.
-pub fn help_line(limit: usize, hints: &[Hint], theme: &Theme, glyphs: &Glyphs) -> Line<'static> {
-    footer(limit, hints, 0, theme, glyphs)
-}
-
 /// The help line with the pending questions badge, "2 questions", before `? Help` while
 /// any question waits for the owner. Inputs: width, hints, the pending count, theme and
 /// glyphs. Output: one line; hints that do not fit drop first, the badge and `? Help` stay.
@@ -540,17 +533,17 @@ mod tests {
             hint("Ctrl-Q", "Quit"),
         ];
         assert_eq!(
-            plain(&help_line(80, &hints, &theme(), &UNICODE)),
+            plain(&footer(80, &hints, 0, &theme(), &UNICODE)),
             " n New project  Enter Open  s Settings  / Filter  Ctrl-K Go to           ? Help "
         );
         assert_eq!(
-            plain(&help_line(120, &hints, &theme(), &UNICODE)),
+            plain(&footer(120, &hints, 0, &theme(), &UNICODE)),
             format!(
                 " n New project   Enter Open   s Settings   / Filter   Ctrl-K Go to   Ctrl-Q Quit{}? Help ",
                 " ".repeat(33)
             )
         );
-        assert!(plain(&help_line(20, &hints, &theme(), &UNICODE)).ends_with("? Help "));
+        assert!(plain(&footer(20, &hints, 0, &theme(), &UNICODE)).ends_with("? Help "));
     }
 
     #[test]

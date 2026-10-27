@@ -108,15 +108,7 @@ fn loaded() -> ProjectPlugins {
 fn frame(view: &ProjectPlugins, width: u16, height: u16) -> Vec<String> {
     let look = Look::plain();
     let columns = usize::from(width);
-    let items: Vec<(String, String)> = Tab::ALL
-        .iter()
-        .map(|tab| {
-            (
-                format!("{} {}", look.glyph(tab.glyph()), tab.label()),
-                String::new(),
-            )
-        })
-        .collect();
+    let items = crate::tui::screens::project_view::tab_items(0, columns, &look);
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Settings as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
     let (lines, help) = view.rows(columns - 4, room, &look);

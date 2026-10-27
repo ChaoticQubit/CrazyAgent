@@ -321,7 +321,7 @@ async fn answer_sends_the_version_read() {
 
 #[tokio::test]
 async fn footer_badge_counts_pending_questions() {
-    let mut engine = Engine::start().await;
+    let engine = Engine::start().await;
     engine.ask(
         "Which hosting region should the shop use?",
         &["Europe", "North America"],
@@ -406,4 +406,89 @@ async fn footer_badge_counts_pending_questions() {
         project.last().unwrap().ends_with("3 questions  ? Help "),
         "the badge shows on every screen: {project:?}"
     );
+}
+
+#[tokio::test]
+async fn a_long_question_is_marked_cut_reads_whole_on_v_and_keeps_its_options_in_view() {
+    let mut engine = Engine::start().await;
+    for topic in ["hosting region", "payment provider", "newsletter tool"] {
+        engine.ask(
+            &format!("Which {topic} should the shop use?"),
+            &["Yes", "No"],
+            "Yes",
+        );
+    }
+    let mut question: String = (1..=60).map(|word| format!("word{word:02} ")).collect();
+    question.push_str("QUESTION-END?");
+    let mut context: String = (1..=120).map(|word| format!("fact{word:03} ")).collect();
+    context.push_str("CONTEXT-END");
+    let db = crate::questions::open(engine.root.path()).unwrap();
+    crate::questions::ask(
+        &db,
+        &engine.project,
+        &Asker::Master(2),
+        &Ask {
+            question,
+            options: vec![
+                "Keep it".into(),
+                "Change it".into(),
+                "Ask again later".into(),
+            ],
+            recommended: Some("Keep it".into()),
+            context: Some(context),
+        },
+    )
+    .unwrap();
+    let mut screen = screen(&engine);
+    engine.pump(&mut screen, NOW).await.unwrap();
+    for _ in 0..3 {
+        assert!(screen.questions.key(key(KeyCode::Down)));
+    }
+    let page = shown(&mut screen, 80, 24);
+    assert!(
+        page.contains("... v reads all of it"),
+        "a cut text says so:\n{page}"
+    );
+    assert!(
+        !page.contains("QUESTION-END") && !page.contains("CONTEXT-END"),
+        "{page}"
+    );
+    assert!(page.contains("v Read all"), "{page}");
+
+    assert!(screen.questions.key(key(KeyCode::Char('a'))));
+    let answering = shown(&mut screen, 80, 24);
+    for option in [
+        "1. Keep it (recommended)",
+        "2. Change it",
+        "3. Ask again later",
+        "Your answer",
+    ] {
+        assert!(
+            answering.contains(option),
+            "{option} stays in view while answering:\n{answering}"
+        );
+    }
+    assert!(screen.questions.key(key(KeyCode::Esc)));
+    assert!(!screen.questions.editing());
+
+    assert!(screen.questions.key(key(KeyCode::Char('v'))));
+    let top = shown(&mut screen, 80, 24);
+    assert!(
+        top.contains("word01") && top.contains("QUESTION-END?"),
+        "the whole question:\n{top}"
+    );
+    assert!(top.contains("Lines 1-"), "{top}");
+    for _ in 0..20 {
+        assert!(screen.questions.key(key(KeyCode::PageDown)));
+    }
+    let end = shown(&mut screen, 80, 24);
+    assert!(
+        end.contains("CONTEXT-END"),
+        "the end of the context:\n{end}"
+    );
+    assert!(screen.questions.key(key(KeyCode::Up)));
+    let back = shown(&mut screen, 80, 24);
+    assert_ne!(back, end, "one line up from the end moves at once");
+    assert!(screen.questions.key(key(KeyCode::Esc)));
+    assert!(shown(&mut screen, 80, 24).contains("... v reads all of it"));
 }

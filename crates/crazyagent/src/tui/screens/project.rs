@@ -83,7 +83,7 @@ impl Tab {
             Self::Conversation => "\u{00bb}",
             Self::Agents => "\u{229b}",
             Self::Changes => "\u{2213}",
-            Self::Questions => "?",
+            Self::Questions => "\u{225f}",
             Self::Context => "\u{29c9}",
             Self::Settings => "\u{2630}",
         }

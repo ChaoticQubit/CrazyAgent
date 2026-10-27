@@ -18,6 +18,8 @@ const STATUS_WIDTH: usize = 10;
 const LABEL_WIDTH: usize = 10;
 const BOX_LEFT: usize = 14;
 const TEXT_LINES_MAX: usize = 4;
+const READ_PAGE: usize = 10;
+const CUT: &str = "... v reads all of it";
 const QUIET_CODES: [&str; 1] = ["trusted_connection_unavailable"];
 
 /// What the owner is doing with the chosen question: typing or picking an answer, or
@@ -46,6 +48,7 @@ pub(in crate::tui) struct ProjectQuestions {
     loaded: bool,
     cursor: usize,
     settling: Option<Settling>,
+    reading: Option<usize>,
     notice: Option<Notice>,
     queued: Option<QuestionsQuery>,
     sent: Option<QuestionsQuery>,
@@ -62,6 +65,7 @@ impl ProjectQuestions {
             loaded: false,
             cursor: 0,
             settling: None,
+            reading: None,
             notice: None,
             queued: None,
             sent: None,
@@ -167,6 +171,9 @@ impl ProjectQuestions {
 
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.items.len().saturating_sub(1));
+        if self.items.is_empty() {
+            self.reading = None;
+        }
         assert!(self.items.is_empty() || self.cursor < self.items.len());
     }
 
@@ -191,9 +198,10 @@ impl ProjectQuestions {
         }
     }
 
-    /// Handles one key: move through the questions, `a` to answer and `d` to dismiss the
-    /// chosen pending one; in the answer box ↑↓ pick an option, letters type, Enter sends and
-    /// Esc cancels. Input: the key. Output: true when the tab used the key; other keys,
+    /// Handles one key: move through the questions, `v` to read the chosen one whole, `a` to
+    /// answer and `d` to dismiss the chosen pending one; in the answer box ↑↓ pick an option,
+    /// letters type, Enter sends and Esc cancels; while reading, ↑↓ and Page keys scroll and
+    /// Esc or `v` close. Input: the key. Output: true when the tab used the key; other keys,
     /// including Esc on the list, are left to the host.
     pub(in crate::tui) fn key(&mut self, key: KeyEvent) -> bool {
         if let Some(Settling::Answer { .. }) = self.settling {
@@ -205,6 +213,18 @@ impl ProjectQuestions {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
         {
             return false;
+        }
+        if let Some(top) = self.reading {
+            self.reading = match key.code {
+                KeyCode::Esc | KeyCode::Char('v') => None,
+                KeyCode::Up => Some(top.saturating_sub(1)),
+                KeyCode::Down => Some(top.saturating_add(1)),
+                KeyCode::PageUp => Some(top.saturating_sub(READ_PAGE)),
+                KeyCode::PageDown => Some(top.saturating_add(READ_PAGE)),
+                KeyCode::Home => Some(0),
+                _ => return true,
+            };
+            return true;
         }
         if let Some(Settling::Dismiss { id, version }) = self.settling {
             match key.code {
@@ -231,6 +251,7 @@ impl ProjectQuestions {
         match (key.code, pending) {
             (KeyCode::Up, _) => self.cursor = self.cursor.saturating_sub(1),
             (KeyCode::Down, _) => self.cursor = self.cursor.saturating_add(1),
+            (KeyCode::Char('v'), _) if self.chosen().is_some() => self.reading = Some(0),
             (KeyCode::Char('a'), Some((id, version, option))) => {
                 self.notice = None;
                 self.settling = Some(Settling::Answer {
@@ -311,18 +332,29 @@ impl ProjectQuestions {
     }
 
     /// Draws the Questions tab: the list, the chosen question with its options and the
-    /// recommended one, and the answer box or the dismiss question while one is open.
+    /// recommended one, and the answer box or the dismiss question while one is open; or,
+    /// while reading, the whole chosen question scrolled to where the owner is.
     /// Inputs: the content width, the rows available, the UTC offset and the look.
     /// Output: the rows, the answer box cursor as a column and row of those rows, and the
     /// help keys.
     pub(in crate::tui) fn rows(
-        &self,
+        &mut self,
         content: usize,
         room: usize,
         offset: i64,
         look: &Look,
     ) -> (Vec<Row>, Option<(usize, usize)>, Help) {
         let mut lines = Vec::new();
+        if let (Some(top), Some(question)) = (self.reading, self.chosen()) {
+            let (shown, top) = whole(question, content, room, top, offset, look);
+            self.reading = Some(top);
+            let help = vec![
+                ("\u{2191}\u{2193}", "Scroll"),
+                ("PgUp/PgDn", "Page"),
+                ("Esc", "Back"),
+            ];
+            return (shown, None, help);
+        }
         if !self.loaded {
             lines.push(Row::of("Questions", look.heading));
             lines.push(Row::of("Loading questions...", look.muted));
@@ -358,7 +390,10 @@ impl ProjectQuestions {
             );
             return lines;
         }
-        let shown = LIST_ROWS_MAX.min(room.saturating_sub(10).max(1));
+        let shown = match self.settling {
+            Some(Settling::Answer { .. }) => 1,
+            _ => LIST_ROWS_MAX.min(room.saturating_sub(10).max(1)),
+        };
         let first = window(self.cursor, self.items.len(), shown);
         let widths = [
             content.saturating_sub(2 + FROM_WIDTH + STATUS_WIDTH + 4),
@@ -386,16 +421,19 @@ impl ProjectQuestions {
         if let Some(question) = self.chosen() {
             lines.extend(self.details(question, content, offset, look));
         }
-        lines.truncate(room.max(1));
+        if lines.len() > room.max(1) {
+            lines.truncate(room.max(1) - 1);
+            lines.push(Row::of(CUT, look.muted));
+        }
+        assert!(lines.len() <= room.max(1));
         lines
     }
 
     fn details(&self, question: &Question, content: usize, offset: i64, look: &Look) -> Vec<Row> {
         let text = content.saturating_sub(LABEL_WIDTH).max(1);
         let asked = i64::try_from(question.created_ms).unwrap_or(i64::MAX);
-        let mut rows: Vec<Row> = wrap_words(&question.question, content)
+        let mut rows: Vec<Row> = cut(wrap_words(&question.question, content))
             .into_iter()
-            .take(TEXT_LINES_MAX)
             .map(|line| Row::of(line, look.heading))
             .collect();
         rows.push(spread(
@@ -405,9 +443,6 @@ impl ProjectQuestions {
                 .push(asker_label(&question.asker), look.fg),
             Row::of(format!("Asked {}", clock(asked, offset)), look.muted),
         ));
-        if let Some(context) = &question.context {
-            rows.extend(field("Context", context, text, look.fg, look));
-        }
         let picked = match &self.settling {
             Some(Settling::Answer { input, option, .. }) if input.value().trim().is_empty() => {
                 *option
@@ -442,6 +477,9 @@ impl ProjectQuestions {
         }
         if let Some(answer) = &question.answer {
             rows.extend(field("Answer", answer, text, look.success, look));
+        }
+        if let Some(context) = &question.context {
+            rows.extend(field("Context", context, text, look.fg, look));
         }
         rows
     }
@@ -510,24 +548,107 @@ impl ProjectQuestions {
         {
             help.extend([("a", "Answer"), ("d", "Dismiss")]);
         }
+        if self.chosen().is_some() {
+            help.push(("v", "Read all"));
+        }
         help.extend([("\u{2191}\u{2193}", "Move"), TABS, ("Esc", "Home")]);
         help
     }
 }
 
+/// Keeps at most `TEXT_LINES_MAX` wrapped lines, the last one saying the text goes on and
+/// how to read it whole when more were cut. Input: the wrapped lines. Output: the lines.
+fn cut(mut lines: Vec<String>) -> Vec<String> {
+    if lines.len() > TEXT_LINES_MAX {
+        lines.truncate(TEXT_LINES_MAX - 1);
+        lines.push(CUT.to_owned());
+    }
+    assert!(lines.len() <= TEXT_LINES_MAX);
+    lines
+}
+
 /// One labelled detail: the label, then the value wrapped beside it, at most
-/// `TEXT_LINES_MAX` lines. Inputs: the label, the value, its width, its style and the look.
-/// Output: the rows.
+/// `TEXT_LINES_MAX` lines with a marker when cut. Inputs: the label, the value, its width,
+/// its style and the look. Output: the rows.
 fn field(label: &str, value: &str, width: usize, style: Style, look: &Look) -> Vec<Row> {
-    wrap_words(value, width)
+    cut(wrap_words(value, width))
         .into_iter()
-        .take(TEXT_LINES_MAX)
         .enumerate()
         .map(|(index, line)| {
             let lead = if index == 0 { label } else { "" };
             Row::of(lead, look.muted).pad(LABEL_WIDTH).push(line, style)
         })
         .collect()
+}
+
+/// The whole of one question for reading: the question, who asked and when, the options with
+/// the recommended one, the suggested answer, the answer and the context, none of them cut,
+/// then where the view is. Inputs: the question, the width, the rows available, the first
+/// line wanted, the UTC offset and the look. Output: the rows and the first line shown, kept
+/// so the last line stays in view.
+fn whole(
+    question: &Question,
+    content: usize,
+    room: usize,
+    top: usize,
+    offset: i64,
+    look: &Look,
+) -> (Vec<Row>, usize) {
+    let text = content.saturating_sub(LABEL_WIDTH).max(1);
+    let labelled = |label: &str, value: &str, style: Style| -> Vec<Row> {
+        wrap_words(value, text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let lead = if index == 0 { label } else { "" };
+                Row::of(lead, look.muted).pad(LABEL_WIDTH).push(line, style)
+            })
+            .collect()
+    };
+    let asked = i64::try_from(question.created_ms).unwrap_or(i64::MAX);
+    let mut all: Vec<Row> = wrap_words(&question.question, content)
+        .into_iter()
+        .map(|line| Row::of(line, look.heading))
+        .collect();
+    all.push(Row::default());
+    all.extend(labelled("From", &asker_label(&question.asker), look.fg));
+    all.push(
+        Row::of("Asked", look.muted)
+            .pad(LABEL_WIDTH)
+            .push(clock(asked, offset), look.fg),
+    );
+    for (index, choice) in question.options.iter().enumerate() {
+        let mut line = format!("{}. {choice}", index + 1);
+        if question.recommended.as_deref() == Some(choice.as_str()) {
+            line.push_str(" (recommended)");
+        }
+        all.extend(labelled(
+            if index == 0 { "Options" } else { "" },
+            &line,
+            look.fg,
+        ));
+    }
+    if question.options.is_empty()
+        && let Some(recommended) = &question.recommended
+    {
+        all.extend(labelled("Suggested", recommended, look.fg));
+    }
+    if let Some(answer) = &question.answer {
+        all.extend(labelled("Answer", answer, look.success));
+    }
+    if let Some(context) = &question.context {
+        all.extend(labelled("Context", context, look.fg));
+    }
+    let page = room.saturating_sub(1).max(1);
+    let top = top.min(all.len().saturating_sub(page));
+    let end = (top + page).min(all.len());
+    let mut rows: Vec<Row> = all[top..end].to_vec();
+    rows.push(Row::of(
+        format!("Lines {}-{end} of {}", top + 1, all.len()),
+        look.muted,
+    ));
+    assert!(rows.len() <= page + 1 && top <= all.len());
+    (rows, top)
 }
 
 /// The option the asker recommended, by position, so the answer box starts on it.
