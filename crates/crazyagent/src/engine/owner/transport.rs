@@ -2626,7 +2626,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
                 .and_then(|v| v.strip_suffix(']'))
                 .ok_or_else(|| failure("dispatch_git_config_unsupported"))?
                 .to_ascii_lowercase();
-            section = if matches!(value.as_str(), "core" | "user" | "init") {
+            section = if matches!(value.as_str(), "core" | "user" | "init" | "extensions") {
                 value
             } else if value.starts_with("remote \"") && value.ends_with('"') {
                 "remote".into()
@@ -2648,6 +2648,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
             ("core", "filemode" | "logallrefupdates" | "ignorecase" | "precomposeunicode") => {
                 matches!(value, "true" | "false")
             }
+            ("extensions", "worktreeconfig") => value == "true",
             ("user", "name" | "email")
             | ("init", "defaultbranch")
             | ("remote", "url" | "fetch")
@@ -2702,9 +2703,8 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     {
         return Err(failure("dispatch_git_backlink_or_branch_changed"));
     }
-    match std::fs::symlink_metadata(metadata.join("config.worktree")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Err(failure("dispatch_git_metadata_unsupported")),
+    if !crate::worktrees::remote_lock_kept(&metadata) {
+        return Err(failure("dispatch_git_metadata_unsupported"));
     }
     Ok(metadata)
 }
