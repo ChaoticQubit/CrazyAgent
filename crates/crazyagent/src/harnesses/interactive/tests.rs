@@ -67,6 +67,7 @@ impl Case {
             model: None,
             tools,
             sandbox_profile: Some(self.profile()),
+            git_identity: None,
             limits: LaunchLimits::default(),
         }
     }
@@ -399,7 +400,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "--setting-sources",
         "",
         "--settings",
-        "{\"disableAllHooks\":true,\"skipDangerousModePermissionPrompt\":true}",
+        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
     ]);
@@ -776,4 +777,30 @@ fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
         "launch_claude_config_unsafe"
     );
+}
+
+#[test]
+fn the_owner_git_identity_reaches_a_pane_agent_environment() {
+    let case = Case::new();
+    let mut request = case.request("claude-code", case.subscription(), true);
+    request.git_identity = Some(
+        crate::harnesses::launch::GitIdentity::new(
+            "Repo Owner".into(),
+            "owner@example.invalid".into(),
+        )
+        .unwrap(),
+    );
+    let built = command(&request, None, &run(None)).unwrap();
+    for (name, value) in [
+        ("GIT_AUTHOR_NAME", "Repo Owner"),
+        ("GIT_AUTHOR_EMAIL", "owner@example.invalid"),
+        ("GIT_COMMITTER_NAME", "Repo Owner"),
+        ("GIT_COMMITTER_EMAIL", "owner@example.invalid"),
+    ] {
+        assert!(
+            built.env.contains(&(name.to_owned(), value.to_owned())),
+            "{name}: {:?}",
+            built.env
+        );
+    }
 }

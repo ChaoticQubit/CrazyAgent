@@ -342,6 +342,23 @@ pub fn accept(
     }
 }
 
+/// Reads the owner's git identity as the owner's own git sees it for a repository: the
+/// repository's config, then the owner's global config in their home, never the system
+/// config. Inputs: the repository root and the owner's home. Output: the name and email,
+/// or `changes_owner_identity_missing`.
+pub fn owner_git_identity(
+    repository: &Path,
+    owner_home: &Path,
+) -> Result<(String, String), EngineError> {
+    #[cfg(unix)]
+    return owner::owner_identity(repository, owner_home);
+    #[cfg(not(unix))]
+    {
+        let _ = (repository, owner_home);
+        Err(unavailable())
+    }
+}
+
 /// Discards a change set, keeping its commits restorable for `RESTORE_WINDOW_MS`, and
 /// points the agent's worktree at the owner's current commit. Inputs: the store, the
 /// change set, the head the owner reviewed and the time now. Output: the

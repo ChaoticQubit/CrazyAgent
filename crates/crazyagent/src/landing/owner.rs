@@ -36,7 +36,10 @@ pub(super) enum Step {
 /// the owner's global config in their home. Runs only `git config --get`, which
 /// executes nothing. Inputs: the owner repository and home. Output: name and email,
 /// or `changes_owner_identity_missing`.
-fn owner_identity(repository: &Path, home: &Path) -> Result<(String, String), EngineError> {
+pub(super) fn owner_identity(
+    repository: &Path,
+    home: &Path,
+) -> Result<(String, String), EngineError> {
     let read = |key: &str| -> Result<String, EngineError> {
         let missing = || failure("changes_owner_identity_missing");
         let output = crate::spawn_gate::output(

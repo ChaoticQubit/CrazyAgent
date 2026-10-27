@@ -235,6 +235,13 @@ pub fn command(
         ("LANG".to_owned(), LOCALE.to_owned()),
         ("LC_ALL".to_owned(), LOCALE.to_owned()),
     ];
+    if let Some(identity) = &request.git_identity {
+        env.extend(
+            identity
+                .variables()
+                .map(|(name, value)| (name.to_owned(), value.to_owned())),
+        );
+    }
     let executable = text(&request.executable)?;
     let transcript = match harness_id(request) {
         "codex" => {
@@ -363,7 +370,9 @@ fn claude(
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let mut settings = serde_json::json!({
+        "attribution": {"commit": "", "pr": ""},
         "disableAllHooks": true,
+        "includeCoAuthoredBy": false,
         "skipDangerousModePermissionPrompt": true,
     });
     if let Some(key_file) = key_file {

@@ -13,7 +13,7 @@ use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
 use crate::launch_context::AgentContext;
@@ -122,6 +122,7 @@ struct Plan {
     model: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
+    git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
 }
@@ -136,6 +137,7 @@ impl Plan {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: Some(self.sandbox_profile.clone()),
+            git_identity: self.git_identity.clone(),
             limits: self.limits,
         }
     }
@@ -2113,6 +2115,7 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
+            git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
         };
@@ -3131,6 +3134,16 @@ fn full_stop(line: String) -> String {
     } else {
         line + "."
     }
+}
+
+/// The owner's git identity for an agent's own commits in a project: the project
+/// repository's `user.name` and `user.email` as the owner's git reads them, with the
+/// owner's home from the engine's `HOME`. Input: the project root. Output: the
+/// identity, or None when the owner set none, so git keeps its own default.
+fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let (name, email) = crate::landing::owner_git_identity(root, &home).ok()?;
+    GitIdentity::new(name, email).ok()
 }
 
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
