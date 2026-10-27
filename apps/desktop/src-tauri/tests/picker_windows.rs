@@ -1,7 +1,8 @@
 #![cfg(target_os = "windows")]
 
 use crazyagent_desktop::bridge::picker::{
-    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, Pick, WINDOWS_DOCUMENTS_SCRIPT, WINDOWS_FOLDER_SCRIPT,
+    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, Pick, WINDOWS_DOCUMENTS_SCRIPT,
+    WINDOWS_FOLDER_SCRIPT, WINDOWS_PROJECT_FOLDER_SCRIPT, WINDOWS_PROJECTS_HOME_SCRIPT,
     chooser_command, read_reply,
 };
 
@@ -27,6 +28,27 @@ fn windows_choosers_run_fixed_powershell_scripts_without_double_quotes() {
     }
     assert!(WINDOWS_FOLDER_SCRIPT.contains("FolderBrowserDialog"));
     assert!(WINDOWS_DOCUMENTS_SCRIPT.contains("$d.Multiselect = $true"));
+}
+
+#[test]
+fn each_windows_folder_chooser_asks_for_its_own_purpose() {
+    for (purpose, windows) in [
+        (FolderPurpose::Skill, WINDOWS_FOLDER_SCRIPT),
+        (FolderPurpose::Project, WINDOWS_PROJECT_FOLDER_SCRIPT),
+        (FolderPurpose::ProjectsHome, WINDOWS_PROJECTS_HOME_SCRIPT),
+    ] {
+        let command = chooser_command(purpose.script()).unwrap();
+        assert_eq!(
+            command.get_args().last(),
+            Some(std::ffi::OsStr::new(windows))
+        );
+        assert!(!windows.contains('"'));
+        assert!(windows.contains("FolderBrowserDialog"));
+        assert_eq!(
+            windows.contains("SKILL.md"),
+            purpose == FolderPurpose::Skill
+        );
+    }
 }
 
 #[test]

@@ -786,10 +786,14 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
   return call<AccountUse>("desktop_release_account", { accountId, generation: nextGeneration() });
 }
 
-/** Opens the macOS folder chooser. Output: the chosen folder's full path, or null when the
- * owner closed the chooser. */
-export function pickFolder(): Promise<Result<string | null>> {
-  return call<string | null>("desktop_pick_folder");
+/** What the native folder chooser is for: a skill folder, an existing project folder to add, or
+ * the folder that holds the owner's projects. Each shows its own fixed prompt. */
+export type FolderPurpose = "skill" | "project" | "projects_home";
+
+/** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
+ * chosen folder's full path, or null when the owner closed the chooser. */
+export function pickFolder(purpose: FolderPurpose): Promise<Result<string | null>> {
+  return call<string | null>("desktop_pick_folder", { purpose });
 }
 
 const SUGGESTION_PROJECTS_MAX = 50;

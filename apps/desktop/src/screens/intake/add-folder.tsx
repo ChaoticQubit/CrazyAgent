@@ -102,7 +102,7 @@ export function AddFolder() {
 
   const choose = async () => {
     setProblem("");
-    const result = await pickFolder();
+    const result = await pickFolder("project");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
     if (result.value === null) return;
     const issue = pickedFolderProblem(result.value, root);
