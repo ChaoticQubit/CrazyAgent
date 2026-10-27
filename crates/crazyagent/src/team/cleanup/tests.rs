@@ -202,6 +202,33 @@ impl Case {
     fn kept(&self, id: i64) -> bool {
         self.known(id) && self.worktree(id).is_dir() && self.folder(id).is_dir()
     }
+
+    fn remove(&self, agents: &[i64]) -> Removal {
+        remove(&self.db, &self.team, &self.project, agents, NOW).unwrap()
+    }
+
+    fn retiring(&self) -> Vec<i64> {
+        let mut statement = self
+            .db
+            .prepare("SELECT agent FROM team_retiring ORDER BY agent")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+}
+
+fn removed(agents: &[i64]) -> Removal {
+    Removal {
+        agents: agents.to_vec(),
+        kept: None,
+    }
+}
+
+fn refused(code: &str) -> Removal {
+    Removal::refused(code)
 }
 
 #[test]
@@ -218,6 +245,7 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         outcome,
         crate::landing::AcceptOutcome::Landed { .. }
     ));
+    case.agent(3, "master", "stopped");
     let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
     assert_eq!(
         listed.iter().map(|agent| agent.id).collect::<Vec<_>>(),
@@ -226,10 +254,13 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
     assert!(listed[1].bytes >= 64 * 1024 && listed[1].counted_all);
     assert_eq!(listed[0].role, AgentRole::Master);
     assert!(!listed[1].label.is_empty());
+    assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
     assert_eq!(
-        remove(&case.db, &case.team, &case.project, &[1, 2], NOW).unwrap(),
-        Ok(vec![1, 2])
+        case.remove(&[3]),
+        refused("cleanup_agent_running"),
+        "the master the runtime starts again keeps its worktree and home"
     );
+    assert!(case.kept(3));
     let listing = git_in(&case.home, &case.repo, &["worktree", "list", "--porcelain"]);
     for id in [1, 2] {
         assert!(!case.worktree(id).exists());
@@ -242,7 +273,8 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         .db
         .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(rows, 2);
+    assert_eq!(rows, 3);
+    assert!(case.retiring().is_empty());
     assert_eq!(
         git_in(&case.home, &case.repo, &["status", "--porcelain"]),
         ""
@@ -290,11 +322,7 @@ fn unlanded_or_live_work_keeps_the_agent_and_says_why() {
         (8, "cleanup_agent_running"),
     ];
     for (id, code) in refusals {
-        assert_eq!(
-            remove(&case.db, &case.team, &case.project, &[id], NOW).unwrap(),
-            Err(code),
-            "agent {id}"
-        );
+        assert_eq!(case.remove(&[id]), refused(code), "agent {id}");
         assert!(case.kept(id), "agent {id} keeps its worktree and folder");
     }
     assert_eq!(case.in_agent(1, &["status", "--porcelain"]), " M README\n");
@@ -311,35 +339,135 @@ fn a_change_after_the_read_is_caught_inside_the_removal_and_nothing_is_removed()
         &case.worktree(2).join("late.txt"),
         b"written after the read\n",
     );
-    assert_eq!(
-        remove(&case.db, &case.team, &case.project, &[1, 2], NOW).unwrap(),
-        Err("cleanup_worktree_dirty")
-    );
+    assert_eq!(case.remove(&[1, 2]), refused("cleanup_worktree_dirty"));
     assert!(case.kept(1) && case.kept(2));
     case.db
         .execute("UPDATE team_agents SET status='starting' WHERE id=3", [])
         .unwrap();
-    assert_eq!(
-        remove(&case.db, &case.team, &case.project, &[1, 3], NOW).unwrap(),
-        Err("cleanup_agent_running")
-    );
+    assert_eq!(case.remove(&[1, 3]), refused("cleanup_agent_running"));
     assert!(case.kept(1) && case.kept(3));
     let other = ProjectId::new("project-2").unwrap();
     assert_eq!(
         remove(&case.db, &case.team, &other, &[1], NOW).unwrap(),
-        Err("cleanup_agent_not_found")
+        refused("cleanup_agent_not_found")
     );
     let over = i64::try_from(RECLAIMABLE_MAX).unwrap() + 1;
     for agents in [vec![], vec![1, 1], (1..=over).collect::<Vec<i64>>()] {
-        assert_eq!(
-            remove(&case.db, &case.team, &case.project, &agents, NOW).unwrap(),
-            Err("cleanup_request_invalid")
-        );
+        assert_eq!(case.remove(&agents), refused("cleanup_request_invalid"));
     }
-    assert!(case.kept(1));
-    assert_eq!(
-        remove(&case.db, &case.team, &case.project, &[1], NOW).unwrap(),
-        Ok(vec![1])
-    );
+    assert!(case.kept(1) && case.kept(2) && case.kept(3));
+    assert!(case.retiring().is_empty());
+    assert_eq!(case.remove(&[1]), removed(&[1]));
     assert_eq!(case.listed(), Vec::<i64>::new());
+}
+
+#[test]
+fn an_older_master_is_listed_but_the_one_the_runtime_starts_again_is_not() {
+    let case = Case::new();
+    case.agent(1, "master", "stopped");
+    case.agent(2, "sub", "stopped");
+    case.agent(3, "master", "failed");
+    assert_eq!(case.listed(), [2, 1]);
+    assert_eq!(case.remove(&[3]), refused("cleanup_agent_running"));
+    case.db
+        .execute("UPDATE team_agents SET harness='codex' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(
+        case.listed(),
+        [2],
+        "the newest ended master of each harness stays"
+    );
+    assert_eq!(case.remove(&[1]), refused("cleanup_agent_running"));
+    assert!(case.kept(1) && case.kept(3));
+}
+
+#[test]
+fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again() {
+    let case = Case::new();
+    for id in [1, 2, 3] {
+        case.agent(id, "sub", "stopped");
+    }
+    std::fs::remove_file(case.profile(2)).unwrap();
+    write(
+        &case.profile(2).join("held"),
+        b"a folder where the profile was\n",
+    );
+    assert_eq!(
+        case.remove(&[1, 2, 3]),
+        Removal {
+            agents: vec![1],
+            kept: Some("cleanup_folder_failed".into()),
+        }
+    );
+    assert!(!case.worktree(1).exists() && !case.folder(1).exists());
+    assert!(!case.worktree(2).exists() && !case.git_dir(2).exists());
+    assert!(!case.known(2), "no revive finds the removed worktree");
+    assert_eq!(
+        case.retiring(),
+        [2],
+        "the agent left part way stays offered"
+    );
+    assert!(case.kept(3), "the agent not reached keeps its record");
+    assert_eq!(case.listed(), [3, 2]);
+    std::fs::remove_dir_all(case.profile(2)).unwrap();
+    assert_eq!(case.remove(&[2]), removed(&[2]));
+    assert!(!case.folder(2).exists() && !case.profile(2).exists());
+    assert!(case.retiring().is_empty());
+    assert_eq!(case.listed(), [3]);
+}
+
+#[test]
+fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_changed() {
+    let case = Case::new();
+    for id in [1, 2] {
+        case.agent(id, "sub", "stopped");
+    }
+    initialize(&case.db).unwrap();
+    assert!(
+        claim(&case.db, &case.project, &[1, 2], NOW)
+            .unwrap()
+            .is_ok()
+    );
+    assert!(!case.known(1) && !case.known(2));
+    write(
+        &case.worktree(2).join("after.txt"),
+        b"written after the stop\n",
+    );
+    assert_eq!(case.listed(), [1]);
+    assert!(case.known(2), "a changed worktree gets its record back");
+    assert_eq!(case.retiring(), [1]);
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && !case.folder(1).exists());
+    assert!(case.retiring().is_empty());
+    assert!(case.kept(2));
+}
+
+#[test]
+fn read_only_folders_are_removed_without_following_a_link_out() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    let outside = case.home.join("outside");
+    write(&outside.join("keep.txt"), b"the owner's\n");
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cache = case.folder(1).join("home/cache/module");
+    write(&cache.join("lib.go"), b"package lib\n");
+    std::os::unix::fs::symlink(&outside, case.folder(1).join("home/cache/link")).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::set_permissions(
+        case.folder(1).join("home/cache"),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+    let closed = case.folder(1).join("tmp/closed");
+    write(&closed.join("inner/file"), b"x\n");
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.folder(1).exists());
+    let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "the link's target keeps its mode");
+    assert_eq!(
+        std::fs::read(outside.join("keep.txt")).unwrap(),
+        b"the owner's\n"
+    );
 }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::ProjectId;
-use crate::team::cleanup::FinishedAgent;
+use crate::team::cleanup::{FinishedAgent, Removal};
 
 impl OwnerController {
     fn cleanup_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -21,12 +21,13 @@ impl OwnerController {
 
     /// Removes the worktrees and agent folders of the finished agents the owner confirmed;
     /// the engine checks each one again first. Inputs: the project and the agents.
-    /// Output: the agents removed, or the code of the first one kept.
+    /// Output: the agents removed with the code of the first one kept, or the refusal when
+    /// it removed none.
     pub async fn remove_finished_agents(
         &self,
         project: ProjectId,
         agents: Vec<i64>,
-    ) -> Result<Vec<i64>, EngineError> {
+    ) -> Result<Removal, EngineError> {
         self.cleanup_client()?
             .remove_finished_agents(project, agents)
             .await

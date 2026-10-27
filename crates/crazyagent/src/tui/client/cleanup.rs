@@ -90,7 +90,10 @@ impl NativeOwner {
             CleanupQuery::Remove { project, agents } => controller
                 .remove_finished_agents(project, agents)
                 .await
-                .map(CleanupReply::Removed),
+                .and_then(|removal| match removal.kept {
+                    None => Ok(CleanupReply::Removed(removal.agents)),
+                    Some(code) => Err(crate::engine::EngineError(code)),
+                }),
         }
         .map_err(problem)
     }

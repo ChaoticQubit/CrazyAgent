@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::{ProjectId, encode_frame};
-use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX};
+use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 2048;
@@ -60,9 +60,16 @@ struct Envelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Finished { agents: Vec<FinishedAgent> },
-    Removed { agents: Vec<i64> },
-    Rejected { code: String },
+    Finished {
+        agents: Vec<FinishedAgent>,
+    },
+    Removed {
+        agents: Vec<i64>,
+        kept: Option<String>,
+    },
+    Rejected {
+        code: String,
+    },
 }
 
 fn unknown() -> EngineError {
@@ -85,17 +92,22 @@ impl OwnerClient {
 
     /// Removes the worktrees and agent folders of finished agents the owner confirmed; the
     /// engine checks every one again first. Inputs: the project and the agents.
-    /// Output: the agents removed, or the plain code of the first one kept.
+    /// Output: the agents removed with the code of the first one kept when it stopped part
+    /// way, or the refusal when it removed none.
     pub async fn remove_finished_agents(
         &self,
         project: ProjectId,
         agents: Vec<i64>,
-    ) -> Result<Vec<i64>, EngineError> {
+    ) -> Result<Removal, EngineError> {
         match self
             .cleanup_exchange(Action::Remove { project, agents })
             .await?
         {
-            Reply::Removed { agents } if agents.len() <= RECLAIMABLE_MAX => Ok(agents),
+            Reply::Removed { agents, kept }
+                if !agents.is_empty() && agents.len() <= RECLAIMABLE_MAX =>
+            {
+                Ok(Removal { agents, kept })
+            }
             _ => Err(unknown()),
         }
     }
@@ -196,8 +208,11 @@ async fn handle(
             },
             Action::Remove { project, agents } => {
                 match cleanup::remove(&db, &team, &project, &agents, now)? {
-                    Ok(agents) => Reply::Removed { agents },
-                    Err(code) => Reply::Rejected { code: code.into() },
+                    Removal {
+                        agents,
+                        kept: Some(code),
+                    } if agents.is_empty() => Reply::Rejected { code },
+                    Removal { agents, kept } => Reply::Removed { agents, kept },
                 }
             }
         })
