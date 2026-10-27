@@ -261,15 +261,15 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// A changes request read and checked once: the reply of a read already made, or a
-/// change still to make under the owner barrier, with the engine folder whose store it changes.
+/// change still to admit, with the engine folder whose store it changes.
 enum Prepared {
     Read(Box<Reply>),
     Change(PathBuf, Action),
 }
 
-/// Serves one changes request: a list or diff is read first, then under the owner barrier
-/// the grant is checked again, any change is made and the reply is written. An Update is
-/// made under its own hold of the barrier and hands its resolve work over before the reply.
+/// Serves one changes request. A list or diff is read first, then under the owner barrier
+/// the grant is checked again and the reply is written. A change is admitted under the
+/// barrier and made without it, and its reply is what it did.
 /// Inputs: the connection, engine, authority, packet, admission and request body.
 /// Output: done once the reply is written.
 pub(super) async fn serve(
@@ -280,16 +280,21 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let prepared = match prepare(engine, authority, packet, admission, bytes).await {
-        Ok(Prepared::Change(root, Action::Update { id })) => {
-            update(engine, authority, packet, admission, root, id)
-                .await
-                .map(|reply| Prepared::Read(Box::new(reply)))
+    let (answered, _barrier) = match prepare(engine, authority, packet, admission, bytes).await {
+        Ok(Prepared::Change(root, action)) => (
+            change(engine, authority, packet, admission, root, action).await,
+            None,
+        ),
+        Ok(Prepared::Read(reply)) => {
+            let barrier = engine.owner_egress.write().await;
+            (
+                checked(authority, packet, admission).map(|()| *reply),
+                Some(barrier),
+            )
         }
-        prepared => prepared,
+        Err(error) => (Err(error), None),
     };
-    let _barrier = engine.owner_egress.write().await;
-    let reply = match finish(authority, packet, admission, prepared).await {
+    let reply = match answered {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected { code: error.0 },
     };
@@ -336,50 +341,45 @@ async fn prepare(
     .map_err(|_| failure("changes_unavailable"))?
 }
 
-/// Answers a prepared request under the owner barrier its caller holds: checks the grant
-/// again, then makes any change. Inputs: the authority, packet, admission and the prepared
-/// request. Output: the reply, or the refusal.
-async fn finish(
+/// Checks the grant again, under the owner barrier its caller holds, before a read's reply
+/// is written. Inputs: the authority, packet and admission. Output: Ok, or the refusal.
+fn checked(
     authority: &Authority,
     packet: &[u8; 37],
     admission: &Admission,
-    prepared: Result<Prepared, EngineError>,
-) -> Result<Reply, EngineError> {
-    let prepared = prepared?;
+) -> Result<(), EngineError> {
     if &authority.authenticate(packet)? != admission {
         return Err(failure("owner_grant_stale_or_revoked"));
     }
-    let (root, action) = match prepared {
-        Prepared::Read(reply) => return Ok(*reply),
-        Prepared::Change(root, action) => (root, action),
-    };
-    tokio::task::spawn_blocking(move || run(&root, action).map(|(reply, _)| reply))
-        .await
-        .map_err(|_| failure("changes_unavailable"))?
+    Ok(())
 }
 
-/// Updates a change set under the owner barrier after checking the grant again, then,
-/// with the barrier released because the resolve work takes it itself, hands a master's
-/// resolve work over. Inputs: the engine, authority, packet, admission, engine folder and
-/// change set. Output: the reply still to write under the barrier, or the refusal.
-async fn update(
+/// Makes one change: the grant is checked and the work handed over under the owner barrier,
+/// which is let go while it runs, so a long Accept stalls no owner request or revocation. A
+/// change admitted before a revocation finishes and answers what it did, unchecked; an
+/// Update then hands a master's resolve over. Inputs: the engine, authority, packet,
+/// admission, engine folder and change. Output: the reply, or the refusal.
+async fn change(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     root: PathBuf,
-    id: ChangeSetId,
+    action: Action,
 ) -> Result<Reply, EngineError> {
-    let merged = {
+    let updated = match &action {
+        Action::Update { id } => Some(id.clone()),
+        _ => None,
+    };
+    let work = {
         let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
-        let (store, action) = (root.clone(), Action::Update { id: id.clone() });
+        checked(authority, packet, admission)?;
+        let store = root.clone();
         tokio::task::spawn_blocking(move || run(&store, action))
-            .await
-            .map_err(|_| failure("changes_unavailable"))??
-            .1
+    };
+    let (reply, merged) = work.await.map_err(|_| failure("changes_unavailable"))??;
+    let Some(id) = updated else {
+        return Ok(reply);
     };
     let runtime = super::OwnerRuntimeHandle {
         engine: engine.clone(),
@@ -394,7 +394,7 @@ async fn update(
         }
         started => started?,
     }
-    Ok(Reply::Done)
+    Ok(reply)
 }
 
 /// Runs one changes request on the change store of an engine folder.
