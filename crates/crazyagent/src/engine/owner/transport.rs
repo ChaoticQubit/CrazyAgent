@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(all(test, unix))]
+mod barrier_tests;
+#[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
 #[cfg(all(test, unix))]
@@ -2273,7 +2275,21 @@ async fn write_owner_reply(
     mutation: bool,
 ) -> Result<(), EngineError> {
     let frame = owner_reply_frame(result, id, mutation)?;
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
+}
+
+/// The longest a reply written under the owner barrier waits for its client to read it.
+const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
+
+/// Writes one reply frame for a writer holding the owner barrier, giving up after
+/// `REPLY_WRITE_TIME` so a client that stops reading never holds the barrier for others;
+/// the connection is then dropped. Inputs: the connection and the frame.
+/// Output: done once written, or `owner_reply_stalled` and the write error.
+async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), EngineError> {
+    tokio::time::timeout(REPLY_WRITE_TIME, stream.write_all(frame))
+        .await
+        .map_err(|_| failure("owner_reply_stalled"))?
+        .map_err(io_error)
 }
 
 /// Encodes one owner reply. An error becomes Rejected with its code when the engine

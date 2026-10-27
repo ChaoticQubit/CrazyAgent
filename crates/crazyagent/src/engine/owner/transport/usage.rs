@@ -195,7 +195,7 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
 }
 
 /// Reads and checks a usage request, and builds a report outside the owner barrier.

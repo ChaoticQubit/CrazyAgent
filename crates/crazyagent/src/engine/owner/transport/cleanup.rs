@@ -156,6 +156,18 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// A cleanup request read and checked once: a list of finished agents already read, or a
+/// removal still to make under the owner barrier, with the engine folder it changes.
+enum Prepared {
+    Finished(Vec<FinishedAgent>),
+    Remove(PathBuf, ProjectId, Vec<i64>),
+}
+
+/// Serves one cleanup request. A list is read first; then, under the owner barrier, the
+/// grant is checked again, any removal is made and the reply is written, so a revocation
+/// that returned saw every removal and reply admitted before it and lets none through after.
+/// Inputs: the connection, engine, authority, packet, admission and request body.
+/// Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -164,7 +176,9 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let reply = match handle(engine, authority, packet, admission, bytes).await {
+    let prepared = prepare(engine, authority, packet, admission, bytes).await;
+    let _barrier = engine.owner_egress.write().await;
+    let reply = match finish(authority, packet, admission, prepared).await {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected { code: error.0 },
     };
@@ -175,16 +189,27 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
 }
 
-async fn handle(
+/// Opens the change store of an engine folder with the team tables in place.
+/// Input: the engine folder. Output: the connection, or `cleanup_unavailable`.
+fn open(root: &Path) -> Result<rusqlite::Connection, EngineError> {
+    let db = crate::landing::open(root).map_err(|_| failure("cleanup_unavailable"))?;
+    crate::team::initialize(&db).map_err(|_| failure("cleanup_unavailable"))?;
+    Ok(db)
+}
+
+/// Reads and checks a cleanup request, and reads a list of finished agents outside the
+/// owner barrier. Inputs: the engine, authority, packet, admission and request body.
+/// Output: the prepared request, or the refusal.
+async fn prepare(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
-) -> Result<Reply, EngineError> {
+) -> Result<Prepared, EngineError> {
     if bytes.len() > REQUEST_BYTES_MAX {
         return Err(failure("cleanup_request_bounds"));
     }
@@ -197,25 +222,47 @@ async fn handle(
         }
     }
     let root = super::changes::engine_root(authority)?;
-    tokio::task::spawn_blocking(move || {
-        let db = crate::landing::open(&root).map_err(|_| failure("cleanup_unavailable"))?;
-        crate::team::initialize(&db).map_err(|_| failure("cleanup_unavailable"))?;
-        let team = root.join("team");
-        let now = crate::team::now_ms();
-        Ok(match action {
-            Action::Finished { project } => Reply::Finished {
-                agents: cleanup::finished(&db, &team, &project, now)?,
-            },
-            Action::Remove { project, agents } => {
-                match cleanup::remove(&db, &team, &project, &agents, now)? {
-                    Removal {
-                        agents,
-                        kept: Some(code),
-                    } if agents.is_empty() => Reply::Rejected { code },
-                    Removal { agents, kept } => Reply::Removed { agents, kept },
-                }
-            }
+    match action {
+        Action::Finished { project } => tokio::task::spawn_blocking(move || {
+            let db = open(&root)?;
+            let now = crate::team::now_ms();
+            cleanup::finished(&db, &root.join("team"), &project, now).map(Prepared::Finished)
         })
+        .await
+        .map_err(|_| failure("cleanup_unavailable"))?,
+        Action::Remove { project, agents } => Ok(Prepared::Remove(root, project, agents)),
+    }
+}
+
+/// Answers a prepared request under the owner barrier its caller holds: checks the grant
+/// again, then makes any removal. Inputs: the authority, packet, admission and the prepared
+/// request. Output: the reply, or the refusal.
+async fn finish(
+    authority: &Authority,
+    packet: &[u8; 37],
+    admission: &Admission,
+    prepared: Result<Prepared, EngineError>,
+) -> Result<Reply, EngineError> {
+    let prepared = prepared?;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
+    }
+    let (root, project, agents) = match prepared {
+        Prepared::Finished(agents) => return Ok(Reply::Finished { agents }),
+        Prepared::Remove(root, project, agents) => (root, project, agents),
+    };
+    tokio::task::spawn_blocking(move || {
+        let db = open(&root)?;
+        let now = crate::team::now_ms();
+        Ok(
+            match cleanup::remove(&db, &root.join("team"), &project, &agents, now)? {
+                Removal {
+                    agents,
+                    kept: Some(code),
+                } if agents.is_empty() => Reply::Rejected { code },
+                Removal { agents, kept } => Reply::Removed { agents, kept },
+            },
+        )
     })
     .await
     .map_err(|_| failure("cleanup_unavailable"))?
