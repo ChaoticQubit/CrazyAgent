@@ -1715,6 +1715,11 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Pool", pool),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
+        entry(
+            "Process",
+            Row::of("Instructions for this project's agents", look.fg)
+                .push("   i Edit", look.muted),
+        ),
         Row::default(),
     ];
     let (plugins, mut help) = screen

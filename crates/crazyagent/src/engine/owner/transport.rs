@@ -44,6 +44,7 @@ mod harness_catalog;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
+pub(crate) mod process;
 mod projects_home;
 mod setup;
 pub(crate) mod terminal;
@@ -1903,6 +1904,7 @@ enum Protocol {
     Changes,
     Usage,
     NativeAuth,
+    Process,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -1928,6 +1930,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("usage", Protocol::Usage),
         ("native_auth", Protocol::NativeAuth),
+        ("process", Protocol::Process),
     ];
     Ok(named
         .into_iter()
@@ -1995,6 +1998,11 @@ async fn serve_admitted(
             }
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::Process => {
+                return process::serve(stream, engine, authority, auth, &a, body)
                     .await
                     .map(|()| None);
             }
@@ -2223,6 +2231,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
+        Protocol::Process => process::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

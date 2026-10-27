@@ -10,6 +10,7 @@ import { ContextTab } from "./context";
 import { ConversationTab } from "./conversation";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
+import { ProcessEditor } from "../process";
 import { pauseSummary, shouldPoll } from "./research";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -23,6 +24,7 @@ export const TABS = [
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
   { id: "context", label: "Context", icon: "folder-open" },
+  { id: "process", label: "Process", icon: "list-checks" },
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
@@ -195,6 +197,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
+      {active === "process" && <ProcessEditor scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}

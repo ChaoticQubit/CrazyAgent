@@ -1811,6 +1811,49 @@ async fn desktop_update_change(
 }
 
 #[tauri::command]
+async fn desktop_process_text(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.process_text(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_process_text(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    text: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.save_process_text(project_id, text)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_import_global_instructions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.import_global_instructions()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_default_process(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.default_process()?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_pick_folder(window: WebviewWindow) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
     Ok(
@@ -2182,6 +2225,10 @@ pub fn run() {
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,
+            desktop_process_text,
+            desktop_save_process_text,
+            desktop_import_global_instructions,
+            desktop_default_process,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

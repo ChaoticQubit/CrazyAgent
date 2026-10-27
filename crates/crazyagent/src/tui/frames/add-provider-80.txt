@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account                    
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+──━━━━━━━━──────────────────────────────────────────────────────────────────────
   Add account                                                                   
   Where does the model come from?                                               
                                                                                 

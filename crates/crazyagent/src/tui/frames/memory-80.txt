@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Memory                                      
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──────────────────────────────────────────────────────────━━━━━━━━──────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+────────────────────────────────────────────────────────────────━━━━━━──────────
   Memory                                                              41 saved  
   Long-term memory every project can use. Nothing is saved without your click.  
   /  Filter                                                                     
