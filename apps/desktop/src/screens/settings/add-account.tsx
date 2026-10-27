@@ -310,7 +310,7 @@ export function KeyOrUrlForm({ provider, option, name, onName, onAdded }: {
 
 function AddToPool({ account }: { account: AccountView }) {
   const session = useAppSession();
-  const [pools] = useLoad(poolSummaries);
+  const [pools] = useLoad(poolSummaries, [], "pool-summaries");
   const [chosen, setChosen] = useState("");
   const [state, setState] = useState<{ kind: "idle" | "saving" } | { kind: "added"; note?: string } | { kind: "error"; message: string }>({ kind: "idle" });
   if (pools.kind === "loading") return <Skeleton shape="line" />;
@@ -358,7 +358,7 @@ export function AddAccountDialog({ open, accounts, onClose, onAdded }: {
   onClose: () => void;
   onAdded: () => void;
 }) {
-  const [catalog, reloadCatalog] = useLoad(accountCatalog);
+  const [catalog, reloadCatalog] = useLoad(accountCatalog, [], "account-catalog");
   const [step, setStep] = useState<Step>({ kind: "provider" });
   const [name, setName] = useState("");
   const [confirmStop, setConfirmStop] = useState(false);

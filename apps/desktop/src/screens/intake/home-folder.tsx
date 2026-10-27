@@ -52,7 +52,7 @@ export function HomeFolderView({ home, picked, busy, problem, onChoose, onSave, 
  * on disk moves. Inputs: what to do once a folder is saved and an optional Continue for first run.
  * Output: the chooser. */
 export function HomeFolderPicker({ onSaved, onContinue }: { onSaved?: () => void; onContinue?: () => void }) {
-  const [home, reload] = useLoad(loadProjectsHome);
+  const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
   const [picked, setPicked] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");

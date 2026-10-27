@@ -50,9 +50,9 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);
   const [allActivity, setAllActivity] = useState(false);
-  const [skills] = useLoad(() => listSkills(data.id), [data.id]);
-  const [servers] = useLoad(() => listMcpServers(data.id), [data.id]);
-  const [summaries] = useLoad(poolSummaries, [data.id]);
+  const [skills] = useLoad(() => listSkills(data.id), [data.id], "skills");
+  const [servers] = useLoad(() => listMcpServers(data.id), [data.id], "mcp-servers");
+  const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
   const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;

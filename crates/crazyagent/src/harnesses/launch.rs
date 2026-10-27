@@ -7,6 +7,7 @@ use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::toolchains::{self, ToolHomes};
+use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
@@ -262,6 +263,7 @@ pub enum LaunchEvent {
     ApprovalDenied,
     Interrupted,
     TurnFinished { success: bool },
+    Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
@@ -989,8 +991,12 @@ impl Driver {
                                     status: RateLimitStatus::Rejected,
                                     ..
                                 } => events.push(LaunchEvent::TurnError { rate_limited: true }),
-                                EventKind::TurnFinished { outcome, .. } => {
+                                EventKind::TurnFinished { outcome, usage, .. } => {
                                     *interrupt = None;
+                                    let tokens = Tokens::reported(&usage);
+                                    if !tokens.is_empty() {
+                                        events.push(LaunchEvent::Usage { tokens });
+                                    }
                                     events.push(LaunchEvent::TurnFinished {
                                         success: outcome == TurnOutcome::Success,
                                     });

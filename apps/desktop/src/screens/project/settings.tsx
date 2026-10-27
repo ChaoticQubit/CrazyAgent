@@ -60,7 +60,7 @@ export function poolSaved(name: string | null): string {
 
 function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const pools = valueOf(data.pools);
-  const [summaries] = useLoad(poolSummaries, [data.id]);
+  const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
   const [choice, setChoice] = useState<string | null>(data.assigned?.pool.id ?? null);
   const [state, setState] = useState<{ busy: boolean; error: string }>({ busy: false, error: "" });
   useEffect(() => { setChoice(data.assigned?.pool.id ?? null); }, [data.assigned?.pool.id]);
