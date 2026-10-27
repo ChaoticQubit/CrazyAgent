@@ -798,42 +798,6 @@ impl OwnerRuntimeHandle {
         eprintln!("master usage not counted: {problem}");
     }
 
-    /// Marks a launched master turn whose harness has no usage reader, such as RCLI, under
-    /// its project's master row for the hour it ran, so Usage says the harness does not
-    /// report usage instead of showing zero. A harness with a reader is counted elsewhere
-    /// and left alone; a store that cannot be written logs only the failure code.
-    /// Input: the prepared turn.
-    pub(super) async fn mark_master_unreported(&self, prepared: &PreparedMasterTurn) {
-        let harness = match prepared.session.selection.backend {
-            MasterBackend::Claude => "claude-code",
-            MasterBackend::Codex => "codex",
-            MasterBackend::Rcli => "rcli",
-        };
-        if Format::of(harness).is_some() {
-            return;
-        }
-        let attribution = Attribution {
-            kind: RunKind::Master,
-            project: Some(prepared.session.project_id.clone()),
-            pool: Some(prepared.session.selection.pool_ref.clone()),
-            account: Some(prepared.profile.binding().connection.id.clone()),
-            agent: crate::usage::service::master_agent(Some(&prepared.session.project_id)),
-            harness: harness.to_owned(),
-        };
-        let root = super::changes::engine_root(&self.authority);
-        let marked = tokio::task::spawn_blocking(move || {
-            let db = crate::usage::open(&root?)?;
-            crate::usage::report::mark_unreported(&db, &attribution, crate::team::now_ms())
-        })
-        .await;
-        let problem = match marked {
-            Ok(Ok(())) => return,
-            Ok(Err(problem)) => crate::usage::service::failure_code(&problem),
-            Err(_) => "usage_unavailable".to_owned(),
-        };
-        eprintln!("master usage mark not recorded: {problem}");
-    }
-
     async fn collect_master_turn(
         &self,
         prepared: &PreparedMasterTurn,

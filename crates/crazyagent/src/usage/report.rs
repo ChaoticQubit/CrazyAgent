@@ -97,10 +97,19 @@ pub struct UsageReport {
     pub not_reported_by: Vec<String>,
 }
 
+/// Tells whether the engine counts a harness's usage: from its session records (Claude
+/// Code, Codex) or from the usage frames its host reports (RCLI, which runs only as a
+/// CrazyAgent master). Input: the harness id. Output: the answer.
+pub fn reports_usage(harness: &str) -> bool {
+    Format::of(harness).is_some()
+        || crate::harnesses::spec(harness).is_some_and(|spec| spec.id == "rcli")
+}
+
 /// Marks that a run of a harness the engine has no usage reader for worked in the hour of
 /// `now_ms`, so the report says its usage is not reported instead of showing zero. Inputs:
 /// the store, the attribution and the time. Output: done, `usage_attribution_invalid` for a
-/// harness with a reader or a missing or oversized agent or harness, or `usage_unavailable`.
+/// harness whose usage is counted or a missing or oversized agent or harness, or
+/// `usage_unavailable`.
 pub fn mark_unreported(
     db: &Connection,
     attribution: &Attribution,
@@ -110,7 +119,7 @@ pub fn mark_unreported(
         || attribution.agent.len() > AGENT_BYTES_MAX
         || attribution.harness.is_empty()
         || attribution.harness.len() > HARNESS_BYTES_MAX
-        || Format::of(&attribution.harness).is_some()
+        || reports_usage(&attribution.harness)
     {
         return Err(failure("usage_attribution_invalid"));
     }

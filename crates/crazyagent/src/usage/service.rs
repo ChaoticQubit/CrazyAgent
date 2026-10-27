@@ -1,6 +1,6 @@
 use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
-use super::report::mark_unreported;
+use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
@@ -246,11 +246,13 @@ impl Usage {
                 access,
             );
             let Some(format) = Format::of(&harness) else {
-                let ran_ms = match (live, stopped_ms) {
-                    (false, Some(stopped)) => stopped.min(now_ms),
-                    _ => now_ms,
-                };
-                mark_unreported(&self.db, &attribution, ran_ms)?;
+                if !reports_usage(&harness) {
+                    let ran_ms = match (live, stopped_ms) {
+                        (false, Some(stopped)) => stopped.min(now_ms),
+                        _ => now_ms,
+                    };
+                    mark_unreported(&self.db, &attribution, ran_ms)?;
+                }
                 continue;
             };
             let home = self

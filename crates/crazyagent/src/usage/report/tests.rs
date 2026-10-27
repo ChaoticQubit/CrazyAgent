@@ -471,3 +471,41 @@ fn harness_without_reader_reports_not_reported_never_zero() {
         .unwrap();
     assert_eq!(rows, 5, "a refused mark writes nothing");
 }
+
+#[test]
+fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    assert!(Format::of("rcli").is_none() && reports_usage("rcli"));
+    assert!(reports_usage("claude-code") && reports_usage("codex"));
+    assert!(!reports_usage("opencode") && !reports_usage(""));
+    let rcli = readerless("alpha", "master-alpha", "rcli", RunKind::Master);
+    crate::usage::capture::count_reported(
+        &db,
+        &rcli,
+        Tokens {
+            input: 300,
+            output: 40,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        "session-1",
+        MIDNIGHT + HOUR,
+    )
+    .unwrap();
+    assert_eq!(
+        mark_unreported(&db, &rcli, MIDNIGHT + HOUR).unwrap_err().0,
+        "usage_attribution_invalid"
+    );
+    let opencode = readerless("alpha", "team-4", "opencode", RunKind::Agent);
+    mark_unreported(&db, &opencode, MIDNIGHT + HOUR).unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(all.total.input, 300);
+    assert_eq!(all.not_reported_by, ["OpenCode"]);
+    assert_eq!(
+        flagged(&all.agents),
+        [("master-alpha", 300, None), ("team-4", 0, Some("OpenCode"))],
+        "a counted RCLI master is never labelled not reported; a readerless agent still is"
+    );
+}
