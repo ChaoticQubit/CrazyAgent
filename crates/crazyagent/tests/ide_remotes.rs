@@ -9,12 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Output, Stdio};
 
 fn git_run(dir: &Path, args: &[&str]) -> Output {
+    owner_git_run(dir, Path::new("/dev/null"), args)
+}
+
+fn owner_git_run(dir: &Path, global: &Path, args: &[&str]) -> Output {
     crazyagent::spawn_gate::output(
         Process::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", global)
             .env("GIT_TERMINAL_PROMPT", "0")
             .arg("-C")
             .arg(dir)
@@ -244,6 +248,47 @@ async fn push_from_the_project_folder_is_unaffected() {
         git(&project.repo, &["rev-parse", "main"])
     );
     assert!(!git_run(&worktree, &["fetch", "origin"]).status.success());
+    assert_eq!(leases(&engine).await.remove(0).state, LeaseState::Ready);
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_owner_rewrite_with_a_transport_allow_cannot_carry_an_agent_worktree_remote() {
+    let project = project();
+    let (engine, worktree) = agent_worktree(&project).await;
+    let global = project.root.join("owner.gitconfig");
+    std::fs::write(
+        &global,
+        format!(
+            "[url \"{}/\"]\n\tinsteadOf = https://example.invalid/\n[protocol \"file\"]\n\tallow = always\n",
+            project.root.display()
+        ),
+    )
+    .unwrap();
+    let rewritten = "https://example.invalid/remote.git";
+    let control = owner_git_run(&project.repo, &global, &["ls-remote", rewritten]);
+    assert!(control.status.success(), "{control:?}");
+    let attempts: [&[&str]; 3] = [
+        &["push", rewritten, "HEAD:refs/heads/agent-work"],
+        &["fetch", rewritten],
+        &["ls-remote", rewritten],
+    ];
+    for args in attempts {
+        let output = owner_git_run(&worktree, &global, args);
+        let printed = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{args:?} worked in the agent worktree"
+        );
+        assert!(
+            printed.contains("transport 'file' not allowed"),
+            "{args:?}: {printed}"
+        );
+    }
+    assert_eq!(
+        git(&project.remote, &["for-each-ref", "--format=%(refname)"]),
+        ""
+    );
     assert_eq!(leases(&engine).await.remove(0).state, LeaseState::Ready);
     engine.close().await.unwrap();
 }
