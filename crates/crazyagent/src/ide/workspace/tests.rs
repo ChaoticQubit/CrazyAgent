@@ -434,3 +434,29 @@ fn idle_agent_without_open_change_set_is_left_out() {
         ]
     );
 }
+
+#[test]
+fn ide_server_folder_is_the_stored_project_folder_with_links_resolved() {
+    let case = Case::new();
+    assert_eq!(folder(&case.root, &case.project).unwrap(), case.folder);
+    let linked = case.root.join("linked-project");
+    std::os::unix::fs::symlink(&case.folder, &linked).unwrap();
+    add_project(&case.db, "beta", &linked);
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(
+        folder(&case.root, &beta).unwrap(),
+        case.folder,
+        "the server and its sandbox get the folder the link points to"
+    );
+    std::fs::remove_file(&linked).unwrap();
+    assert_eq!(
+        folder(&case.root, &beta).unwrap_err().0,
+        "ide_project_folder_invalid"
+    );
+    assert_eq!(
+        folder(&case.root, &ProjectId::new("gamma").unwrap())
+            .unwrap_err()
+            .0,
+        "ide_project_unknown"
+    );
+}

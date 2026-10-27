@@ -126,6 +126,30 @@ pub fn listed(db: &Connection, project: &ProjectId) -> Result<Vec<Section>, Engi
     Ok(sections)
 }
 
+/// The project folder the IDE server opens and its sandbox grants: the stored folder with
+/// every link resolved. Inputs: the engine root and the project. Output: the folder, or
+/// `ide_project_unknown` or `ide_project_folder_invalid`.
+pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> {
+    let db = open(root)?;
+    let folder = project_folder(&db, project)?;
+    crate::sandbox::canonical(&folder).map_err(|_| failure("ide_project_folder_invalid"))
+}
+
+/// Reads the project's stored folder. Inputs: the database and project. Output: the
+/// absolute folder, or `ide_project_unknown` or `ide_project_folder_invalid`.
+fn project_folder(db: &Connection, project: &ProjectId) -> Result<PathBuf, EngineError> {
+    let folder = {
+        let tx = db.unchecked_transaction().map_err(unavailable)?;
+        crate::project_setup::load_setup(&tx, project)?
+            .ok_or_else(|| failure("ide_project_unknown"))?
+            .project_folder()
+    };
+    if !folder.is_absolute() {
+        return Err(failure("ide_project_folder_invalid"));
+    }
+    Ok(folder)
+}
+
 /// Opens the engine database with the change set and workspace tables in place.
 /// Input: the engine root. Output: the connection.
 fn open(root: &Path) -> Result<Connection, EngineError> {
@@ -190,15 +214,7 @@ fn sections(
     project: &ProjectId,
     show_all: bool,
 ) -> Result<(Vec<Section>, usize), EngineError> {
-    let folder = {
-        let tx = db.unchecked_transaction().map_err(unavailable)?;
-        crate::project_setup::load_setup(&tx, project)?
-            .ok_or_else(|| failure("ide_project_unknown"))?
-            .project_folder()
-    };
-    if !folder.is_absolute() {
-        return Err(failure("ide_project_folder_invalid"));
-    }
+    let folder = project_folder(db, project)?;
     let mut statement = db.prepare(AGENTS).map_err(unavailable)?;
     let rows = statement
         .query_map(params![project.as_str(), AGENTS_LISTED_MAX as i64], |row| {

@@ -19,7 +19,7 @@ fn ide_error(error: EngineError) -> BridgeError {
 }
 
 impl NativeBridge {
-    fn ide_client(&self) -> Result<Arc<OwnerClient>, BridgeError> {
+    fn reveal_client(&self) -> Result<Arc<OwnerClient>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
@@ -34,7 +34,7 @@ impl NativeBridge {
     /// run without the bridge lock. Output: the project and the reveal, or None when no
     /// reveal is waiting.
     pub fn ide_focus(&self) -> Result<Unlocked<Option<RevealFocus>>, BridgeError> {
-        let client = self.ide_client()?;
+        let client = self.reveal_client()?;
         Ok(Box::pin(async move {
             client.ide_focus().await.map_err(ide_error)
         }))
