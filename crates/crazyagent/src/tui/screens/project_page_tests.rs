@@ -1077,10 +1077,10 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
 
     shell.key(Key::Char('n'));
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("1 earlier")
+        shown.contains("1 earlier") && shown.contains("No messages yet.")
     })
     .await;
-    assert!(!shown.contains("Plan the first slice"), "{shown}");
+    assert!(!shown.contains("RCLI stopped"), "{shown}");
     let (fresh, _) = latest_master(&mut engine, &notes).await;
     let fresh = fresh.unwrap();
     assert_ne!(fresh.session_id, first.session_id);
@@ -1100,10 +1100,11 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     }
     shell.key(Key::Enter);
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("Plan the first slice") && !shown.contains("Sessions  2")
+        shown.contains("RCLI stopped") && !shown.contains("Sessions  2")
     })
     .await;
     assert!(shown.contains("1 earlier"), "{shown}");
+    assert!(!shown.contains("No messages yet."), "{shown}");
     let (resumed, _) = latest_master(&mut engine, &notes).await;
     let resumed = resumed.unwrap();
     assert_eq!(resumed.session_id, first.session_id);
