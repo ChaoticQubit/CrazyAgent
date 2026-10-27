@@ -157,12 +157,14 @@ pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, L
 /// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
 /// the approved skills and MCP servers that team agents with tools on receive. No secret
 /// value, command, URL or file of a server is read or given. Input: a transaction the caller
-/// holds on `engine.db`, the project and its master tools switch. Output: at most
-/// `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown, or a plain code.
+/// holds on `engine.db`, the project, its master tools switch and the live model access,
+/// none without settings. Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown,
+/// or a plain code.
 pub fn for_master(
     tx: &Transaction<'_>,
     project: &ProjectId,
     tools: bool,
+    access: Option<&crate::config::ModelAccess>,
 ) -> Result<String, LaunchError> {
     let root = engine_root(tx)?;
     let mut text = project_instructions(tx, project)?;
@@ -170,7 +172,10 @@ pub fn for_master(
         let setup = crate::project_setup::load_setup(tx, project)
             .map_err(unavailable)?
             .ok_or_else(|| failure("launch_context_master_tools_without_plan"))?;
-        text.push_str(&master_tools_section(&setup));
+        let available = access
+            .map(|access| crate::team::available_harnesses(access, project))
+            .unwrap_or_default();
+        text.push_str(&master_tools_section(&setup, &available));
     } else {
         let plugins = crate::storage::plugins::effective(tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
@@ -182,9 +187,10 @@ pub fn for_master(
 
 /// Tells a conversation master whose tools are on what it can do and how it starts a
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
-/// to the team, and the team plan's sub-agents, or plainly that the plan has none.
-/// Input: the project setup. Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
-pub(crate) fn master_tools_section(setup: &StoredSetup) -> String {
+/// to the team, and the team plan's sub-agents, or for an empty plan the harnesses it can use.
+/// Input: the project setup and the harnesses with an eligible account now.
+/// Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
+pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> String {
     let mut section = format!(
         "\n## Your tools\n\nYour tools are on in this conversation. You can read and search files, edit them and run shell commands in this conversation's own git worktree, your working folder. You cannot write outside it; the project folder itself stays read-only to you.\n\nTo start a sub-agent, call the `{}` tool of the `{}` MCP server with the task in plain words and, if you choose, a harness from the team plan. Each call hands over one task, at most {} in one reply. Start sub-agents only with this tool. Never use your harness's own sub-agent tools, such as Codex's `spawn_agent`, `followup_task`, `send_message` or `wait_agent`: CrazyAgent stops any agent they start, and only agents started with this tool run on the project's pool and appear in the project's Agents tab and Team view. When your reply ends, CrazyAgent checks each task against the team plan and runs it in its own git worktree. Its full progress and result show in the project's Team view. When it ends, a short note on how it went comes back to this conversation as an `Engine:` line you see on your next turn.\n\n",
         crate::team::tool::TOOL_NAME,
@@ -192,7 +198,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup) -> String {
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
     if setup.team.sub_harnesses.is_empty() {
-        section.push_str("This project's team plan has no sub-agents, so CrazyAgent refuses every task you hand over. Do the work yourself, or tell the owner to add sub-agents in the project's Team settings.\n");
+        section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
         section.push_str("The team plan's sub-agents:\n");
         let mut left = 0;

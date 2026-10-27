@@ -956,8 +956,8 @@ impl TeamRuntime {
     }
 
     fn sync_pool(&mut self, stored: &StoredSetup, access: &ModelAccess) -> Result<(), EngineError> {
-        for slot in &stored.team.sub_harnesses {
-            let Some(launch) = launch_harness(&slot.harness) else {
+        for harness in super::plan_harnesses(&stored.team) {
+            let Some(launch) = launch_harness(&harness) else {
                 continue;
             };
             let usable = matches!(
@@ -972,7 +972,7 @@ impl TeamRuntime {
             self.connection
                 .execute(
                     "UPDATE team_tasks SET status=?3 WHERE project=?1 AND harness=?2 AND status=?4",
-                    params![stored.project_id.as_str(), slot.harness, to, from],
+                    params![stored.project_id.as_str(), harness, to, from],
                 )
                 .map_err(error)?;
         }
@@ -1376,7 +1376,11 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
-            prompt.push_str(&framing(stored, team_tool));
+            prompt.push_str(&framing(
+                stored,
+                team_tool,
+                &super::available_harnesses(access, project),
+            ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
             if !history.is_empty() {
@@ -1533,12 +1537,17 @@ impl TeamRuntime {
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         for (task, harness, prompt, pin) in queued {
-            let Some(slot) = stored
-                .team
-                .sub_harnesses
-                .iter()
-                .find(|s| s.harness == harness)
-            else {
+            let slot = if stored.team.sub_harnesses.is_empty() {
+                super::slot(&stored.team, &harness)
+            } else {
+                stored
+                    .team
+                    .sub_harnesses
+                    .iter()
+                    .find(|s| s.harness == harness)
+                    .cloned()
+            };
+            let Some(slot) = slot else {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
@@ -2788,24 +2797,31 @@ impl TeamRuntime {
 }
 
 /// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup and whether the team tool is on.
+/// and the project brief. Input: the setup, whether the team tool is on and, for an
+/// empty plan, the harnesses with an eligible account now.
 /// Output: the frame text, with the brief from `master_brief`.
-fn framing(stored: &StoredSetup, team_tool: bool) -> String {
+fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
     let brief = master_brief(stored);
-    let team = stored
-        .team
-        .sub_harnesses
-        .iter()
-        .map(|slot| {
-            format!(
-                "- {}: up to {} agents, tools {}",
-                slot.harness,
-                slot.agents,
-                if slot.tools { "on" } else { "off" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let team = if stored.team.sub_harnesses.is_empty() {
+        super::any_harness_text(&stored.team, available)
+            .trim_end()
+            .to_owned()
+    } else {
+        stored
+            .team
+            .sub_harnesses
+            .iter()
+            .map(|slot| {
+                format!(
+                    "- {}: up to {} agents, tools {}",
+                    slot.harness,
+                    slot.agents,
+                    if slot.tools { "on" } else { "off" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",

@@ -1,6 +1,6 @@
 use super::new_project::{
-    Control, HarnessState, PLATFORM_ORDER, Phase, PickFor, Step, Wizard, harness_name, size_label,
-    team_summary,
+    ANY_HARNESS_NOTE, Control, HarnessState, PLATFORM_ORDER, Phase, PickFor, Step, Wizard,
+    harness_name, size_label, team_summary,
 };
 use super::new_project_input::{TextInput, cells, char_cells};
 use super::project_markdown::sanitize;
@@ -1128,6 +1128,9 @@ fn team(draw: &mut Draw) {
         focus,
         &look,
     ));
+    if team.sub_harnesses.is_empty() {
+        draw.note(ANY_HARNESS_NOTE, look.muted);
+    }
     if let Some((text, _)) = draw.note_for(Control::Team) {
         draw.note(&text, look.error);
     } else if let Some(text) = wizard.limited_note().filter(|_| focus) {

@@ -2375,6 +2375,7 @@ fn turn_tools(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<bool,
 
 fn bundle(
     tx: &Transaction<'_>,
+    config: &EffectiveConfig,
     session: MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<MasterRuntimeResult, EngineError> {
@@ -2386,10 +2387,13 @@ fn bundle(
     let tools = turn_tools(tx, &session)?;
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
-        MasterBackend::Codex | MasterBackend::Claude => {
-            crate::launch_context::for_master(tx, &session.project_id, tools)
-                .map_err(|problem| EngineError(problem.0))?
-        }
+        MasterBackend::Codex | MasterBackend::Claude => crate::launch_context::for_master(
+            tx,
+            &session.project_id,
+            tools,
+            config.settings.model_access.as_ref(),
+        )
+        .map_err(|problem| EngineError(problem.0))?,
     };
     let agent_project = crate::launch_context::agent_project(tx, &session.project_id)
         .map_err(|problem| EngineError(problem.0))?;
@@ -2499,7 +2503,7 @@ fn prepare_turn(
         if !preflight_turn(tx, config, session, turn)? {
             return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
         }
-        return bundle(tx, session.clone(), turn);
+        return bundle(tx, config, session.clone(), turn);
     }
     if turn.phase != MasterTurnPhase::Queued {
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
@@ -2558,7 +2562,7 @@ fn prepare_turn(
         turn.phase = MasterTurnPhase::Prepared;
         persist_runtime(tx, config, session, turn)?;
         current_scope(tx, config, sources, host, session, turn)?;
-        return bundle(tx, session.clone(), turn);
+        return bundle(tx, config, session.clone(), turn);
     }
     block_on_gaps(tx, config, host, session, turn, &gaps)?;
     Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())))
