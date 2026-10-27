@@ -35,12 +35,13 @@ export function mountMasterComposer() {
     team: { kind: "loading" }, reloadTeam: () => {},
   };
   mount(createElement(ConversationTab, { data }));
-  return "pj-composer";
+  return document.querySelector(".cs textarea").id;
 }
 
 export function field(id) {
   const element = document.getElementById(id);
-  return { value: element.value, focused: document.activeElement === element, help: document.getElementById(element.getAttribute("aria-describedby"))?.textContent ?? "", sent: [...sent] };
+  const help = element.closest(".cs")?.querySelector(".cs-status") ?? document.getElementById(element.getAttribute("aria-describedby"));
+  return { value: element.value, focused: document.activeElement === element, help: help?.textContent ?? "", sent: [...sent] };
 }
 
 export function syntheticEnter(id, init) {

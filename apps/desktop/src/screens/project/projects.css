@@ -121,12 +121,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 
 .pj-convo { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; }
 .pj-convo-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.pj-thread { flex: 1; min-height: 240px; overflow: auto; display: grid; gap: 16px; align-content: start; padding: 4px 2px; }
-.pj-turn { display: grid; gap: 8px; }
-.pj-msg-owner { justify-self: end; max-width: 75%; padding: 8px 12px; border-radius: var(--radius-panel); background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; }
-.pj-msg-master { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: start; min-width: 0; }
-.pj-msg-body { min-width: 0; }
-.pj-composer { display: grid; gap: 8px; }
+.pj-convo > .cs { flex: 1; height: auto; min-height: 240px; }
 
 .pj-ctx { display: grid; grid-template-columns: 260px minmax(0, 1fr); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); min-height: 480px; }
 .pj-tree { border-right: 1px solid var(--border); padding: 12px 8px; overflow: auto; max-height: calc(100vh - 220px); }

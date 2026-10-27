@@ -83,14 +83,27 @@ export function shown() {
     terminalLabel: document.querySelector(".tg-terminal")?.getAttribute("aria-label") ?? null,
     close: Boolean(document.querySelector('[aria-label="Close terminal"]')),
     conversation: Boolean(document.querySelector(".pj-convo")),
-    composer: Boolean(document.getElementById("pj-composer")),
-    send: Boolean(document.querySelector('[data-testid="send-master-message"]')),
+    console: Boolean(document.querySelector(".pj-convo > .cs")),
+    prompt: document.querySelector(".cs textarea")?.value ?? null,
+    status: document.querySelector(".cs-status")?.textContent ?? null,
+    owner: [...document.querySelectorAll(".cs-owner")].map((line) => line.textContent),
     buttons: [...document.querySelectorAll("button")].map((item) => item.textContent.trim()).filter(Boolean),
     text: document.getElementById("panel").textContent,
     viewport: window.innerHeight,
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,
     box: box ? { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height) } : null,
   };
+}
+
+/** Types into the console prompt and presses Enter, as the owner does. */
+export function typeAndEnter(text) {
+  const field = document.querySelector(".cs textarea");
+  const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+  flushSync(() => {
+    set.call(field, text);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  flushSync(() => field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })));
 }
 
 /** Opens a real xterm whose keys go through the panel's key routing, and focuses it. */

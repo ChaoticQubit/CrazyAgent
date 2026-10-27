@@ -32,7 +32,7 @@ test("only Codex and Claude Code masters run live, and the master is found by ki
 
 test("the project page mounts the master area on one line, where the team activity strip wraps it", () => {
   const page = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
-  assert.match(page, /active === "conversation" && <MasterArea data=\{data\} \/>/);
+  assert.match(page, /active === "conversation" && <TeamActivity data=\{data\}><MasterArea data=\{data\} \/><\/TeamActivity>/);
 });
 
 const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
@@ -54,7 +54,7 @@ test("with the live master on, its terminal fills the master area with no close 
   assert.equal(seen.terminalLabel, "Master terminal");
   assert.equal(seen.close, false, "the master's terminal is the area itself; nothing closes it");
   assert.equal(seen.conversation, false);
-  assert.equal(seen.composer, false);
+  assert.equal(seen.console, false);
   assert.ok(seen.buttons.includes("Earlier conversation"), seen.buttons.join(", "));
   assert.ok(seen.area.bottom - seen.area.top >= seen.viewport - 200 - 1, JSON.stringify(seen.area));
   assert.ok(seen.area.bottom - seen.box.bottom <= 1, `terminal reaches the bottom of the area: ${JSON.stringify(seen)}`);
@@ -83,21 +83,25 @@ test("before the master's terminal opens, and when the engine can't start it, th
   }
 });
 
-test("Earlier conversation opens the old engine-driven conversation read-only, and the live master comes back", async () => {
+test("Earlier conversation opens the old engine-driven conversation read-only in the console, and the live master comes back", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountView("running")');
     const opened = await evaluate('Fixture.click("Earlier conversation")');
     const earlier = await evaluate("Fixture.shown()");
+    await evaluate('Fixture.typeAndEnter("one more thing")');
+    const typed = await evaluate("Fixture.shown()");
     const closed = await evaluate('Fixture.click("Back to the live master")');
-    return { opened, earlier, closed, back: await evaluate("Fixture.shown()") };
+    return { opened, earlier, typed, closed, back: await evaluate("Fixture.shown()") };
   });
   assert.equal(seen.opened, true);
   assert.equal(seen.earlier.conversation, true);
+  assert.equal(seen.earlier.console, true, "the earlier conversation is the terminal-style console");
   assert.equal(seen.earlier.terminal, false);
-  assert.equal(seen.earlier.composer, false, "no message box: the old session is read-only");
-  assert.equal(seen.earlier.send, false);
+  assert.equal(seen.earlier.status, "Read-only: the master runs live in its terminal now.");
   assert.ok(!seen.earlier.buttons.some((text) => ["Send", "Send again", "Stop", "Conversation actions"].includes(text)), seen.earlier.buttons.join(", "));
-  assert.match(seen.earlier.text, /No earlier conversation/);
+  assert.equal(seen.typed.prompt, "one more thing", "Enter sends nothing: the text is held");
+  assert.deepEqual(seen.typed.owner, []);
+  assert.equal(seen.typed.status, "The master can't take a message right now. Your text stays here.");
   assert.equal(seen.closed, true);
   assert.equal(seen.back.terminal, true);
   assert.equal(seen.back.conversation, false);
@@ -117,7 +121,8 @@ test("a master harness with no terminal app keeps today's conversation, also whe
     assert.equal(view.live, false, why);
     assert.equal(view.terminal, false, why);
     assert.equal(view.conversation, true, why);
-    assert.equal(view.composer, true, `${why}: the conversation takes messages as today`);
+    assert.equal(view.console, true, `${why}: the conversation is the terminal-style console`);
+    assert.equal(view.status, "Enter to send, Shift+Enter for a new line, / for commands, @ to tag.", why);
   }
   assert.equal(seen.loading.conversation, false, "nothing is decided before the team plan is read");
   assert.equal(seen.loading.live, false);

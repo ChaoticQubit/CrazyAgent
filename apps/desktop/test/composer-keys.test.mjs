@@ -66,14 +66,15 @@ test("in the team terminal composer Enter sends the prompt, Shift+Enter adds a l
   assert.match(seen.entered.help, /Enter to send, Shift\+Enter for a new line\./);
 });
 
-test("in the master composer Shift+Enter adds a line and Enter is taken as send, never typed", async () => {
+test("in the master console Shift+Enter adds a line and Enter is taken as send, never typed", async () => {
   const seen = await composerKeys("mountMasterComposer");
   assert.equal(seen.shifted.value, "first line\nsecond");
+  assert.equal(seen.shifted.help, "Enter to send, Shift+Enter for a new line, / for commands, @ to tag.");
   assert.equal(seen.composingPrevented, false);
   assert.equal(seen.webkitPrevented, false);
   assert.equal(seen.composed.value, "first line\nsecondかな");
   assert.equal(seen.entered.value, "first line\nsecondかな", "Enter adds no line; with no engine the send waits");
-  assert.equal(seen.entered.help, "Enter to send, Shift+Enter for a new line");
+  assert.equal(seen.entered.help, "The master can't take a message right now. Your text stays here.");
 });
 
 test("after a master turn ends its terminal, the composer still takes typing and keeps the draft; only Send waits until the terminal is live", async () => {
