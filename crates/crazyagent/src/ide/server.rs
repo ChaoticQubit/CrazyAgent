@@ -851,4 +851,4 @@ pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests;
+pub(crate) mod tests;

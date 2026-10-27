@@ -227,38 +227,29 @@ impl IdeViews {
     }
 
     /// Starts one open of a project's IDE before the engine is asked, so a hide or close
-    /// that comes first stops it from showing. Input: the project. Output: its ticket.
-    pub fn begin(&self, project: &ProjectId) -> u64 {
+    /// that comes first stops it from showing. Input: the project. Output: its ticket and
+    /// the turn it holds while the engine opens the project's server, so a stop from a page
+    /// close runs wholly before or wholly after it.
+    pub fn begin(&self, project: &ProjectId) -> (u64, Arc<tokio::sync::Mutex<()>>) {
         let mut held = self.lock();
         held.asks += 1;
         let ticket = held.asks;
         held.opening.insert(project.as_str().to_owned(), ticket);
-        held.engine
+        let order = held
+            .engine
             .entry(project.as_str().to_owned())
             .or_insert_with(|| Order {
                 turn: Arc::default(),
                 begun: ticket,
-            })
-            .begun = ticket;
-        ticket
+            });
+        order.begun = ticket;
+        (ticket, Arc::clone(&order.turn))
     }
 
     /// Whether this project's IDE webview is loaded, shown or hidden. Input: the project.
     /// Output: true while it is loaded.
     pub fn loaded(&self, project: &ProjectId) -> bool {
         self.lock().loaded.contains_key(project.as_str())
-    }
-
-    /// The turn an open holds while the engine opens the project's server, so a stop from
-    /// a page close runs wholly before or wholly after it. Input: the project, after
-    /// [`IdeViews::begin`]. Output: the turn.
-    pub fn turn(&self, project: &ProjectId) -> Arc<tokio::sync::Mutex<()>> {
-        let held = self.lock();
-        let order = held
-            .engine
-            .get(project.as_str())
-            .expect("an open takes its turn after begin");
-        Arc::clone(&order.turn)
     }
 
     /// Notes a project page's close, before any await, when an open asked the engine for
@@ -667,8 +658,8 @@ mod tests {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();
         let beta = ProjectId::new("beta").unwrap();
-        let first = views.begin(&alpha);
-        let second = views.begin(&alpha);
+        let (first, _) = views.begin(&alpha);
+        let (second, _) = views.begin(&alpha);
         assert!(second > first);
         assert!(
             !views.lock().admit(&alpha, first),
@@ -676,13 +667,13 @@ mod tests {
         );
         assert!(views.lock().admit(&alpha, second));
         assert!(!views.lock().admit(&alpha, second), "a ticket shows once");
-        let hidden = views.begin(&alpha);
+        let (hidden, _) = views.begin(&alpha);
         views.lock().cancel(&alpha);
         assert!(
             !views.lock().admit(&alpha, hidden),
             "hide or close before the engine answered"
         );
-        let other = views.begin(&beta);
+        let (other, _) = views.begin(&beta);
         views.lock().cancel(&alpha);
         assert!(
             views.lock().admit(&beta, other),
@@ -690,36 +681,75 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_closed_page_stops_its_server_in_turn_unless_a_newer_open_wants_it() {
-        let views = IdeViews::default();
+        use crate::bridge::NativeBridge;
+        use crazyagent::engine::bootstrap::EngineService;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempfile::Builder::new()
+            .prefix("ca-dide-stop-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("g"),
+            &root.path().join("p"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+        bridge.connect().await.unwrap();
+        let bridge = Arc::new(bridge);
+        let views = Arc::new(IdeViews::default());
         let alpha = ProjectId::new("alpha").unwrap();
         assert!(
             views.closing(&alpha).is_none(),
             "a page that never asked for a server stops nothing"
         );
 
-        views.begin(&alpha);
-        let open = views.turn(&alpha);
+        let (_, open) = views.begin(&alpha);
         let opening = open.lock().await;
         let closing = views.closing(&alpha).unwrap();
+        let asked = Arc::new(AtomicBool::new(false));
         let stop = tokio::spawn({
-            let views = Arc::new(views);
-            let alpha = alpha.clone();
-            let shared = Arc::clone(&views);
+            let (views, bridge, asked, alpha) = (
+                Arc::clone(&views),
+                Arc::clone(&bridge),
+                Arc::clone(&asked),
+                alpha.clone(),
+            );
             async move {
-                let stopped = shared
-                    .stop_closed(&alpha, closing, || async { Ok(true) })
-                    .await;
-                (stopped.map_err(|error| error.code), views)
+                views
+                    .stop_closed(&alpha, closing, || async {
+                        asked.store(true, Ordering::SeqCst);
+                        let call = bridge.ide_stop(alpha.clone())?;
+                        call.await
+                    })
+                    .await
+                    .map_err(|error| error.code)
             }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!stop.is_finished(), "the stop waits while the open runs");
+        assert!(
+            !asked.load(Ordering::SeqCst),
+            "the engine is not asked to stop before the open ends"
+        );
         drop(opening);
         drop(open);
-        let (stopped, views) = stop.await.unwrap();
-        assert_eq!(stopped, Ok(true), "then the closed page's server stops");
+        assert_eq!(
+            stop.await.unwrap(),
+            Ok(false),
+            "then the engine is asked, and with no server running it stopped none"
+        );
+        assert!(asked.load(Ordering::SeqCst));
         assert!(
             views.closing(&alpha).is_none(),
             "a stopped project is forgotten"
@@ -728,30 +758,43 @@ mod tests {
         views.begin(&alpha);
         let closing = views.closing(&alpha).unwrap();
         views.begin(&alpha);
+        let asked = AtomicBool::new(false);
         assert_eq!(
             views
-                .stop_closed(&alpha, closing, || async { Ok(true) })
+                .stop_closed(&alpha, closing, || async {
+                    asked.store(true, Ordering::SeqCst);
+                    let call = bridge.ide_stop(alpha.clone())?;
+                    call.await
+                })
                 .await
                 .map_err(|error| error.code),
             Ok(false),
             "an open that began after the close keeps its server"
         );
         assert!(
+            !asked.load(Ordering::SeqCst),
+            "and the engine is never asked to stop it"
+        );
+        assert!(
             views.closing(&alpha).is_some(),
             "the newer open's order stays"
         );
+
         let closing = views.closing(&alpha).unwrap();
+        let detached = NativeBridge::new(Some(root.path().join("e.sock")));
         assert_eq!(
             views
                 .stop_closed(&alpha, closing, || async {
-                    Err(refused("ide_tab_outcome_unknown"))
+                    let call = detached.ide_stop(alpha.clone())?;
+                    call.await
                 })
                 .await
                 .map_err(|error| error.code),
-            Err("ide_tab_outcome_unknown"),
+            Err("not_connected"),
             "a refused stop reaches the caller"
         );
         assert!(views.closing(&alpha).is_none());
+        service.shutdown().await.unwrap();
     }
 
     #[test]

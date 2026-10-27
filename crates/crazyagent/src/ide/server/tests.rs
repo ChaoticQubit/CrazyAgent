@@ -10,7 +10,7 @@ const GONE_WAIT: Duration = Duration::from_secs(15);
 /// The pinned VSCodium reh-web build that IDE-1 extracted into the project-local cache, in
 /// the `.local-state/ide-cache` of the nearest checkout above this crate. A machine without
 /// it fails these tests: the IDE server is unqualified there.
-fn cached_build() -> PathBuf {
+pub(crate) fn cached_build() -> PathBuf {
     let build = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .map(|folder| folder.join(".local-state").join("ide-cache").join(BUILD))
@@ -47,11 +47,21 @@ fn mode(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().mode() & 0o777
 }
 
+/// The process group the running launch recorded in a project's IDE folder. Input: the
+/// folder. Output: the group's id; panics when none is recorded.
+pub(crate) fn recorded_launch(folder: &Path) -> i32 {
+    recorded_group(&folder.join(GROUP))
+        .expect("a running launch records its process group")
+        .0
+        .as_raw_nonzero()
+        .get()
+}
+
 fn present(group: i32) -> bool {
     group_present(Pid::from_raw(group).unwrap())
 }
 
-async fn gone(group: i32) {
+pub(crate) async fn gone(group: i32) {
     let deadline = Instant::now() + GONE_WAIT;
     while present(group) {
         assert!(

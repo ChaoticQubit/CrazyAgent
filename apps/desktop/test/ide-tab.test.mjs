@@ -50,6 +50,12 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   }
   assert.equal(client.openFailure("ide_platform_unqualified"), "The IDE is unavailable on this platform.");
   assert.equal(client.openFailure("ide_build_not_ready"), "The IDE isn't ready yet. Wait for the download to finish.");
+  for (const code of ["ide_extension_install_failed", "ide_extension_list_invalid", "ide_extension_hash_mismatch", "ide_extensions_unavailable"]) {
+    assert.equal(client.openFailure(code), "The IDE's extensions couldn't be installed, so the IDE didn't start. Try again.", code);
+  }
+  for (const code of ["ide_capability_capacity", "ide_capability_unavailable"]) {
+    assert.equal(client.openFailure(code), "The IDE couldn't get its private link to CrazyAgent, so it didn't start. Try again.", code);
+  }
 });
 
 test("the tab is absent when ide_tab is off and last when it is on", () => {
@@ -163,7 +169,10 @@ test("the IDE webview follows its panel through any layout shift or scroll, and 
   const tab = read("src/screens/project/ide.tsx");
   assert.match(tab, /window\.requestAnimationFrame\(follow\)/, "the panel's box is compared every frame while shown, so a banner or a scroll that moves it without a resize moves the IDE too");
   assert.match(tab, /window\.cancelAnimationFrame\(frame\)/, "hiding the tab stops following");
-  assert.match(tab, /if \(!box \|\| !shown \|\| sameBounds\(box, last\)\) return;/,"the window hears only a box that changed");
+  assert.match(tab, /if \(!box \|\| sameBounds\(box, last\)\) return;/, "the window hears only a box that changed");
+  assert.match(tab, /const place = \(\) => \{\s*if \(!shown\) return;\s*const box = bounds\(element\.getBoundingClientRect\(\)\);/, "nothing is measured before the IDE shows");
+  assert.match(tab, /if \(!live \|\| !shown\) \{\s*frame = 0;\s*return;\s*\}/, "the loop runs only while the IDE is shown");
+  assert.match(tab, /if \(frame === 0\) follow\(\);/, "the loop starts once the IDE shows, never twice");
   const css = read("src/screens/project/ide.css");
   assert.doesNotMatch(css, /100vh/, "the tab is not sized from a guessed header height");
   assert.match(css, /\.main:has\(\.ide-tab\)/, "the page lays out as a column while the IDE tab is shown");
@@ -177,7 +186,8 @@ test("closing a project page stops its IDE server, ordered with any open of the 
   assert.match(close, /views\s*\.stop_closed\(&project, closing,/);
   assert.match(close, /ide_stop\(project\.clone\(\)\)/, "the engine stops the server");
   const open = command(lib, "desktop_ide_open");
-  assert.ok(open.indexOf("views.turn(&project)") > open.indexOf("views.begin(&project)"), "an open takes its turn after its ticket");
+  assert.match(open, /let \(ticket, turn\) = views\.begin\(&project\);/, "an open takes its ticket and its turn under one lock");
+  assert.doesNotMatch(open, /views\.turn\(/, "no second lock where a close could remove the order between them");
   assert.ok(open.indexOf("turn.lock().await") < open.indexOf("ide_open(project"), "the engine opens only in the project's turn");
   const bridge = read("src-tauri/src/bridge/ide.rs");
   assert.match(bridge, /client\.ide_tab_stop\(project\)/);

@@ -63,12 +63,17 @@ export function IdeTab({ projectId }: { projectId: string }) {
     let last: IdeBounds | null = null;
     let frame = 0;
     const place = () => {
+      if (!shown) return;
       const box = bounds(element.getBoundingClientRect());
-      if (!box || !shown || sameBounds(box, last)) return;
+      if (!box || sameBounds(box, last)) return;
       last = box;
       void placeIde(projectId, box);
     };
     const follow = () => {
+      if (!live || !shown) {
+        frame = 0;
+        return;
+      }
       place();
       frame = window.requestAnimationFrame(follow);
     };
@@ -88,10 +93,9 @@ export function IdeTab({ projectId }: { projectId: string }) {
       shown = true;
       last = null;
       setProblem(null);
-      place();
+      if (frame === 0) follow();
     };
     void open();
-    follow();
     const beat = window.setInterval(() => {
       void touchIde(projectId).then((result) => {
         if (live && result.kind === "ok" && !result.value) void open();

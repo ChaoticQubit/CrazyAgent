@@ -31,6 +31,8 @@ export type IdeStatus = { line: string; action: "download" | "retry" | null; rea
 const PLATFORMS: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
 const MEGABYTE = 1024 * 1024;
 const UNQUALIFIED = "The IDE is unavailable on this platform.";
+const EXTENSIONS_FAILED = "The IDE's extensions couldn't be installed, so the IDE didn't start. Try again.";
+const LINK_FAILED = "The IDE couldn't get its private link to CrazyAgent, so it didn't start. Try again.";
 
 const BUILD_FAILURES: Record<string, string> = {
   ide_build_hash_mismatch: "The IDE download didn't match its published checksum, so it was deleted and never run.",
@@ -48,6 +50,9 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_servers_full: "Too many project IDEs are open. Close another project, then try again.",
   ide_server_start_timeout: "The IDE took too long to start. Try again.",
   ide_server_start_failed: "The IDE couldn't start. Try again.",
+  ide_entropy_unavailable: "The IDE couldn't start. Try again.",
+  ide_capability_capacity: LINK_FAILED,
+  ide_capability_unavailable: LINK_FAILED,
   ide_server_exited: "The IDE stopped while it started. Try again.",
   ide_server_port_taken: "Another program took the IDE's port. Try again.",
   ide_port_unavailable: "No free port was found for the IDE. Try again.",
@@ -82,8 +87,10 @@ export function ideStatus(state: IdeTabState): IdeStatus {
   }
 }
 
-/** Says why the IDE didn't open. Input: the refusal code. Output: the plain sentence. */
+/** Says why the IDE didn't open; every refusal of the extension install before the server
+ * starts reads as one sentence. Input: the refusal code. Output: the plain sentence. */
 export function openFailure(code: string): string {
+  if (code === "ide_extensions_unavailable" || code.startsWith("ide_extension_")) return EXTENSIONS_FAILED;
   return OPEN_FAILURES[code] ?? failureCopy(code);
 }
 

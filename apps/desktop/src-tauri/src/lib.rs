@@ -2210,8 +2210,7 @@ async fn desktop_ide_open(
     main_window(&window)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
-    let ticket = views.begin(&project);
-    let turn = views.turn(&project);
+    let (ticket, turn) = views.begin(&project);
     let opened = {
         let _turn = turn.lock().await;
         let call = read(&state).await?.ide_open(project.clone())?;
