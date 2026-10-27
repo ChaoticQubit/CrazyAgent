@@ -78,9 +78,6 @@ export type SavedText =
   | { kind: "saved"; version: number }
   | { kind: "stale"; version: number; current: ProcessText; writer: LastWriter };
 
-/** The sentence for a save refused because the text changed after the owner opened it. */
-export const PROCESS_STALE = "These instructions changed since you opened them, so yours were not saved. Your text is still here; copy it, then reopen this page to see the saved version.";
-
 /** Reads the owner's instructions. Input: null for app-wide, or the project id.
  * Output: the text, empty when nothing is saved, and the version a save names. */
 export function loadProcess(projectId: string | null): Promise<Result<ProcessText>> {

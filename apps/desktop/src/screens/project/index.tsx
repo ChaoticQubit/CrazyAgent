@@ -174,7 +174,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
-      {active === "process" && <ProcessEditor scope={{ kind: "project", id: data.id, name: data.name }} />}
+      {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
