@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::MutexGuard;
+use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 const HEAD_BYTES_MAX: usize = 16 * 1024;
 const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
@@ -32,10 +32,16 @@ enum Routed {
     Unknown,
 }
 
-/// Takes the shared bridge through the same bounded queue the app's commands use.
+/// Takes the shared bridge alone through the same bounded queue the app's commands use.
 /// Input: the shared bridge. Output: its guard, or `busy` past the queue's bounds.
-async fn lock(state: &Shared) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
+async fn lock(state: &Shared) -> Result<RwLockWriteGuard<'_, NativeBridge>, BridgeError> {
     state.enter().await
+}
+
+/// Shares the bridge with other plain reads through the same bounded queue the app's
+/// reads use. Input: the shared bridge. Output: its guard, or `busy` past the queue's bounds.
+async fn read(state: &Shared) -> Result<RwLockReadGuard<'_, NativeBridge>, BridgeError> {
+    state.read().await
 }
 
 /// Reads a command's camelCase arguments the way Tauri does, refusing ones that do not fit.

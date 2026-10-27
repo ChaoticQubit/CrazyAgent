@@ -28,16 +28,18 @@ pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {
     /// Lists the engine's harness catalog for the master, sub-agent and research pickers.
-    /// Input: none; uses the attached owner connection. Output: entries in owner
-    /// priority order, or `controller_disconnected` without a connection.
+    /// Input: whether the engine should probe now instead of answering from its last probe;
+    /// uses the attached owner connection. Output: entries in owner priority order, or
+    /// `controller_disconnected` without a connection.
     pub async fn harness_catalog(
         &self,
+        check: bool,
     ) -> Result<Vec<crate::harnesses::HarnessEntry>, EngineError> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?;
-        client.harness_catalog().await
+        client.harness_catalog(check).await
     }
 }
 
@@ -254,6 +256,22 @@ impl OwnerController {
         self.client
             .clone()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
+    /// Builds a controller for reads on the same connection that leaves this controller's
+    /// view and pending intent untouched, so plain reads can run side by side with no effect
+    /// on later mutations. Takes the controller. Returns the copy with no view and nothing
+    /// pending, or `controller_disconnected`.
+    pub fn reader(&self) -> Result<Self, EngineError> {
+        Ok(Self {
+            client: Some(self.shared_client()?),
+            identity: self.identity.clone(),
+            view: None,
+            pending: None,
+            pending_account_profile: None,
+            kind: self.kind,
+            timeout: self.timeout,
+        })
     }
 
     /// Disconnects this client without stopping the shared engine.

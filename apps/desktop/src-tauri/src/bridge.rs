@@ -320,6 +320,14 @@ impl NativeBridge {
             .ok_or_else(|| failure("not_connected"))
     }
 
+    fn reader(&self) -> Result<OwnerController, BridgeError> {
+        self.controller
+            .as_ref()
+            .ok_or_else(|| failure("not_connected"))?
+            .reader()
+            .map_err(|_| failure("not_connected"))
+    }
+
     pub async fn baselines(&mut self, next: bool) -> Result<BaselinePage, BridgeError> {
         self.selected = None;
         let cursor = if next {

@@ -22,10 +22,10 @@ impl NativeBridge {
     /// Reads a project's team: harness plan, agents, tasks and the master conversation.
     /// Takes the project id.
     /// Returns the bounded team status or a plain failure code.
-    pub async fn team_status(&mut self, id: &str) -> Result<TeamStatus, BridgeError> {
+    pub async fn team_status(&self, id: &str) -> Result<TeamStatus, BridgeError> {
         let project_id = project(id)?;
         let status = self
-            .controller()?
+            .reader()?
             .team_status(project_id)
             .await
             .map_err(|e| read_failure(&e.0))?;

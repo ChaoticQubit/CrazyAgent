@@ -404,7 +404,7 @@ impl NativeOwner {
             }
             SettingsJob::Harnesses => SettingsEvent::Harnesses(match self.settings_controller() {
                 Ok(controller) => controller
-                    .harness_catalog()
+                    .harness_catalog(true)
                     .await
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),

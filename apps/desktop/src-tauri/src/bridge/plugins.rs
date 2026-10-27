@@ -24,12 +24,12 @@ impl NativeBridge {
     /// Lists skills for global settings (no project) or one project's settings.
     /// Output: each skill's name, description, scope, On flags and folders.
     pub async fn plugin_skills(
-        &mut self,
+        &self,
         project_id: Option<String>,
     ) -> Result<Vec<SkillView>, BridgeError> {
         self.plugins_ready()?;
         let project = project(project_id)?;
-        self.controller()?
+        self.reader()?
             .plugin_skills(project)
             .await
             .map_err(plugin_failure)
@@ -38,12 +38,12 @@ impl NativeBridge {
     /// Lists MCP servers for global settings or one project's settings.
     /// Output: how each runs, its plain status, saved secret names and tools.
     pub async fn plugin_servers(
-        &mut self,
+        &self,
         project_id: Option<String>,
     ) -> Result<Vec<ServerView>, BridgeError> {
         self.plugins_ready()?;
         let project = project(project_id)?;
-        self.controller()?
+        self.reader()?
             .plugin_servers(project)
             .await
             .map_err(plugin_failure)
