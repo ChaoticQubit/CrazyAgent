@@ -471,12 +471,24 @@ impl Engine {
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {
+        self.storage_job_within(self.timeout, build).await
+    }
+
+    /// Runs one storage job and waits at most `wait` for its answer, for owner work whose
+    /// client waits longer than the owner deadline. Inputs: the wait and the job.
+    /// Output: the job's result, or the outcome-unknown error while storage has not
+    /// answered in time or went away without answering.
+    async fn storage_job_within<T>(
+        &self,
+        wait: Duration,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+    ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
         self.storage
             .sender
             .try_send(build(send))
             .map_err(|_| EngineError("owner_queue_not_submitted".into()))?;
-        tokio::time::timeout(self.timeout, receive)
+        tokio::time::timeout(wait, receive)
             .await
             .map_err(|_| owner::native_auth::outcome_unknown())?
             .map_err(|_| owner::native_auth::outcome_unknown())?
