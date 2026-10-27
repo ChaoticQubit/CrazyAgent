@@ -293,7 +293,7 @@ fn codex_line(
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
 /// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`.
 /// Inputs: the home and the format. Output: the paths.
-fn records(home: &Path, format: Format) -> Vec<PathBuf> {
+pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let root = match format {
         Format::Claude => home.join("projects"),
         Format::Codex => home.join("sessions"),
@@ -335,7 +335,7 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
 }
 
 #[cfg(unix)]
-fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
+pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     use std::os::unix::fs::MetadataExt;
     let file = rustix::fs::open(
         path,
@@ -354,7 +354,7 @@ fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
 }
 
 #[cfg(not(unix))]
-fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
+pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     if !std::fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }

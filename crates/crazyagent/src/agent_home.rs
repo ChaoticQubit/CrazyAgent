@@ -459,6 +459,9 @@ fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), AgentHomeE
     Ok(())
 }
 
+mod transcript;
+pub use transcript::{LoadedFile, Observed, observed};
+
 #[cfg(test)]
 #[path = "agent_home/tests.rs"]
 mod tests;

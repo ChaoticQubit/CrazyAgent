@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent_home::{PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
+use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
 use crate::protocol::encode_frame;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,9 @@ enum Reply {
         harness: String,
         launched: bool,
         skills: Vec<String>,
+        sessions: u32,
+        loaded: Vec<LoadedFile>,
+        skills_used: Vec<String>,
         bytes: u32,
     },
     Rejected {
@@ -92,7 +95,9 @@ enum Reply {
 
 /// What one team agent received at its last launch, read back from its private home: the
 /// agent id, its harness, whether it has launched, the text of its harness's instruction
-/// file (empty when none was given) and the names of the skills installed for it.
+/// file (empty when none was given) and the names of the skills installed for it; then
+/// what its harness reported in its own session records: how many were read, the
+/// instruction files it loaded and the skills it invoked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstructions {
@@ -101,6 +106,9 @@ pub struct AgentInstructions {
     pub launched: bool,
     pub text: String,
     pub skills: Vec<String>,
+    pub sessions: u32,
+    pub loaded: Vec<LoadedFile>,
+    pub skills_used: Vec<String>,
 }
 
 enum Answer {
@@ -168,6 +176,9 @@ impl OwnerClient {
                     harness,
                     launched,
                     skills,
+                    sessions,
+                    loaded,
+                    skills_used,
                     ..
                 },
                 Some(text),
@@ -177,6 +188,9 @@ impl OwnerClient {
                 launched,
                 text,
                 skills,
+                sessions,
+                loaded,
+                skills_used,
             }),
             _ => Err(unknown()),
         }
@@ -236,6 +250,9 @@ impl OwnerClient {
                     harness,
                     launched,
                     skills,
+                    sessions,
+                    loaded,
+                    skills_used,
                     bytes,
                 } => {
                     let text = read_payload(&mut stream, bytes, PROCESS_BYTES_MAX)
@@ -249,6 +266,9 @@ impl OwnerClient {
                         harness,
                         launched,
                         skills,
+                        sessions,
+                        loaded,
+                        skills_used,
                         bytes,
                     };
                     Ok((reply, Some(text)))
@@ -322,6 +342,9 @@ pub(super) async fn serve(
                 harness: view.harness,
                 launched: view.launched,
                 skills: view.skills,
+                sessions: view.sessions,
+                loaded: view.loaded,
+                skills_used: view.skills_used,
                 bytes: view.text.len() as u32,
             };
             (reply, Some(view.text))
@@ -440,8 +463,9 @@ fn run(
 }
 
 /// Reads what one team agent of a project received at its last launch from its private
-/// home under `<root>/team`. Inputs: the engine root, the project and the agent id, none
-/// for the project's newest master. Output: the view, or a plain code.
+/// home under `<root>/team`, and what its harness reported loading and invoking in its own
+/// session records there. Inputs: the engine root, the project and the agent id, none for
+/// the project's newest master. Output: the view, or a plain code.
 fn agent_instructions(
     root: &Path,
     project: &ProjectId,
@@ -480,12 +504,19 @@ fn agent_instructions(
         crate::agent_home::received(&home, kind).map_err(|problem| EngineError(problem.0))?;
     let launched = received.is_some();
     let received = received.unwrap_or_default();
+    let seen = match launched {
+        true => crate::agent_home::observed(&home, kind),
+        false => crate::agent_home::Observed::default(),
+    };
     Ok(AgentInstructions {
         agent: id,
         harness,
         launched,
         text: received.text,
         skills: received.skills,
+        sessions: u32::try_from(seen.records).map_err(|_| failure("process_reply_bounds"))?,
+        loaded: seen.loaded,
+        skills_used: seen.used,
     })
 }
 
