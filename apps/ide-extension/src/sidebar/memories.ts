@@ -8,7 +8,8 @@ const ICONS: Record<string, string> = { "memory.pending": "lightbulb", "memory.a
 /**
  * The Memories view: the project's memories grouped by state, with Approve and Reject on
  * the ones waiting for the owner. Each decision goes to the engine with the revision the
- * owner saw; the extension never writes memory itself. Refreshes on `memories_changed`.
+ * owner saw. Approve only asks: the owner confirms it in the CrazyAgent window, which the
+ * IDE cannot click. The extension never writes memory itself. Refreshes on `memories_changed`.
  * Input: the extension context and the engine bridge. Output: none.
  */
 export function sidebarMemories(context: vscode.ExtensionContext, engine: Engine): void {
@@ -46,6 +47,7 @@ export function sidebarMemories(context: vscode.ExtensionContext, engine: Engine
     }
     const reply = await ask(engine, "ide.memory_decide", { id: memory.id, revision: memory.revision, decision });
     if (reply?.kind !== "ok") void vscode.window.showWarningMessage(trouble(reply));
+    else if (decision === "approve") void vscode.window.showInformationMessage("Confirm in the CrazyAgent window to save this memory.");
     refresh();
   };
   context.subscriptions.push(

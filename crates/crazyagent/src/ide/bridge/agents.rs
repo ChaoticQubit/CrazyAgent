@@ -117,11 +117,11 @@ pub(crate) async fn sent(
     Ok(serde_json::json!({ "agent": agent }))
 }
 
-fn database(runtime: &OwnerRuntimeHandle) -> Result<PathBuf, EngineError> {
+pub(super) fn database(runtime: &OwnerRuntimeHandle) -> Result<PathBuf, EngineError> {
     Ok(runtime.ide()?.root.join("engine.db"))
 }
 
-fn open(database: &Path, access: OpenFlags) -> Result<Connection, EngineError> {
+pub(super) fn open(database: &Path, access: OpenFlags) -> Result<Connection, EngineError> {
     let connection = Connection::open_with_flags(
         database,
         access | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,

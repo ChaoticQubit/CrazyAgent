@@ -457,6 +457,16 @@ async fn desktop_project_memories(
 }
 
 #[tauri::command]
+async fn desktop_ide_asks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<MemoryItem>, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.ide_asks(&id).await
+}
+
+#[tauri::command]
 async fn desktop_review_memory(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2413,6 +2423,7 @@ pub fn run() {
             desktop_set_pack_entry,
             desktop_remove_pack_entry,
             desktop_project_memories,
+            desktop_ide_asks,
             desktop_review_memory,
             desktop_memories,
             desktop_memory,

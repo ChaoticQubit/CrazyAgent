@@ -6,6 +6,7 @@ use crate::protocol::{
     ClientId, Command, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, RequestId, WireReply,
     WireRequest,
 };
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 
 pub const STALE: &str = "state_stale";
@@ -16,6 +17,8 @@ const CONFLICT: &str = "knowledge_version_conflict";
 const MOVED: &str = "stale_revision";
 const CLIENT: &str = "crazyagent-ide";
 const DECIDE_TRIES_MAX: usize = 3;
+const ASK_TTL_MS: i64 = 10 * 60 * 1000;
+const ASKS_PER_PROJECT_MAX: i64 = 8;
 
 /// Where one memory stands: waiting for the owner, approved, or set aside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,10 +67,12 @@ pub struct Stale {
     pub writer: Writer,
 }
 
-/// What a checked decision does next: the owner write to apply, or the stale reply.
+/// What a checked decision does next: the owner write to apply, an approval to ask the
+/// owner to confirm in the desktop app, or the stale reply.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     Apply(OwnerMutation),
+    Ask { entry_id: RequestId, version: u64 },
     Stale(Stale),
 }
 
@@ -123,8 +128,9 @@ pub fn check(decide: &Decide) -> Result<OwnerRead, &'static str> {
 }
 
 /// Plans a decision from the engine's reply to `check`: the memory must be this project's
-/// and the revision the owner saw must be its newest, else the reply is stale. Approve
-/// keeps the memory through the engine's own review; reject rejects it there. Takes the
+/// and the revision the owner saw must be its newest, else the reply is stale. Approve is
+/// never written from the IDE: it becomes an ask the owner confirms in the desktop app,
+/// which approves through its own owner review. Reject is written at once. Takes the
 /// project, the decision and the reply. Returns the plan, `ide_memory_unknown` for a memory
 /// this project does not have at that revision, or `ide_reply_invalid` for another reply.
 pub fn plan(project: &ProjectId, decide: &Decide, data: &OwnerData) -> Result<Plan, &'static str> {
@@ -142,17 +148,19 @@ pub fn plan(project: &ProjectId, decide: &Decide, data: &OwnerData) -> Result<Pl
             writer: writer(newest),
         }));
     }
-    let decision = match decide.decision {
-        Decision::Approve => ReviewDecision::Keep,
-        Decision::Reject => ReviewDecision::Reject,
-    };
-    Ok(Plan::Apply(OwnerMutation::Knowledge {
-        review: HumanReview::Review {
+    Ok(match decide.decision {
+        Decision::Approve => Plan::Ask {
             entry_id: decide.id.clone(),
             version: decide.revision,
-            decision,
         },
-    }))
+        Decision::Reject => Plan::Apply(OwnerMutation::Knowledge {
+            review: HumanReview::Review {
+                entry_id: decide.id.clone(),
+                version: decide.revision,
+                decision: ReviewDecision::Reject,
+            },
+        }),
+    })
 }
 
 /// Reads the end of an applied decision from the engine's outcome. Takes the outcome.
@@ -195,11 +203,12 @@ pub(crate) async fn memories(
     serde_json::to_value(shown).map_err(|_| failure(REPLY))
 }
 
-/// Answers `ide.memory_decide` through the engine's own owner review: checks the revision
-/// the owner saw, writes the decision at the engine revision it read, and checks again when
-/// either moved in between, at most `DECIDE_TRIES_MAX` times. Tells the project's IDE the
-/// memories changed. Takes the owner runtime, the project and the decision. Returns `ok`,
-/// the stale reply, or a refusal such as `ide_memory_unknown` or `ide_memory_busy`.
+/// Answers `ide.memory_decide`: checks the revision the owner saw, then records an approval
+/// as an ask for the desktop app's confirm (`{"confirm": "desktop"}`), or writes a
+/// rejection through the engine's own owner review at the engine revision it read, checking
+/// again when either moved in between, at most `DECIDE_TRIES_MAX` times. Takes the owner
+/// runtime, the project and the decision. Returns `ok`, the stale reply, or a refusal such
+/// as `ide_memory_unknown` or `ide_memory_busy`.
 pub(crate) async fn decide(
     runtime: &OwnerRuntimeHandle,
     project: &ProjectId,
@@ -210,6 +219,12 @@ pub(crate) async fn decide(
         let (revision, data) = read(runtime, query.clone()).await?;
         let mutation = match plan(project, decide, &data).map_err(failure)? {
             Plan::Stale(stale) => return Ok(stale_reply(&stale)),
+            Plan::Ask { entry_id, version } => {
+                asked(runtime, project, entry_id, version).await?;
+                return Ok(IdeReply::Ok {
+                    data: serde_json::json!({ "confirm": "desktop" }),
+                });
+            }
             Plan::Apply(mutation) => mutation,
         };
         match decided(&run(runtime, revision, mutation.command()?).await?.outcome) {
@@ -224,6 +239,122 @@ pub(crate) async fn decide(
         }
     }
     Err(failure("ide_memory_busy"))
+}
+
+/// Creates the table of approvals the IDE asked the owner to confirm in the desktop app.
+/// Takes the engine connection. Returns Ok.
+pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS ide_asks (
+                project TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0),
+                asked_ms INTEGER NOT NULL,
+                PRIMARY KEY (project, entry)
+            ) WITHOUT ROWID;",
+        )
+        .map_err(|_| failure("ide_asks_unavailable"))
+}
+
+/// Records that the IDE asked to approve one memory revision, replacing an older ask for
+/// the same memory, dropping asks older than `ASK_TTL_MS` and keeping the project's newest
+/// `ASKS_PER_PROJECT_MAX`. Takes the connection, project, memory, revision and time.
+/// Returns Ok, or `ide_asks_unavailable`.
+pub fn ask(
+    connection: &Connection,
+    project: &ProjectId,
+    entry_id: &RequestId,
+    version: u64,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let unavailable = |_| failure("ide_asks_unavailable");
+    let version = i64::try_from(version).map_err(|_| failure(INVALID))?;
+    let write = connection.unchecked_transaction().map_err(unavailable)?;
+    write
+        .execute(
+            "DELETE FROM ide_asks WHERE asked_ms < ?1",
+            [now_ms.saturating_sub(ASK_TTL_MS)],
+        )
+        .map_err(unavailable)?;
+    write
+        .execute(
+            "INSERT INTO ide_asks(project,entry,version,asked_ms) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(project,entry) DO UPDATE SET version=excluded.version, asked_ms=excluded.asked_ms",
+            params![project.as_str(), entry_id.as_str(), version, now_ms],
+        )
+        .map_err(unavailable)?;
+    write
+        .execute(
+            "DELETE FROM ide_asks WHERE project=?1 AND entry NOT IN
+             (SELECT entry FROM ide_asks WHERE project=?1 ORDER BY asked_ms DESC, entry LIMIT ?2)",
+            params![project.as_str(), ASKS_PER_PROJECT_MAX],
+        )
+        .map_err(unavailable)?;
+    write.commit().map_err(unavailable)
+}
+
+/// The memories the IDE asked the owner to approve that still wait at the asked revision,
+/// oldest ask first, at most `ASKS_PER_PROJECT_MAX`; the desktop app confirms each through
+/// its own owner review. Takes the connection, project and time. Returns the entries.
+pub fn asks(
+    connection: &Connection,
+    project: &ProjectId,
+    now_ms: i64,
+) -> Result<Vec<KnowledgeEntry>, EngineError> {
+    let unavailable = |_| failure("ide_asks_unavailable");
+    let mut statement = connection
+        .prepare(
+            "SELECT e.body FROM ide_asks a
+             JOIN knowledge_heads h ON h.id=a.entry AND h.version=a.version AND h.project=a.project
+             JOIN knowledge_entries e ON e.id=h.id AND e.version=h.version
+             WHERE a.project=?1 AND a.asked_ms>=?2 ORDER BY a.asked_ms, a.entry LIMIT ?3",
+        )
+        .map_err(unavailable)?;
+    let bodies = statement
+        .query_map(
+            params![
+                project.as_str(),
+                now_ms.saturating_sub(ASK_TTL_MS),
+                ASKS_PER_PROJECT_MAX
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unavailable)?;
+    let mut waiting = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        let entry: KnowledgeEntry = serde_json::from_str(&body).map_err(|_| failure(REPLY))?;
+        if entry.status == KnowledgeStatus::Provisional {
+            waiting.push(entry);
+        }
+    }
+    Ok(waiting)
+}
+
+/// Records an approval ask on the engine database, off the async runtime. Takes the owner
+/// runtime, project, memory and revision. Returns Ok, or `ide_asks_unavailable`.
+async fn asked(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    entry_id: RequestId,
+    version: u64,
+) -> Result<(), EngineError> {
+    let database = super::agents::database(runtime)?;
+    let project = project.clone();
+    tokio::task::spawn_blocking(move || {
+        let connection = super::agents::open(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        ask(
+            &connection,
+            &project,
+            &entry_id,
+            version,
+            crate::team::now_ms(),
+        )
+    })
+    .await
+    .map_err(|_| failure("ide_asks_unavailable"))?
 }
 
 /// Runs one owner read in the engine. Takes the runtime and the read. Returns the engine

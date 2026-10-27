@@ -595,6 +595,9 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    IdeAsks {
+        project_id: ProjectId,
+    },
     ProjectFiles {
         project_id: ProjectId,
         query: String,
@@ -701,6 +704,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::IdeAsks { .. }
             | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
@@ -1062,6 +1066,9 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    IdeAsks {
+        entries: Vec<crate::memory::KnowledgeEntry>,
     },
     ProjectFiles {
         project_id: ProjectId,

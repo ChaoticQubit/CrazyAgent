@@ -932,6 +932,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::projects_home::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::ide::bridge::memory::initialize(connection)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
     setup::initialize(connection)?;
@@ -2412,6 +2413,9 @@ fn owner_read(
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
+        },
+        OwnerRead::IdeAsks { project_id } => OwnerData::IdeAsks {
+            entries: crate::ide::bridge::memory::asks(&tx, project_id, crate::team::now_ms())?,
         },
         OwnerRead::TeamEvents => OwnerData::TeamEvents {
             events: Box::new(crate::team::events::app(&tx)?),

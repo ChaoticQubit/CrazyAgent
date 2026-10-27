@@ -19,7 +19,7 @@ fn project(name: &str) -> ProjectId {
 }
 
 struct Store {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     engine: Engine,
     config: EffectiveConfig,
     revision: u64,
@@ -36,12 +36,16 @@ impl Store {
             .await
             .unwrap();
         Self {
-            _root: root,
+            root,
             engine,
             config,
             revision: 0,
             sequence: 0,
         }
+    }
+
+    fn database(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.root.path().join("db")).unwrap()
     }
 
     async fn command(&mut self, command: Command) -> Outcome {
@@ -181,10 +185,12 @@ fn decide(id: &str, revision: u64, decision: Decision) -> Decide {
     }
 }
 
-/// The sidebar's Approve and Reject go through the engine's own owner review with the
-/// revision the owner saw: a decision on an older revision writes nothing and returns the
-/// stale reply with the current revision and its writer, a revision that changes between
-/// the check and the write asks for a new check, and another project's memory is unknown.
+/// The sidebar's Approve never writes from the IDE: it becomes an ask the desktop app shows
+/// until the owner's own review keeps that revision, and an ask expires. Reject goes through
+/// the engine's own owner review with the revision the owner saw. A decision on an older
+/// revision writes nothing and returns the stale reply with the current revision and its
+/// writer, a revision that changes between the check and the write asks for a new check,
+/// and another project's memory is unknown.
 #[tokio::test]
 async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     let mut store = Store::open().await;
@@ -222,25 +228,80 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     );
 
     let approve = decide("fact", 1, Decision::Approve);
-    let Plan::Apply(mutation) = store.plan(&p, &approve).await.unwrap() else {
-        panic!("the current revision is applied");
-    };
     assert_eq!(
-        mutation,
-        OwnerMutation::Knowledge {
-            review: HumanReview::Review {
-                entry_id: id("fact"),
-                version: 1,
-                decision: ReviewDecision::Keep,
-            },
-        }
+        store.plan(&p, &approve).await,
+        Ok(Plan::Ask {
+            entry_id: id("fact"),
+            version: 1,
+        }),
+        "an approval from the IDE is only asked, never written"
     );
-    let outcome = store.write(mutation).await;
-    assert_eq!(decided(&outcome), Decided::Applied);
+    assert_eq!(store.memories(&p, None).await, shown);
+    let database = store.database();
+    let now = 1_000_000;
+    ask(&database, &p, &id("fact"), 1, now).unwrap();
+    ask(&database, &p, &id("fact"), 1, now + 1).unwrap();
+    let waiting = asks(&database, &p, now + 2).unwrap();
+    assert_eq!(
+        waiting
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.version, entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        [("fact", 1, "curated fact fact")]
+    );
+    assert!(asks(&database, &q, now + 2).unwrap().is_empty());
+    assert!(
+        asks(&database, &p, now + 1 + ASK_TTL_MS + 1)
+            .unwrap()
+            .is_empty(),
+        "an ask expires"
+    );
+    let many: Vec<String> = (0..=ASKS_PER_PROJECT_MAX)
+        .map(|n| format!("r{n}"))
+        .collect();
+    store
+        .seed(
+            "ide-r",
+            &many.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .await;
+    let r = project("ide-r");
+    for (n, entry) in many.iter().enumerate() {
+        ask(
+            &database,
+            &r,
+            &id(entry),
+            1,
+            now + i64::try_from(n).unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        asks(&database, &r, now + 100)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        many[1..],
+        "a project keeps its newest asks only"
+    );
+
+    let confirmed = OwnerMutation::Knowledge {
+        review: HumanReview::Review {
+            entry_id: id("fact"),
+            version: 1,
+            decision: ReviewDecision::Keep,
+        },
+    };
+    assert_eq!(decided(&store.write(confirmed).await), Decided::Applied);
     let approved = store.memories(&p, None).await;
     assert_eq!(approved[0].revision, 2);
     assert_eq!(approved[0].state, MemoryState::Approved);
     assert!(approved[0].reviewed);
+    assert!(
+        asks(&database, &p, now + 2).unwrap().is_empty(),
+        "an ask the owner confirmed leaves the desktop list"
+    );
 
     let late = decide("fact", 1, Decision::Reject);
     let Plan::Stale(stale) = store.plan(&p, &late).await.unwrap() else {
