@@ -604,7 +604,7 @@ async fn desktop_project_read_paths(
     id: String,
 ) -> Result<Vec<String>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.project_read_paths(&id).await
+    read(&state).await?.project_read_paths(&id).await
 }
 
 #[tauri::command]

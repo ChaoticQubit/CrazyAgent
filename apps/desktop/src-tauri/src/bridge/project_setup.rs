@@ -325,9 +325,9 @@ impl NativeBridge {
     /// Reads the extra read-only folders a project's agents get beside its toolchains.
     /// Takes the project id.
     /// Returns the folders in saved order.
-    pub async fn project_read_paths(&mut self, id: &str) -> Result<Vec<String>, BridgeError> {
+    pub async fn project_read_paths(&self, id: &str) -> Result<Vec<String>, BridgeError> {
         let paths = self
-            .controller()?
+            .reader()?
             .project_read_paths(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;

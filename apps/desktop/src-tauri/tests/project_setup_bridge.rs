@@ -144,6 +144,16 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         Path::new(&context.folder),
         Path::new(&stored.folder).join(".crazyagent")
     );
+    let (paths, shown) = tokio::join!(
+        bridge.project_read_paths(&id),
+        bridge.project_context(&id)
+    );
+    assert_eq!(
+        paths?,
+        Vec::<String>::new(),
+        "a new project's agents get no extra read folders"
+    );
+    assert_eq!(shown?.items.len(), context.items.len());
     let chunk = bridge
         .project_context_item(&id, "context/documents/brief.txt".into(), 0)
         .await?;
