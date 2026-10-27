@@ -40,8 +40,9 @@ async function devtoolsPort(profile, chrome) {
 }
 
 /** Runs a check in a real headless Google Chrome page and always stops Chrome afterwards.
- * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value)
- * and `send(method, params)` for DevTools input events. Output: what the check returns. */
+ * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
+ * `send(method, params)` for DevTools input events and `on(method, listener)` for DevTools
+ * events such as `Network.loadingFailed`. Output: what the check returns. */
 export async function withPage(check) {
   assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}`);
   const profile = mkdtempSync(join(tmpdir(), "ca-chrome-"));
@@ -57,9 +58,14 @@ export async function withPage(check) {
     socket = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error("DevTools connection failed")); });
     const waiting = new Map();
+    const listeners = new Map();
     let next = 0;
     socket.onmessage = (message) => {
       const reply = JSON.parse(message.data);
+      if (reply.method) {
+        for (const listener of listeners.get(reply.method) ?? []) listener(reply.params);
+        return;
+      }
       const pending = waiting.get(reply.id);
       if (!pending) return;
       waiting.delete(reply.id);
@@ -73,6 +79,7 @@ export async function withPage(check) {
       waiting.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
       socket.send(JSON.stringify({ id, method, params }));
     });
+    const on = (method, listener) => listeners.set(method, [...(listeners.get(method) ?? []), listener]);
     const evaluate = async (expression) => {
       const reply = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
       if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
@@ -80,7 +87,7 @@ export async function withPage(check) {
     };
     await send("Emulation.setFocusEmulationEnabled", { enabled: true });
     assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
-    return await check({ evaluate, send });
+    return await check({ evaluate, send, on });
   } finally {
     socket?.close();
     if (chrome.exitCode === null) chrome.kill("SIGTERM");
