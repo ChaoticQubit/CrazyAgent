@@ -389,9 +389,22 @@ fn read_record(
     progress: &mut Progress,
     now_ms: i64,
 ) -> (Tokens, Option<Observation>) {
-    let Some((mut file, identity, length)) = open_record(path) else {
+    let Some(opened) = open_record(path) else {
         return (Tokens::default(), None);
     };
+    read_opened(opened, format, progress, now_ms)
+}
+
+/// Reads what an open record gained since its stored progress, up to the length it had
+/// when it was opened and at most `READ_BYTES_MAX`, so lines a harness appends meanwhile
+/// wait for the next scan. Inputs: the open record with its identity and length, its
+/// progress and the time. Output: the growth and the last limits.
+fn read_opened(
+    (mut file, identity, length): (File, (u64, u64), u64),
+    format: Format,
+    progress: &mut Progress,
+    now_ms: i64,
+) -> (Tokens, Option<Observation>) {
     if progress.identity != identity || length < progress.offset {
         *progress = Progress {
             identity,
@@ -403,7 +416,7 @@ fn read_record(
     }
     let mut bytes = Vec::new();
     if file
-        .take(READ_BYTES_MAX as u64)
+        .take((length - progress.offset).min(READ_BYTES_MAX as u64))
         .read_to_end(&mut bytes)
         .is_err()
     {
