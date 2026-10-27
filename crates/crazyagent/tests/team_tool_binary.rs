@@ -1,9 +1,9 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    ANSWER_TOOL, CALLS_PER_TICK_MAX, CHANGES_TOOL, Call, DROP_FILE, LIVE_SERVER_COMMAND,
-    MAILBOX_FOLDER, MESSAGE_TOOL, SERVER_COMMAND, STATUS_TOOL, TOOL_NAME, answer_call, take,
-    take_calls,
+    ANSWER_TOOL, CALLS_PER_TICK_MAX, CHANGES_TOOL, Call, DROP_FILE, ESCALATE_TOOL,
+    LIVE_SERVER_COMMAND, MAILBOX_FOLDER, MESSAGE_TOOL, SERVER_COMMAND, STATUS_TOOL, TOOL_NAME,
+    answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -99,7 +99,8 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             MESSAGE_TOOL,
             ANSWER_TOOL,
             STATUS_TOOL,
-            CHANGES_TOOL
+            CHANGES_TOOL,
+            ESCALATE_TOOL
         ],
     );
 
