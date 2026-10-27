@@ -5,6 +5,7 @@ exports.deactivate = deactivate;
 const base_content_js_1 = require("./base-content.js");
 const comments_js_1 = require("./comments.js");
 const engine_js_1 = require("./engine.js");
+const extensions_js_1 = require("./extensions.js");
 const lock_js_1 = require("./lock.js");
 const readonly_js_1 = require("./readonly.js");
 const agents_js_1 = require("./sidebar/agents.js");
@@ -21,6 +22,7 @@ const features = [
     changes_js_1.sidebarChanges,
     context_js_1.sidebarContext,
     readonly_js_1.readonly,
+    extensions_js_1.extensions,
 ];
 function activate(context) {
     (0, lock_js_1.startLock)(context, process.env);

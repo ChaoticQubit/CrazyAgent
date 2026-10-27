@@ -7,6 +7,7 @@ import { displayText } from "../conversation";
 import { ChangesTab } from "../changes";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
+import { IdeExtensionConfirm } from "./ide-extensions";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { IdeConfirm } from "./ide-confirm";
@@ -181,6 +182,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
     <IdeConfirm data={data} />
+    <IdeExtensionConfirm data={data} />
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
   </div>;
 }

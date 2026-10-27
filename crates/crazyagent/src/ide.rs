@@ -4,6 +4,7 @@ pub const FOLDER: &str = "ide";
 
 pub mod bridge;
 pub mod env;
+pub mod extensions;
 pub mod fetch;
 pub mod git;
 pub mod manifest;

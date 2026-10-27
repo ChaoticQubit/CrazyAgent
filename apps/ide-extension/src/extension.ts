@@ -2,6 +2,7 @@ import type * as vscode from "vscode";
 import { registerBaseContent } from "./base-content.js";
 import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
+import { extensions } from "./extensions.js";
 import { startLock } from "./lock.js";
 import { readonly } from "./readonly.js";
 import { sidebarAgents } from "./sidebar/agents.js";
@@ -25,6 +26,7 @@ const features: Feature[] = [
   sidebarChanges,
   sidebarContext,
   readonly,
+  extensions,
 ];
 
 /**

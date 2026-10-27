@@ -22,6 +22,7 @@ pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
+pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
 pub use transport::process::{AgentInstructions, PROCESS_CODES, ProcessText, SavedText};
 pub use transport::recovery::{

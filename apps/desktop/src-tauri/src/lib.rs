@@ -24,6 +24,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
+use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView};
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
@@ -1968,6 +1969,47 @@ async fn desktop_usage_set_reset(
 }
 
 #[tauri::command]
+async fn desktop_ide_extension_asks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Vec<AskView>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.ide_extension_asks(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_extension_approve(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    version: String,
+) -> Result<Approved, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .ide_extension_approve(project_id, id, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_extension_decline(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    version: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .ide_extension_decline(project_id, id, version)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_finished_agents(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2559,6 +2601,9 @@ pub fn run() {
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,
+            desktop_ide_extension_asks,
+            desktop_ide_extension_approve,
+            desktop_ide_extension_decline,
             desktop_finished_agents,
             desktop_remove_finished_agents,
             desktop_pick_folder,
