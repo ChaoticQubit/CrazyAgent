@@ -1072,6 +1072,7 @@ impl TeamRuntime {
         self.retire_rejected(project, access);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
+        self.resume_interrupted(&stored, access, &paused)?;
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.feed_master(&stored, access, &paused)?;
@@ -1431,7 +1432,10 @@ impl TeamRuntime {
         let pending: Option<(i64, String, String)> = self
             .connection
             .query_row(
-                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' ORDER BY id LIMIT 1",
+                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' AND id NOT IN (
+                     SELECT message FROM recovery_runs WHERE message IS NOT NULL
+                     AND state IN ('interrupted','resuming','failed'))
+                 ORDER BY id LIMIT 1",
                 [project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -1824,7 +1828,10 @@ impl TeamRuntime {
         let pending: Option<(i64, String, String)> = self
             .connection
             .query_row(
-                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' ORDER BY id LIMIT 1",
+                "SELECT id,author,text FROM team_messages WHERE project=?1 AND state='pending' AND id NOT IN (
+                     SELECT message FROM recovery_runs WHERE message IS NOT NULL
+                     AND state IN ('interrupted','resuming','failed'))
+                 ORDER BY id LIMIT 1",
                 [project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -2016,7 +2023,10 @@ impl TeamRuntime {
                 .prepare(
                     "SELECT t.id,t.harness,t.prompt,p.agent FROM team_tasks t
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
-                     WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
+                     WHERE t.project=?1 AND t.status='queued' AND t.id NOT IN (
+                         SELECT task FROM recovery_runs WHERE task IS NOT NULL
+                         AND state IN ('interrupted','resuming','failed'))
+                     ORDER BY t.id LIMIT 64",
                 )
                 .map_err(error)?;
             statement
@@ -2383,7 +2393,7 @@ impl TeamRuntime {
             Ok((root, plan, mode)) => (
                 root,
                 Plan {
-                    resume: resume.filter(|_| plan.live),
+                    resume: resume.filter(|_| plan.live || plan.pane.is_some()),
                     ..plan
                 },
                 mode,
@@ -2890,9 +2900,15 @@ impl TeamRuntime {
     }
 
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
+        self.follow_resume(id, &report)?;
         match report {
             Report::Ready { group, pane } => {
-                if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
+                let per_turn = self.workers[&id].managed && !self.workers[&id].live;
+                if let Some(record) = pane
+                    .as_ref()
+                    .filter(|_| !per_turn)
+                    .and_then(PaneRecord::encode)
+                {
                     self.connection
                         .execute(
                             "INSERT OR REPLACE INTO team_panes(agent,record) VALUES (?1,?2)",
@@ -3718,10 +3734,13 @@ fn work(
     let adopted_live = matches!(&launch, Launch::Adopt(adoption) if adoption.live);
     let started = match launch {
         Launch::Fresh(plan, mode) => match *mode {
-            Mode::Kept { account, context } => {
-                AgentSession::start(plan.request(account), context, plan.pane.clone())
-                    .map_err(|problem| with_code("The agent could not start", Some(&problem.0)))
-            }
+            Mode::Kept { account, context } => AgentSession::start_resuming(
+                plan.request(account),
+                context,
+                plan.pane.clone(),
+                plan.resume.as_ref(),
+            )
+            .map_err(|problem| with_code("The agent could not start", Some(&problem.0))),
             Mode::PerTurn { home } => {
                 let problem = per_turn(
                     &plan, &home, &orders, &reports, &cancel, &interrupt, turn_time,
@@ -4086,6 +4105,7 @@ fn per_turn(
     interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
+    let mut resume = plan.resume.as_ref();
     while let Next::Turn(prompt, grant) = next_turn(orders, cancel, None) {
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
@@ -4113,7 +4133,9 @@ fn per_turn(
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
-        let mut session = match AgentSession::start(request, context, plan.pane.clone()) {
+        let started =
+            AgentSession::start_resuming(request, context, plan.pane.clone(), resume.take());
+        let mut session = match started {
             Ok(session) => session,
             Err(problem) => {
                 let _ = reports.send(Report::Finished {
@@ -4126,7 +4148,7 @@ fn per_turn(
         };
         let _ = reports.send(Report::Ready {
             group: session.process_group(),
-            pane: None,
+            pane: session.pane_record(),
         });
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         let stopped = session.stop();
@@ -4693,6 +4715,9 @@ pub fn agents(
         .collect::<Result<_, _>>()
         .map_err(error)
 }
+
+#[path = "runtime/resume.rs"]
+mod resume;
 
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
