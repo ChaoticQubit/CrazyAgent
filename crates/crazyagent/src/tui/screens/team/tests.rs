@@ -1,11 +1,11 @@
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
-use crate::tui::ctx::{Ctx, Link};
+use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::screens::{Place, open};
-use crate::tui::seam::{Arrival, NOT_READY, Request};
+use crate::tui::seam::{AccountRow, Arrival, NOT_READY, Request};
 use crate::tui::shell::Shell;
 use crate::tui::terminal_pane::LEADER;
 use crate::tui::theme::{Appearance, Colors, Depth};
@@ -59,7 +59,7 @@ fn graph() -> Box<TeamGraph> {
             None,
             "Master",
             AgentStatus::Working,
-            Some("ChatGPT Pro - main"),
+            Some("acct-pro"),
             Some("team-1"),
         )
     };
@@ -91,7 +91,7 @@ fn graph() -> Box<TeamGraph> {
                 Some("group-claude"),
                 "claude-1",
                 AgentStatus::Working,
-                Some("Claude Max - work"),
+                Some("acct-max"),
                 Some("team-2"),
             ),
             agent(
@@ -108,7 +108,7 @@ fn graph() -> Box<TeamGraph> {
                 Some("group-codex"),
                 "codex-1",
                 AgentStatus::Starting,
-                Some("ChatGPT Plus"),
+                Some("acct-plus"),
                 Some("team-5"),
             ),
         ],
@@ -146,6 +146,21 @@ fn fresh(width: u16, height: u16) -> Shell {
     ctx.width = width;
     ctx.height = height;
     ctx.link = Link::Ready;
+    ctx.store.accounts = Load::Ready(
+        [
+            ("acct-pro", "ChatGPT Pro - main"),
+            ("acct-max", "Claude Max - work"),
+            ("acct-plus", "ChatGPT Plus"),
+        ]
+        .into_iter()
+        .map(|(id, name)| AccountRow {
+            id: CredentialRef::new(id).unwrap(),
+            name: name.into(),
+            provider: String::new(),
+            status: String::new(),
+        })
+        .collect(),
+    );
     let place = Place::Team {
         id: project(),
         name: "Tidepool".into(),

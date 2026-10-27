@@ -115,6 +115,13 @@ export function resultSummary(text: string): string {
   return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
 }
 
+/** Names a team agent's account as the owner sees it in Accounts, never by its id. Inputs: the
+ * owner's account names and the account id. Output: the name, "An account in the pool" for an id
+ * not listed, or "No account yet". */
+export function accountName(accounts: { id: string; name: string }[], id: string | null): string {
+  return id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+}
+
 /** Builds the Team panel: each agent with its role, plain name, harness, account, current task
  * (between tasks, its last one) and the folder it works in (the master in the project folder, a
  * sub-agent in its own worktree), then the tasks handed from the master or the owner to a
@@ -125,7 +132,7 @@ export function resultSummary(text: string): string {
 export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
   filter: TeamFilter, now: number): { agents: TeamAgentRow[]; tasks: TeamTaskRow[] } {
   const names = new Map(status.agents.map((agent) => [agent.id, agent.label]));
-  const account = (id: string | null) => id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+  const account = (id: string | null) => accountName(accounts, id);
   const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
     const held = status.tasks.find((item) => item.id === agent.task);
     const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>

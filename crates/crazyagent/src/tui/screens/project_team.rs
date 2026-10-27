@@ -971,7 +971,10 @@ fn agents_word(count: usize) -> String {
     }
 }
 
-fn account_name(id: Option<&str>, accounts: &[AccountRow]) -> String {
+/// Names an agent's account as the owner sees it in Accounts, never by its id.
+/// Takes the account id, if the agent has one, and the owner's account rows.
+/// Returns the account name, "A pool account" for an id not listed, or "-" for none.
+pub(in crate::tui) fn account_name(id: Option<&str>, accounts: &[AccountRow]) -> String {
     match id {
         None => "-".into(),
         Some(id) => accounts

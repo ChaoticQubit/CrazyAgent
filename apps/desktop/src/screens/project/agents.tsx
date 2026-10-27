@@ -1,4 +1,4 @@
-import { nextGeneration } from "../../api";
+import { listAccounts, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
 import { cancelResearch, failureCopy, loadResearchLog, retryResearch } from "../../api-projects";
@@ -7,7 +7,7 @@ import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
+import { accountName, changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
 import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
@@ -15,6 +15,7 @@ import { TeamControls } from "../team/controls";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
+import { useLoad } from "../../state";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
  * Input: the research row. Output: the agent status word and tone. */
@@ -69,6 +70,8 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const jobs = valueOf(data.research)?.jobs ?? [];
   const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
+  const [loadedAccounts] = useLoad(listAccounts, []);
+  const named = loadedAccounts.kind === "ok" ? loadedAccounts.value : [];
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
   const accounts = data.assigned?.pool.members.length ?? 0;
@@ -108,9 +111,9 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} />
+    <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
-    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} reload={data.reloadTeam} />
+    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);
