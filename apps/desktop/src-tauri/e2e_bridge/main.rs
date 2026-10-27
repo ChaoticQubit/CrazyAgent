@@ -19,6 +19,7 @@ const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 const RECORD_MODE: &str = "record-turn-end";
 const RECORD_ARGS_MAX: usize = 10;
+const IDE_OPEN: &str = "e2e_ide_open";
 
 /// The one bridge every route shares, as the app's `NativeState` does.
 type Shared = Arc<BridgeQueue>;
@@ -117,6 +118,29 @@ async fn request(stream: &mut TcpStream, token: &str) -> Result<Vec<u8>, &'stati
     Ok(body)
 }
 
+/// Opens a project's IDE server through the bridge as the app's `desktop_ide_open` does,
+/// without the native webview it would show it in, and answers where the IDE is reached,
+/// so the end-to-end test loads the same workbench in a browser. Inputs: the shared bridge
+/// and `{ projectId }`. Output: the opened server, or its refusal.
+async fn ide_open(state: &Shared, args: Value) -> Routed {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Args {
+        project_id: String,
+    }
+    let Args { project_id } = match parse(args) {
+        Ok(args) => args,
+        Err(invalid) => return invalid,
+    };
+    let result: Result<_, BridgeError> = async {
+        let project = crazyagent_desktop::bridge::ide::ide_project(&project_id)?;
+        let call = read(state).await?.ide_open(project)?;
+        call.await
+    }
+    .await;
+    routed(result)
+}
+
 /// Serves one connection: routes its invoke on the shared bridge and writes the answer.
 /// Input: the stream, the shared bridge and the token. Output: nothing; failures close it.
 async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
@@ -126,7 +150,12 @@ async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
             Ok(Value::Object(mut call)) => match call.remove("cmd") {
                 Some(Value::String(command)) => {
                     let args = call.remove("args").unwrap_or_else(|| json!({}));
-                    let answer = match routes::route(&state, &command, args).await {
+                    let routed = if command == IDE_OPEN {
+                        ide_open(&state, args).await
+                    } else {
+                        routes::route(&state, &command, args).await
+                    };
+                    let answer = match routed {
                         Routed::Value(value) => json!({ "value": value }),
                         Routed::Failure(failure) => json!({ "failure": failure }),
                         Routed::Invalid(message) => json!({ "invalid": message }),
