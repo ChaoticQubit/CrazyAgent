@@ -234,6 +234,12 @@ impl OwnerController {
         self.view.as_ref()
     }
 
+    /// Takes the view a `reader` copy ended its read with, as if that read had run here.
+    /// Takes the copy's view. Returns nothing; pending intent and the connection are unchanged.
+    pub fn adopt_view(&mut self, view: ControllerView) {
+        self.view = Some(view);
+    }
+
     /// Borrows the one unresolved exact native mutation.
     /// Takes the controller without sending or editing intent.
     /// Returns absence only when no mutation is retained.
@@ -258,15 +264,15 @@ impl OwnerController {
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
-    /// Builds a controller for reads on the same connection that leaves this controller's
-    /// view and pending intent untouched, so plain reads can run side by side with no effect
-    /// on later mutations. Takes the controller. Returns the copy with no view and nothing
-    /// pending, or `controller_disconnected`.
+    /// Builds a controller for reads on the same connection, starting from this controller's
+    /// view with nothing pending, so plain reads can run side by side while this controller
+    /// stays untouched until it takes the copy's view with `adopt_view`. Takes the controller.
+    /// Returns the copy, or `controller_disconnected`.
     pub fn reader(&self) -> Result<Self, EngineError> {
         Ok(Self {
             client: Some(self.shared_client()?),
             identity: self.identity.clone(),
-            view: None,
+            view: self.view.clone(),
             pending: None,
             pending_account_profile: None,
             kind: self.kind,

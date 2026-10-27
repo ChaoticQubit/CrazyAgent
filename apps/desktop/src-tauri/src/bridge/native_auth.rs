@@ -266,6 +266,7 @@ impl NativeBridge {
                 | "native_auth_outcome_unknown_read_same_operation"
                 | "native_auth_claude_input_outcome_unknown"
         ) {
+            self.settle_reads();
             if let Some(controller) = self.controller.as_mut() {
                 controller.detach();
             }

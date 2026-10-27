@@ -1,4 +1,4 @@
-use crazyagent::client_controller::OwnerController;
+use crazyagent::client_controller::{ControllerView, OwnerController};
 use crazyagent::conversation::{
     ConversationContent, ConversationCursor, ConversationEntry, ConversationMutation,
     TEXT_BYTES_MAX,
@@ -11,7 +11,9 @@ use crazyagent::engine::owner::{
 use crazyagent::protocol::{BaselineId, ProjectId, ProjectSpec};
 use crazyagent::verification::BaselineDraft;
 use serde::Serialize;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 mod account_profile;
@@ -250,6 +252,40 @@ pub struct NativeBridge {
     model_access_next: Option<crazyagent::engine::owner::ModelAccessCursor>,
     native_auth: Option<native_auth::Operation>,
     account_profile: Option<account_profile::Operation>,
+    reads: Mutex<Option<ControllerView>>,
+}
+
+/// One plain read's controller: a copy on the same connection that starts from the bridge
+/// controller's view and, once the read is done, leaves the view it ended with for the bridge
+/// controller to take before its next use, as if the read had run on it.
+struct Reader<'a> {
+    controller: OwnerController,
+    before: Option<ControllerView>,
+    reads: &'a Mutex<Option<ControllerView>>,
+}
+
+impl Deref for Reader<'_> {
+    type Target = OwnerController;
+
+    fn deref(&self) -> &OwnerController {
+        &self.controller
+    }
+}
+
+impl DerefMut for Reader<'_> {
+    fn deref_mut(&mut self) -> &mut OwnerController {
+        &mut self.controller
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        if let Some(view) = self.controller.view()
+            && self.before.as_ref() != Some(view)
+        {
+            *self.reads.lock().unwrap_or_else(PoisonError::into_inner) = Some(view.clone());
+        }
+    }
 }
 
 impl NativeBridge {
@@ -267,10 +303,12 @@ impl NativeBridge {
             model_access_next: None,
             native_auth: None,
             account_profile: None,
+            reads: Mutex::new(None),
         }
     }
 
     pub async fn connect(&mut self) -> Result<ConnectionStatus, BridgeError> {
+        self.settle_reads();
         self.model_access = None;
         self.model_access_next = None;
         self.next = None;
@@ -315,17 +353,54 @@ impl NativeBridge {
     }
 
     fn controller(&mut self) -> Result<&mut OwnerController, BridgeError> {
+        self.settle_reads();
         self.controller
             .as_mut()
             .ok_or_else(|| failure("not_connected"))
     }
 
-    fn reader(&self) -> Result<OwnerController, BridgeError> {
-        self.controller
+    fn reader(&self) -> Result<Reader<'_>, BridgeError> {
+        let controller = self
+            .controller
             .as_ref()
-            .ok_or_else(|| failure("not_connected"))?
-            .reader()
-            .map_err(|_| failure("not_connected"))
+            .ok_or_else(|| failure("not_connected"))?;
+        let before = controller.view().cloned();
+        let controller = controller.reader().map_err(|_| failure("not_connected"))?;
+        assert_eq!(controller.view(), before.as_ref());
+        Ok(Reader {
+            controller,
+            before,
+            reads: &self.reads,
+        })
+    }
+
+    /// Gives the bridge controller the view the last plain read ended with, so a change or
+    /// a ticket check sees what it would have seen had that read run on the controller.
+    /// Output: none; nothing changes when no read finished since the last call.
+    fn settle_reads(&mut self) {
+        let read = self
+            .reads
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let (Some(view), Some(controller)) = (read, self.controller.as_mut()) {
+            controller.adopt_view(view);
+        }
+    }
+
+    /// The view the bridge controller has, or will have once it takes the last plain read's.
+    /// Output: that view, or None before any read.
+    fn current_view(&self) -> Option<ControllerView> {
+        let read = self
+            .reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        read.or_else(|| {
+            self.controller
+                .as_ref()
+                .and_then(|controller| controller.view().cloned())
+        })
     }
 
     pub async fn baselines(&mut self, next: bool) -> Result<BaselinePage, BridgeError> {

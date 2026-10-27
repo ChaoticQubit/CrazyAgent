@@ -29,16 +29,21 @@ impl BridgeQueue {
         }
     }
 
-    /// Takes the bridge alone for one call. Output: the bridge, or `busy` when
-    /// the queue is full or the wait ran out.
+    /// Takes the bridge alone for one call, after it takes the view the last
+    /// plain read ended with. Output: the bridge, or `busy` when the queue is
+    /// full or the wait ran out.
     pub async fn enter(&self) -> Result<RwLockWriteGuard<'_, NativeBridge>, BridgeError> {
-        self.queued(self.bridge.write()).await
+        let mut bridge = self.queued(self.bridge.write()).await?;
+        bridge.settle_reads();
+        Ok(bridge)
     }
 
     /// Takes the bridge alone for a call that hands it to a spawned task, with
     /// the same bounds as `enter`. Output: the owned bridge, or `busy`.
     pub async fn enter_owned(&self) -> Result<OwnedRwLockWriteGuard<NativeBridge>, BridgeError> {
-        self.queued(Arc::clone(&self.bridge).write_owned()).await
+        let mut bridge = self.queued(Arc::clone(&self.bridge).write_owned()).await?;
+        bridge.settle_reads();
+        Ok(bridge)
     }
 
     /// Shares the bridge with other plain reads, with the same bounds as `enter`.
