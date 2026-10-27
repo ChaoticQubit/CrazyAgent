@@ -637,7 +637,7 @@ impl ProjectScreen {
         self.adding = None;
         self.folders = None;
         self.general = None;
-        self.typing = tab == Tab::Conversation && !self.live_master();
+        self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
             self.changes.refresh();
         }
@@ -816,7 +816,6 @@ impl ProjectScreen {
             SetupView::Setup(Some(setup)) => {
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
-                self.typing &= !self.live_master();
                 self.setup_due = false;
                 self.setup_failed_ms = None;
             }
@@ -1132,9 +1131,7 @@ impl ProjectScreen {
             KeyCode::Left if shift => return self.tab_by(-1),
             KeyCode::Right if shift => return self.tab_by(1),
             KeyCode::Tab
-                if self.tab == Tab::Conversation
-                    && !self.live_master()
-                    && !(self.typing && self.picks().len() > 0) =>
+                if self.tab == Tab::Conversation && !(self.typing && self.picks().len() > 0) =>
             {
                 self.typing = !self.typing;
                 return ProjectReply::Handled;
@@ -1289,7 +1286,7 @@ impl ProjectScreen {
     /// Returns the matching commands for a `/` word, the completing tags for an `@` word, or
     /// None.
     pub fn picks(&self) -> Picks {
-        if self.tab != Tab::Conversation || !self.typing || self.live_master() {
+        if self.tab != Tab::Conversation || !self.typing {
             return Picks::None;
         }
         if let Some(commands) = console::menu(self.input.value()) {
@@ -1354,6 +1351,12 @@ impl ProjectScreen {
                 });
                 self.transcript_scroll = 0;
             }
+            console::Action::Master if self.live_master() => return ProjectReply::Master,
+            console::Action::Master => {
+                self.console_note = vec![
+                    "This master has no live terminal; its conversation is this console.".into(),
+                ];
+            }
             console::Action::Agents => self.open(Tab::Agents),
             console::Action::Changes => self.open(Tab::Changes),
             console::Action::Usage => return ProjectReply::Usage,
@@ -1395,7 +1398,7 @@ impl ProjectScreen {
     }
 
     /// Says whether the project's master runs as its own app in a live terminal, which
-    /// leaves the Conversation tab only the earlier conversation to read.
+    /// `/master` opens from the console.
     /// Takes the screen.
     /// Returns true for a Codex or Claude Code master in the stored team plan.
     pub fn live_master(&self) -> bool {
@@ -1405,19 +1408,7 @@ impl ProjectScreen {
         })
     }
 
-    fn earlier_key(&mut self, key: KeyEvent) -> ProjectReply {
-        match key.code {
-            KeyCode::Enter => ProjectReply::Master,
-            KeyCode::PageUp => self.scroll_transcript(5),
-            KeyCode::PageDown => self.scroll_transcript(-5),
-            _ => ProjectReply::Ignored,
-        }
-    }
-
     fn conversation_key(&mut self, key: KeyEvent) -> ProjectReply {
-        if self.live_master() {
-            return self.earlier_key(key);
-        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('s') if !self.pool.as_ref().is_some_and(|p| p.assigned) => {

@@ -1067,13 +1067,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
                 .map(|s| harness_name(&s.team.master, None))
         })
         .unwrap_or_else(|| "Master".into());
-    let live = screen.live_master();
-    let title = if live {
-        "Earlier conversation"
-    } else {
-        "Master"
-    };
-    let mut head = Row::of(title, look.heading).push(format!("  {master}"), look.fg);
+    let mut head = Row::of("Master", look.heading).push(format!("  {master}"), look.fg);
     let status = if !screen.pool_ready {
         MasterStatus::NotReady
     } else if !assigned {
@@ -1097,14 +1091,10 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
             look.muted,
         );
     }
-    let badge = if live {
-        Row::of("Read-only", look.muted)
-    } else {
-        master_status(&status, look)
-    };
+    let badge = master_status(&status, look);
     let mut lines = vec![spread(content, head, badge), Row::default()];
     let (prompt, at) = prompt_rows(screen, content, look);
-    let typed = screen.typing && assigned && screen.transcript.is_some() && !live;
+    let typed = screen.typing && assigned && screen.transcript.is_some();
     let below: Vec<Row> = if typed {
         let note = screen
             .console_note
@@ -1116,39 +1106,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
     };
     let prompt_extra = if typed { prompt.len() - 1 } else { 0 };
     let available = room.saturating_sub(4 + prompt_extra + below.len());
-    let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if live {
-        let earlier = screen
-            .transcript
-            .as_ref()
-            .filter(|transcript| !transcript.messages.is_empty());
-        let body = match earlier {
-            Some(transcript) => transcript_lines(screen, transcript, content, look),
-            None => std::iter::once(Row::of("No earlier conversation.", look.fg))
-                .chain(
-                    wrap_words(
-                        "Messages sent to the master before it ran live stay here to read.",
-                        content,
-                    )
-                    .into_iter()
-                    .map(|line| Row::of(line, look.fg)),
-                )
-                .collect(),
-        };
-        (
-            body,
-            earlier.is_none(),
-            vec![Row::of(
-                "> The master runs live in its terminal. Enter opens it.",
-                look.muted,
-            )],
-            vec![
-                ("Enter", "Live master"),
-                ("PgUp", "Scroll"),
-                TABS,
-                ("Esc", "Home"),
-            ],
-        )
-    } else if !screen.pool_ready {
+    let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if !screen.pool_ready {
         (
             vec![Row::of(
                 "The master conversation is not ready yet in this window.",

@@ -872,7 +872,7 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
         chars(&rows[2], 2, 78),
         format!(
             "{:<58}s Stop live master",
-            "Live master on. It starts when you open this tab."
+            "Live master on. It starts when you open this view."
         )
     );
     assert_eq!(

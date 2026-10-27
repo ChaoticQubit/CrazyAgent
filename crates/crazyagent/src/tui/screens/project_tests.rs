@@ -1073,7 +1073,7 @@ fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
 }
 
 #[test]
-fn with_a_live_master_the_conversation_tab_is_the_earlier_conversation_read_only() {
+fn with_a_live_master_the_conversation_tab_stays_the_console_and_slash_master_opens_its_terminal() {
     let project = ProjectId::new("notes-cli").unwrap();
     let mut screen = loaded(&project);
     screen.pool = Some(PoolInfo {
@@ -1091,44 +1091,22 @@ fn with_a_live_master_the_conversation_tab_is_the_earlier_conversation_read_only
         messages: Vec::new(),
     });
     screen.open(Tab::Conversation);
-    assert!(
-        !screen.typing,
-        "nothing types into the earlier conversation"
-    );
-    for code in [KeyCode::Char('a'), KeyCode::Tab, KeyCode::Char('e')] {
-        assert_ne!(screen.key(key(code)), ProjectReply::EndConversation);
-    }
-    assert_ne!(
-        screen.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-        ProjectReply::StopTurn
-    );
-    assert_eq!(screen.paste("note"), ProjectReply::Ignored);
-    assert!(!screen.typing);
+    assert!(screen.typing, "the console takes typing for every master");
+    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("Message the master"), "{shown}");
+    assert!(!shown.contains("Read-only"), "{shown}");
+    type_text(&mut screen, "/master");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Master);
     assert_eq!(screen.input.value(), "");
 
-    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
-    let (shown, cursor, help) = (text(&drawn.rows), drawn.cursor, drawn.help);
-    assert!(shown.contains("Earlier conversation  Codex"), "{shown}");
-    assert!(shown.contains("No earlier conversation."), "{shown}");
-    assert!(
-        shown.contains("> The master runs live in its terminal. Enter opens it."),
-        "{shown}"
-    );
-    assert!(!shown.contains("Message the master"), "{shown}");
-    assert_eq!(cursor, None);
-    assert!(help.contains(&("Enter", "Live master")), "{help:?}");
-    assert!(help.contains(&("PgUp", "Scroll")), "{help:?}");
-    assert!(!help.contains(&("e", "End conversation")), "{help:?}");
-    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Master);
-
     screen.setup.as_mut().expect("loaded").team.master = "rcli".into();
-    screen.open(Tab::Conversation);
-    assert!(
-        screen.typing,
-        "a master without a terminal app keeps today's conversation"
+    type_text(&mut screen, "/master");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.console_note,
+        ["This master has no live terminal; its conversation is this console."]
     );
-    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
-    assert!(text(&drawn.rows).contains("Message the master"));
 }
 
 #[test]
@@ -2287,7 +2265,7 @@ fn slash_opens_the_command_menu_and_runs_the_chosen_command() {
     );
     type_text(&mut screen, "/help");
     screen.key(key(KeyCode::Enter));
-    assert_eq!(screen.console_note.len(), 7);
+    assert_eq!(screen.console_note.len(), 8);
     assert_eq!(screen.console_note[0], "/help     Show the commands");
     let shown = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
     assert!(

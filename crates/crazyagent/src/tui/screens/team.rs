@@ -31,7 +31,7 @@ const ENDED: &str = "terminal_ended";
 const STOPPED: &str = "agent_stopped";
 const MASTER_WAITING: &str =
     "Starting the master's terminal. It opens once the master signs in and starts.";
-const MASTER_ON: &str = "Live master on. It starts when you open this tab.";
+const MASTER_ON: &str = "Live master on. It starts when you open this view.";
 const MASTER_OFF: &str = "Live master stopped.";
 const MASTER_STOPPED: &str =
     "The live master is stopped. Its terminal opens again once you start it.";

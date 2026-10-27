@@ -12,6 +12,7 @@ const MASTER_TAG: &str = "@master";
 pub(in crate::tui) enum Action {
     Help,
     Clear,
+    Master,
     Agents,
     Changes,
     Usage,
@@ -38,6 +39,11 @@ pub(in crate::tui) const COMMANDS: &[Command] = &[
         name: "clear",
         about: "Clear this view; nothing is deleted",
         action: Action::Clear,
+    },
+    Command {
+        name: "master",
+        about: "Open the live master's terminal",
+        action: Action::Master,
     },
     Command {
         name: "agents",
