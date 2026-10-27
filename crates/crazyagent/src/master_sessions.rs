@@ -786,6 +786,9 @@ mod tests {
         let database = folder.path().join("engine.db");
         let connection = rusqlite::Connection::open(&database).unwrap();
         crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
         let id = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
         let record = folder.path().join(format!("{id}.jsonl"));
         let made = crate::spawn_gate::status(
