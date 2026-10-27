@@ -1,5 +1,6 @@
 import { loadTeamEvents } from "../../api-projects";
 import type { TeamNotification } from "../../engine-client";
+import { systemNotifications, systemNotificationsLine } from "../../notify";
 import { useAppSession, useLoad } from "../../state";
 import { LoadError, NotReady, Panel, Skeleton } from "../../ui";
 import { NotificationList, WakeRuleEditor } from "../team/wake-rules";
@@ -15,17 +16,21 @@ export function byProject(notifications: TeamNotification[]): { projectId: strin
 }
 
 /** Settings, Team alerts: the app's own wake rule, which every project and agent uses until it
- * sets one, and the owner's notifications of every project. Output: the panel. */
+ * sets one, whether macOS shows question notifications, and the owner's notifications of every
+ * project. Output: the panel. */
 export function TeamAlertsSettings() {
   const session = useAppSession();
   const names = new Map(session.projects.kind === "ok" ? session.projects.value.map((project) => [project.id, project.name]) : []);
   const [events, reload] = useLoad(loadTeamEvents);
+  const [system] = useLoad(systemNotifications);
+  const systemLine = systemNotificationsLine(system.kind === "loading" ? undefined : system);
   if (events.kind === "loading") return <Skeleton shape="card" />;
   if (events.kind === "not_ready") return <NotReady what="Team alerts" />;
   if (events.kind === "error") return <LoadError message={`Couldn't load team alerts. ${events.message}`} onRetry={reload} />;
   const groups = byProject(events.value.notifications);
   return <Panel title="Wake the master">
     <p className="tg-terminal-note">Sub-agent events wake each project's master on their own. Projects and agents can set their own rule on the Agents tab.</p>
+    {systemLine && <p className="tg-terminal-note" role="note">{systemLine}</p>}
     <WakeRuleEditor target={{ level: "app" }} own={events.value.rule} version={events.value.rule_version} effective={events.value.effective} fallback="shipped" reload={reload} />
     {groups.map((group) => <div key={group.projectId}>
       <h3>{names.get(group.projectId) ?? "A removed project"}</h3>

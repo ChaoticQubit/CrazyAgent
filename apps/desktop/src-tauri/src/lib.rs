@@ -6,6 +6,7 @@ mod native_refresh_observation;
 
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryList, MemoryNote};
+use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
 use bridge::terminal::Terminals;
@@ -46,6 +47,7 @@ use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
@@ -2132,6 +2134,51 @@ async fn desktop_update_change(
     call.await
 }
 
+/// Shows one macOS notification for a pending question while the window is in the
+/// background, at most once per question. The text is built here from the engine's record
+/// and the project's name; the window names only the project and the question.
+#[tauri::command]
+async fn desktop_notify_question(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    notices: State<'_, Notices>,
+    project_id: String,
+    question_id: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    bridge::notify::available()?;
+    if window.is_focused().unwrap_or(false) {
+        return Ok(());
+    }
+    let call = read(&state)
+        .await?
+        .notified_question(project_id.clone(), question_id)?;
+    let question = call.await?;
+    let setup = read(&state).await?.project_setup(&project_id).await;
+    let name = setup.ok().flatten().map(|setup| setup.name);
+    let notice = bridge::notify::notice(name.as_deref(), &question);
+    let Some(id) = notices.claim(question.id, question.project.as_str()) else {
+        return Ok(());
+    };
+    bridge::notify::show(tauri::Manager::app_handle(&window), id, &notice)
+        .inspect_err(|_| notices.release(question.id, id))
+}
+
+#[tauri::command]
+async fn desktop_notification_target(
+    window: WebviewWindow,
+    notices: State<'_, Notices>,
+) -> Result<Option<String>, BridgeError> {
+    main_window(&window)?;
+    Ok(notices.take())
+}
+
+#[tauri::command]
+async fn desktop_system_notifications(window: WebviewWindow) -> Result<&'static str, BridgeError> {
+    main_window(&window)?;
+    Ok(bridge::notify::support())
+}
+
 #[tauri::command]
 async fn desktop_process_text(
     window: WebviewWindow,
@@ -2460,7 +2507,9 @@ pub fn run() {
         .manage(NativeState(BridgeQueue::new(NativeBridge::new(socket))))
         .manage(TerminalState(Arc::new(Terminals::default())))
         .manage(UpdateState::default())
+        .manage(Notices::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
@@ -2616,6 +2665,9 @@ pub fn run() {
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,
+            desktop_notify_question,
+            desktop_notification_target,
+            desktop_system_notifications,
             desktop_process_text,
             desktop_save_process_text,
             desktop_import_global_instructions,
@@ -2660,6 +2712,9 @@ pub fn run() {
                             && url.port() == Some(1420))
                 })
                 .build()?;
+            let handle = app.handle().clone();
+            app.notification()
+                .on_action(move |action| bridge::notify::performed(&handle, action))?;
             Ok(())
         });
     #[cfg(feature = "native-webdriver")]
