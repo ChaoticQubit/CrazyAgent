@@ -378,11 +378,37 @@ fn extract_refuses_entries_outside_the_target() {
     std::os::windows::fs::symlink_dir("C:\\Windows", rooted.join("system")).unwrap();
     let rooted_archive = root.join("rooted.tar.gz");
     pack(&rooted, &rooted_archive);
+    let inside = root.join("inside");
+    write(&inside.join("product.json"), "{}\n");
+    std::fs::create_dir(inside.join("bin")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("../product.json", inside.join("bin/product")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("..\\product.json", inside.join("bin/product")).unwrap();
+    let inside_archive = root.join("inside.tar.gz");
+    pack(&inside, &inside_archive);
+    let chained = root.join("chained");
+    write(&chained.join("product.json"), "{}\n");
+    std::fs::create_dir(chained.join("d")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("..", chained.join("d/a")).unwrap();
+        std::os::unix::fs::symlink("d/a/../outside", chained.join("x")).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir("..", chained.join("d/a")).unwrap();
+        std::os::windows::fs::symlink_file("d\\a\\..\\outside", chained.join("x")).unwrap();
+    }
+    let chained_archive = root.join("chained.tar.gz");
+    pack(&chained, &chained_archive);
     for (case, archive) in [
         ("absolute", &absolute_archive),
         ("dots", &dots_archive),
         ("link", &link_archive),
         ("rooted", &rooted_archive),
+        ("inside", &inside_archive),
+        ("chained", &chained_archive),
     ] {
         let place = root.join(format!("case-{case}"));
         std::fs::create_dir(&place).unwrap();
@@ -545,7 +571,26 @@ fn a_ready_build_installed_before_hiding_is_fetched_again_and_then_kept() {
         std::fs::read_to_string(root.join(crate::ide::hide::BUNDLE)).unwrap(),
         crate::ide::hide::tests::HIDDEN
     );
+    assert!(!old.exists());
+    assert_eq!(files_in(&runtime.join("ide/builds")), [installed_folder()]);
+
+    let builds = runtime.join("ide/builds");
+    write(&builds.join("0.9.0-h1/product.json"), "{}\n");
+    write(
+        &builds.join(format!(".staging-{VERSION}/product.json")),
+        "{}\n",
+    );
+    let outside = tmp.path().join("outside");
+    write(&outside.join("keep.txt"), "keep\n");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, builds.join("linked")).unwrap();
     assert!(!ensure_with(&runtime, build(&server.url, &bytes)));
+    assert_eq!(files_in(&builds), [installed_folder()]);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(root.join(crate::ide::hide::BUNDLE).is_file());
     assert_eq!(server.hits(), 1);
 }
 

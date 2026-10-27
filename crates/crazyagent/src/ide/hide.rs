@@ -1,5 +1,5 @@
 use crate::engine::EngineError;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// The workbench bundle the browser loads, relative to an extracted build's root.
@@ -7,7 +7,7 @@ pub const BUNDLE: &str = "out/vs/code/browser/workbench/workbench.js";
 
 /// Names the set of [`EDITS`] a build was installed with, so a build installed under another
 /// revision is fetched again. Change it whenever [`EDITS`] change.
-pub const REVISION: &str = "h1";
+pub const REVISION: &str = "h2";
 
 const BUNDLE_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const WINDOW: usize = 32;
@@ -22,9 +22,10 @@ struct Edit {
 
 /// The removed parts that no setting or extension can hide in the pinned build: the palette
 /// entries of the Remote menu, remote extension install, the Accounts commands, account
-/// policy sync and inline suggestion snoozing, the Remote menu's shortcut, and the Remote
-/// indicator (`status.host`), which stops rendering.
-const EDITS: [Edit; 9] = [
+/// policy sync and diagnostics, inline suggestion snoozing, dynamic authentication providers
+/// and every Copilot command, the Remote menu's shortcut, and the Remote indicator
+/// (`status.host`), which stops rendering. The Remote connection commands stay.
+const EDITS: [Edit; 16] = [
     Edit {
         anchor: "\"Show Remote Menu\")",
         from: "f1:!0,keybinding:{weight:200,primary:2605}",
@@ -70,6 +71,41 @@ const EDITS: [Edit; 9] = [
         from: "){",
         to: "){return;",
     },
+    Edit {
+        anchor: "\"Cancel Snooze Inline Suggestions\")",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Remove Dynamic Authentication Providers\"),category:",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Policy Diagnostics\")",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Manage Copilot Settings\")",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Show Extensions using Copilot\")",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Upgrade to GitHub Copilot Pro\")",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Manage GitHub Copilot Budget\")",
+        from: "f1:!0",
+        to: "f1:!1",
+    },
 ];
 
 fn failed(_: impl std::fmt::Display) -> EngineError {
@@ -78,8 +114,9 @@ fn failed(_: impl std::fmt::Display) -> EngineError {
 
 /// Hides the removed parts in an extracted build by rewriting its workbench bundle with
 /// [`EDITS`]. The bundle must be a regular file within [`BUNDLE_BYTES_MAX`] where every edit
-/// applies, else it is left as it was. Input: the build root. Output: Ok, or
-/// `ide_build_patch_failed`.
+/// applies, else it is left as it was. The new text goes to a file created fresh beside it,
+/// after any leftover entry there is removed, so a link planted at that name is never
+/// followed. Input: the build root. Output: Ok, or `ide_build_patch_failed`.
 pub fn apply(root: &Path) -> Result<(), EngineError> {
     let path = root.join(BUNDLE);
     let metadata = std::fs::symlink_metadata(&path).map_err(failed)?;
@@ -97,7 +134,20 @@ pub fn apply(root: &Path) -> Result<(), EngineError> {
     }
     let hidden = hide(&text).ok_or_else(|| failed("edit"))?;
     let staged = path.with_extension("js.hiding");
-    let written = std::fs::write(&staged, hidden).and_then(|()| std::fs::rename(&staged, &path));
+    match std::fs::remove_file(&staged) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(failed(error)),
+    }
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| {
+            file.write_all(hidden.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
+        .and_then(|()| std::fs::rename(&staged, &path));
     if written.is_err() {
         let _ = std::fs::remove_file(&staged);
     }

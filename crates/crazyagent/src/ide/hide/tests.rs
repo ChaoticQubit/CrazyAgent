@@ -1,8 +1,8 @@
 use super::*;
 
-/// The pinned build's descriptors for every edited entry point, as shipped in its bundle,
-/// with neighbors that must stay: Cancel Snooze, Close Remote Connection and a command the
-/// build already keeps out of the palette.
+/// The pinned build's descriptors for every edited entry point, as shipped in its bundle
+/// (long preconditions cut short), with neighbors that must stay: Close Remote Connection
+/// and a command the build already keeps out of the palette.
 pub(crate) const SHIPPED: &str = concat!(
     r#"super({id:ib.REMOTE_ACTIONS_COMMAND_ID,category:e,title:H(18553,"Show Remote Menu"),f1:!0,keybinding:{weight:200,primary:2605}})"#,
     "\n",
@@ -23,6 +23,18 @@ pub(crate) const SHIPPED: &str = concat!(
     r#"this.renderRemoteStatusIndicator(ib.DEFAULT_REMOTE_STATUS_LABEL,d(18547,null))}renderRemoteStatusIndicator(e,t,i,n){let{text:r,tooltip:a,ariaLabel:c}=this.withNetworkS"#,
     "\n",
     r#"super({id:s.ID,title:H(170,"Cancel Snooze Inline Suggestions"),precondition:J3o,f1:!0})"#,
+    "\n",
+    r#"super({id:s.ID,title:H(6335,"Remove Dynamic Authentication Providers"),category:H(6327,"Authentication"),f1:!0})"#,
+    "\n",
+    r#"super({id:"workbench.action.showPolicyDiagnostics",title:H(4180,"Policy Diagnostics"),category:Ze.Developer,f1:!0})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.manageSettings",title:H(6728,"Manage Copilot Settings"),category:zi,f1:!0,precondition:D.and(D.or(te.Entitlement.planFree,te.Entitlement.planEdu),o)})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.showExtensionsUsingCopilot",title:H(6737,"Show Extensions using Copilot"),f1:!0,category:RZ,precondition:te.enabled})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.upgradePlan",title:H(10647,"Upgrade to GitHub Copilot Pro"),category:H(10640,"Chat"),f1:!0,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.manageAdditionalSpend",title:H(10646,"Manage GitHub Copilot Budget"),category:H(10640,"Chat"),f1:!0,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
     "\n",
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",
@@ -50,7 +62,19 @@ pub(crate) const HIDDEN: &str = concat!(
     "\n",
     r#"this.renderRemoteStatusIndicator(ib.DEFAULT_REMOTE_STATUS_LABEL,d(18547,null))}renderRemoteStatusIndicator(e,t,i,n){return;let{text:r,tooltip:a,ariaLabel:c}=this.withNetworkS"#,
     "\n",
-    r#"super({id:s.ID,title:H(170,"Cancel Snooze Inline Suggestions"),precondition:J3o,f1:!0})"#,
+    r#"super({id:s.ID,title:H(170,"Cancel Snooze Inline Suggestions"),precondition:J3o,f1:!1})"#,
+    "\n",
+    r#"super({id:s.ID,title:H(6335,"Remove Dynamic Authentication Providers"),category:H(6327,"Authentication"),f1:!1})"#,
+    "\n",
+    r#"super({id:"workbench.action.showPolicyDiagnostics",title:H(4180,"Policy Diagnostics"),category:Ze.Developer,f1:!1})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.manageSettings",title:H(6728,"Manage Copilot Settings"),category:zi,f1:!1,precondition:D.and(D.or(te.Entitlement.planFree,te.Entitlement.planEdu),o)})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.showExtensionsUsingCopilot",title:H(6737,"Show Extensions using Copilot"),f1:!1,category:RZ,precondition:te.enabled})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.upgradePlan",title:H(10647,"Upgrade to GitHub Copilot Pro"),category:H(10640,"Chat"),f1:!1,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
+    "\n",
+    r#"super({id:"workbench.action.chat.manageAdditionalSpend",title:H(10646,"Manage GitHub Copilot Budget"),category:H(10640,"Chat"),f1:!1,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
     "\n",
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",
@@ -144,5 +168,76 @@ fn a_build_whose_bundle_is_missing_oversized_or_linked_is_refused() {
         assert_eq!(refused(linked.path()), "ide_build_patch_failed");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SHIPPED);
         assert!(!staged_left(linked.path()));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn a_link_or_leftover_at_the_staged_name_is_replaced_and_never_followed() {
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("outside.js");
+    std::fs::write(&target, "keep").unwrap();
+    let linked = tempfile::tempdir().unwrap();
+    let path = bundle_at(linked.path(), SHIPPED);
+    std::os::unix::fs::symlink(&target, path.with_extension("js.hiding")).unwrap();
+    apply(linked.path()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), HIDDEN);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    assert!(!staged_left(linked.path()));
+    assert!(
+        std::fs::symlink_metadata(path.with_extension("js.hiding")).is_err(),
+        "the planted link is gone"
+    );
+
+    let leftover = tempfile::tempdir().unwrap();
+    let path = bundle_at(leftover.path(), SHIPPED);
+    std::fs::write(path.with_extension("js.hiding"), "half a bundle").unwrap();
+    apply(leftover.path()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), HIDDEN);
+    assert!(!staged_left(leftover.path()));
+
+    let folder = tempfile::tempdir().unwrap();
+    let path = bundle_at(folder.path(), SHIPPED);
+    std::fs::create_dir(path.with_extension("js.hiding")).unwrap();
+    assert_eq!(refused(folder.path()), "ide_build_patch_failed");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SHIPPED);
+}
+
+/// Every hiding revision, oldest first, with the digest of the edits a build installed under
+/// it carries. Changing [`EDITS`] or [`WINDOW`] changes the digest, so it needs a new row
+/// and a new [`REVISION`], or installed builds would keep the old edits.
+const REVISIONS: [(&str, &str); 2] = [
+    (
+        "h1",
+        "257622519e4a1a7d3a7bee30f97186083c9a4e14b1f5cdaaf83e3ef33347430b",
+    ),
+    (
+        "h2",
+        "794fd53ff124982ffacd3a829147c6f969f1df4694efa015a78fb4d62d9c22dc",
+    ),
+];
+
+/// The sha256 of the window and each edit's anchor, from and to. Input: the edits. Output:
+/// the lowercase hex digest.
+fn digest(edits: &[Edit]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{WINDOW}\n"));
+    for edit in edits {
+        hasher.update(format!("{}\0{}\0{}\n", edit.anchor, edit.from, edit.to));
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+#[test]
+fn every_change_to_the_edits_names_a_new_revision() {
+    let current = digest(&EDITS);
+    assert_eq!(REVISIONS.last(), Some(&(REVISION, current.as_str())));
+    assert_eq!(digest(&EDITS[..9]), REVISIONS[0].1);
+    for (n, (name, sum)) in REVISIONS.iter().enumerate() {
+        for (other, other_sum) in &REVISIONS[n + 1..] {
+            assert_ne!(name, other);
+            assert_ne!(sum, other_sum);
+        }
     }
 }
