@@ -307,7 +307,12 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
     let local = default_team(&config, Some(&local_pool), &[], &signed(&[]));
     assert_eq!(local.master, "codex");
     assert!(local.sub_harnesses.is_empty());
-    assert_eq!((local.min_agents, local.max_agents), (1, 1));
+    assert_eq!(
+        (local.min_agents, local.max_agents),
+        (1, TEAM_AGENTS_MAX),
+        "no harness chosen means any harness, up to the team maximum"
+    );
+    assert!(local.validate().is_ok());
     assert_eq!(
         default_team(&config, None, &[], &signed(&[])).master,
         "codex"

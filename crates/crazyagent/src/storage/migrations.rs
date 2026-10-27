@@ -34,10 +34,45 @@ pub(crate) type StepRun = fn(&Transaction<'_>) -> Result<(), EngineError>;
 /// Every engine.db schema step, oldest first, numbered from 2 without gaps. Version 1
 /// is the shape engines up to 0.1 wrote, which never set `PRAGMA user_version`. A step
 /// must accept that a table open creates lazily, such as owner_meta, may be absent.
-pub(crate) const STEPS: &[Step] = &[Step {
-    to: 2,
-    run: adopt_user_version,
-}];
+pub(crate) const STEPS: &[Step] = &[
+    Step {
+        to: 2,
+        run: adopt_user_version,
+    },
+    Step {
+        to: 3,
+        run: widen_empty_team_plans,
+    },
+];
+
+/// Step 3 (DEC-096 addendum 3): an empty sub-harness list now means any harness, so a saved
+/// plan that lists none and allows at most one agent, the old "master only" default, gets the
+/// team maximum. Runs once with the upgrade, so an owner who later sets one agent keeps it.
+/// A body that is not valid JSON is left as it is.
+fn widen_empty_team_plans(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let setups: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_setups')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !setups {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE project_setups SET body=json_set(body,'$.team.max_agents',?1)
+         WHERE CASE WHEN json_valid(body)
+             THEN json_type(body,'$.team.sub_harnesses')='array'
+                 AND json_array_length(body,'$.team.sub_harnesses')=0
+                 AND json_type(body,'$.team.max_agents')='integer'
+                 AND json_extract(body,'$.team.max_agents')<=1
+             ELSE 0 END",
+        [crate::project_setup::TEAM_AGENTS_MAX],
+    )
+    .map_err(error)?;
+    Ok(())
+}
 
 /// Step 2: makes `PRAGMA user_version` the database version of record. owner_meta
 /// keeps its fixed `schema_version = 1` column as the owner row layout, so every query
