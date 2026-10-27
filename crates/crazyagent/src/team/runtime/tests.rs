@@ -2733,6 +2733,14 @@ fn outcomes(fixture: &Fixture, kind: &str, key: &str) -> Vec<Option<String>> {
         .unwrap()
 }
 
+fn pending_keys(fixture: &Fixture, kind: ledger::ActionKind) -> Vec<String> {
+    ledger::pending(&fixture.connection, kind)
+        .unwrap()
+        .into_iter()
+        .map(|action| action.key)
+        .collect()
+}
+
 fn nothing_pending(fixture: &Fixture) -> bool {
     ledger::pending(&fixture.connection, ledger::ActionKind::Message)
         .unwrap()
@@ -2834,9 +2842,10 @@ fn message_interrupted_before_send_is_sent_once() {
 }
 
 /// A message whose master left no session record cannot be told delivered or not; the next
-/// engine closes its intent as unknown, fails the message with a note and never types it.
+/// engine fails the message with a note and never types it, and its intent stays pending
+/// for the owner across starts until the owner dismisses it (DEC-098 addendum 4).
 #[test]
-fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_never_sent() {
+fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_stays_pending_for_the_owner() {
     let fixture = Fixture::new(1);
     let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
     let message = interrupted_message(&fixture, master);
@@ -2844,28 +2853,138 @@ fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_never_sent() {
 
     drop(fixture.runtime());
     assert_eq!(message_state(&fixture, message), "failed");
-    assert!(fixture.note(delivery::UNKNOWN_NOTE));
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
     assert_eq!(
         outcomes(&fixture, "message", &key),
-        [Some("unknown".to_owned())]
+        [None],
+        "an unknown intent stays open for the owner"
     );
-    assert!(
-        nothing_pending(&fixture),
-        "an unknown intent is closed, never left open"
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        [key.clone()],
+        "the recovery banner reads it from pending()"
     );
 
     drop(fixture.runtime());
     assert_eq!(message_state(&fixture, message), "failed");
     assert_eq!(
-        fixture
-            .status()
-            .messages
-            .iter()
-            .filter(|said| said.text == delivery::UNKNOWN_NOTE)
-            .count(),
+        noted(&fixture, delivery::UNKNOWN_NOTE),
         1,
-        "a second start finds nothing to settle"
+        "a second start says it once and types nothing"
     );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        [key.clone()]
+    );
+
+    let open = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
+        .unwrap()
+        .expect("the unknown intent is still open");
+    ledger::finish(&fixture.connection, open.id, ledger::Outcome::Unknown).unwrap();
+    drop(fixture.runtime());
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("unknown".to_owned())],
+        "the owner's dismissal closes it"
+    );
+    assert!(nothing_pending(&fixture));
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+}
+
+/// A task whose sub-agent left no session record cannot be told handed over or not; the
+/// next engine fails it once with a plain reason and never hands it out again, and its
+/// intent stays pending for the owner across starts.
+#[test]
+fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let prompt = "Write the changelog";
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+            params![PROJECT, prompt, sub],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    ledger::initialize(&fixture.connection).unwrap();
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap());
+    let key = format!("team-task/{task}");
+    let row = |fixture: &Fixture| -> (String, Option<i64>, Option<String>, Option<i64>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,error,finished_ms FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap()
+    };
+
+    drop(fixture.runtime());
+    let failed = row(&fixture);
+    assert_eq!(
+        (failed.0.as_str(), failed.1, failed.2.as_deref()),
+        ("failed", Some(sub), Some(delivery::UNKNOWN_TASK))
+    );
+    assert_eq!(outcomes(&fixture, "dispatch", &key), [None]);
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        [key.clone()]
+    );
+
+    drop(fixture.runtime());
+    assert_eq!(
+        row(&fixture),
+        failed,
+        "a second start fails it no second time"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        [key.clone()]
+    );
+}
+
+/// Unknown deliveries the owner has not dismissed stay pending up to `UNKNOWN_KEPT` of each
+/// kind; a start closes the oldest beyond that as unknown, so undismissed ones never fill
+/// the ledger that every delivery and agent start shares.
+#[test]
+fn a_start_keeps_the_newest_unknown_deliveries_of_each_kind_and_closes_older_ones() {
+    let fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let kinds = [
+        (ledger::ActionKind::Message, "message", "team-message"),
+        (ledger::ActionKind::Dispatch, "dispatch", "team-task"),
+    ];
+    let keys = |prefix: &str| -> Vec<String> {
+        (0..=delivery::UNKNOWN_KEPT)
+            .map(|n| format!("{prefix}/{}", 900_000 + n))
+            .collect()
+    };
+    for (kind, _, prefix) in kinds {
+        for key in keys(prefix) {
+            ledger::begin(&fixture.connection, kind, &key, "{}").unwrap();
+        }
+    }
+
+    for _ in 0..2 {
+        drop(fixture.runtime());
+        for (kind, name, prefix) in kinds {
+            let all = keys(prefix);
+            assert_eq!(
+                pending_keys(&fixture, kind),
+                all[1..],
+                "the newest {} stay pending",
+                delivery::UNKNOWN_KEPT
+            );
+            assert_eq!(
+                outcomes(&fixture, name, &all[0]),
+                [Some("unknown".to_owned())],
+                "the oldest is closed as unknown"
+            );
+        }
+    }
 }
 
 /// A task its sub-agent's record shows was handed over is never handed out again after a

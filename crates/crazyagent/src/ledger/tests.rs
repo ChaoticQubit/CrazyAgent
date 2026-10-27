@@ -135,7 +135,8 @@ fn second_pending_action_for_one_key_is_refused() {
 }
 
 #[test]
-fn resolution_finishes_every_pending_action_and_never_offers_an_unknown_one_for_replay() {
+fn resolution_finishes_done_and_not_started_and_keeps_an_unknown_one_pending_until_the_owner_closes_it()
+ {
     let (root, db) = store();
     let folder = root.path().join("work");
     std::fs::create_dir(&folder).unwrap();
@@ -185,22 +186,33 @@ fn resolution_finishes_every_pending_action_and_never_offers_an_unknown_one_for_
         "an action that never started is closed; the caller completes it as a new one"
     );
     assert_eq!(
-        stored_outcome(&db, unknown).as_deref(),
-        Some("unknown"),
-        "an unknown action is closed, never left open"
+        stored_outcome(&db, unknown),
+        None,
+        "an unknown action stays open until the owner closes it"
     );
-    assert!(pending(&db, ActionKind::WorktreeCreate).unwrap().is_empty());
+    assert_eq!(
+        ids(&pending(&db, ActionKind::WorktreeCreate).unwrap()),
+        vec![unknown]
+    );
     assert_eq!(
         stored_outcome(&db, other_kind),
         None,
         "another kind is not checked"
     );
 
+    drop(db);
+    let db = open(root.path()).unwrap();
     let again = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
     assert!(
-        again.done.is_empty() && again.not_started.is_empty() && again.unknown.is_empty(),
+        again.done.is_empty() && again.not_started.is_empty(),
         "a second start finds nothing to replay"
     );
+    assert_eq!(
+        ids(&again.unknown),
+        vec![unknown],
+        "an unknown action is shown again, never offered for replay"
+    );
+    assert_eq!(stored_outcome(&db, unknown), None);
     let redo = begin(
         &db,
         ActionKind::WorktreeCreate,
@@ -215,6 +227,17 @@ fn resolution_finishes_every_pending_action_and_never_offers_an_unknown_one_for_
             .map(|action| action.id),
         Some(redo)
     );
+    assert_eq!(
+        pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-3")
+            .unwrap()
+            .map(|action| action.id),
+        Some(unknown)
+    );
+
+    finish(&db, unknown, Outcome::Unknown).unwrap();
+    let closed = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
+    assert!(closed.unknown.is_empty(), "the owner closed it");
+    assert_eq!(stored_outcome(&db, unknown).as_deref(), Some("unknown"));
     assert_eq!(
         pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-3").unwrap(),
         None
