@@ -56,6 +56,8 @@ const MODEL_BYTES_MAX: usize = 256;
 const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(unix)]
+const SETUP_TIMED_OUT: &str = "setup_timed_out";
+#[cfg(unix)]
 const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
@@ -203,6 +205,7 @@ pub enum RunError {
     Account(String),
     Busy,
     Uncertain(&'static str),
+    Setup(&'static str),
     Io(io::Error),
 }
 
@@ -211,6 +214,7 @@ impl fmt::Display for RunError {
         match self {
             Self::Invalid(reason) => write!(f, "research refused: {reason}"),
             Self::Jobs(error) => write!(f, "{error}"),
+            Self::Setup(code) => write!(f, "worktree setup failed: {code}"),
             Self::Sandbox(error) => write!(f, "{error}"),
             Self::Context(error) => write!(f, "research context: {}", error.0),
             Self::Account(code) => write!(f, "research account: {code}"),
@@ -1782,7 +1786,10 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)
+        Ok(
+            wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)?
+                == Ended::Succeeded,
+        )
     };
     let created = git(&["init", "-q", "--template="])?
         && git(&[
@@ -1856,9 +1863,7 @@ pub(crate) fn add_worktree(
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
         .arg("HEAD");
-    if !wait_bounded(crate::spawn_gate::spawn(&mut add)?, SETUP_TIMEOUT)? {
-        return Err(RunError::Invalid("git worktree add failed".into()));
-    }
+    setup_step(&mut add, "worktree_add_failed")?;
     let mut listing = worktree_git(sandbox, profile);
     listing
         .arg("-C")
@@ -1871,28 +1876,42 @@ pub(crate) fn add_worktree(
         .arg("-C")
         .arg(worktree)
         .args(["reset", "-q", "--hard", "HEAD"]);
-    if !wait_bounded(crate::spawn_gate::spawn(&mut checkout)?, SETUP_TIMEOUT)? {
-        return Err(RunError::Invalid(
-            "git could not check out the worktree".into(),
-        ));
-    }
+    setup_step(&mut checkout, "worktree_checkout_failed")?;
     assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
 }
 
-/// A git command for the engine's own worktree steps under the agent's installed profile:
-/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
-/// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
+/// Runs one worktree setup git step within the setup time limit. Takes the command and
+/// the plain code for a step that exits with a failure. Returns unit, or [`RunError::Setup`]
+/// with that code, or with `setup_timed_out` for a step stopped at the limit, so the owner
+/// sees which step failed and how.
+#[cfg(unix)]
+fn setup_step(command: &mut Command, failed: &'static str) -> Result<(), RunError> {
+    match wait_bounded(crate::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
+        Ended::Succeeded => Ok(()),
+        Ended::Failed => Err(RunError::Setup(failed)),
+        Ended::TimedOut => Err(RunError::Setup(SETUP_TIMED_OUT)),
+    }
+}
+
 /// The real git binary for the engine's sandboxed setup steps, resolved once outside the
 /// sandbox so no setup step runs the `/usr/bin/git` xcrun shim. Inside the sandbox the
 /// shim's `xcrun_db` cache write (to the per-user temp dir, which it picks regardless of
 /// TMPDIR) is denied on every call, and its developer-dir lookup is extra work that fails
 /// under memory pressure; the resolved real git has neither. Falls back to [`GIT`] where
-/// xcrun cannot resolve it (for example on Linux), no worse than before. Returns the path.
+/// xcrun cannot resolve it (for example on Linux), no worse than before. Only a resolved
+/// path is kept: a lookup that fails once under load is asked again at the next step
+/// rather than leaving every later setup of the process on the shim. Returns the path.
 #[cfg(unix)]
 fn setup_git() -> &'static Path {
     static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    RESOLVED.get_or_init(|| real_git().unwrap_or_else(|| PathBuf::from(GIT)))
+    if let Some(path) = RESOLVED.get() {
+        return path;
+    }
+    match real_git() {
+        Some(path) => RESOLVED.get_or_init(|| path),
+        None => Path::new(GIT),
+    }
 }
 
 /// Asks xcrun once, outside any sandbox, for the active toolchain's git. Returns an
@@ -1917,6 +1936,9 @@ fn real_git() -> Option<PathBuf> {
     (path.is_absolute() && path != Path::new(GIT) && path.is_file()).then_some(path)
 }
 
+/// A git command for the engine's own worktree steps under the agent's installed profile:
+/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, setup_git());
@@ -1956,8 +1978,10 @@ fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
     command.stdout(Stdio::piped());
     let mut child = crate::spawn_gate::spawn(command)?;
     let stdout = child.stdout.take().ok_or_else(refused)?;
-    if !wait_bounded(child, SETUP_TIMEOUT)? {
-        return Err(refused());
+    match wait_bounded(child, SETUP_TIMEOUT)? {
+        Ended::Succeeded => {}
+        Ended::Failed => return Err(RunError::Setup("worktree_config_failed")),
+        Ended::TimedOut => return Err(RunError::Setup(SETUP_TIMED_OUT)),
     }
     let mut bytes = Vec::new();
     stdout
@@ -2024,15 +2048,30 @@ pub(crate) fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> 
     Ok(arguments)
 }
 
-fn wait_bounded(mut child: Child, limit: Duration) -> Result<bool, RunError> {
+/// How a setup command run within a time limit ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+/// Waits for a setup command for at most `limit`, stopping its process group when it runs
+/// past. Takes the command's process, which leads its own group, and the limit. Returns
+/// whether it succeeded, failed or was stopped at the limit.
+fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(status.success());
+            return Ok(if status.success() {
+                Ended::Succeeded
+            } else {
+                Ended::Failed
+            });
         }
         if started.elapsed() >= limit {
             stop_timed_out(&mut child);
-            return Ok(false);
+            return Ok(Ended::TimedOut);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -3331,6 +3370,108 @@ mod tests {
                 handle.join().unwrap();
             }
         });
+    }
+
+    /// Many sandboxed setup commands started at once each get their own session. The shim
+    /// leaves the group it was started in and calls setsid at once, and under load macOS can
+    /// still see that group for a moment, so setsid failed with EPERM ("no new session") on
+    /// about one start in a thousand; that was the `setup_refused` flake.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn many_sandboxed_setup_commands_started_at_once_each_get_their_own_session() {
+        const THREADS: usize = 32;
+        const STARTS: usize = 40;
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, home, tmp) = (base.join("project"), base.join("home"), base.join("tmp"));
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = base.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let refused = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    for _ in 0..STARTS {
+                        let mut command = sandbox.command(&profile, Path::new("/usr/bin/true"));
+                        command
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::piped());
+                        let output = crate::spawn_gate::output(&mut command).unwrap();
+                        if !output.status.success() {
+                            refused
+                                .lock()
+                                .unwrap()
+                                .push(String::from_utf8_lossy(&output.stderr).into_owned());
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(refused.into_inner().unwrap(), Vec::<String>::new());
+    }
+
+    /// A setup command that exits well, exits with a failure or runs past its limit ends
+    /// as each of the three, and the one past its limit is stopped with its group.
+    #[test]
+    fn a_bounded_setup_command_tells_success_failure_and_timeout_apart() {
+        use std::os::unix::process::CommandExt;
+        let run = |program: &str, arguments: &[&str], limit: Duration| {
+            let mut command = Command::new(program);
+            command
+                .args(arguments)
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let child = crate::spawn_gate::spawn(&mut command).unwrap();
+            let group = child.id();
+            (wait_bounded(child, limit).unwrap(), group)
+        };
+        let long = Duration::from_secs(30);
+        assert_eq!(run("/usr/bin/true", &[], long).0, Ended::Succeeded);
+        assert_eq!(run("/usr/bin/false", &[], long).0, Ended::Failed);
+        let started = Instant::now();
+        let (ended, group) = run("/bin/sleep", &["30"], Duration::from_millis(200));
+        assert_eq!(ended, Ended::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
+        assert!(rustix::process::test_kill_process_group(pid).is_err());
+    }
+
+    /// A worktree add that git refuses names its own step, not the generic setup refusal:
+    /// a repository with no commit has no HEAD to add a worktree at.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refused_worktree_add_names_its_step() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("home");
+        let tmp = base.join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        repository_git(&project, &["init", "-q", "--template="]);
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = base.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = crate::projects_home::state_folder(&project)
+            .join("worktrees")
+            .join("agent-1");
+
+        let refused = add_worktree(&sandbox, &profile, &worktree);
+
+        assert!(
+            matches!(refused, Err(RunError::Setup("worktree_add_failed"))),
+            "{refused:?}"
+        );
+        assert!(!worktree.join(".git").exists());
     }
 
     #[cfg(target_os = "macos")]
