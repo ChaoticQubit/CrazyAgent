@@ -5,6 +5,7 @@ pub const FOLDER: &str = "ide";
 pub mod bridge;
 pub mod env;
 pub mod fetch;
+pub mod git;
 pub mod manifest;
 #[cfg(unix)]
 pub mod ports;

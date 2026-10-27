@@ -306,10 +306,12 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
             "workbench.settings.showAISearchToggle": false,
             "extensions.ignoreRecommendations": true,
             "workbench.startupEditor": "none",
+            "git.detectSubmodules": false,
+            "git.autoRepositoryDetection": false,
             "files.readonlyInclude": running,
             "files.readonlyExclude": {},
         }),
-        "the workspace file carries the lock's workspace keys and the running agents' globs"
+        "the workspace file carries the lock's and git's workspace keys and the running agents' globs"
     );
 }
 

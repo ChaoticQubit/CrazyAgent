@@ -233,8 +233,8 @@ fn sections(
     Ok((sections, hidden))
 }
 
-/// Renders the workspace file: its folders in order, the lock's workspace keys and its
-/// settings.
+/// Renders the workspace file: its folders in order, the lock's workspace keys, the keys
+/// that keep the IDE's git to each section's root and its settings.
 /// Inputs: the sections and settings. Output: the JSON text.
 fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, EngineError> {
     let folders = sections
@@ -254,6 +254,7 @@ fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, 
             .collect()
     };
     let mut locked = super::settings::workspace();
+    locked.extend(super::git::workspace());
     locked.insert(
         "files.readonlyInclude".to_owned(),
         serde_json::Value::Object(globs(&settings.readonly_include)),
