@@ -196,6 +196,23 @@ pub struct ProjectPage {
     pub fresh: bool,
 }
 
+/// The projects Home, the sidebar, Go to and the desktop's name checks list: at most
+/// `PROJECT_LIST_MAX` in engine order, and whether the engine holds more than that.
+#[derive(Debug, Serialize)]
+pub struct ProjectList {
+    pub items: Vec<ProjectRow>,
+    pub more: bool,
+}
+
+/// The most projects one `project_list` read returns, the terminal app's bound.
+pub const PROJECT_LIST_MAX: usize = 200;
+
+/// The JSON size of one project row at most: a 128-byte id, a 256-byte name whose every
+/// byte may escape to two, a 20-digit repository count and the field names.
+const PROJECT_ROW_BYTES_MAX: usize = 704;
+
+const PROJECT_LIST_BYTES_MAX: usize = PROJECT_LIST_MAX * PROJECT_ROW_BYTES_MAX + 64;
+
 #[derive(Debug, Serialize)]
 pub struct ConversationRow {
     pub kind: &'static str,
@@ -830,6 +847,38 @@ impl NativeBridge {
             self.projects_next = None;
             None
         };
+        let (rows, next) = self.project_page(cursor).await?;
+        let page = bounded(ProjectPage {
+            items: rows,
+            has_more: next.is_some(),
+            fresh: true,
+        })?;
+        self.projects_next = next;
+        Ok(page)
+    }
+
+    /// Reads every project page by page inside this one call, with a cursor of its own, so
+    /// list reads that overlap never share paging state with each other or with `projects`.
+    /// Input: none. Output: at most `PROJECT_LIST_MAX` projects in engine order and whether the
+    /// engine holds more, after at most `PROJECT_LIST_MAX + 1` page reads.
+    pub async fn project_list(&mut self) -> Result<ProjectList, BridgeError> {
+        let mut items = Vec::new();
+        let mut cursor = None;
+        for _ in 0..=PROJECT_LIST_MAX {
+            let (rows, next) = self.project_page(cursor.take()).await?;
+            items.extend(rows);
+            match next {
+                Some(next) if items.len() < PROJECT_LIST_MAX => cursor = Some(next),
+                next => return cut_projects(items, next.is_some()),
+            }
+        }
+        cut_projects(items, true)
+    }
+
+    async fn project_page(
+        &mut self,
+        cursor: Option<OwnerPageCursor>,
+    ) -> Result<(Vec<ProjectRow>, Option<OwnerPageCursor>), BridgeError> {
         let state = self
             .controller()?
             .read_page(OwnerView::Projects, cursor, Some(PAGE_SIZE))
@@ -856,13 +905,7 @@ impl NativeBridge {
                 _ => Err(failure("unexpected_reply")),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let page = bounded(ProjectPage {
-            items: rows,
-            has_more: next.is_some(),
-            fresh: true,
-        })?;
-        self.projects_next = next;
-        Ok(page)
+        Ok((rows, next))
     }
 
     pub async fn create_project(
@@ -1191,18 +1234,64 @@ fn display_content(bytes: Vec<u8>) -> (String, &'static str) {
 }
 
 fn bounded<T: Serialize>(value: T) -> Result<T, BridgeError> {
+    bounded_by(value, PROJECTION_BYTES_MAX)
+}
+
+fn bounded_by<T: Serialize>(value: T, maximum: usize) -> Result<T, BridgeError> {
     let bytes = serde_json::to_vec(&value).map_err(|_| failure("projection_failed"))?;
-    if bytes.len() > PROJECTION_BYTES_MAX {
+    if bytes.len() > maximum {
         return Err(failure("projection_limit"));
     }
     assert!(!bytes.is_empty());
-    assert!(bytes.len() <= PROJECTION_BYTES_MAX);
+    assert!(bytes.len() <= maximum);
     Ok(value)
+}
+
+fn cut_projects(mut items: Vec<ProjectRow>, more: bool) -> Result<ProjectList, BridgeError> {
+    let more = more || items.len() > PROJECT_LIST_MAX;
+    items.truncate(PROJECT_LIST_MAX);
+    bounded_by(ProjectList { items, more }, PROJECT_LIST_BYTES_MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_list_stops_at_its_bound_says_so_and_fits_the_worst_rows() {
+        let rows = |count: usize| -> Vec<ProjectRow> {
+            (1..=count)
+                .map(|at| ProjectRow {
+                    id: format!("p-{at}"),
+                    name: format!("Project {at}"),
+                    repository_count: 0,
+                })
+                .collect()
+        };
+        let all = cut_projects(rows(20), false).unwrap();
+        assert_eq!((all.items.len(), all.more), (20, false));
+        let full = cut_projects(rows(PROJECT_LIST_MAX), false).unwrap();
+        assert_eq!((full.items.len(), full.more), (PROJECT_LIST_MAX, false));
+        let over = cut_projects(rows(PROJECT_LIST_MAX + 5), false).unwrap();
+        assert_eq!((over.items.len(), over.more), (PROJECT_LIST_MAX, true));
+        assert_eq!(
+            over.items.last().unwrap().id,
+            format!("p-{PROJECT_LIST_MAX}")
+        );
+        let cut_short = cut_projects(rows(16), true).unwrap();
+        assert_eq!((cut_short.items.len(), cut_short.more), (16, true));
+
+        let worst = (0..PROJECT_LIST_MAX)
+            .map(|at| ProjectRow {
+                id: format!("{at:0>128}"),
+                name: "\"".repeat(256),
+                repository_count: usize::MAX,
+            })
+            .collect();
+        let worst = cut_projects(worst, true).unwrap();
+        assert!(serde_json::to_vec(&worst).unwrap().len() <= PROJECT_LIST_BYTES_MAX);
+        assert!(serde_json::to_vec(&worst.items[0]).unwrap().len() <= PROJECT_ROW_BYTES_MAX);
+    }
 
     #[test]
     fn random_ids_are_64_hex_characters_and_differ() {

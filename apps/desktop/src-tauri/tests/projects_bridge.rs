@@ -499,6 +499,64 @@ async fn receipt_identity_opens_creation_outside_first_project_page() {
 }
 
 #[tokio::test]
+async fn a_full_project_list_reads_every_page_and_leaves_a_paged_read_where_it_was() {
+    let root = private_root();
+    let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut bridge = connected_bridge(root.path()).await?;
+        for generation in 1..=20 {
+            bridge.projects(false).await?;
+            let receipt = bridge
+                .create_project(
+                    declaration(root.path(), &format!("Project {generation}")),
+                    generation,
+                )
+                .await?;
+            assert_eq!(
+                receipt.outcome,
+                crazyagent_desktop::bridge::ActionOutcome::Applied
+            );
+        }
+        let first = bridge.projects(false).await?;
+        assert_eq!(first.items.len(), 16);
+        assert!(first.has_more);
+
+        let list = bridge.project_list().await?;
+        assert_eq!(list.items.len(), 20);
+        assert!(!list.more);
+        let mut names: Vec<&str> = list.items.iter().map(|row| row.name.as_str()).collect();
+        names.sort_unstable();
+        let mut expected: Vec<String> = (1..=20).map(|at| format!("Project {at}")).collect();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        assert_eq!(bridge.project_list().await?.items.len(), 20);
+
+        let second = bridge.projects(true).await?;
+        assert_eq!(second.items.len(), 4, "the paged read kept its own place");
+        assert!(!second.has_more);
+        let mut paged: Vec<&str> = first
+            .items
+            .iter()
+            .chain(&second.items)
+            .map(|row| row.id.as_str())
+            .collect();
+        let mut listed: Vec<&str> = list.items.iter().map(|row| row.id.as_str()).collect();
+        paged.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(paged, listed);
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn native_creation_accepts_utf8_and_repository_count_boundaries_without_inspection() {
     let root = private_root();
     let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();

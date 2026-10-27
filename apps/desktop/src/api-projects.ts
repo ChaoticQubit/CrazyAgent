@@ -1,7 +1,7 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
-  newMasterSession, openMaster, openProject, projects, resumeMasterSession, submitMaster,
+  newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
   AccountPool, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
@@ -508,18 +508,10 @@ export function loadPools(): Promise<Result<PoolChoice[]>> {
   });
 }
 
-/** Reads every project name the engine holds.
- * Input: none. Output: the projects, across every page. */
+/** Reads the project names the engine holds, up to the bridge's PROJECT_LIST_MAX, in one
+ * bridge call that pages with its own cursor. Input: none. Output: the projects. */
 export function loadProjects(): Promise<Result<ProjectPage["items"]>> {
-  return wrap(async () => {
-    let page = await projects(false);
-    const items = [...page.items];
-    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
-      page = await projects(true);
-      items.push(...page.items);
-    }
-    return items;
-  });
+  return wrap(async () => (await projectList()).items);
 }
 
 /** Names the projects a saved pool serves, for the delete confirm.
@@ -529,12 +521,7 @@ export function projectsUsing(poolId: string): Promise<Result<string[]>> {
     const record = (await allRecords("pools")).find((item) => item.kind === "pool" && item.pool.id === poolId);
     const ids = record?.kind === "pool" ? record.pool.projects : [];
     if (ids.length === 0) return [];
-    let page = await projects(false);
-    const names = new Map(page.items.map((item) => [item.id, item.name]));
-    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
-      page = await projects(true);
-      for (const item of page.items) names.set(item.id, item.name);
-    }
+    const names = new Map((await projectList()).items.map((item) => [item.id, item.name]));
     return ids.map((id) => names.get(id) ?? "a project");
   });
 }

@@ -10,6 +10,7 @@ fn main() {
         "desktop_reconcile",
         "desktop_retry",
         "desktop_projects",
+        "desktop_project_list",
         "desktop_create_project",
         "desktop_project_catalog",
         "desktop_setup_project",
