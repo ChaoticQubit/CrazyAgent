@@ -2,7 +2,8 @@ use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delega
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::memory::library::{
-    AgentMemory, AgentWrite, NOTE_BYTES_MAX, agent_memories, agent_remember,
+    AGENT_SUGGESTIONS_MAX, AGENT_VERSIONS_MAX, AgentMemory, AgentWrite, NOTE_BYTES_MAX,
+    agent_memories, agent_remember,
 };
 use crate::protocol::{ProjectId, RequestId};
 use crate::storage::versioned::LastWriter;
@@ -541,7 +542,7 @@ fn remember_once(
         })
         .map_err(failed)?;
     let revision = u64::try_from(revision).map_err(|problem| EngineError(problem.to_string()))?;
-    let written = agent_remember(
+    let written = match agent_remember(
         &tx,
         config,
         project,
@@ -549,7 +550,12 @@ fn remember_once(
         read.map(|(memory, version)| (memory, *version)),
         text,
         revision,
-    )?;
+    ) {
+        Err(problem) if problem.0 == "knowledge_record_capacity" => {
+            AgentWrite::Refused { code: problem.0 }
+        }
+        written => written?,
+    };
     if matches!(written, AgentWrite::Saved { .. }) {
         tx.commit().map_err(failed)?;
     }
@@ -615,14 +621,23 @@ fn remembered_text(written: &AgentWrite) -> (String, bool) {
                 "Not saved: {}.",
                 match code.as_str() {
                     "memory_missing" =>
-                        "this project has no memory with that id; read the ids with memories()",
-                    "memory_duplicate" => "you already suggested this memory",
-                    "memory_text_invalid" => "give one plain memory of up to 2000 bytes",
-                    "memory_source_removed" => "the owner removed what this memory came from",
-                    "memory_agent_missing" => "only this project's live master saves memories",
+                        "this project has no memory with that id; read the ids with memories()"
+                            .to_owned(),
+                    "memory_duplicate" => "you already suggested this memory".to_owned(),
+                    "memory_text_invalid" => "give one plain memory of up to 2000 bytes".to_owned(),
+                    "memory_source_removed" =>
+                        "the owner removed what this memory came from".to_owned(),
+                    "memory_agent_missing" =>
+                        "only this project's live master saves memories".to_owned(),
+                    "memory_suggestions_full" => format!(
+                        "this project already has {AGENT_SUGGESTIONS_MAX} suggested memories the owner has not reviewed; change one of them or wait for the owner to keep or reject them"
+                    ),
+                    "memory_versions_full" => format!(
+                        "this suggestion already has {AGENT_VERSIONS_MAX} versions; wait for the owner to review it or suggest a new memory"
+                    ),
                     "knowledge_record_capacity" =>
-                        "the project's memory is full until the owner reviews it",
-                    other => other,
+                        "the engine's memory is full until the owner deletes memories".to_owned(),
+                    other => other.to_owned(),
                 }
             ),
             true,

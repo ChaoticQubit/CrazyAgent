@@ -24,6 +24,10 @@ pub const LAUNCH_ITEMS_MAX: usize = 24;
 pub const LAUNCH_BYTES_MAX: usize = 12288;
 /// The most memories one agent read lists.
 pub const AGENT_MEMORIES_MAX: usize = 64;
+/// The most suggestions agents keep waiting for the owner's review in one project.
+pub const AGENT_SUGGESTIONS_MAX: usize = 16;
+/// The most versions agents write of one suggestion before the owner reviews it.
+pub const AGENT_VERSIONS_MAX: u64 = 8;
 const TEXT_BYTES_MAX: usize = 4096;
 const PAGE_BYTES_MAX: usize = FRAME_BYTES_MAX - 8192;
 const RENDER_HEADER_BYTES_MAX: usize = 1024;
@@ -663,6 +667,11 @@ pub(crate) fn agent_remember(
             code: "memory_source_removed".into(),
         });
     }
+    if version >= AGENT_VERSIONS_MAX {
+        return Ok(AgentWrite::Refused {
+            code: "memory_versions_full".into(),
+        });
+    }
     let mut next = entry;
     next.version = version + 1;
     next.text = text.to_owned();
@@ -702,6 +711,11 @@ fn suggest(
             code: "memory_duplicate".into(),
         });
     }
+    if pending_suggestions(tx, project)? >= AGENT_SUGGESTIONS_MAX {
+        return Ok(AgentWrite::Refused {
+            code: "memory_suggestions_full".into(),
+        });
+    }
     let principal = Principal {
         id: RequestId::new(format!("agent-{}", agent.as_str())).map_err(error)?,
         project_id: project.clone(),
@@ -738,6 +752,34 @@ fn suggest(
     assert_eq!((entry.version, entry.text.as_str()), (1, text));
     assert_eq!(entry_writer(&entry), LastWriter::Agent(agent.clone()));
     Ok(AgentWrite::Saved { id, version: 1 })
+}
+
+/// Counts the agent suggestions of one project still waiting for the owner's review,
+/// stopping at `AGENT_SUGGESTIONS_MAX`. Input: a transaction on `engine.db` and the project.
+/// Output: the count.
+fn pending_suggestions(tx: &Transaction<'_>, project: &ProjectId) -> Result<usize, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT e.body FROM knowledge_entries e JOIN knowledge_heads h
+             ON e.id=h.id AND e.version=h.version WHERE h.project=?1 ORDER BY h.id",
+        )
+        .map_err(error)?;
+    let mut rows = statement.query([project.as_str()]).map_err(error)?;
+    let mut pending = 0;
+    while pending < AGENT_SUGGESTIONS_MAX {
+        let Some(row) = rows.next().map_err(error)? else {
+            break;
+        };
+        let entry: KnowledgeEntry =
+            serde_json::from_str(&row.get::<_, String>(0).map_err(error)?).map_err(error)?;
+        entry.assert_consistent();
+        assert_eq!(&entry.project_id, project);
+        if !owner_holds(&entry) {
+            pending += 1;
+        }
+    }
+    assert!(pending <= AGENT_SUGGESTIONS_MAX);
+    Ok(pending)
 }
 
 fn entry_writer(entry: &KnowledgeEntry) -> LastWriter {

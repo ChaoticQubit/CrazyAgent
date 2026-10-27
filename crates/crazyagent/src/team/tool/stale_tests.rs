@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{EffectiveConfig, ModelAccess, resolve_config_bytes};
-use crate::memory::library::NOTE_BYTES_MAX;
+use crate::memory::library::{AGENT_SUGGESTIONS_MAX, AGENT_VERSIONS_MAX, NOTE_BYTES_MAX};
 use crate::memory::{
     HumanReview, KnowledgeAction, KnowledgeEntry, KnowledgeStatus, ReviewDecision,
 };
@@ -163,6 +163,47 @@ impl Fixture {
         );
         tx.commit().unwrap();
     }
+
+    fn review(&mut self, entry: &RequestId, decision: ReviewDecision) -> Outcome {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let review = KnowledgeAction::Owner {
+            action: HumanReview::Review {
+                entry_id: entry.clone(),
+                version: 1,
+                decision,
+            },
+        };
+        let outcome = crate::memory::execute(&tx, &self.config, &review, 1)
+            .unwrap_or_else(|problem| panic!("the owner review failed: {}", problem.0));
+        tx.commit().unwrap();
+        outcome
+    }
+
+    fn entry(&self, entry: &RequestId) -> KnowledgeEntry {
+        let body: String = self
+            .connection
+            .query_row(
+                "SELECT e.body FROM knowledge_entries e JOIN knowledge_heads h
+                 ON e.id=h.id AND e.version=h.version WHERE h.id=?1",
+                [entry.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&body).unwrap()
+    }
+
+    fn rows(&self, table: &str) -> usize {
+        let count: i64 = self
+            .connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        usize::try_from(count).unwrap()
+    }
 }
 
 #[test]
@@ -311,5 +352,134 @@ fn agent_stale_memory_write_gets_the_reread_instruction() {
         fixture.memory(),
         held,
         "no refused write changed the memory"
+    );
+}
+
+#[test]
+fn agent_memory_writes_stop_at_their_bound_and_the_owner_still_reviews_a_full_store() {
+    let mut fixture = Fixture::new();
+    let mut suggested = Vec::new();
+    for index in 0..AGENT_SUGGESTIONS_MAX {
+        let (saved, error) = fixture.call(
+            REMEMBER_TOOL,
+            json!({"text": format!("Suggested memory number {index}.")}),
+        );
+        assert!(!error, "{saved}");
+        let id = saved.split_whitespace().nth(2).unwrap();
+        suggested.push(RequestId::new(id).unwrap());
+    }
+    let (full, error) = fixture.call(REMEMBER_TOOL, json!({"text": "One suggestion too many."}));
+    assert!(error, "{full}");
+    assert!(
+        full.starts_with("Not saved")
+            && full.contains(&format!("{AGENT_SUGGESTIONS_MAX} suggested memories")),
+        "past the bound the agent is told why: {full}"
+    );
+    assert_eq!(
+        (
+            fixture.rows("knowledge_heads"),
+            fixture.rows("knowledge_activity")
+        ),
+        (AGENT_SUGGESTIONS_MAX, AGENT_SUGGESTIONS_MAX),
+        "a suggestion past the bound writes nothing"
+    );
+
+    let first = suggested[0].clone();
+    for version in 1..AGENT_VERSIONS_MAX {
+        let (saved, error) = fixture.call(
+            REMEMBER_TOOL,
+            json!({"memory": first.as_str(), "version": version,
+                "text": format!("Changed memory at version {}.", version + 1)}),
+        );
+        assert!(
+            !error,
+            "a suggestion changes while under its bound: {saved}"
+        );
+    }
+    let (spent, error) = fixture.call(
+        REMEMBER_TOOL,
+        json!({"memory": first.as_str(), "version": AGENT_VERSIONS_MAX, "text": "One change too many."}),
+    );
+    assert!(error, "{spent}");
+    assert!(
+        spent.starts_with("Not saved") && spent.contains(&format!("{AGENT_VERSIONS_MAX} versions")),
+        "{spent}"
+    );
+    let kept = fixture.entry(&first);
+    assert_eq!(
+        (kept.version, kept.text),
+        (
+            AGENT_VERSIONS_MAX,
+            format!("Changed memory at version {AGENT_VERSIONS_MAX}.")
+        ),
+        "a change past the bound changes nothing"
+    );
+
+    assert_eq!(
+        fixture.review(&suggested[1], ReviewDecision::Reject),
+        Outcome::Applied
+    );
+    let (freed, error) = fixture.call(
+        REMEMBER_TOOL,
+        json!({"text": "A suggestion after the owner rejected one."}),
+    );
+    assert!(!error, "an owner review frees a place: {freed}");
+
+    let rows = fixture.rows("knowledge_entries");
+    fixture.config.settings.knowledge.records_max = rows;
+    let (stored, error) = fixture.call(
+        REMEMBER_TOOL,
+        json!({"memory": suggested[2].as_str(), "version": 1, "text": "A change into a full store."}),
+    );
+    assert!(error, "{stored}");
+    assert!(
+        stored.starts_with("Not saved") && stored.contains("memory is full"),
+        "{stored}"
+    );
+    assert_eq!(fixture.rows("knowledge_entries"), rows);
+
+    for (memory, decision, status) in [
+        (
+            &suggested[2],
+            ReviewDecision::Reject,
+            KnowledgeStatus::Rejected,
+        ),
+        (
+            &suggested[3],
+            ReviewDecision::Remove,
+            KnowledgeStatus::Removed,
+        ),
+        (
+            &suggested[4],
+            ReviewDecision::Keep,
+            KnowledgeStatus::Confirmed,
+        ),
+        (
+            &suggested[5],
+            ReviewDecision::Edit {
+                text: "The owner's wording.".into(),
+            },
+            KnowledgeStatus::Confirmed,
+        ),
+    ] {
+        assert_eq!(
+            fixture.review(memory, decision),
+            Outcome::Applied,
+            "the owner reviews a store the agents filled"
+        );
+        let reviewed = fixture.entry(memory);
+        assert_eq!(
+            (reviewed.version, reviewed.status, reviewed.human_reviewed),
+            (2, status, true)
+        );
+    }
+    assert_eq!(fixture.rows("knowledge_entries"), rows + 4);
+    let (still, error) = fixture.call(
+        REMEMBER_TOOL,
+        json!({"memory": suggested[6].as_str(), "version": 1, "text": "Still a full store."}),
+    );
+    assert!(
+        error && still.contains("memory is full"),
+        "owner reviews past the bound leave no room to agents: {still}"
     );
 }
