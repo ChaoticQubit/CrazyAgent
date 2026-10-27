@@ -1,7 +1,7 @@
 use crate::agent_home::Harness;
 use crate::config::plain_problem;
 use crate::engine::owner::AgentInstructions;
-use crate::project_setup::SetupQuery;
+use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph};
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
@@ -37,6 +37,11 @@ const STOPPED: &str = "agent_stopped";
 const PAGE_STEP: usize = 10;
 const MASTER_WAITING: &str =
     "Starting the master's terminal. It opens once the master signs in and starts.";
+const MASTER_ON: &str = "Live master on. It starts when you open this view.";
+const MASTER_OFF: &str = "Live master stopped.";
+const MASTER_STOPPED: &str =
+    "The live master is stopped. Its terminal opens again once you start it.";
+const MASTER_HEAD_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -64,6 +69,14 @@ struct TreeRow {
     item: Option<Item>,
     prefix: String,
     body: Body,
+}
+
+/// The live master switch as the engine last told it: on, off, or never set, and why the
+/// master last could not start.
+#[derive(Debug)]
+struct LiveSwitch {
+    on: Option<bool>,
+    problem: Option<String>,
 }
 
 struct Attached {
@@ -96,6 +109,8 @@ pub struct Team {
     name: String,
     master: bool,
     asked: bool,
+    switch: Option<LiveSwitch>,
+    want: Option<bool>,
     refused: Option<String>,
     graph: Load<Box<TeamGraph>>,
     cursor: usize,
@@ -115,6 +130,8 @@ impl Team {
             name,
             master: false,
             asked: false,
+            switch: None,
+            want: None,
             refused: None,
             graph: Load::Loading,
             cursor: 0,
@@ -126,9 +143,9 @@ impl Team {
         }
     }
 
-    /// The master view of one project: the live master's own terminal filling
-    /// the body, opened as soon as the team shows it. Showing it asks the
-    /// engine to keep the master running live.
+    /// The master view of one project: a header with the live master switch, then the
+    /// live master's own terminal filling the body, opened as soon as the team shows it.
+    /// The first open of a project whose switch was never set turns the master on.
     /// Inputs: the project id and name. Output: the screen, waiting for the master.
     pub fn master(project: ProjectId, name: String) -> Self {
         Self {
@@ -137,40 +154,100 @@ impl Team {
         }
     }
 
-    fn ask_live(&mut self, ctx: &mut Ctx) {
-        if !self.master || self.asked {
-            return;
-        }
+    /// Whether the live master is on as the owner sees it: the owner's last change until the
+    /// engine shows it, else the engine's switch; None until read or when never set.
+    fn live_on(&self) -> Option<bool> {
+        self.want
+            .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
+    }
+
+    fn turn_live(&mut self, on: bool, ctx: &mut Ctx) {
         self.asked = true;
+        self.want = Some(on);
+        self.refused = None;
+        if !on {
+            self.detach(ctx);
+        }
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: TeamAction::LiveMaster {
                 project_id: self.project.clone(),
-                on: true,
+                on,
             },
             generation,
         }));
     }
 
-    fn took_change(&mut self, query: &SetupQuery, result: &Result<impl Sized, String>) {
-        let SetupQuery::TeamChange {
-            action: TeamAction::LiveMaster { project_id, .. },
-            ..
-        } = query
-        else {
-            return;
-        };
-        if !self.master || *project_id != self.project {
+    fn read_switch(&self, ctx: &mut Ctx) {
+        ctx.request(Request::Setup(SetupQuery::Team {
+            project: self.project.clone(),
+        }));
+    }
+
+    /// Takes a team status read or a live switch change of this master view: a good read
+    /// replaces the switch and turns a never set one on once; a failed read changes nothing;
+    /// an accepted change is the switch until the next read, which is read at once.
+    /// Inputs: the setup query, its result and the context. Output: none.
+    fn took_setup(
+        &mut self,
+        query: &SetupQuery,
+        result: &Result<SetupView, String>,
+        ctx: &mut Ctx,
+    ) {
+        if !self.master {
             return;
         }
-        self.refused = result.as_ref().err().cloned();
+        match query {
+            SetupQuery::Team { project } if *project == self.project => {
+                let Ok(SetupView::Team(status)) = result else {
+                    return;
+                };
+                let switch = LiveSwitch {
+                    on: status.live_master,
+                    problem: status.live_problem.clone(),
+                };
+                if self.want.is_some() && self.want == switch.on {
+                    self.want = None;
+                }
+                let never = switch.on.is_none();
+                self.switch = Some(switch);
+                if never && !self.asked {
+                    self.turn_live(true, ctx);
+                }
+            }
+            SetupQuery::TeamChange {
+                action: TeamAction::LiveMaster { project_id, on },
+                ..
+            } if *project_id == self.project => match result {
+                Ok(_) => {
+                    self.want = None;
+                    self.switch = Some(LiveSwitch {
+                        on: Some(*on),
+                        problem: None,
+                    });
+                    self.read_switch(ctx);
+                }
+                Err(code) => {
+                    self.want = None;
+                    if *on {
+                        self.refused = Some(code.clone());
+                    } else {
+                        ctx.say(Message::warning(
+                            "The live master could not be stopped.",
+                            plain_problem(code).unwrap_or(code.as_str()),
+                        ));
+                    }
+                }
+            },
+            _ => {}
+        }
     }
 
     /// Opens the master's terminal once the team lists it, and the new one
     /// after the master moved to another account.
     /// Input: the context. Output: none; attach and size requests are queued.
     fn follow_master(&mut self, ctx: &mut Ctx) {
-        if !self.master {
+        if !self.master || self.live_on() == Some(false) {
             return;
         }
         let Some((node, terminal)) = self.graph.ready().and_then(|graph| {
@@ -199,6 +276,10 @@ impl Team {
             .is_some_and(|attached| attached.closed.is_none());
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
+            Key::Char('s') => {
+                let on = self.live_on() == Some(false);
+                self.turn_live(on, ctx);
+            }
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -464,10 +545,6 @@ impl Team {
     }
 
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        if *key == LEADER && self.master {
-            self.detach(ctx);
-            return Flow::Back;
-        }
         if *key == LEADER {
             self.focus = Focus::Tree;
             return Flow::Handled;
@@ -600,6 +677,37 @@ impl Team {
         Some(lines)
     }
 
+    fn switch_control(&self) -> &'static str {
+        if self.live_on() == Some(false) {
+            "Start live master"
+        } else {
+            "Stop live master"
+        }
+    }
+
+    /// The master view's header: whether the live master is on, and the key that switches it
+    /// at the right edge. Inputs: the width and context. Output: the line.
+    fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
+        let state = if self.live_on() == Some(false) {
+            MASTER_OFF
+        } else {
+            MASTER_ON
+        };
+        let control = format!("s {}", self.switch_control());
+        let room = limit.saturating_sub(width(&control));
+        if room < width(state) + 2 {
+            return styled(
+                cut(&control, limit, ctx.glyphs.ellipsis),
+                Role::Muted,
+                &ctx.theme,
+            );
+        }
+        join([
+            Line::raw(format!("{state:<room$}")),
+            styled(control, Role::Muted, &ctx.theme),
+        ])
+    }
+
     fn draw_right(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
         let inner = inside(area);
@@ -623,6 +731,23 @@ impl Team {
             let mut lines = vec![Line::raw("The master terminal could not start.")];
             lines.extend(
                 wrap(plain_problem(code).unwrap_or(code), limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
+        if self.master && self.live_on() == Some(false) && self.attached.is_none() {
+            let problem = self
+                .switch
+                .as_ref()
+                .and_then(|switch| switch.problem.as_deref());
+            let mut lines: Vec<Line<'static>> = wrap(problem.unwrap_or(MASTER_STOPPED), limit)
+                .into_iter()
+                .map(Line::raw)
+                .collect();
+            lines.extend(
+                wrap("Press s to start it.", limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
@@ -692,7 +817,7 @@ impl Screen for Team {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.focus == Focus::Terminal && self.master {
-            return vec![hint("Ctrl-]", "Back"), hint("Ctrl-J", "New line")];
+            return vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
         }
         if self.focus == Focus::Terminal {
             return vec![hint("Ctrl-]", "Back to the team")];
@@ -706,8 +831,9 @@ impl Screen for Team {
             {
                 hints.push(hint("Enter", "Terminal"));
             }
+            hints.push(hint("s", self.switch_control()));
+            hints.push(hint("Esc", "Earlier conversation"));
             hints.push(hint("r", "Refresh"));
-            hints.push(hint("Esc", "Back"));
             return hints;
         }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
@@ -805,10 +931,9 @@ impl Screen for Team {
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
-                OwnerEvent::Setup(event) => self.took_change(&event.query, &event.result),
+                OwnerEvent::Setup(event) => self.took_setup(&event.query, &event.result, ctx),
                 _ => {}
             },
-            Arrival::Connected(_) => self.asked = false,
             _ => {}
         }
         self.sync(ctx);
@@ -816,7 +941,9 @@ impl Screen for Team {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
-        self.ask_live(ctx);
+        if self.master {
+            self.read_switch(ctx);
+        }
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });
@@ -830,7 +957,10 @@ impl Screen for Team {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         if self.master {
-            return self.draw_right(frame, whole(area), ctx);
+            let (head, body) = master_split(whole(area));
+            let line = self.master_head(usize::from(head.width), ctx);
+            draw_lines(frame.buffer_mut(), head, &[line]);
+            return self.draw_right(frame, body, ctx);
         }
         let (left, right) = split(area);
         let inner = inside(left);
@@ -1225,13 +1355,27 @@ fn inside(area: Rect) -> Rect {
     )
 }
 
+/// Splits the master view into its header row with the live master switch and the body.
+/// Takes the area inside the side margins. Returns the header and the body.
+fn master_split(area: Rect) -> (Rect, Rect) {
+    let rows = MASTER_HEAD_ROWS.min(area.height);
+    (
+        Rect::new(area.x, area.y, area.width, rows),
+        Rect::new(area.x, area.y + rows, area.width, area.height - rows),
+    )
+}
+
 /// The terminal size the pane gets at the current window size, within the
 /// engine's terminal size bounds.
 /// Input: the context and whether the master view fills the body. Output:
 /// (rows, columns).
 fn pane_size(ctx: &Ctx, master: bool) -> (u16, u16) {
     let body = body_area(ctx);
-    let inner = inside(if master { whole(body) } else { split(body).1 });
+    let inner = inside(if master {
+        master_split(whole(body)).1
+    } else {
+        split(body).1
+    });
     (
         inner.height.clamp(SIZE_MIN, SIZE_MAX),
         inner.width.clamp(SIZE_MIN, SIZE_MAX),
