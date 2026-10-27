@@ -63,16 +63,36 @@ export function processTextError(text: string): string | undefined {
   return undefined;
 }
 
-/** Reads the owner's instructions. Input: null for app-wide, or the project id.
- * Output: the text, empty when nothing is saved. */
-export function loadProcess(projectId: string | null): Promise<Result<string>> {
-  return call<string>("desktop_process_text", { projectId });
+/** Who saved a shared item's current version: nobody yet, the owner, or one agent. */
+export type LastWriter = "nobody" | "owner" | { agent: string };
+
+/** One instructions text and the version it was read at; a save names that version. */
+export interface ProcessText {
+  text: string;
+  version: number;
 }
 
-/** Saves the owner's instructions whole. Inputs: null for app-wide, or the project id,
- * and the text. Agents launched after this get it. */
-export function saveProcess(projectId: string | null, text: string): Promise<Result<void>> {
-  return call<void>("desktop_save_process_text", { projectId, text });
+/** What a save of instructions did: stored as the next version, or refused as stale because
+ * another save landed after the version it named, with that newer text and who saved it. */
+export type SavedText =
+  | { kind: "saved"; version: number }
+  | { kind: "stale"; version: number; current: ProcessText; writer: LastWriter };
+
+/** The sentence for a save refused because the text changed after the owner opened it. */
+export const PROCESS_STALE = "These instructions changed since you opened them, so yours were not saved. Your text is still here; copy it, then reopen this page to see the saved version.";
+
+/** Reads the owner's instructions. Input: null for app-wide, or the project id.
+ * Output: the text, empty when nothing is saved, and the version a save names. */
+export function loadProcess(projectId: string | null): Promise<Result<ProcessText>> {
+  return call<ProcessText>("desktop_process_text", { projectId });
+}
+
+/** Saves the owner's instructions whole when no other save landed since they were read.
+ * Inputs: null for app-wide, or the project id; the text; the version read; and, only for
+ * "Keep mine" after a stale reply, the older version the owner opened. Output: saved with
+ * the new version, or stale with the newer text. Agents launched after a save get it. */
+export function saveProcess(projectId: string | null, text: string, version: number, opened: number | null = null): Promise<Result<SavedText>> {
+  return call<SavedText>("desktop_save_process_text", { projectId, text, version, opened });
 }
 
 /** Reads the owner's ~/.claude/CLAUDE.md for a preview. Only the owner's Import click calls

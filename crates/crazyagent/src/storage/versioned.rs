@@ -1,6 +1,10 @@
 use crate::engine::EngineError;
+use crate::protocol::ProjectId;
 use crate::terminal::AgentId;
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -10,6 +14,7 @@ pub const ITEM_BYTES_MAX: usize = 256;
 /// How many owner force records one item keeps; older ones are dropped first.
 pub const FORCES_PER_ITEM_MAX: usize = 100;
 const VERSION_MAX: u64 = i64::MAX as u64;
+const BUSY_WAIT: Duration = Duration::from_secs(5);
 const OWNER: &str = "owner";
 const AGENT_PREFIX: &str = "agent:";
 const SCHEMA: &str = "
@@ -54,6 +59,30 @@ impl Item {
     }
 }
 
+/// Names the versioned item of the owner's app-wide instructions, or of one project's.
+/// Input: the project, none for the app. Output: the item.
+pub fn process_text_item(project: Option<&ProjectId>) -> Item {
+    named(match project {
+        None => "process:app".to_owned(),
+        Some(project) => format!("process:project:{}", project.as_str()),
+    })
+}
+
+/// Names the versioned item of the owner's own instructions for one team agent.
+/// Inputs: the agent's project and its id, above 0. Output: the item.
+pub fn agent_instructions_item(project: &ProjectId, agent: i64) -> Item {
+    assert!(agent > 0);
+    named(format!(
+        "agent-instructions:{}:team-{agent}",
+        project.as_str()
+    ))
+}
+
+fn named(name: String) -> Item {
+    assert!(Item::new(&name).is_ok());
+    Item(name)
+}
+
 /// Who asks to write a shared item. The owner may keep their own text after being shown a
 /// conflict (`force_after_conflict`), which is recorded; an agent has no way to force.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +92,8 @@ pub enum Writer {
 }
 
 /// Who wrote an item's current version: nobody yet, the owner, or one agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LastWriter {
     Nobody,
     Owner,
@@ -241,6 +271,50 @@ pub fn forces(tx: &Transaction<'_>, item: &Item) -> Result<Vec<Force>, EngineErr
     }
     assert!(records.len() <= FORCES_PER_ITEM_MAX);
     Ok(records)
+}
+
+/// Drops one shared item's version and its owner "Keep mine" records, for an item deleted
+/// together with its value in the same transaction; a later write starts again at version 0.
+/// Inputs: a transaction on `engine.db` and the item. Output: whether the item had a version.
+pub fn forget(tx: &Transaction<'_>, item: &Item) -> Result<bool, EngineError> {
+    if !exists(tx)? {
+        return Ok(false);
+    }
+    let removed = tx
+        .execute(
+            "DELETE FROM versioned_items WHERE item = ?1",
+            [item.as_str()],
+        )
+        .map_err(|_| failure("versioned_unavailable"))?;
+    tx.execute(
+        "DELETE FROM versioned_forces WHERE item = ?1",
+        [item.as_str()],
+    )
+    .map_err(|_| failure("versioned_unavailable"))?;
+    assert!(removed <= 1);
+    assert_eq!(current(tx, item)?.version, 0);
+    Ok(removed == 1)
+}
+
+/// Opens the engine database for versioned writes without ever creating it, waiting up to
+/// five seconds behind another writer. Callers then write in an immediate transaction so a
+/// racing writer is told to re-read. Input: the absolute engine root holding `engine.db`.
+/// Output: the connection, or `versioned_unavailable`.
+pub fn open(root: &Path) -> Result<Connection, EngineError> {
+    if !root.is_absolute() {
+        return Err(failure("versioned_unavailable"));
+    }
+    let connection = Connection::open_with_flags(
+        root.join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| failure("versioned_unavailable"))?;
+    connection
+        .busy_timeout(BUSY_WAIT)
+        .map_err(|_| failure("versioned_unavailable"))?;
+    Ok(connection)
 }
 
 fn record_force(

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess,
+  PROCESS_STALE, PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess,
   skillSegments, textBytes, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
@@ -108,7 +108,8 @@ export function catalogOf(skills: Loaded<{ id: string; name: string; description
 export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const session = useAppSession();
   const projectId = scope.kind === "project" ? scope.id : null;
-  const [saved, reload] = useLoad(() => loadProcess(projectId), [projectId]);
+  const [loaded, reload] = useLoad(() => loadProcess(projectId), [projectId]);
+  const saved: Loaded<string> = loaded.kind === "ok" ? { kind: "ok", value: loaded.value.text } : loaded;
   const [skills] = useLoad(() => listSkills(projectId ?? undefined), [projectId]);
   const [draft, setDraft] = useState("");
   const [failure, setFailure] = useState("");
@@ -127,14 +128,17 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     else fail(result);
   };
   const save = async () => {
+    if (loaded.kind !== "ok") return;
     setFailure("");
     setBusy("save");
-    const result = session.noteResult(await saveProcess(projectId, draft));
+    const result = session.noteResult(await saveProcess(projectId, draft, loaded.value.version));
     setBusy(null);
-    if (result.kind === "ok") {
+    if (result.kind !== "ok") fail(result);
+    else if (result.value.kind === "stale") setFailure(PROCESS_STALE);
+    else {
       session.showToast("Instructions saved. Agents started from now on get them.");
       reload();
-    } else fail(result);
+    }
   };
   return <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview}
     onDraft={setDraft} onSave={() => void save()} onImport={() => void seed("import")} onDefault={() => void seed("default")}
