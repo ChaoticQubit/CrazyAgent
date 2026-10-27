@@ -683,16 +683,24 @@ fn an_agent_head_pointed_at_the_owners_branch_is_never_read_through_or_moved() {
             "linked: {linked}"
         );
         assert_eq!(case.tip(), tip, "linked: {linked}");
-        let agent = flow::open_agent(
+        let opened = flow::open_agent(
             &case.db,
             AgentKind::Sub,
             &case.workspace.repository,
             &case.workspace.worktree,
             &case.workspace.git_dir,
-        )
-        .unwrap();
-        assert_eq!(refused(agent.head()), "changes_workspace_invalid");
-        assert!(flow::reset_agent(&agent, &head).is_err());
+        );
+        match opened {
+            Ok(agent) => {
+                assert!(!linked);
+                assert_eq!(refused(agent.head()), "changes_workspace_invalid");
+                assert!(flow::reset_agent(&agent, &head).is_err());
+            }
+            Err(refused) => {
+                assert!(linked);
+                assert_eq!(refused.0, "changes_workspace_invalid");
+            }
+        }
         assert_eq!(case.tip(), tip, "linked: {linked}");
         assert!(
             std::fs::symlink_metadata(case.workspace.git_dir.join("HEAD.lock")).is_err(),
@@ -740,6 +748,128 @@ fn engine_head_moves_never_follow_a_reflog_link_in_the_agent_admin_folder() {
         case.owner(&["config", "--get", "user.name"]).trim(),
         "Repo Owner"
     );
+}
+
+#[test]
+fn a_fifo_planted_in_the_agent_git_folder_is_refused_without_waiting_on_it() {
+    let (done, finished) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        use std::os::unix::fs::FileTypeExt;
+        let case = Case::new();
+        let fifo = |path: &Path| {
+            let _ = std::fs::remove_file(path);
+            let output = crate::spawn_gate::output(
+                Command::new("/usr/bin/mkfifo")
+                    .arg(path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "mkfifo failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_fifo()
+            );
+        };
+        let git_dir = case.workspace.git_dir.clone();
+        let head_file = git_dir.join("HEAD");
+        let tip = case.tip();
+        let logs = git_dir.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        fifo(&logs.join("HEAD"));
+        case.edit("src/new.rs", "fn main() {}\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        assert_eq!(case.agent_head(), head);
+        discard(&case.db, &id, &head, NOW_MS).unwrap();
+        assert_eq!(case.agent_head(), tip);
+        restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+        assert_eq!(case.agent_head(), head);
+        assert!(
+            std::fs::symlink_metadata(logs.join("HEAD"))
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        fifo(&head_file);
+        case.edit("later.txt", "more work\n");
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: "turn-2".into(),
+            prompt_line: "Read a FIFO".into(),
+        };
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_workspace_invalid"
+        );
+        discard(&case.db, &id, &head, NOW_MS).unwrap();
+        assert_eq!(case.view(&id).state, ChangeState::Discarded);
+        assert_eq!(
+            refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+            "changes_workspace_invalid"
+        );
+        let late = NOW_MS + 8 * DAY_MS;
+        let blocker = |now| {
+            retire_blocker(
+                &case.db,
+                &case.workspace.repository,
+                &case.workspace.worktree,
+                &git_dir,
+                now,
+            )
+            .unwrap()
+        };
+        assert_eq!(blocker(late), Some("cleanup_worktree_invalid"));
+        assert_eq!(case.tip(), tip);
+        std::fs::remove_file(&head_file).unwrap();
+        std::fs::write(&head_file, format!("{head}\n")).unwrap();
+        let agent = flow::open_agent(
+            &case.db,
+            AgentKind::Sub,
+            &case.workspace.repository,
+            &case.workspace.worktree,
+            &git_dir,
+        )
+        .unwrap();
+        assert_eq!(agent.head().unwrap(), head);
+        fifo(&head_file);
+        assert_eq!(refused(agent.head()), "changes_workspace_invalid");
+        assert!(agent.move_head(None, &tip, "CrazyAgent: test").is_err());
+        assert!(std::fs::symlink_metadata(git_dir.join("HEAD.lock")).is_err());
+        assert!(
+            std::fs::symlink_metadata(&head_file)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        std::fs::remove_file(&head_file).unwrap();
+        std::fs::write(&head_file, format!("{head}\n")).unwrap();
+        fifo(&git_dir.join("gitdir"));
+        assert_eq!(
+            refused(flow::check_places(
+                &case.workspace.repository,
+                &case.workspace.worktree,
+                &git_dir,
+            )),
+            "changes_workspace_invalid"
+        );
+        assert_eq!(blocker(late), Some("cleanup_worktree_invalid"));
+        assert_eq!(case.tip(), tip);
+        done.send(()).unwrap();
+    });
+    let waited = finished.recv_timeout(std::time::Duration::from_secs(120));
+    assert!(
+        !matches!(waited, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "a FIFO in the agent git folder made the engine wait"
+    );
+    worker.join().unwrap();
 }
 
 #[test]

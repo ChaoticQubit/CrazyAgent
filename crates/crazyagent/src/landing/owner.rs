@@ -481,16 +481,18 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             }
         }
         Some(Intent::Reset { target }) => {
-            let agent = flow::agent(db, record)?;
-            let reset = match agent.head() {
-                Ok(current) => {
-                    flow::holds_only(&agent.repo, &target)?
-                        || flow::holds_only(&agent.repo, &current)?
-                }
-                Err(_) => false,
+            let agent = match flow::agent(db, record) {
+                Err(refused) if refused.0 == "changes_workspace_invalid" => None,
+                opened => Some(opened?),
             };
-            if reset {
-                flow::reset_agent(&agent, &target)?;
+            let mut reset = false;
+            if let Some(agent) = &agent
+                && let Ok(current) = agent.head()
+                && (flow::holds_only(&agent.repo, &target)?
+                    || flow::holds_only(&agent.repo, &current)?)
+            {
+                flow::reset_agent(agent, &target)?;
+                reset = true;
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };

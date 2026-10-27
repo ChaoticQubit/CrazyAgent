@@ -194,7 +194,7 @@ fn bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
     let mut bytes = Vec::new();
     open_plain(path)
-        .map_err(|_| failure("changes_git_failed"))?
+        .ok_or_else(|| failure("changes_git_failed"))?
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| failure("changes_git_failed"))?;
@@ -204,26 +204,35 @@ fn bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
     Ok(bytes)
 }
 
+/// Opens a file an agent may have replaced, for reading only, without following a link
+/// and without waiting on a FIFO or device, and keeps it only when it is a regular file.
+/// Input: the path. Output: the open file, or none.
 #[cfg(unix)]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
+fn open_plain(path: &Path) -> Option<std::fs::File> {
+    let file = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()
+    .map(std::fs::File::from)?;
+    file.metadata().ok()?.is_file().then_some(file)
 }
 
+/// Opens a regular file for reading where the unix flags do not exist. Input: the path.
+/// Output: the open file, or none.
 #[cfg(not(unix))]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
+fn open_plain(path: &Path) -> Option<std::fs::File> {
+    let file = std::fs::File::open(path).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
 }
 
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
-    let file = open_plain(path).map_err(|_| invalid())?;
-    if !file.metadata().is_ok_and(|found| found.is_file()) {
-        return Err(invalid());
-    }
+    let file = open_plain(path).ok_or_else(invalid)?;
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
@@ -556,6 +565,9 @@ pub(super) fn open_agent(
     git_dir: &Path,
 ) -> Result<Agent, EngineError> {
     check_places(repository, worktree, git_dir)?;
+    if !std::fs::symlink_metadata(git_dir.join("HEAD")).is_ok_and(|found| found.is_file()) {
+        return Err(invalid());
+    }
     let pointer = match kind {
         AgentKind::Sub => Pointer::Detached,
         AgentKind::Master => crate::worktrees::lease_branch(db, worktree)
@@ -633,12 +645,21 @@ pub(super) fn reset_if_quiet(
     target: &str,
 ) -> Result<(), EngineError> {
     assert!(!record.is_open());
-    let agent = agent(db, record)?;
-    if agent.head().ok().as_deref() != Some(expected) || !holds_only(&agent.repo, expected)? {
+    let agent = match agent(db, record) {
+        Err(refused) if refused.0 == "changes_workspace_invalid" => None,
+        opened => Some(opened?),
+    };
+    let quiet = match &agent {
+        Some(agent) => {
+            agent.head().ok().as_deref() == Some(expected) && holds_only(&agent.repo, expected)?
+        }
+        None => false,
+    };
+    let (true, Some(agent)) = (quiet, agent) else {
         record.intent = None;
         store::save(db, record)?;
         return store::set_base(db, &record.worktree, expected);
-    }
+    };
     record.intent = Some(Intent::Reset {
         target: target.to_owned(),
     });

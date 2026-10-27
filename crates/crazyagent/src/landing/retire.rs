@@ -45,7 +45,12 @@ pub(super) fn blocker(
     if check_places(repository, worktree, git_dir).is_err() {
         return Ok(Some("cleanup_worktree_invalid"));
     }
-    let agent = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
+    let agent = match open_agent(db, AgentKind::Sub, repository, worktree, git_dir) {
+        Err(refused) if refused.0 == "changes_workspace_invalid" => {
+            return Ok(Some("cleanup_worktree_invalid"));
+        }
+        opened => opened?,
+    };
     let head = match agent.head() {
         Ok(head) => Some(head),
         Err(refused) if refused.0 == "changes_workspace_invalid" => {
