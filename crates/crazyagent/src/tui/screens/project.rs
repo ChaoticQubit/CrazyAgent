@@ -5,6 +5,7 @@ use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::questions::ProjectQuestions;
 use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
@@ -33,7 +34,7 @@ const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 
-/// Names the six tabs of a project.
+/// Names the seven tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
 /// The order is the tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,16 +43,18 @@ pub(in crate::tui) enum Tab {
     Conversation,
     Agents,
     Changes,
+    Questions,
     Context,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
+        Self::Questions,
         Self::Context,
         Self::Settings,
     ];
@@ -65,6 +68,7 @@ impl Tab {
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
             Self::Changes => "Changes",
+            Self::Questions => "Questions",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }
@@ -79,6 +83,7 @@ impl Tab {
             Self::Conversation => "\u{00bb}",
             Self::Agents => "\u{229b}",
             Self::Changes => "\u{2213}",
+            Self::Questions => "?",
             Self::Context => "\u{29c9}",
             Self::Settings => "\u{2630}",
         }
@@ -558,6 +563,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
+    pub questions: ProjectQuestions,
     pub recovery: ProjectRecovery,
     pub sessions: Sessions,
     pub now_ms: i64,
@@ -580,6 +586,7 @@ impl ProjectScreen {
         Self {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
+            questions: ProjectQuestions::new(project.clone()),
             recovery: ProjectRecovery::new(project.clone()),
             sessions: Sessions::default(),
             project,
@@ -652,6 +659,9 @@ impl ProjectScreen {
         self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
             self.changes.refresh();
+        }
+        if tab == Tab::Questions {
+            self.questions.refresh();
         }
     }
 
@@ -1175,6 +1185,7 @@ impl ProjectScreen {
             Tab::Conversation => self.conversation_key(key),
             Tab::Agents => self.agents_key(key),
             Tab::Changes => ProjectReply::Ignored,
+            Tab::Questions => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
@@ -1218,6 +1229,9 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         }
         if self.tab == Tab::Changes && self.changes.paste(text) {
+            return ProjectReply::Handled;
+        }
+        if self.tab == Tab::Questions && self.questions.paste(text) {
             return ProjectReply::Handled;
         }
         ProjectReply::Ignored

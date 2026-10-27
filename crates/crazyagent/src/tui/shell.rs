@@ -1,9 +1,11 @@
+use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
+use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint,
+    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, footer, header, hint,
     strip_bidi, too_small,
 };
 use super::keys::{Global, Key, global};
@@ -12,7 +14,7 @@ use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::{Arrival, ProjectCard};
+use super::seam::{Arrival, ProjectCard, Request};
 use super::text::{cells, join, list_row, pad, styled};
 use super::theme::Role;
 use super::widgets::{TextField, buttons};
@@ -257,6 +259,10 @@ impl Shell {
     /// Asks the top screen to refresh its data.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn refresh(&mut self) {
+        if self.ctx.link == Link::Ready {
+            self.ctx
+                .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+        }
         let ctx = &mut self.ctx;
         self.stack
             .last_mut()
@@ -550,6 +556,11 @@ impl Shell {
                     });
                 }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
+                if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::Questions(event) = event.as_ref()
+                {
+                    self.questions(event);
+                }
             }
             _ => {}
         }
@@ -566,6 +577,46 @@ impl Shell {
         self.apply(top_flow);
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.refresh();
+        }
+    }
+
+    /// Keeps the pending counts for the footer badge and says once when a project has a new
+    /// question; the first read only fills the badge. A settled answer or dismissal reads
+    /// the counts again. Input: one Questions reply. Output: none.
+    fn questions(&mut self, event: &QuestionsEvent) {
+        match (&event.query, &event.result) {
+            (QuestionsQuery::Counts, Ok(QuestionsReply::Counts(counts))) => {
+                if let Some(before) = self.ctx.store.questions.ready()
+                    && let Some((project, _)) = counts.iter().find(|(project, count)| {
+                        let was = before
+                            .iter()
+                            .find(|(seen, _)| seen == project)
+                            .map_or(0, |(_, count)| *count);
+                        *count > was
+                    })
+                {
+                    let name = self
+                        .ctx
+                        .store
+                        .projects
+                        .ready()
+                        .and_then(|cards| cards.iter().find(|card| card.id == *project))
+                        .map_or_else(|| "a project".to_owned(), |card| card.name.clone());
+                    self.ctx.say(Message::warning(
+                        &format!("New question in {name}."),
+                        "Answer it on the project's Questions tab.",
+                    ));
+                }
+                self.ctx.store.questions = Load::Ready(counts.clone());
+            }
+            (QuestionsQuery::Counts, Err(code)) if self.ctx.store.questions.ready().is_none() => {
+                self.ctx.store.questions = Load::Failed(code.clone());
+            }
+            (QuestionsQuery::Answer { .. } | QuestionsQuery::Dismiss { .. }, Ok(_)) => {
+                self.ctx
+                    .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+            }
+            _ => {}
         }
     }
 
@@ -782,7 +833,13 @@ impl Shell {
         draw_lines(
             frame.buffer_mut(),
             help,
-            &[help_line(width, &hints, &theme, glyphs)],
+            &[footer(
+                width,
+                &hints,
+                self.ctx.store.pending(),
+                &theme,
+                glyphs,
+            )],
         );
         let mut cursor = if screen_modal.is_some() || self.overlay.is_some() {
             None

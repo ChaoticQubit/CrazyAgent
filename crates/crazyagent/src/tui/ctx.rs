@@ -1,3 +1,4 @@
+use super::client::questions::QuestionsQuery;
 use super::frame::Message;
 use super::glyphs::Glyphs;
 use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
@@ -5,6 +6,7 @@ use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use crate::protocol::ProjectId;
 use crate::setup::SetupStatus;
 use crate::terminal::INPUT_BYTES_MAX;
 use ratatui::text::{Line, Span};
@@ -60,6 +62,17 @@ pub struct Store {
     pub memory: Load<usize>,
     pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
+    pub questions: Load<Vec<(ProjectId, u32)>>,
+}
+
+impl Store {
+    /// Counts the questions waiting for the owner in every project, for the footer badge.
+    /// Input: none. Output: the sum of the last counts read, 0 before the first read.
+    pub fn pending(&self) -> u64 {
+        self.questions.ready().map_or(0, |counts| {
+            counts.iter().map(|(_, count)| u64::from(*count)).sum()
+        })
+    }
 }
 
 impl Default for Store {
@@ -74,6 +87,7 @@ impl Default for Store {
             memory: Load::NotReady,
             setup: Load::Idle,
             projects_seen: None,
+            questions: Load::Idle,
         }
     }
 }
@@ -172,6 +186,10 @@ impl Ctx {
             && queued.len() + bytes.len() <= INPUT_BYTES_MAX
         {
             queued.extend_from_slice(bytes);
+            return;
+        }
+        let counts = |queued: &Request| matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts);
+        if counts(&request) && self.requests.iter().any(counts) {
             return;
         }
         let read = matches!(
