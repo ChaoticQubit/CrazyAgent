@@ -1101,10 +1101,12 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
     }
     let tools = live_framing(&setup, true, &["codex"]);
     assert!(
-        tools.contains("ask_owner(question, options?, recommended?, context?) asks the owner one question and logs it"),
+        tools.contains("ask(question, options?, recommended?, context?) asks the owner one question and logs it, record_answer(question, version, owner_turn) records an answer the owner gave you in chat"),
         "{tools}"
     );
-    assert!(!live_framing(&setup, false, &["codex"]).contains("ask_owner"));
+    let typed = live_framing(&setup, false, &["codex"]);
+    assert!(!typed.contains("ask(question"));
+    assert!(!typed.contains("record_answer"));
 }
 
 #[test]

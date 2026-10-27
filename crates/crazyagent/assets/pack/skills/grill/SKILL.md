@@ -1,6 +1,6 @@
 ---
 name: grill
-description: Interview the owner one question at a time through CrazyAgent's ask_owner tool, each question with its options and a recommended answer, until a plan or design is settled. Use before building or changing anything that carries a decision, or when asked to grill a plan.
+description: Interview the owner one question at a time through CrazyAgent's ask tool, each question with its options and a recommended answer, until a plan or design is settled. Use before building or changing anything that carries a decision, or when asked to grill a plan.
 ---
 
 # Grill
@@ -15,14 +15,15 @@ Settle a plan with the owner before the work starts, one decision at a time. The
 
 ## How to ask
 
-- Ask only with the `ask_owner` tool of the `crazyagent-team` MCP server. Never ask the owner in your reply text and never with your harness's own question tools.
+- Ask only with the `ask` tool of the `crazyagent-team` MCP server. Never ask the owner in your reply text and never with your harness's own question tools.
 - Ask one question per call, and wait for its answer before you ask the next one. A question stays open until the owner answers or dismisses it.
 - Write the question so the owner can answer it without reading anything else.
-- Put the choices in `options`, at most 4 short one-line ones, and the answer you recommend in `recommended`, with the reason in a sentence.
+- Put the choices in `options`, at most 6 short one-line ones, and the one you recommend in `recommended`. Give the reason for it in `context`.
 - Use `context` for what the owner needs to know to answer: what the code or the documents show, and what each choice costs.
 - Do not act on a decision while its question is open.
-- The answer or dismissal comes back to you once as a message from the owner. If the owner answers you in chat instead, call `ask_owner` with only the question's `id` and their `answer` to record it.
-- If this conversation has no `ask_owner` tool, ask in your reply instead, with the same shape: one question, its options, your recommendation and why.
+- The answer or dismissal comes back to you once. A sub-agent gets it through its master.
+- If the owner answers you in chat instead and you have the `record_answer` tool, record it with the question's number, the version you read and the number of the owner's message.
+- If this conversation has no `ask` tool, ask in your reply instead, with the same shape: one question, its options, your recommendation and why.
 
 ## Order
 

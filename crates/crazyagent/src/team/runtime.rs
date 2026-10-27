@@ -283,6 +283,7 @@ struct Worker {
     managed: bool,
     tools: bool,
     team_tool: bool,
+    ask_tool: bool,
     grants: u64,
     thread: Option<JoinHandle<()>>,
     hosted: Option<Hosted>,
@@ -1079,6 +1080,7 @@ impl TeamRuntime {
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
+        self.serve_agent_asks(project);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         let master_live = self.master(project).is_some();
@@ -1533,6 +1535,7 @@ impl TeamRuntime {
         }
         if team_tool {
             tool::clear(&self.tool_record(id));
+            tool::questions::clear_asks(&self.tool_record(id));
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
@@ -1813,6 +1816,60 @@ impl TeamRuntime {
             host: self.terminal.as_deref(),
         };
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
+    }
+
+    /// Logs the questions this project's sub-agents asked through their `ask` tool since
+    /// the last tick, each with its sub-agent as the asker, and answers every call, a
+    /// refused one with its reason. Takes the project.
+    fn serve_agent_asks(&self, project: &ProjectId) {
+        let asking: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && worker.ask_tool && !worker.stopping)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in asking {
+            let asker = crate::questions::Asker::Agent(id);
+            tool::questions::serve_agent_calls(&self.mailbox(id), |ask| {
+                crate::questions::ask(&self.connection, project, &asker, ask)
+            });
+        }
+    }
+
+    /// Logs the questions a drop-file master asked with its `ask` tool during the reply that
+    /// just ended, each as that master's own, and notes any the store refused so the master
+    /// hears why on its next turn. Takes the project and the master's team agent id.
+    /// Returns any SQLite failure of a note.
+    fn log_master_asks(&mut self, project: &ProjectId, id: i64) -> Result<(), EngineError> {
+        let asker = crate::questions::Asker::Master(id);
+        for call in tool::questions::take_asks(&self.tool_record(id)) {
+            let tool::Call::Ask {
+                question,
+                options,
+                recommended,
+                context,
+            } = call
+            else {
+                unreachable!("take_asks returns only questions");
+            };
+            let ask = crate::questions::Ask {
+                question,
+                options,
+                recommended,
+                context,
+            };
+            if let Err(problem) = crate::questions::ask(&self.connection, project, &asker, &ask) {
+                self.note(
+                    project,
+                    &format!(
+                        "Your question \"{}\" was not logged for the owner ({}).",
+                        bound_text(&ask.question, 200),
+                        bound_text(&problem.0, 120)
+                    ),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Types the oldest waiting team message into a project's live master once it is idle
@@ -2562,6 +2619,8 @@ impl TeamRuntime {
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
+        let ask_tool =
+            seat.role != AgentRole::Master && seat.tools && self.delegation_tool.is_some();
         self.workers.insert(
             id,
             Worker {
@@ -2583,6 +2642,7 @@ impl TeamRuntime {
                 managed,
                 tools: seat.tools,
                 team_tool,
+                ask_tool,
                 grants: 0,
                 thread: Some(thread),
                 hosted: seat.hosted,
@@ -2654,10 +2714,9 @@ impl TeamRuntime {
             }
         };
         let live = self.live_master(&stored.project_id, role, launch);
-        if live && tools {
-            private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
-                with_code("the master's tool mailbox could not be made", Some(&e.0))
-            })?;
+        if tools && (live || (role != AgentRole::Master && self.delegation_tool.is_some())) {
+            private_directory(&tmp.join(tool::MAILBOX_FOLDER))
+                .map_err(|e| with_code("the agent's tool mailbox could not be made", Some(&e.0)))?;
         }
         let context = self.context(&stored.project_id, id, role, tools)?;
         let network = if tools {
@@ -2838,6 +2897,14 @@ impl TeamRuntime {
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
                 context
                     .with_team_tool(engine, &self.tool_record(id))
+                    .map_err(unread)
+            }
+            Some(engine) if tools => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                context
+                    .with_agent_team_tool(engine, &self.mailbox(id))
                     .map_err(unread)
             }
             _ if master && !tools => context
@@ -3048,6 +3115,9 @@ impl TeamRuntime {
                         } else {
                             Vec::new()
                         };
+                        if team_tool {
+                            self.log_master_asks(&project, id)?;
+                        }
                         self.finish_message(
                             &project,
                             message,
@@ -3667,7 +3737,7 @@ fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> St
     let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner, {}(question, options?, recommended?, context?) asks the owner one question and logs it, and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner, {}(question, options?, recommended?, context?) asks the owner one question and logs it, {}(question, version, owner_turn) records an answer the owner gave you in chat, and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
@@ -3675,6 +3745,7 @@ fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> St
             tool::STATUS_TOOL,
             tool::CHANGES_TOOL,
             tool::ASK_TOOL,
+            tool::RECORD_TOOL,
             tool::ESCALATE_TOOL
         )
     } else {

@@ -189,7 +189,8 @@ pub fn for_master(
 
 /// Tells a conversation master whose tools are on what it can do and how it starts a
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
-/// to the team, and the team plan's sub-agents, or for an empty plan the harnesses it can use.
+/// to the team, its `ask` tool is the only way it asks the owner, and the team plan's
+/// sub-agents, or for an empty plan the harnesses it can use.
 /// Input: the project setup and the harnesses with an eligible account now.
 /// Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
 pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> String {
@@ -199,6 +200,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
         crate::team::tool::SERVER_NAME,
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
+    let rule = ask_rule(AskReach::ReplyEnd);
     if setup.team.sub_harnesses.is_empty() {
         section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
@@ -211,7 +213,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
                 slot.agents,
                 if slot.tools { "on" } else { "off" }
             );
-            if left > 0 || section.len() + line.len() > TEAM_INDEX_BYTES_MAX {
+            if left > 0 || section.len() + line.len() + rule.len() > TEAM_INDEX_BYTES_MAX {
                 left += 1;
                 continue;
             }
@@ -221,6 +223,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
             section.push_str(&format!("- and {left} more\n"));
         }
     }
+    section.push_str(&rule);
     assert!(section.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     section
 }
@@ -290,17 +293,23 @@ impl AgentContext {
         Ok(self)
     }
 
-    /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
-    /// Input: the absolute canonical engine executable that serves it and the absolute drop file
-    /// in the master's private temporary folder. Output: the context, or a plain code when a path
-    /// is not plain or an approved server already uses the name.
+    /// Adds the engine's own MCP server that gives a team master with tools on its `delegate`
+    /// and `ask` tools, both taken when its reply ends, and tells it to ask the owner only
+    /// with `ask`. Input: the absolute canonical engine executable that serves it and the
+    /// absolute drop file in the master's private temporary folder. Output: the context, or a
+    /// plain code when a path is not plain or an approved server already uses the name.
     pub fn with_team_tool(self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
-        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop)
+        self.with_team_server(
+            executable,
+            crate::team::tool::SERVER_COMMAND,
+            drop,
+            AskReach::ReplyEnd,
+        )
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
     /// tools, answered by the engine at once through the mailbox folder, and tells it to ask
-    /// the owner only with that server's ask tool. Input: the absolute canonical engine
+    /// the owner only with that server's `ask` tool. Input: the absolute canonical engine
     /// executable and the absolute mailbox in the master's private temporary folder.
     /// Output: the context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_live_team_tool(
@@ -308,11 +317,30 @@ impl AgentContext {
         executable: &Path,
         mailbox: &Path,
     ) -> Result<Self, LaunchError> {
-        let mut context =
-            self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)?;
-        context.instructions.push_str(&ask_rule());
-        assert!(context.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
-        Ok(context)
+        self.with_team_server(
+            executable,
+            crate::team::tool::LIVE_SERVER_COMMAND,
+            mailbox,
+            AskReach::Live,
+        )
+    }
+
+    /// Adds the engine's own MCP server that gives a sub-agent with tools on only the `ask`
+    /// tool, answered by the engine at once through the mailbox folder, and tells it to ask
+    /// the owner only with that tool. Input: the absolute canonical engine executable and the
+    /// absolute mailbox in the agent's private temporary folder. Output: the context, or a
+    /// plain code as for [`Self::with_team_tool`].
+    pub fn with_agent_team_tool(
+        self,
+        executable: &Path,
+        mailbox: &Path,
+    ) -> Result<Self, LaunchError> {
+        self.with_team_server(
+            executable,
+            crate::team::tool::questions::AGENT_SERVER_COMMAND,
+            mailbox,
+            AskReach::SubAgent,
+        )
     }
 
     fn with_team_server(
@@ -320,6 +348,7 @@ impl AgentContext {
         executable: &Path,
         subcommand: &str,
         drop: &Path,
+        reach: AskReach,
     ) -> Result<Self, LaunchError> {
         let plain = |path: &Path| {
             path.is_absolute()
@@ -348,6 +377,8 @@ impl AgentContext {
             },
             secrets: Vec::new(),
         });
+        self.instructions.push_str(&ask_rule(reach));
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(self)
     }
 
@@ -624,17 +655,34 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
     text
 }
 
-/// Tells a live team master how it asks the owner: only with the live server's ask tool,
-/// one question per call, with its options and a recommended answer, never in reply text
-/// or with its harness's own question tools, and how it records an answer given in chat.
-/// Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
-pub(crate) fn ask_rule() -> String {
+/// How the answer to an `ask` call reaches the conversation that asked: at once on a live
+/// master's own server, when the reply ends on the drop-file server, or through the master
+/// for a sub-agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AskReach {
+    Live,
+    ReplyEnd,
+    SubAgent,
+}
+
+/// Tells a conversation that holds the engine's `ask` tool how it asks the owner: only with
+/// that tool, one question per call, with its options and the one it recommends, never in
+/// reply text or with its harness's own question tools, and how the answer comes back.
+/// Input: how the answer reaches it. Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
+pub(crate) fn ask_rule(reach: AskReach) -> String {
+    let back = match reach {
+        AskReach::Live => format!(
+            "The owner's answer or dismissal comes to you once as a message from the owner. If the owner answers you here in chat instead, record it with `{}`, naming the question, its version and the owner's turn.",
+            crate::team::tool::RECORD_TOOL
+        ),
+        AskReach::ReplyEnd => "The engine logs your questions when your reply ends, and the owner's answer or dismissal comes back to you once on a later turn.".to_owned(),
+        AskReach::SubAgent => "Your master sees your questions too, and the owner's answer or dismissal reaches you once through your master.".to_owned(),
+    };
     let rule = format!(
-        "\n## Asking the owner\n\nAsk the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the answer you recommend in `recommended` with the reason in a sentence, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. The owner's answer or dismissal comes to you once as a message from the owner. If the owner answers you here in chat instead, call `{}` with only the question's `id` and their `answer` to record it.\n",
+        "\n## Asking the owner\n\nAsk the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the one you recommend in `recommended`, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",
         crate::team::tool::ASK_TOOL,
         crate::team::tool::SERVER_NAME,
-        crate::questions::OPTIONS_MAX,
-        crate::team::tool::ASK_TOOL
+        crate::questions::OPTIONS_MAX
     );
     assert!(rule.len() <= ASK_RULE_BYTES_MAX);
     rule

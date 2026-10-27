@@ -124,9 +124,9 @@ struct Recorded {
     role: Option<String>,
 }
 
-/// Serves the master's `delegate` tool as an MCP server over stdio until its client closes input.
+/// Serves the master's `delegate` and `ask` tools as an MCP server over stdio until its client closes input.
 /// Takes the client's input and output and the absolute drop file in the master's private temporary folder.
-/// Returns an input or output failure; each call only records a proposal, which the engine admits after the turn.
+/// Returns an input or output failure; each call only records a proposal or question, which the engine takes after the turn.
 pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::Result<()> {
     if !drop.is_absolute() {
         return Err(std::io::Error::other(
@@ -235,9 +235,12 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
                 "required": ["task"],
                 "additionalProperties": false,
             },
-        }]}),
-        Some("tools/call") => match call(params, drop) {
-            Some((text, error)) => tool_result(text, error),
+        }, questions::ask_listing()]}),
+        Some("tools/call") => match call(params, drop)
+            .map(|(text, error)| (text.to_owned(), error))
+            .or_else(|| questions::drop_call(params, drop))
+        {
+            Some((text, error)) => tool_result(&text, error),
             None => return Some(failure(id, -32602, "Unknown tool")),
         },
         _ => return Some(failure(id, -32601, "Method not found")),
@@ -971,6 +974,8 @@ pub fn clear(drop: &Path) {
         let _ = std::fs::remove_file(drop);
     }
 }
+
+pub mod questions;
 
 #[cfg(all(test, unix))]
 #[path = "tool/tests.rs"]
