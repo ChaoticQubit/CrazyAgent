@@ -2,7 +2,7 @@ import { loadUsage, usageNotReady, usageRefusal, type UsageReport } from "../../
 import type { TeamAgent } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Panel, Skeleton } from "../../ui";
-import { agentLabel, compactCount, offsetMinutes, rangeStart, totalTokens } from "../settings/usage";
+import { agentLabel, offsetMinutes, rangeStart, tokenText, totalTokens } from "../settings/usage";
 
 const TICK_MS = 30_000;
 
@@ -13,12 +13,15 @@ export interface AgentSpan {
   removed: number;
 }
 
-/** One agent's row on a project's Usage card, keyed like the engine's usage rows. */
+/** One agent's row on a project's Usage card, keyed like the engine's usage rows, with the
+ * harness that ran for it without reporting usage today or over 7 days, when one did. */
 export interface AgentUsage {
   key: string;
   name: string;
   today: AgentSpan;
   week: AgentSpan;
+  notReportedToday?: string;
+  notReportedWeek?: string;
 }
 
 type Named = Pick<TeamAgent, "id" | "role" | "label">;
@@ -27,6 +30,10 @@ function span(report: UsageReport, key: string): AgentSpan {
   const row = report.agents.find((item) => item.key === key);
   const lines = report.agent_lines.find((item) => item.agent === key);
   return { tokens: row ? totalTokens(row.tokens) : 0, added: lines?.added ?? 0, removed: lines?.removed ?? 0 };
+}
+
+function notReportedBy(report: UsageReport, key: string): string | null {
+  return report.agents.find((item) => item.key === key)?.not_reported_by ?? null;
 }
 
 function agentName(key: string, agents: Named[]): string {
@@ -41,7 +48,14 @@ function agentName(key: string, agents: Named[]): string {
  * team's agents. Output: the rows. */
 export function agentUsage(today: UsageReport, week: UsageReport, agents: Named[]): AgentUsage[] {
   const keys = new Set([...week.agents.map((row) => row.key), ...week.agent_lines.map((row) => row.agent)]);
-  return [...keys].map((key) => ({ key, name: agentName(key, agents), today: span(today, key), week: span(week, key) }))
+  return [...keys].map((key) => {
+    const row: AgentUsage = { key, name: agentName(key, agents), today: span(today, key), week: span(week, key) };
+    const byToday = notReportedBy(today, key);
+    const byWeek = notReportedBy(week, key);
+    if (byToday) row.notReportedToday = byToday;
+    if (byWeek) row.notReportedWeek = byWeek;
+    return row;
+  })
     .sort((a, b) => b.week.tokens - a.week.tokens || (b.week.added + b.week.removed) - (a.week.added + a.week.removed) || a.name.localeCompare(b.name));
 }
 
@@ -70,9 +84,9 @@ function AgentUsageTable({ rows }: { rows: AgentUsage[] }) {
     <thead><tr><th scope="col">Agent</th><th scope="col">Tokens today</th><th scope="col">Lines today</th><th scope="col">Tokens, 7 days</th><th scope="col">Lines, 7 days</th></tr></thead>
     <tbody>{rows.map((row) => <tr key={row.key}>
       <th scope="row">{row.name}</th>
-      <td>{compactCount(row.today.tokens)}</td>
+      <td>{tokenText(row.today.tokens, row.notReportedToday)}</td>
       <td>{linesText(row.today)}</td>
-      <td>{compactCount(row.week.tokens)}</td>
+      <td>{tokenText(row.week.tokens, row.notReportedWeek)}</td>
       <td>{linesText(row.week)}</td>
     </tr>)}</tbody>
   </table></div>;
