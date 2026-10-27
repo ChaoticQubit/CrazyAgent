@@ -29,6 +29,7 @@ pub mod open;
 mod owner_setup;
 pub mod picker;
 mod plugins;
+mod process;
 pub mod project_setup;
 mod queue;
 mod team;

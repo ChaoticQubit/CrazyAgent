@@ -7,6 +7,7 @@ import { MemorySettings } from "./memory";
 import { PackSettings } from "./pack";
 import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
+import { ProcessSettings } from "../process";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
 import { UpdatesSettings } from "./updates";
@@ -16,6 +17,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "pools", label: "Pools", icon: "layers" },
   { id: "harnesses", label: "Harnesses", icon: "terminal" },
   { id: "plugins", label: "Plugins and skills", icon: "puzzle" },
+  { id: "process", label: "Process", icon: "list-checks" },
   { id: "pack", label: "Pack", icon: "boxes" },
   { id: "home", label: "Projects folder", icon: "folder" },
   { id: "github", label: "GitHub", icon: "git-branch" },
@@ -36,6 +38,7 @@ export function Settings({ tab, action, account }: { tab: SettingsTab; action?: 
         : tab === "pools" ? <Pools creating={action === "new"} />
         : tab === "harnesses" ? <Harnesses />
         : tab === "plugins" ? <PluginsAndSkills />
+        : tab === "process" ? <ProcessSettings />
         : tab === "pack" ? <PackSettings />
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
