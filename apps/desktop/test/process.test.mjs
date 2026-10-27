@@ -10,10 +10,10 @@ const view = await import("../src/screens/process.tsx");
 const { parseRoute, formatRoute } = await import("../src/ui/router.ts");
 
 const SKILLS = [
-  { name: "tdd", description: "Write the failing test first." },
-  { name: "tdd-strict", description: "Red, green, refactor, no exceptions." },
-  { name: "code-review", description: "Review a diff for bugs." },
-  { name: "bad name", description: "Never a tag." },
+  { id: "skill-000000000000000000000001", name: "tdd", description: "Write the failing test first." },
+  { id: "skill-000000000000000000000002", name: "tdd-strict", description: "Red, green, refactor, no exceptions." },
+  { id: "skill-000000000000000000000003", name: "code-review", description: "Review a diff for bugs." },
+  { id: "skill-000000000000000000000004", name: "bad name", description: "Never a tag." },
 ];
 
 const never = (what) => () => { throw new Error(`${what} ran during render`); };
@@ -37,9 +37,9 @@ test("a catalog skill name reads as a tag only as a whole name, longest first, a
   const segments = client.skillSegments(text, SKILLS);
   assert.equal(segments.map((segment) => segment.kind === "text" ? segment.text : segment.name).join(""), text);
   assert.deepEqual(segments.filter((segment) => segment.kind === "skill"), [
-    { kind: "skill", name: "tdd-strict", description: "Red, green, refactor, no exceptions." },
-    { kind: "skill", name: "tdd", description: "Write the failing test first." },
-    { kind: "skill", name: "code-review", description: "Review a diff for bugs." },
+    { kind: "skill", id: "skill-000000000000000000000002", name: "tdd-strict", description: "Red, green, refactor, no exceptions." },
+    { kind: "skill", id: "skill-000000000000000000000001", name: "tdd", description: "Write the failing test first." },
+    { kind: "skill", id: "skill-000000000000000000000003", name: "code-review", description: "Review a diff for bugs." },
   ]);
   assert.deepEqual(client.skillSegments("bad name here", SKILLS), [{ kind: "text", text: "bad name here" }]);
   assert.deepEqual(client.skillSegments("Use tdd: then tdd.", SKILLS).filter((segment) => segment.kind === "skill").map((segment) => segment.name), ["tdd", "tdd"]);
@@ -48,10 +48,10 @@ test("a catalog skill name reads as a tag only as a whole name, longest first, a
   assert.deepEqual(client.skillSegments("", SKILLS), []);
 });
 
-test("a tag shows its one-line description on hover and opens that skill in Settings", () => {
-  assert.equal(client.skillHref("code-review"), "#/settings/plugins?skill=code-review");
+test("a tag shows its one-line description on hover and opens that skill's detail by id", () => {
+  assert.equal(client.skillHref("skill-000000000000000000000003"), "#/settings/plugins?skill=skill-000000000000000000000003");
   const markup = renderToStaticMarkup(createElement(view.TaggedText, { text: "Use code-review now.", skills: SKILLS }));
-  assert.match(markup, /<a class="skill-tag" href="#\/settings\/plugins\?skill=code-review" title="Review a diff for bugs\." aria-label="Skill code-review: Review a diff for bugs\.">code-review<\/a>/);
+  assert.match(markup, /<a class="skill-tag" href="#\/settings\/plugins\?skill=skill-000000000000000000000003" title="Review a diff for bugs\." aria-label="Skill code-review: Review a diff for bugs\.">code-review<\/a>/);
   assert.match(markup, /<span>Use <\/span>/);
   assert.match(markup, /<span> now\.<\/span>/);
 });
@@ -60,7 +60,7 @@ test("Settings and a project each have a Process tab, and a skill link keeps its
   for (const [hash, route] of [
     ["#/settings/process", { name: "settings", tab: "process" }],
     ["#/projects/harbor-notes/process", { name: "project", id: "harbor-notes", tab: "process" }],
-    ["#/settings/plugins?skill=code-review", { name: "settings", tab: "plugins", skill: "code-review" }],
+    ["#/settings/plugins?skill=skill-0123456789abcdef01234567", { name: "settings", tab: "plugins", skill: "skill-0123456789abcdef01234567" }],
   ]) {
     assert.deepEqual(parseRoute(hash), route, hash);
     assert.equal(formatRoute(route), hash);
@@ -130,6 +130,20 @@ test("only the Import click reads the owner's global instructions", () => {
   assert.match(seed, /source === "import" \? importGlobalInstructions\(\) : defaultProcess\(\)/);
   assert.match(source, /onImport=\{\(\) => void seed\("import"\)\}/);
   assert.match(source, /onClick=\{onImport\}/);
+});
+
+test("the tags read the engine's one-line description when the catalog carries it", () => {
+  const read = { kind: "ok", value: [
+    { id: "skill-a", name: "tdd", description: "Long description.\nSecond line.", line: "Write the failing test first." },
+    { id: "skill-b", name: "lint", description: "Run the linter." },
+  ] };
+  assert.deepEqual(view.catalogOf(read), [
+    { id: "skill-a", name: "tdd", description: "Write the failing test first." },
+    { id: "skill-b", name: "lint", description: "Run the linter." },
+  ]);
+  assert.deepEqual(view.catalogOf({ kind: "loading" }), []);
+  const duplicate = [...SKILLS, { id: "skill-000000000000000000000009", name: "tdd", description: "A project copy." }];
+  assert.equal(client.skillSegments("tdd", duplicate)[0].id, "skill-000000000000000000000001", "the first listed skill of a name wins");
 });
 
 test("every engine refusal a Process action can show has a plain sentence", () => {

@@ -79,22 +79,23 @@ export function defaultProcess(): Promise<Result<string>> {
   return call<string>("desktop_default_process");
 }
 
-/** A skill the tags can name: its name and one-line description. */
+/** A skill the tags can name: its engine id, its name and its one-line description. */
 export interface SkillEntry {
+  id: string;
   name: string;
   description: string;
 }
 
 /** One piece of instructions text: plain text, or a skill name that matches the catalog. */
-export type ProcessSegment = { kind: "text"; text: string } | { kind: "skill"; name: string; description: string };
+export type ProcessSegment = { kind: "text"; text: string } | { kind: "skill"; id: string; name: string; description: string };
 
 /** Splits instructions text into plain text and skill tags: a whole skill name, not part of
  * a longer name, that matches the catalog. Longer names win over names they contain.
  * Inputs: the text and the skill catalog. Output: the pieces, which join back to the text. */
 export function skillSegments(text: string, skills: readonly SkillEntry[]): ProcessSegment[] {
-  const known = new Map<string, string>();
+  const known = new Map<string, SkillEntry>();
   for (const skill of skills) {
-    if (SKILL_NAME.test(skill.name) && !known.has(skill.name)) known.set(skill.name, skill.description);
+    if (SKILL_NAME.test(skill.name) && !known.has(skill.name)) known.set(skill.name, skill);
   }
   const byFirst = new Map<string, string[]>();
   for (const name of [...known.keys()].sort((left, right) => right.length - left.length)) {
@@ -114,14 +115,17 @@ export function skillSegments(text: string, skills: readonly SkillEntry[]): Proc
     }
     if (plain) segments.push({ kind: "text", text: plain });
     plain = "";
-    segments.push({ kind: "skill", name, description: known.get(name) ?? "" });
+    const skill = known.get(name);
+    if (skill === undefined) throw new Error("A matched skill name is missing from the catalog.");
+    segments.push({ kind: "skill", id: skill.id, name, description: skill.description });
     at += name.length;
   }
   if (plain) segments.push({ kind: "text", text: plain });
   return segments;
 }
 
-/** Where a skill tag opens: that skill in Settings. Input: the skill name. Output: the hash. */
-export function skillHref(name: string): string {
-  return formatRoute({ name: "settings", tab: "plugins", skill: name });
+/** Where a skill tag opens: that skill's detail in Settings. Input: the skill's engine id.
+ * Output: the hash. */
+export function skillHref(id: string): string {
+  return formatRoute({ name: "settings", tab: "plugins", skill: id });
 }

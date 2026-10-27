@@ -23,7 +23,7 @@ export function TaggedText({ text, skills }: { text: string; skills: readonly Sk
   return <div className="process-text">
     {skillSegments(text, skills).map((segment, index) => segment.kind === "text"
       ? <span key={index}>{segment.text}</span>
-      : <a key={index} className="skill-tag" href={skillHref(segment.name)} title={segment.description || segment.name}
+      : <a key={index} className="skill-tag" href={skillHref(segment.id)} title={segment.description || segment.name}
         aria-label={segment.description ? `Skill ${segment.name}: ${segment.description}` : `Skill ${segment.name}`}>{segment.name}</a>)}
   </div>;
 }
@@ -94,10 +94,11 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   </div>;
 }
 
-/** The skill catalog the tags name, from the engine's skill list. Input: the read.
- * Output: each skill's name and description, empty while unread or failed. */
-export function catalogOf(skills: Loaded<{ name: string; description: string }[]>): SkillEntry[] {
-  return skills.kind === "ok" ? skills.value.map(({ name, description }) => ({ name, description })) : [];
+/** The skill catalog the tags name, from the engine's skill list. Input: the read, whose
+ * skills carry the engine's one-line description as `line` where the engine reports it.
+ * Output: each skill's id, name and one-line description, empty while unread or failed. */
+export function catalogOf(skills: Loaded<{ id: string; name: string; description: string; line?: string }[]>): SkillEntry[] {
+  return skills.kind === "ok" ? skills.value.map(({ id, name, description, line }) => ({ id, name, description: line || description })) : [];
 }
 
 /** The Process page for one scope: reads the saved text and the skill catalog from the
