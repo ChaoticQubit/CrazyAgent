@@ -652,6 +652,10 @@ fn latest(
         .transpose()
 }
 
+/// Reads one stored turn and checks it against its session and the owner operation that
+/// took its input. An input entry an older engine pruned leaves no text to hash, so such a
+/// turn still reads when its operation holds and no other entry took that cursor. Inputs:
+/// the transaction, session, row and owner revision. Output: the turn or a plain error.
 fn decode_turn(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -684,22 +688,26 @@ fn decode_turn(
         validate_runtime_record(tx, session, &turn)?;
         return Ok(turn);
     }
-    let input_owner: Option<(String, String)> = tx.query_row("SELECT CASE WHEN length(o.owner_id)=64 THEN o.owner_id END,CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END FROM conversation_entries c JOIN owner_operations o ON o.event_cursor=c.event_cursor AND o.origin='native_owner' WHERE c.project=?1 AND c.event_cursor=?2 AND c.kind='message' AND c.brief_version=0 AND o.operation_id=?3", params![session.project_id.as_str(), signed(input)?, turn.id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(error)?;
-    let (owner, text) = input_owner.ok_or_else(|| error("master_input_provenance"))?;
+    let provenance = input_operation(tx, &turn)?;
+    let Some(text) = turn_input(tx, session, &turn)? else {
+        let kept: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversation_entries WHERE event_cursor=?1)",
+                [signed(input)?],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if kept {
+            return Err(error("master_input_provenance"));
+        }
+        validate_runtime_record(tx, session, &turn)?;
+        return Ok(turn);
+    };
     ConversationMutation::AppendMessage {
         project_id: session.project_id.clone(),
         text: text.clone(),
     }
     .validate()?;
-    let (provenance, result) = owner_lookup(tx, "native_owner", &owner, &turn.id, None)?
-        .ok_or_else(|| error("master_input_provenance"))?;
-    if provenance.event_cursor != Some(turn.input_cursor.clone())
-        || provenance.revision_after != turn.input_cursor
-        || provenance.revision_before.value().checked_add(1) != Some(input)
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(error("master_input_provenance"));
-    }
     let original = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: turn.id.clone(),
@@ -740,25 +748,7 @@ fn resolve_provenance(
     {
         return Err(refused());
     }
-    let input = signed(turn.input_cursor.value())?;
-    let owner: Option<Option<String>> = tx
-        .query_row(
-            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
-            params![turn.id.as_str(), input],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    let owner = owner.flatten().ok_or_else(refused)?;
-    let (provenance, result) =
-        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
-    if provenance.event_cursor != Some(turn.input_cursor.clone())
-        || provenance.revision_after != turn.input_cursor
-        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(refused());
-    }
+    let provenance = input_operation(tx, turn)?;
     let original = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: turn.id.clone(),
@@ -777,6 +767,59 @@ fn resolve_provenance(
         return Err(refused());
     }
     Ok(())
+}
+
+/// Reads the native owner's operation that took a turn's input: applied, with the turn's
+/// id, recorded at the turn's input revision one revision after the one it was asked at.
+/// Inputs: the transaction and the turn. Output: its provenance, or
+/// `master_input_provenance`.
+fn input_operation(
+    tx: &Transaction<'_>,
+    turn: &MasterTurnView,
+) -> Result<OwnerProvenance, EngineError> {
+    let refused = || error("master_input_provenance");
+    let owner: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
+            params![turn.id.as_str(), signed(turn.input_cursor.value())?],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let owner = owner.flatten().ok_or_else(refused)?;
+    let (provenance, result) =
+        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
+    if provenance.event_cursor != Some(turn.input_cursor.clone())
+        || provenance.revision_after != turn.input_cursor
+        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
+        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
+    {
+        return Err(refused());
+    }
+    Ok(provenance)
+}
+
+/// Reads the owner's message a turn took as input from the project's conversation.
+/// Inputs: the transaction, session and turn. Output: the text, None once an older
+/// engine pruned the entry, or `master_input_provenance` for text past its bound.
+fn turn_input(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Option<String>, EngineError> {
+    let text: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0",
+            params![
+                session.project_id.as_str(),
+                signed(turn.input_cursor.value())?
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    text.map(|text| text.ok_or_else(|| error("master_input_provenance")))
+        .transpose()
 }
 
 fn load_turn(
@@ -2395,19 +2438,34 @@ fn current_prompt(
     checked_prompt(&session.session_id, turn_id, message, context.as_deref())
 }
 
+/// The text a turn hands its master: the engine's request, or the owner's message.
+/// Inputs: the transaction, session and turn. Output: the text, or None once an older
+/// engine pruned the owner's message.
 fn turn_message(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
     turn: &MasterTurnView,
-) -> Result<String, EngineError> {
+) -> Result<Option<String>, EngineError> {
     if let Some(request) = &turn.engine_request {
-        return Ok(request.text.clone());
+        return Ok(Some(request.text.clone()));
     }
-    tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)
+    turn_input(tx, session, turn)
+}
+
+/// The text a turn about to run hands its master, which it must still have.
+/// Inputs: the transaction, session and turn. Output: the text, or
+/// `master_input_provenance` once the owner's message is gone.
+fn running_message(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<String, EngineError> {
+    turn_message(tx, session, turn)?.ok_or_else(|| error("master_input_provenance"))
 }
 
 const HISTORY_HEADER: &str = "Conversation so far, oldest first:";
 const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
+const INPUT_GONE: &str = "(This message is no longer kept.)";
 
 /// Reads the earlier turns of this conversation that reached a model, oldest first, as
 /// the entries the next prompt carries. Inputs: the transaction, session and current
@@ -2444,7 +2502,12 @@ fn prior_turns(
         }
         let asked = match &earlier.engine_request {
             Some(request) => format!("Engine: {}", request.line),
-            None => format!("Owner: {}", turn_message(tx, session, &earlier)?),
+            None => format!(
+                "Owner: {}",
+                turn_message(tx, session, &earlier)?
+                    .as_deref()
+                    .unwrap_or(INPUT_GONE)
+            ),
         };
         let mut entry = match &earlier.reply {
             Some(reply) => format!("{asked}\nYou: {}", reply.text),
@@ -2534,7 +2597,7 @@ fn prompt(
     session: &MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
-    let message = turn_message(tx, session, turn)?;
+    let message = running_message(tx, session, turn)?;
     let context = prompt_context(tx, session)?;
     let entries = prior_turns(tx, session, turn)?;
     let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
@@ -2645,7 +2708,7 @@ fn bundle(
         .map_err(|problem| EngineError(problem.0))?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
-        message: turn_message(tx, &session, turn)?,
+        message: running_message(tx, &session, turn)?,
         instructions,
         tools,
         session,
