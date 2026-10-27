@@ -1813,16 +1813,68 @@ pub(crate) fn add_worktree(
 /// A git command for the engine's own worktree steps under the agent's installed profile:
 /// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
+/// The real git binary for the engine's sandboxed setup steps, resolved once outside the
+/// sandbox so no setup step runs the `/usr/bin/git` xcrun shim. Inside the sandbox the
+/// shim's `xcrun_db` cache write (to the per-user temp dir, which it picks regardless of
+/// TMPDIR) is denied on every call, and its developer-dir lookup is extra work that fails
+/// under memory pressure; the resolved real git has neither. Falls back to [`GIT`] where
+/// xcrun cannot resolve it (for example on Linux), no worse than before. Returns the path.
+#[cfg(unix)]
+fn setup_git() -> &'static Path {
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(|| real_git().unwrap_or_else(|| PathBuf::from(GIT)))
+}
+
+/// Asks xcrun once, outside any sandbox, for the active toolchain's git. Returns an
+/// absolute path that exists and is not the `/usr/bin/git` shim, or None when xcrun is
+/// absent or fails so the caller keeps using [`GIT`].
+#[cfg(unix)]
+fn real_git() -> Option<PathBuf> {
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/xcrun")
+            .args(["--find", "git"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(std::str::from_utf8(&output.stdout).ok()?.trim());
+    (path.is_absolute() && path != Path::new(GIT) && path.is_file()).then_some(path)
+}
+
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
-    let mut git = sandbox.command(profile, Path::new(GIT));
+    let mut git = sandbox.command(profile, setup_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_LAZY_FETCH", "1")
         .args(GIT_SAFE)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(setup_debug_stderr());
     git
+}
+
+#[cfg(unix)]
+static SETUP_DEBUG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The stderr for a setup git step: discarded, unless `CRAZYAGENT_SETUP_DEBUG` names a
+/// directory, when each step's stderr goes to its own file there so a failing run can be
+/// read afterwards. Diagnostic only; the default path drops stderr as before.
+#[cfg(unix)]
+fn setup_debug_stderr() -> Stdio {
+    if let Some(dir) = std::env::var_os("CRAZYAGENT_SETUP_DEBUG") {
+        let seq = SETUP_DEBUG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = Path::new(&dir).join(format!("git-{}-{seq}.err", std::process::id()));
+        if let Ok(file) = fs::File::create(&path) {
+            return Stdio::from(file);
+        }
+    }
+    Stdio::null()
 }
 
 /// Runs a setup git command whose output fits in [`GIT_CONFIG_LISTING_BYTES_MAX`] within
@@ -3059,6 +3111,100 @@ mod tests {
             !marker.exists(),
             "the engine's git ran the project fsmonitor"
         );
+    }
+
+    /// The engine's sandboxed setup git must be the real git, not the `/usr/bin/git` xcrun
+    /// shim: under the agent profile the shim's per-user-temp cache write is denied on every
+    /// call and its developer-dir lookup forks xcrun, the fragile path behind the load flake.
+    /// The resolved git runs `git version` under the profile with no xcrun work and so prints
+    /// nothing to stderr. Skipped only where no toolchain git resolves and the fix falls back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_setup_git_does_not_run_the_xcrun_shim_under_the_sandbox() {
+        if setup_git() == Path::new(GIT) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("home");
+        let tmp = base.join("tmp");
+        let profiles = base.join("profiles");
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let printed = crate::spawn_gate::output(
+            sandbox
+                .command(&profile, setup_git())
+                .args(["version"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            printed.status.success(),
+            "setup git could not run under the sandbox"
+        );
+        let stderr = String::from_utf8_lossy(&printed.stderr);
+        assert!(
+            !stderr.contains("xcrun") && !stderr.contains("Operation not permitted"),
+            "setup git still runs the xcrun shim under the sandbox: {stderr}"
+        );
+    }
+
+    /// Many agent worktrees add at once, each project in its own sandbox under one profile,
+    /// the way a run of the team tests drives the setup path. Every add must succeed; a
+    /// refusal here is the load flake the real-git setup fixes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn add_worktree_survives_concurrent_setup() {
+        const PROJECTS: usize = 8;
+        const PER_PROJECT: usize = 3;
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let mut setups = Vec::new();
+        for index in 0..PROJECTS {
+            let project = base.join(format!("project-{index}"));
+            let home = base.join(format!("home-{index}"));
+            let tmp = base.join(format!("tmp-{index}"));
+            let profiles = base.join(format!("profiles-{index}"));
+            for folder in [&project, &home, &tmp, &profiles] {
+                fs::create_dir_all(folder).unwrap();
+            }
+            ensure_repository(&project, &tmp).unwrap();
+            let sandbox =
+                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+                    .unwrap();
+            let profile = profiles.join("agent.sb");
+            sandbox.install(&profile).unwrap();
+            setups.push((sandbox, profile, project));
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = setups
+                .into_iter()
+                .map(|(sandbox, profile, project)| {
+                    scope.spawn(move || {
+                        for worktree_index in 0..PER_PROJECT {
+                            let worktree = project
+                                .join("worktrees")
+                                .join(format!("agent-{worktree_index}"));
+                            add_worktree(&sandbox, &profile, &worktree)
+                                .expect("add_worktree under concurrent load");
+                            assert!(worktree.join(".git").is_file());
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
     }
 
     #[cfg(target_os = "macos")]
