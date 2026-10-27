@@ -244,7 +244,8 @@ impl ProjectPage {
     }
 
     /// Lists the project files for the `@` word the owner is typing: one read out at a time,
-    /// and only when the word differs from the last listed one. Takes the context.
+    /// and only when the word differs from the last listed one. A read the full request
+    /// queue drops is not counted as out, so the next key asks again. Takes the context.
     fn ask_files(&mut self, ctx: &mut Ctx) {
         if self.covered || self.files_asked.is_some() || ctx.link != Link::Ready {
             return;
@@ -260,11 +261,14 @@ impl ProjectPage {
         {
             return;
         }
-        self.files_asked = Some(query.clone());
+        let queued = ctx.queued();
         ctx.request(Request::ProjectFiles {
             project: self.screen.project.clone(),
-            query,
+            query: query.clone(),
         });
+        if ctx.queued() > queued {
+            self.files_asked = Some(query);
+        }
     }
 
     fn select_master(&mut self, ctx: &Ctx) {

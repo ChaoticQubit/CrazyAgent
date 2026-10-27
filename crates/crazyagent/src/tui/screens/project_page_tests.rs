@@ -626,6 +626,62 @@ fn t_on_the_agents_tab_opens_the_project_team() {
     assert_eq!(shell.depth(), 2);
 }
 
+#[test]
+fn an_at_file_read_dropped_on_a_full_queue_is_asked_again_on_the_next_key() {
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let files = |shell: &mut Shell| {
+        let mut asked = Vec::new();
+        while let Some(request) = shell.ctx.next_request() {
+            if let Request::ProjectFiles { project, query } = request {
+                assert_eq!(project, notes);
+                asked.push(query);
+            }
+        }
+        asked
+    };
+    files(&mut shell);
+    let mut filled = 0;
+    while filled < 64 && {
+        let queued = shell.ctx.queued();
+        shell.ctx.request(Request::TeamGraph {
+            project: notes.clone(),
+        });
+        shell.ctx.queued() > queued
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+    shell.key(Key::Char('@'));
+    assert_eq!(
+        files(&mut shell),
+        Vec::<String>::new(),
+        "the full queue dropped it"
+    );
+    shell.key(Key::Char('p'));
+    assert_eq!(
+        files(&mut shell),
+        ["p"],
+        "the dropped read is not counted as out"
+    );
+    shell.key(Key::Char('l'));
+    assert_eq!(
+        files(&mut shell),
+        Vec::<String>::new(),
+        "one read out at a time"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
     let mut engine = Engine::start().await;
