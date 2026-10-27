@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 const PROJECT: &str = "screen-questions";
 const WAIT: Duration = Duration::from_secs(20);
-const CLAUDE_ASK: &str = " \u{2610} Sign-in\n\n Which sign-in should the app use?\n\n \u{276f} 1. OAuth\n      The provider's own sign-in page\n   2. API key\n      A key kept in project settings\n   3. Type something.\n\n Tab/Arrow keys to navigate \u{b7} Esc to cancel\n";
+const CLAUDE_ASK: &str = " \u{2610} Sign-in\n\n Which sign-in should the app use?\n\n \u{276f} 1. OAuth\n      The provider's own sign-in page\n   2. API key\n      A key kept in project settings\n   3. Type something.\n\n Enter to select \u{b7} \u{2191}/\u{2193} to navigate \u{b7} Esc to cancel\n";
 const CLAUDE_LINE: &str =
     "Which sign-in should the app use? | 1. OAuth | 2. API key | 3. Type something.";
-const ASK: &str = r#"printf ' \342\230\220 Sign-in\n\n Which sign-in should the app use?\n\n \342\235\257 1. OAuth\n      The provider sign-in page\n   2. API key\n      A key kept in project settings\n   3. Type something.\n\n Tab/Arrow keys to navigate\n'
+const ASK: &str = r#"printf ' \342\230\220 Sign-in\n\n Which sign-in should the app use?\n\n \342\235\257 1. OAuth\n      The provider sign-in page\n   2. API key\n      A key kept in project settings\n   3. Type something.\n\n Enter to select \302\267 Tab/Arrow keys to navigate \302\267 Esc to cancel\n'
 IFS= read -r answer
 printf '\033[2J\033[H'
 printf 'answer:%s\n' "$answer" > "$1"
@@ -121,7 +121,7 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 
 #[test]
 fn only_harness_question_boxes_are_owner_questions_and_permission_or_approval_prompts_are_not() {
-    let codex_ask = "  Which database should the service use?\r\n\r\n\x1b[1m\u{203a} 1. Postgres\x1b[22m\r\n  2. SQLite\r\n  3. None of the above\r\n     Optionally, add details in notes (tab)\r\n";
+    let codex_ask = "  Which database should the service use?\r\n\r\n\x1b[1m\u{203a} 1. Postgres\x1b[22m\r\n  2. SQLite\r\n  3. None of the above\r\n     Optionally, add details in notes (tab)\r\n\r\n  tab to add notes \u{b7} enter to submit answer \u{b7} esc to interrupt\r\n";
     assert_eq!(
         owner_question(CLAUDE_ASK.as_bytes()).as_deref(),
         Some(CLAUDE_LINE)
@@ -156,6 +156,39 @@ fn only_harness_question_boxes_are_owner_questions_and_permission_or_approval_pr
     assert_eq!(owner_question(named.as_bytes()), None);
     let unmarked = " Which sign-in?\n   1. OAuth\n   2. API key\n   3. Type something.\n";
     assert_eq!(owner_question(unmarked.as_bytes()), None);
+
+    let other_marker = CLAUDE_ASK.replace('\u{276f}', ">");
+    let printed: [(&str, &str); 4] = [
+        (
+            "a quoted list above an idle Claude input prompt",
+            " Here is what the page asks:\n\n > 1. Yes\n   2. None of the above\n\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n > \n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  ? for shortcuts\n",
+        ),
+        (
+            "a printed box with its footer above an idle Claude input prompt",
+            " Which sign-in should the app use?\n \u{276f} 1. OAuth\n   2. Type something.\n Enter to select \u{b7} \u{2191}/\u{2193} to navigate \u{b7} Esc to cancel\n\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n > \n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  ? for shortcuts\n",
+        ),
+        (
+            "a printed box with its footer above an idle Codex composer",
+            "  Which database?\r\n\u{203a} 1. Postgres\r\n  2. None of the above\r\n  tab to add notes \u{b7} enter to submit answer\r\n\r\n\u{203a} Ask Codex to do anything\r\n  \u{23ce} send   \u{2303}J newline   \u{2303}C quit\r\n",
+        ),
+        (
+            "a box drawn with another app's marker",
+            other_marker.as_str(),
+        ),
+    ];
+    for (case, shown) in printed {
+        assert!(
+            question(shown.as_bytes()).is_some(),
+            "{case} reads as a choice"
+        );
+        assert_eq!(owner_question(shown.as_bytes()), None, "{case}");
+    }
+}
+
+#[test]
+#[should_panic]
+fn only_a_master_the_last_scan_read_can_report_a_logged_question() {
+    MasterWatch::default().logged(1, CLAUDE_LINE);
 }
 
 #[test]
@@ -190,6 +223,18 @@ fn a_master_s_question_box_is_asked_once_and_answered_when_it_leaves_its_screen(
         vec![asked],
         "a question the log does not hold yet, such as one it refused, is asked again"
     );
+    let mut dismissed = MasterWatch::default();
+    until("the restarted watch to ask the box", || {
+        !dismissed.scan(host.as_ref(), &masters, &[]).is_empty()
+    });
+    dismissed.logged(41, CLAUDE_LINE);
+    for _ in 0..3 {
+        assert_eq!(
+            dismissed.scan(host.as_ref(), &masters, &[]),
+            vec![],
+            "a box logged and dismissed before the next scan is not asked again"
+        );
+    }
 
     let logged = [pending(7, 41)];
     for _ in 0..3 {

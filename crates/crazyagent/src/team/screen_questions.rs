@@ -9,21 +9,42 @@ use std::time::Instant;
 /// Claude Code's AskUserQuestion "Type something." and Codex's request_user_input "None of
 /// the above". Permission and approval prompts never carry one.
 const FREE_ANSWERS: [&str; 2] = ["Type something", "None of the above"];
+/// The selection markers of those boxes: Claude Code's pointer and Codex's.
+const BOX_MARKERS: [char; 2] = ['\u{276f}', '\u{203a}'];
+/// Key hints only those boxes' footers show while the harness waits on them: Claude Code's
+/// "Enter to select", and Codex's notes and submit hints.
+const FOOTER_HINTS: [&str; 4] = [
+    " to select",
+    " to add notes",
+    " to clear notes",
+    " to submit",
+];
+/// The last screen rows, below the box's last option, one of which must be its footer.
+const FOOTER_ROWS: usize = 2;
 /// Scans in a row a logged question must be off its master's screen before it is answered.
 const MISSES_TO_CLOSE: u8 = 2;
 /// Terminal host refusals that mean the master's terminal no longer runs.
 const GONE: [&str; 2] = ["terminal_agent_unknown", "terminal_ended"];
 
 /// Finds a question a master's harness asks the owner in its own terminal: a choice box
-/// with a free-answer option. A permission or approval prompt has none and is not one.
-/// Takes the screen bytes. Returns the question and its options as one bounded line, or none.
+/// with a free-answer option, the harness's own selection marker, and its footer among the
+/// last FOOTER_ROWS screen rows below the options, so the harness is waiting on it. A
+/// permission or approval prompt has no free answer, and a list the master printed above
+/// its input prompt has no footer at the bottom; neither is one. Takes the screen bytes.
+/// Returns the question and its options as one bounded line, or none.
 pub fn owner_question(screen: &[u8]) -> Option<String> {
     let choice = choice(screen)?;
-    choice
+    let free = choice
         .options
         .iter()
-        .any(|text| FREE_ANSWERS.contains(&text.trim_end_matches('.')))
-        .then(|| choice.line())
+        .any(|text| FREE_ANSWERS.contains(&text.trim_end_matches('.')));
+    let footed = choice
+        .below
+        .iter()
+        .rev()
+        .take(FOOTER_ROWS)
+        .any(|row| FOOTER_HINTS.iter().any(|hint| row.contains(hint)));
+    (free && footed && BOX_MARKERS.contains(&choice.marker)).then(|| choice.line())
 }
 
 /// A question asked in a master's terminal that the owner questions log holds as pending:
@@ -49,10 +70,11 @@ pub enum Change {
 }
 
 /// Reads live masters' screens for questions their harness asks the owner. A question on a
-/// screen unchanged since the last scan, so the harness waits, is logged until the log
-/// holds it, and is not logged again while it stays on screen, even once the owner
-/// dismissed it; a logged one is answered after MISSES_TO_CLOSE scans in a row without it
-/// on its master's screen. Masters that left are read until their questions are closed.
+/// screen unchanged since the last scan, so the harness waits, is asked until the caller
+/// reports it `logged` or the log holds it, and is not asked again while it stays on
+/// screen, even once the owner dismissed it; a logged one is answered after
+/// MISSES_TO_CLOSE scans in a row without it on its master's screen. Masters that left are
+/// read until their questions are closed.
 #[derive(Debug, Default)]
 pub struct MasterWatch {
     next: Option<Instant>,
@@ -87,6 +109,15 @@ impl MasterWatch {
             .into_iter()
             .map(|(agent, project)| (project, agent))
             .collect()
+    }
+
+    /// Records that the owner questions log took a question `scan` asked, so it is not asked
+    /// again while it stays on its master's screen, even if the owner dismisses it before
+    /// the next scan. Takes the watch, the master's team agent id, which the last scan read,
+    /// and the question's line.
+    pub fn logged(&mut self, agent: i64, text: &str) {
+        assert!(self.screens.contains_key(&agent));
+        self.held.insert(agent, text.to_owned());
     }
 
     /// Reads each live master's screen once and compares it with the log's pending terminal

@@ -3089,7 +3089,7 @@ while IFS= read -r line; do
   printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
   if [ "$asked" = 0 ]; then
     asked=1
-    printf '\n  Which database should the service use?\n\n\342\200\272 1. Postgres\n  2. SQLite\n  3. None of the above\n'
+    printf '\n  Which database should the service use?\n\n\342\200\272 1. Postgres\n  2. SQLite\n  3. None of the above\n\n  tab to add notes \302\267 enter to submit answer \302\267 esc to interrupt\n'
   fi
 done
 "#;

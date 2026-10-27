@@ -1358,11 +1358,13 @@ pub fn screen_rows(screen: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn option(row: &str) -> Option<(usize, &str, bool)> {
+fn option(row: &str) -> Option<(usize, &str, Option<char>)> {
     let row = row.trim_start();
     let (marked, rest) = match row.chars().next() {
-        Some(marker) if MARKERS.contains(&marker) => (true, row[marker.len_utf8()..].trim_start()),
-        _ => (false, row),
+        Some(marker) if MARKERS.contains(&marker) => {
+            (Some(marker), row[marker.len_utf8()..].trim_start())
+        }
+        _ => (None, row),
     };
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 || digits > 2 {
@@ -1388,11 +1390,14 @@ pub fn question(screen: &[u8]) -> Option<String> {
 }
 
 /// A numbered choice an agent's app waits on, read from its screen: the question line above
-/// it and each option's text, in order, without its number.
+/// it, each option's text in order without its number, the selection marker on the marked
+/// option and the non-empty rows below the last option, down to the screen's end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub asked: String,
     pub options: Vec<String>,
+    pub marker: char,
+    pub below: Vec<String>,
 }
 
 impl Choice {
@@ -1430,20 +1435,23 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
         .iter()
         .rposition(|row| option(row).is_some_and(|(number, ..)| number == 1))?;
     let mut options = Vec::new();
-    let mut marked = false;
-    for row in &rows[first..] {
+    let mut marker = None;
+    let mut last = first;
+    for (at, row) in rows.iter().enumerate().skip(first) {
         match option(row) {
-            Some((number, text, marker))
+            Some((number, text, marked))
                 if number == options.len() + 1 && options.len() < OPTIONS_MAX =>
             {
-                marked |= marker;
+                marker = marker.or(marked);
+                last = at;
                 options.push(text.to_owned());
             }
             Some(_) => break,
             None => {}
         }
     }
-    if options.len() < 2 || !marked {
+    let marker = marker?;
+    if options.len() < 2 {
         return None;
     }
     let above = &rows[first.saturating_sub(QUESTION_ROWS_ABOVE)..first];
@@ -1455,6 +1463,8 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
     Some(Choice {
         asked: asked.clone(),
         options,
+        marker,
+        below: rows[last + 1..].to_vec(),
     })
 }
 

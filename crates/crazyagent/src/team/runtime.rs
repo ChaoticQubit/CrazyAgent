@@ -785,7 +785,11 @@ impl TeamRuntime {
                     &text,
                     now,
                 )
-                .and_then(|logged| logged.map(|_| ()).map_err(|code| EngineError(code.into()))),
+                .and_then(|logged| {
+                    logged
+                        .map(|_| self.master_watch.logged(agent, &text))
+                        .map_err(|code| EngineError(code.into()))
+                }),
                 Change::Answered(id) => {
                     crate::questions::answered_in_terminal(&self.connection, id, now).map(|_| ())
                 }
