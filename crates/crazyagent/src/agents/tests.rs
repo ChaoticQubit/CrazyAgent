@@ -34,11 +34,19 @@ impl Case {
     }
 }
 
-/// Writes the fixture agent child as `agent_child.py` in `root`, executable by its owner.
+/// Writes the fixture agent child as `agent_child.py` in `root`, executable by its owner,
+/// and runs it once through the spawn gate, so macOS has assessed the fresh script before
+/// any test bounds how long the child takes to start.
 pub(crate) fn install_fixture(root: &Path) {
     let child = root.join("agent_child.py");
     std::fs::write(&child, CHILD).unwrap();
     std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let first = crate::spawn_gate::first_run(
+        std::process::Command::new(&child)
+            .arg("first-exec")
+            .current_dir(root),
+    );
+    assert_eq!(first.code(), Some(3));
 }
 
 fn private(path: &Path) -> PathBuf {

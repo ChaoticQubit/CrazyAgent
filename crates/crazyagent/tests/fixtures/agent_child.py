@@ -30,6 +30,8 @@ def reply(text):
 
 
 def main():
+    if sys.argv[1:] == ["first-exec"]:
+        return 3
     grandchild = subprocess.Popen(
         ["/bin/sleep", "300"],
         stdin=subprocess.DEVNULL,
