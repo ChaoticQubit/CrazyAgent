@@ -471,3 +471,109 @@ fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_di
     assert!(!help.iter().any(|(key, _)| ["a", "d", "u"].contains(key)));
     assert!(text(&resolving).contains("Agent is updating"));
 }
+
+/// The whole view text on a screen tall enough that no file row is cut. Input: the view.
+/// Output: the text.
+fn tall(view: &ProjectChanges) -> String {
+    let (rows, _, _) = view.rows(100, 80, NOW, &Look::plain());
+    rows.iter().map(|row| row.text() + "\n").collect()
+}
+
+/// One changed file of a diff page. Input: its path, status, kind and marks. Output: the file.
+fn changed(path: &str, status: FileStatus, kind: FileKind, marks: Vec<FileMark>) -> ChangedFile {
+    ChangedFile {
+        path: path.into(),
+        old_path: None,
+        status,
+        kind,
+        marks,
+    }
+}
+
+/// Opens the diff of one pending set with these files. Input: the files. Output: the view.
+fn diff_of(files: Vec<ChangedFile>) -> ProjectChanges {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let page = ChangeDiff {
+        files,
+        text: "@@ -0,0 +1 @@\n+x".into(),
+        next: None,
+        truncated: true,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    view
+}
+
+#[test]
+fn a_marked_file_past_the_preview_limit_is_named_with_its_marks_before_plain_files() {
+    let mut files: Vec<ChangedFile> = (0..FILES_SHOWN)
+        .map(|n| {
+            changed(
+                &format!(".github/workflow-{n:02}.yml"),
+                FileStatus::Modified,
+                FileKind::Text,
+                Vec::new(),
+            )
+        })
+        .collect();
+    files.push(changed(
+        "zz/hook.sh",
+        FileStatus::Added,
+        FileKind::Text,
+        vec![FileMark::Executable],
+    ));
+    files.push(changed(
+        "zz/link",
+        FileStatus::Added,
+        FileKind::Symlink,
+        vec![FileMark::Symlink],
+    ));
+    let shown = tall(&diff_of(files));
+    for want in [
+        "Added zz/hook.sh",
+        "! Can run as a program",
+        "Added zz/link",
+        "! Symbolic link: points to another path",
+        "and 2 more files",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(
+        shown.find("zz/link").unwrap() < shown.find(".github/workflow-00.yml").unwrap(),
+        "marked files come first\n{shown}"
+    );
+    assert!(!shown.contains("need checking"), "{shown}");
+
+    let many: Vec<ChangedFile> = (0..FILES_SHOWN + 2)
+        .map(|n| {
+            changed(
+                &format!("bin/tool-{n:02}"),
+                FileStatus::Added,
+                FileKind::Text,
+                vec![FileMark::Executable],
+            )
+        })
+        .chain([changed(
+            "README.md",
+            FileStatus::Modified,
+            FileKind::Text,
+            Vec::new(),
+        )])
+        .collect();
+    let listed = listed_files(&many);
+    assert_eq!(
+        (
+            listed.shown.len(),
+            listed.marked_hidden,
+            listed.plain_hidden
+        ),
+        (FILES_SHOWN, 2, 1)
+    );
+    let shown = tall(&diff_of(many));
+    for want in [
+        "2 more files need checking before you accept.",
+        "and 1 more files",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+}

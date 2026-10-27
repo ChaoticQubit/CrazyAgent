@@ -7,6 +7,7 @@ use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
+use std::cell::{Cell, RefCell};
 
 const WIDE: usize = 96;
 const NAME_WIDTH: usize = 22;
@@ -39,6 +40,9 @@ enum Item {
 /// The skills and MCP servers one project's agents get: every-project items
 /// with whether they are on here, and this project's own items.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
+/// Drawing the approval question keeps its first command line in range and
+/// notes the server whose command showed through its last line; `y` approves
+/// only that server with that command.
 pub(in crate::tui) struct ProjectPlugins {
     pub project: ProjectId,
     pub skills: Vec<SkillView>,
@@ -51,6 +55,8 @@ pub(in crate::tui) struct ProjectPlugins {
     waiting: bool,
     stale: bool,
     changing: Option<String>,
+    command_top: Cell<usize>,
+    read_through: RefCell<Option<(String, String)>>,
 }
 
 impl ProjectPlugins {
@@ -70,6 +76,8 @@ impl ProjectPlugins {
             waiting: false,
             stale: true,
             changing: None,
+            command_top: Cell::new(0),
+            read_through: RefCell::new(None),
         }
     }
 
@@ -116,9 +124,14 @@ impl ProjectPlugins {
                             assert!(visible(scope, &self.project));
                             assert_eq!(on_here.is_some(), *scope == Scope::Global);
                         }
+                        let asked = self.asking().map(|server| server.runs.clone());
                         self.skills = skills.clone();
                         self.servers = servers.clone();
                         self.loaded = true;
+                        if self.asking().map(|server| &server.runs) != asked.as_ref() {
+                            self.command_top.set(0);
+                            *self.read_through.borrow_mut() = None;
+                        }
                     }
                     Err(code) => {
                         self.notice = Some(Notice::problem(format!(
@@ -245,9 +258,19 @@ impl ProjectPlugins {
         }
         if let Some(id) = self.confirm.clone() {
             return match key.code {
-                KeyCode::Char('y') => {
+                KeyCode::Char('y') if self.read_whole_command() => {
                     self.confirm = None;
                     self.approve(&id)
+                }
+                KeyCode::Down => {
+                    self.command_top
+                        .set(self.command_top.get().saturating_add(1));
+                    PluginsReply::Handled
+                }
+                KeyCode::Up => {
+                    self.command_top
+                        .set(self.command_top.get().saturating_sub(1));
+                    PluginsReply::Handled
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.confirm = None;
@@ -279,6 +302,8 @@ impl ProjectPlugins {
                     if self.servers[index].status == ServerStatus::WaitingForApproval =>
                 {
                     self.confirm = Some(self.servers[index].id.clone());
+                    self.command_top.set(0);
+                    *self.read_through.borrow_mut() = None;
                     PluginsReply::Handled
                 }
                 _ => PluginsReply::Ignored,
@@ -413,6 +438,15 @@ impl ProjectPlugins {
         PluginsReply::Edit(Box::new(server.clone()))
     }
 
+    fn read_whole_command(&self) -> bool {
+        self.asking().is_some_and(|server| {
+            matches!(
+                &*self.read_through.borrow(),
+                Some((id, runs)) if *id == server.id && *runs == server.runs
+            )
+        })
+    }
+
     fn approve(&mut self, id: &str) -> PluginsReply {
         if self.still_saving() {
             return PluginsReply::Handled;
@@ -429,7 +463,8 @@ impl ProjectPlugins {
     }
 
     /// Draws the Skills and MCP servers sections of the project's Settings tab; a short window
-    /// cuts the details panel first, so the notice and any question always show.
+    /// cuts the details panel first, so the notice and any question always show. An
+    /// approval question takes the whole section and never more than `room` rows.
     /// Takes the content width, the rows available and the look.
     /// Returns the rows and the help keys.
     pub fn rows(&self, content: usize, room: usize, look: &Look) -> (Vec<Row>, Help) {
@@ -440,7 +475,10 @@ impl ProjectPlugins {
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
             return (lines, self.help());
         }
-        let footer = self.footer(content, look);
+        if let Some(server) = self.asking() {
+            return (self.approval(server, content, room, look), self.help());
+        }
+        let footer = self.footer(look);
         let mut panel = self.panel(content, look);
         panel.truncate(room.saturating_sub(6 + footer.len()));
         let fixed = 6 + panel.len() + footer.len();
@@ -581,9 +619,6 @@ impl ProjectPlugins {
                     Row::of(server.name.clone(), look.heading),
                     Row::of(server.scope.label(), look.muted),
                 ));
-                if self.confirm.is_some() {
-                    return rows;
-                }
                 rows.push(entry("Runs", short_runs(server), look.fg));
                 match &server.problem {
                     Some(problem) => rows.extend(
@@ -604,7 +639,7 @@ impl ProjectPlugins {
         rows
     }
 
-    fn footer(&self, content: usize, look: &Look) -> Vec<Row> {
+    fn footer(&self, look: &Look) -> Vec<Row> {
         if let Some((name, skill)) = self.removed() {
             return vec![
                 Row::of(format!("Remove {name}?"), look.warning)
@@ -622,10 +657,22 @@ impl ProjectPlugins {
                 ),
             ];
         }
-        let Some(server) = self.asking() else {
-            return self.notice.iter().map(|notice| notice.row(look)).collect();
-        };
+        self.notice.iter().map(|notice| notice.row(look)).collect()
+    }
+
+    /// Draws the approval question: the server, the question and as many lines
+    /// of exactly what it runs as fit from the first line Up and Down chose, with
+    /// a line marker when some do not fit. Records the server and command once
+    /// its last line has shown, which `y` needs before it approves.
+    /// Takes the server asked about, the content width, the rows and the look.
+    /// Returns at most `room` rows.
+    fn approval(&self, server: &ServerView, content: usize, room: usize, look: &Look) -> Vec<Row> {
         let mut rows = vec![
+            spread(
+                content,
+                Row::of(server.name.clone(), look.heading),
+                Row::of(server.scope.label(), look.muted),
+            ),
             Row::of(format!("Approve {}?", server.name), look.warning)
                 .push("   y", look.heading)
                 .push(" Approve   ", look.fg)
@@ -636,17 +683,52 @@ impl ProjectPlugins {
                 look.muted,
             ),
         ];
+        let command = exact_lines(&server.runs, content.saturating_sub(2));
+        let fits = rows.len() + command.len() <= room;
+        let shown = if fits {
+            command.len()
+        } else {
+            room.saturating_sub(rows.len() + 1)
+        };
+        assert!(shown <= command.len());
+        let top = self.command_top.get().min(command.len() - shown);
+        self.command_top.set(top);
+        let end = top + shown;
         rows.extend(
-            exact_lines(&server.runs, content.saturating_sub(2))
-                .into_iter()
-                .map(|line| Row::of("  ", Style::new()).push(line, look.fg)),
+            command[top..end]
+                .iter()
+                .map(|line| Row::of("  ", Style::new()).push(line.clone(), look.fg)),
         );
+        if shown > 0 && end == command.len() {
+            *self.read_through.borrow_mut() = Some((server.id.clone(), server.runs.clone()));
+        }
+        if !fits {
+            let marker = match shown {
+                0 => "  Make the window taller to read what it runs.".to_owned(),
+                _ if end == command.len() => format!(
+                    "  Lines {}-{end} of {}, the end. Up reads back.",
+                    top + 1,
+                    command.len()
+                ),
+                _ => format!(
+                    "  Lines {}-{end} of {}. Down reads on; y waits for the end.",
+                    top + 1,
+                    command.len()
+                ),
+            };
+            rows.push(Row::of(marker, look.warning));
+        }
+        rows.truncate(room);
         rows
     }
 
     fn help(&self) -> Help {
         if self.confirm.is_some() {
-            return vec![("y", "Approve"), ("n", "Not now")];
+            return vec![
+                ("\u{2191}\u{2193}", "Read"),
+                ("y", "Approve"),
+                ("n", "Not now"),
+            ];
         }
         if self.removing.is_some() {
             return vec![("y", "Remove"), ("n", "Keep")];

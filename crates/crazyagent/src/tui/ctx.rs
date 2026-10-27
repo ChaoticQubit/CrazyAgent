@@ -148,14 +148,22 @@ impl Ctx {
         self.theme = Theme::new(self.depth, colors, appearance);
     }
 
+    /// Queues one engine request as `try_request` does, for callers that need
+    /// no answer because the refusal message already tells the owner.
+    /// Input: the request. Output: none.
+    pub fn request(&mut self, request: Request) {
+        self.try_request(request);
+    }
+
     /// Queues one engine request; duplicates of a queued read are dropped and
     /// keystrokes for the agent terminal already waiting at the back join it.
-    /// Input: the request. Output: none; the queue holds at most 32 requests,
-    /// a joined terminal input at most the engine's terminal input limit.
-    pub fn request(&mut self, request: Request) {
+    /// Input: the request. Output: whether the engine will see it; false only
+    /// when the queue already holds 32 requests and this one was refused. A
+    /// joined terminal input holds at most the engine's terminal input limit.
+    pub fn try_request(&mut self, request: Request) -> bool {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;
-            return;
+            return true;
         }
         if let Request::TerminalInput { agent, bytes } = &request
             && let Some(Request::TerminalInput {
@@ -166,7 +174,7 @@ impl Ctx {
             && queued.len() + bytes.len() <= INPUT_BYTES_MAX
         {
             queued.extend_from_slice(bytes);
-            return;
+            return true;
         }
         let read = matches!(
             request,
@@ -178,14 +186,14 @@ impl Ctx {
                 .iter()
                 .any(|queued| std::mem::discriminant(queued) == std::mem::discriminant(&request))
         {
-            return;
+            return true;
         }
         if self.requests.len() >= QUEUE_MAX {
             self.say(Message::error(
                 "Too many requests are waiting.",
                 "Wait a moment, then try again.",
             ));
-            return;
+            return false;
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
@@ -201,6 +209,8 @@ impl Ctx {
             _ => {}
         }
         self.requests.push_back(request);
+        assert!(self.requests.len() <= QUEUE_MAX);
+        true
     }
 
     /// Takes the next queued request.
@@ -357,14 +367,17 @@ mod tests {
     fn the_queue_is_bounded_and_says_so() {
         let mut ctx = ctx();
         for _ in 0..QUEUE_MAX {
-            ctx.request(Request::EditPool {
+            assert!(ctx.try_request(Request::EditPool {
                 change: crate::tui::seam::PoolChange::Remove {
                     id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
                 },
-            });
+            }));
         }
         assert_eq!(ctx.queued(), QUEUE_MAX);
-        ctx.request(Request::Pools);
+        assert!(
+            !ctx.try_request(Request::Pools),
+            "a refused request tells its caller"
+        );
         assert_eq!(ctx.queued(), QUEUE_MAX);
         assert_eq!(
             ctx.message().unwrap().lead,
