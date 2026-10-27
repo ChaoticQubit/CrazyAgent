@@ -751,3 +751,131 @@ fn an_agent_cannot_plant_the_git_redirect_files_the_engine_rejects() {
     }
     assert_eq!(landed, Vec::<&str>::new());
 }
+
+/// Lists what a confined agent could have added to a git object store: every entry below
+/// it except `info`, `pack` and the `tmp_obj_` scratch files git writes before naming an
+/// object, with its kind. Input: the object store. Output: the sorted entries.
+fn object_entries(objects: &Path) -> Vec<(String, &'static str)> {
+    let mut found = Vec::new();
+    let mut pending = vec![objects.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(objects).unwrap().display().to_string();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if ["info", "pack"].contains(&relative.as_str()) || name.starts_with("tmp_obj_") {
+                continue;
+            }
+            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            let shown = if kind.is_symlink() {
+                "link"
+            } else if kind.is_dir() {
+                pending.push(path);
+                "folder"
+            } else {
+                "file"
+            };
+            found.push((relative, shown));
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn a_confined_agent_cannot_add_shadow_or_link_a_git_object_in_the_shared_store() {
+    let case = case();
+    fs::write(case.project.join("owner.txt"), "owner\n").unwrap();
+    fs::write(case.root.join("loose.txt"), "loose\n").unwrap();
+    let loose_source = case.root.join("loose.txt");
+    let git = |arguments: &[&str]| {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+        String::from_utf8(made.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "owner.txt"]);
+    git(&["commit", "-q", "-m", "start"]);
+    git(&["repack", "-a", "-d", "-q"]);
+    git(&["prune-packed"]);
+    let packed = git(&["rev-parse", "HEAD:owner.txt"]);
+    let loose = git(&["hash-object", "-w", loose_source.to_str().unwrap()]);
+    assert_ne!(packed[..2], loose[..2]);
+    let one = case.project.join("worktrees").join("one");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        one.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let objects = case.project.join(".git").join("objects");
+    let absent = objects.join(&packed[..2]);
+    let present = objects.join(&loose[..2]);
+    assert!(fs::symlink_metadata(&absent).is_err() && present.is_dir());
+    let fresh = "0".repeat(38);
+    let staged = case.tmp.join("staged");
+    let script = [
+        format!("mkdir {}", quoted(&absent)),
+        format!("ln -s {} {}", quoted(&case.tmp), quoted(&absent)),
+        format!(
+            "ln -s {} {}",
+            quoted(&case.tmp),
+            quoted(&objects.join("notes"))
+        ),
+        format!(
+            "mkdir {staged} && printf x > {staged}/{rest} && mv {staged} {absent}",
+            staged = quoted(&staged),
+            rest = &packed[2..],
+            absent = quoted(&absent)
+        ),
+        format!("printf x > {}", quoted(&present.join(&fresh))),
+        format!(
+            "printf x > {tmp} && mv {tmp} {object}",
+            tmp = quoted(&present.join("tmp_obj_agent")),
+            object = quoted(&present.join(&fresh))
+        ),
+        format!(
+            "printf x > {file} && ln {file} {object}",
+            file = quoted(&case.tmp.join("f")),
+            object = quoted(&present.join(&fresh))
+        ),
+        format!(
+            "ln -s {} {}",
+            quoted(&case.tmp.join("f")),
+            quoted(&present.join(&fresh))
+        ),
+    ]
+    .map(|step| format!("({step}) 2>/dev/null; echo tried"))
+    .join("\n");
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&one)
+        .unwrap();
+    let before = object_entries(&objects);
+    let tried = run(&sandbox, &case.profiles.join("objects.sb"), &script);
+    assert_eq!(
+        String::from_utf8_lossy(&tried.stdout),
+        "tried\n".repeat(8),
+        "{}",
+        String::from_utf8_lossy(&tried.stderr)
+    );
+    assert_eq!(
+        object_entries(&objects),
+        before,
+        "the agent added to the store"
+    );
+    assert!(fs::symlink_metadata(&absent).is_err());
+    assert!(fs::symlink_metadata(objects.join("notes")).is_err());
+    assert_eq!(git(&["cat-file", "-p", &packed]), "owner");
+    let wrote = run(
+        &sandbox,
+        &case.profiles.join("objects.sb"),
+        &format!(
+            "printf mine > {} && echo wrote",
+            quoted(&one.join("mine.txt"))
+        ),
+    );
+    assert_eq!(String::from_utf8_lossy(&wrote.stdout), "wrote\n");
+    assert_eq!(fs::read_to_string(one.join("mine.txt")).unwrap(), "mine");
+}

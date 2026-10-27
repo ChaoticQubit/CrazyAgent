@@ -44,8 +44,11 @@ pub(super) fn blocker(
     if check_places(repository, worktree, git_dir).is_err() {
         return Ok(Some("cleanup_worktree_invalid"));
     }
+    let Ok(head) = super::flow::agent_head(worktree, git_dir) else {
+        return Ok(Some("cleanup_worktree_invalid"));
+    };
     let repo = Repo::open(git_dir, Some(worktree))?;
-    match (repo.commit_of("HEAD")?, store::base_of(db, text)?) {
+    match (head.commit(&repo).ok(), store::base_of(db, text)?) {
         (Some(head), Some(base)) if head == base => {
             Ok((!holds_only(&repo, &head)?).then_some("cleanup_worktree_dirty"))
         }

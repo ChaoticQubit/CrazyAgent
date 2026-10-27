@@ -935,7 +935,8 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     let quoted = |path: &Path| format!("'{}'", path.display());
     let script = format!(
         "g='/usr/bin/git -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null'\n\
-         echo mine > mine.txt && $g add mine.txt && $g commit -q -m mine && echo committed\n\
+         echo mine > mine.txt && echo wrote\n\
+         ($g add mine.txt && $g commit -q -m mine) >/dev/null 2>&1 && echo committed || echo commit=refused\n\
          (echo x > {sibling}) 2>/dev/null && echo sibling=written || echo sibling=refused\n\
          (echo x >> {owner}) 2>/dev/null && echo owner=written || echo owner=refused\n\
          (echo x > {fresh}) 2>/dev/null && echo project=written || echo project=refused\n\
@@ -969,9 +970,13 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         text,
-        "committed\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\nobject=tried\nfanout=tried\n",
+        "wrote\ncommit=refused\nsibling=refused\nowner=refused\nproject=refused\nlink=refused\nobject=tried\nfanout=tried\n",
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(first.working_dir.join("mine.txt")).unwrap(),
+        "mine\n"
     );
     assert!(!second.working_dir.join("escaped.txt").exists());
     assert_eq!(
