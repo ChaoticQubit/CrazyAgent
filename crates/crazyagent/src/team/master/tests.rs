@@ -356,7 +356,7 @@ fn a_live_master_s_team_calls_take_effect_while_its_turn_still_runs() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(role, "@page-writer");
+    assert_eq!(role, "page-writer");
     assert_eq!(
         text(&answers[1]),
         (

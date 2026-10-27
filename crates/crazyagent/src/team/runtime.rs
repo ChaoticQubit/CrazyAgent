@@ -171,6 +171,15 @@ struct Adoption {
     record: PaneRecord,
     limits: LaunchLimits,
     live: bool,
+    managed: Option<Managed>,
+}
+
+/// What a live master on a signed-in account needs when a later engine takes its pane over:
+/// its private home, where the credential copy goes again, and the harness executable that
+/// renews it.
+struct Managed {
+    home: PathBuf,
+    executable: PathBuf,
 }
 
 /// Who one agent is in its team: the project, role, team harness, account and tools
@@ -537,16 +546,25 @@ impl TeamRuntime {
                 "the project already runs {PANES_PER_PROJECT_MAX} agents"
             )));
         }
-        let endpoint = matches!(
-            eligible_accounts(access, &project, launch),
-            Accounts::Usable(accounts) if accounts.iter().any(|account| {
-                account.connection == connection
-                    && matches!(account.reach, TeamReach::Endpoint { .. })
-            })
-        );
-        if !endpoint {
-            return Ok(Err("its account is no longer in the project's pool".into()));
-        }
+        let live = self.live_master(&project, role, launch);
+        let reach = match eligible_accounts(access, &project, launch) {
+            Accounts::Usable(accounts) => accounts
+                .iter()
+                .find(|account| account.connection == connection)
+                .map(|account| matches!(account.reach, TeamReach::Endpoint { .. })),
+            _ => None,
+        };
+        let managed = match reach {
+            Some(true) => None,
+            Some(false) if live => match self.executables.get(launch) {
+                Some(executable) => Some(Managed {
+                    home: self.agent_folder(id).join("home"),
+                    executable: executable.clone(),
+                }),
+                None => return Ok(Err("its harness is not installed".into())),
+            },
+            _ => return Ok(Err("its account is no longer in the project's pool".into())),
+        };
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
         };
@@ -565,7 +583,8 @@ impl TeamRuntime {
             agent,
             record: record.clone(),
             limits: self.launch_limits(),
-            live: self.live_master(&project, role, launch),
+            live,
+            managed,
         };
         self.run_worker(
             id,
@@ -2240,11 +2259,13 @@ impl TeamRuntime {
         let leave = Arc::new(AtomicBool::new(false));
         let (flag, kept) = (cancel.clone(), leave.clone());
         let turn_time = self.limits.turn_time;
-        let managed =
-            matches!(&launch, Launch::Fresh(_, mode) if matches!(**mode, Mode::PerTurn { .. }));
-        let (live, adopted) = match &launch {
+        let managed = match &launch {
+            Launch::Fresh(_, mode) => matches!(**mode, Mode::PerTurn { .. }),
+            Launch::Adopt(adoption) => adoption.managed.is_some(),
+        };
+        let (live, briefed) = match &launch {
             Launch::Fresh(plan, _) => (plan.live, false),
-            Launch::Adopt(adoption) => (adoption.live, true),
+            Launch::Adopt(adoption) => (adoption.live, adoption.managed.is_none()),
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -2277,7 +2298,7 @@ impl TeamRuntime {
                 thread: Some(thread),
                 hosted: seat.hosted,
                 live,
-                briefed: adopted,
+                briefed,
                 turn_started: None,
             },
         );
@@ -2745,10 +2766,10 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
-                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
+                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -3315,6 +3336,11 @@ fn work(
             let _ = reports.send(Report::Ended { problem });
             return;
         }
+        Launch::Adopt(adoption) if adoption.live && adoption.managed.is_some() => {
+            let problem = live_adopted(*adoption, &orders, &reports, &cancel, &leave);
+            let _ = reports.send(Report::Ended { problem });
+            return;
+        }
         other => other,
     };
     let adopted_live = matches!(&launch, Launch::Adopt(adoption) if adoption.live);
@@ -3400,8 +3426,8 @@ fn live(
             let request = plan.request(AccountBinding::Subscription { home });
             (
                 AgentSession::start(request, context, plan.pane.clone()),
-                Some((profile, credential)),
-                false,
+                Some((credential, profile)),
+                true,
             )
         }
     };
@@ -3425,6 +3451,77 @@ fn live(
         Err(problem) => Some(with_code("The agent could not start", Some(&problem.0))),
     };
     drop(held);
+    problem
+}
+
+/// Takes over the pane of a live master on a signed-in account that an earlier engine left
+/// running: waits for the runtime's first order, which carries a fresh custody use of the
+/// account, hands the credential to the master's home again, then follows every turn
+/// without typing the briefing again. The credential copy and the custody use are held
+/// until the pane is stopped or left, and removed then. Takes the adoption and the worker's
+/// channels and flags. Returns the problem that ended it, if any.
+fn live_adopted(
+    adoption: Adoption,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    leave: &AtomicBool,
+) -> Option<String> {
+    let Adoption {
+        host,
+        agent,
+        record,
+        limits,
+        managed,
+        ..
+    } = adoption;
+    let managed = managed.expect("a managed adoption names its home");
+    let grant = match next_turn(orders, cancel, None) {
+        Next::Turn(_, Some(grant)) => grant,
+        Next::Turn(_, None) => {
+            let _ = host.kill(&agent);
+            return Some("The live master was taken over without its signed-in account".into());
+        }
+        Next::Stop | Next::Closed(_) => {
+            if !leave.load(Ordering::SeqCst) {
+                let _ = host.kill(&agent);
+            }
+            return None;
+        }
+    };
+    let Grant { profile, .. } = *grant;
+    let credential =
+        match profile.hand_to_agent(&managed.home, limits.run_time, &managed.executable) {
+            Ok(credential) => credential,
+            Err(problem) => {
+                let _ = host.kill(&agent);
+                return Some(with_code(
+                    "The signed-in account could not reach the agent",
+                    Some(&problem.0),
+                ));
+            }
+        };
+    let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+        Ok(AgentSession::Terminal(session)) => {
+            live_serve(*session, None, orders, reports, cancel, leave, true)
+        }
+        Ok(other) => {
+            let _ = other.stop();
+            Some(with_code(
+                "The master has no terminal app to run live",
+                Some("team_master_no_terminal"),
+            ))
+        }
+        Err(problem) => {
+            let _ = host.kill(&agent);
+            Some(with_code(
+                "The agent's running terminal could not be taken over",
+                Some(&problem.0),
+            ))
+        }
+    };
+    drop(credential);
+    drop(profile);
     problem
 }
 
