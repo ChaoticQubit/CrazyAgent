@@ -112,6 +112,7 @@
     "allow-desktop-save-owner-profile",
     "allow-desktop-pool-summaries",
     "allow-desktop-account-schedule",
+    "allow-desktop-account-ranking",
     "allow-desktop-set-account-schedule",
     "allow-desktop-account-catalog",
     "allow-desktop-list-accounts",

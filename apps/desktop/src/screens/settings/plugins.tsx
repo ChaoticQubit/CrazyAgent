@@ -13,6 +13,7 @@ import {
 import { navigate } from "../../ui/router";
 import { MarkdownView } from "../project/markdown";
 import { useLinkOpener } from "../project/links";
+import { SkillTag } from "../skill-tag";
 import { homePath } from "./harnesses";
 
 const ARGS_MAX = 32;
@@ -156,7 +157,8 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
       {skills.value.map((skill, index) => {
         const on = pluginSwitch(skill, projectId);
         return <div className="item-row" key={skill.id}>
-          <div className="stack-small"><span className="title">{skill.name}</span><span className="secondary">{skill.description}</span>
+          <div className="stack-small"><span className="title"><SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]}
+            onOpen={() => onOpen(skill)} /></span><span className="secondary">{skill.description}</span>
             <span className="mono muted small">{homePath(skill.source)}</span></div>
           <span className="row">
             <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
@@ -229,7 +231,7 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
 }) {
   const session = useAppSession();
   const openLink = useLinkOpener(session.showToast);
-  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId]);
+  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId], "skill-detail");
   const [failure, setFailure] = useState("");
   const toggle = async (skill: SkillView, on: boolean) => {
     setFailure("");
@@ -614,8 +616,8 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
   const [section, setSection] = useState<"skills" | "servers">("skills");
-  const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId]);
-  const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId]);
+  const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
+  const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();

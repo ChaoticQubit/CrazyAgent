@@ -625,6 +625,7 @@ pub enum OwnerRead {
         offset: u8,
     },
     AccountSchedule,
+    AccountRanking,
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -694,7 +695,8 @@ impl OwnerRead {
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
             | Self::PoolSummaries { .. }
-            | Self::AccountSchedule => return Ok(None),
+            | Self::AccountSchedule
+            | Self::AccountRanking => return Ok(None),
             Self::Memories { search, limit, .. } => {
                 crate::memory::library::validate_page(search.as_deref(), *limit)?;
                 return Ok(None);
@@ -1082,6 +1084,9 @@ pub enum OwnerData {
     },
     AccountSchedule {
         schedule: crate::scheduling::Schedule,
+    },
+    AccountRanking {
+        pools: Vec<crate::scheduling::PoolRanking>,
     },
     Page {
         items: Vec<OwnerSummary>,

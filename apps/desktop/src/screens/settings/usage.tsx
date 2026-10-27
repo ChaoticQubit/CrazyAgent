@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
-import { listAccounts, poolSummaries, type Result } from "../../api";
+import { useEffect, useState, type ReactNode } from "react";
+import { accountRanking, listAccounts, poolSummaries, type Result } from "../../api";
 import {
   loadUsage, pollFailure, refreshUsage, setManualReset, usageNotReady, usageRefusal,
   type AccountLimits, type DayTokens, type LimitWindow, type LinesRow, type Tokens, type UsageReport, type UsageRow, type WindowKind,
 } from "../../api-usage";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, TextField } from "../../ui";
+import { NextAccountsPanel } from "./account-choice";
 import "../project/projects.css";
 import "./usage.css";
 
@@ -275,13 +276,14 @@ function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
 /** Settings, Usage as a pure view: the range switch, app-wide totals, each account's limits
  * with reset countdowns and manual reset times, tokens by project, pool, account, agent and
  * day, and lines changed. Inputs: the report, names, now, the last failure and the actions. */
-export function UsageView({ report, range, names, nowMs, failure, busy, onRange, onRefresh, onSetReset, onRetry }: {
+export function UsageView({ report, range, names, nowMs, failure, busy, next, onRange, onRefresh, onSetReset, onRetry }: {
   report: Loaded<UsageReport>;
   range: UsageRange;
   names: UsageNames;
   nowMs: number;
   failure: string;
   busy: string | null;
+  next?: ReactNode;
   onRange: (range: UsageRange) => void;
   onRefresh: () => void;
   onSetReset: (account: string, kind: WindowKind, at: number | null) => void;
@@ -310,6 +312,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, onRange,
         : <div className="usage-limit-grid">{value.limits.map((limits) => <LimitsCard key={limits.account} limits={limits} name={account(limits.account)}
           nowMs={nowMs} busy={busy} onSetReset={onSetReset} />)}</div>}
     </Panel>
+    {next}
     {empty ? <EmptyState icon="trending-up" title="No usage in this range" compact>Runs show up here a few seconds after an agent works.</EmptyState> : <>
       <UsageTable title="By project" rows={value.projects} name={project} nowMs={nowMs} />
       <UsageTable title="By pool" rows={value.pools} name={pool} nowMs={nowMs} />
@@ -334,8 +337,9 @@ export function UsageSettings() {
     const now = new Date();
     return loadUsage(rangeStart(range, now), offsetMinutes(now));
   }, [range, tick]);
-  const [accounts] = useLoad(listAccounts);
-  const [pools] = useLoad(poolSummaries);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [pools] = useLoad(poolSummaries, [], "pool-summaries");
+  const [ranking] = useLoad(accountRanking, [tick]);
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTick((old) => old + 1); }, TICK_MS);
     return () => clearInterval(timer);
@@ -358,6 +362,7 @@ export function UsageSettings() {
   }
 
   return <UsageView report={report} range={range} names={names} nowMs={nowMs} failure={failure} busy={busy}
+    next={<NextAccountsPanel ranking={ranking} pools={pools} names={names.accounts} nowMs={nowMs} />}
     onRange={(next) => { setRange(next); setNowMs(Date.now()); }} onRetry={reload}
     onRefresh={() => void act("refresh", refreshUsage, "Checking limits now. They update here within a minute.")}
     onSetReset={(account, kind, at) => void act(`${account}/${kind}`, () => setManualReset(account, kind, at),

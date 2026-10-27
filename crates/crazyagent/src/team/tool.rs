@@ -38,7 +38,6 @@ const CALL_BYTES_MAX: u64 = 16 * 1024;
 const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
-const LIVE_ROLE_CHARS_MAX: usize = names::HANDLE_CHARS_MAX;
 const CALL_SUFFIX: &str = ".call";
 const TAKEN_SUFFIX: &str = ".taken";
 const REPLY_SUFFIX: &str = ".reply";
@@ -47,7 +46,7 @@ const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
-const ROLE_INVALID: &str = "Not handed off: a role is 2 to 32 lowercase letters, digits and hyphens, such as @onboarding-fix.";
+const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
 const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
@@ -58,7 +57,6 @@ const NOT_ANSWERED: &str = "The engine took the call but did not answer within a
 
 const _: () = assert!(REPLY_BYTES_MAX < REQUEST_BYTES_MAX as u64);
 const _: () = assert!(CALLS_PER_TICK_MAX <= CALLS_PENDING_MAX);
-const _: () = assert!(LIVE_ROLE_CHARS_MAX == 32);
 const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 
 /// One team tool call a live master made, as its server writes it into the mailbox for the
@@ -318,8 +316,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 return Some(Err(LIVE_INVALID));
             };
             let role = match argument("role").map(role_handle) {
-                Some(None) => return Some(Err(ROLE_INVALID)),
-                Some(Some(role)) => Some(role),
+                Some(Err(())) => return Some(Err(ROLE_INVALID)),
+                Some(Ok(role)) => role,
                 None => None,
             };
             Ok(Call::Delegate {
@@ -376,19 +374,19 @@ fn agent_name_valid(agent: &str) -> bool {
     !agent.is_empty() && agent.len() <= AGENT_NAME_BYTES_MAX && !agent.chars().any(char::is_control)
 }
 
-/// Reads a role handle as a master wrote it, `@onboarding-fix` or `onboarding-fix`.
-/// Takes the text. Returns the handle with its `@`, or none when it is not 2 to `LIVE_ROLE_CHARS_MAX`
-/// lowercase letters, digits and single inner hyphens.
-pub fn role_handle(text: &str) -> Option<String> {
-    let bare = text.trim().strip_prefix('@').unwrap_or(text.trim());
-    let fits = (2..=LIVE_ROLE_CHARS_MAX).contains(&bare.len())
-        && bare
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !bare.starts_with('-')
-        && !bare.ends_with('-')
-        && !bare.contains("--");
-    fits.then(|| format!("@{bare}"))
+/// Reads the role a master gave a job by the same rule as the reply-turn `delegate` tool:
+/// at most `ROLE_BYTES_MAX` bytes, turned into a handle by `names::handle`.
+/// Takes the text, `@onboarding-fix` or `Onboarding Fix`. Returns the bare handle, none
+/// for blank text, or an error when no handle is left or the text is too long.
+fn role_handle(text: &str) -> Result<Option<String>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.len() > ROLE_BYTES_MAX {
+        return Err(());
+    }
+    names::handle(text).map(Some).ok_or(())
 }
 
 /// Writes one call into the mailbox and waits for the engine's answer. A call still in the

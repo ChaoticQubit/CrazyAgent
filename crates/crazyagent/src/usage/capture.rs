@@ -1,7 +1,7 @@
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
@@ -17,6 +17,8 @@ const NAME_BYTES_MAX: usize = 128;
 const AGENT_BYTES_MAX: usize = NAME_BYTES_MAX + 64;
 const WALK_DEPTH_MAX: usize = 3;
 const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
+const LINE_TOKENS_MAX: u64 = 1_000_000_000;
+const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_tokens (
     hour_ms INTEGER NOT NULL,
@@ -86,9 +88,30 @@ impl Tokens {
         }
     }
 
+    /// Caps every count at `max`. Input: the cap. Output: the capped count.
+    fn at_most(self, max: u64) -> Tokens {
+        Tokens {
+            input: self.input.min(max),
+            output: self.output.min(max),
+            cache_read: self.cache_read.min(max),
+            cache_write: self.cache_write.min(max),
+        }
+    }
+
     /// Whether every count is zero. Output: true for an empty count.
     pub fn is_empty(self) -> bool {
         self == Tokens::default()
+    }
+
+    /// The tokens a harness reported for a turn, with an unreported count as zero.
+    /// Input: the reported usage. Output: the count.
+    pub fn reported(usage: &crate::adapters::events::TokenUsage) -> Tokens {
+        Tokens {
+            input: usage.input_tokens.unwrap_or(0),
+            output: usage.output_tokens.unwrap_or(0),
+            cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+            cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
+        }
     }
 }
 
@@ -154,8 +177,8 @@ struct Progress {
 
 /// The token growth one Claude Code transcript line shows. Each assistant line carries its
 /// message's usage, and several lines of one message repeat it, so each message counts
-/// once at its largest values. Inputs: the parsed line and the file's progress.
-/// Output: the growth to add.
+/// once at its largest values, each count capped at `LINE_TOKENS_MAX`.
+/// Inputs: the parsed line and the file's progress. Output: the growth to add.
 fn claude_line(value: &Value, progress: &mut Progress) -> Tokens {
     let message = &value["message"];
     if value["type"] != "assistant" || !message["usage"].is_object() {
@@ -168,7 +191,8 @@ fn claude_line(value: &Value, progress: &mut Progress) -> Tokens {
         output: count("output_tokens"),
         cache_read: count("cache_read_input_tokens"),
         cache_write: count("cache_creation_input_tokens"),
-    };
+    }
+    .at_most(LINE_TOKENS_MAX);
     let id = message["id"].as_str().map(str::to_owned);
     if id.is_some() && id == progress.message {
         let growth = seen.growth_over(progress.counted);
@@ -185,11 +209,17 @@ fn claude_line(value: &Value, progress: &mut Progress) -> Tokens {
     seen
 }
 
+/// One limit window a rollout line reports. The agent writes its own rollout, so a window
+/// counts only when it resets within its own length from now. Inputs: the window and the
+/// time. Output: its length in minutes and the window, or None.
 fn codex_window(value: &Value, now_ms: i64) -> Option<(u64, LimitWindow)> {
     let used = value["used_percent"]
         .as_f64()
         .filter(|used| used.is_finite())?;
     let minutes = value["window_minutes"].as_u64()?;
+    let latest = now_ms
+        .saturating_add(i64::try_from(minutes).ok()?.saturating_mul(60_000))
+        .min(super::RESET_MS_MAX);
     let resets_at_ms = match (
         value["resets_at"].as_i64(),
         value["resets_in_seconds"].as_i64(),
@@ -200,20 +230,21 @@ fn codex_window(value: &Value, now_ms: i64) -> Option<(u64, LimitWindow)> {
             .and_then(|ms| now_ms.checked_add(ms)),
         (None, None) => None,
     }
-    .filter(|at| (1..=super::RESET_MS_MAX).contains(at));
+    .filter(|at| (1..=latest).contains(at))?;
     Some((
         minutes,
         LimitWindow {
             used_percent: used.clamp(0.0, 100.0),
-            resets_at_ms,
+            resets_at_ms: Some(resets_at_ms),
         },
     ))
 }
 
 /// What one Codex rollout line shows: the growth of the session's cumulative token totals
-/// past the last ones counted, and the account's limit windows when the line carries them.
-/// Codex counts cached input inside input; the growth keeps them apart.
-/// Inputs: the parsed line, the file's progress and the time. Output: growth and limits.
+/// past the last ones counted, each capped at `LINE_TOKENS_MAX`, and the account's limit
+/// windows when the line carries them. Codex counts cached input inside input; the growth
+/// keeps them apart. Inputs: the parsed line, the file's progress and the time.
+/// Output: growth and limits.
 fn codex_line(
     value: &Value,
     progress: &mut Progress,
@@ -234,7 +265,7 @@ fn codex_line(
             cache_read: cached,
             cache_write: 0,
         };
-        growth = seen.growth_over(progress.total);
+        growth = seen.growth_over(progress.total).at_most(LINE_TOKENS_MAX);
         progress.total = seen;
     }
     let limits = &payload["rate_limits"];
@@ -307,7 +338,10 @@ fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     use std::os::unix::fs::MetadataExt;
     let file = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .ok()
@@ -403,10 +437,27 @@ fn read_record(
     (growth, limits)
 }
 
+fn stored_progress(db: &Connection, key: &str) -> Result<Progress, EngineError> {
+    let stored: Option<String> = db
+        .query_row(
+            "SELECT progress FROM usage_files WHERE path=?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match stored {
+        Some(text) => serde_json::from_str(&text).map_err(storage),
+        None => Ok(Progress::default()),
+    }
+}
+
 /// Counts what every session record in one agent home gained since the last scan and adds
 /// it to the run's attribution in the hour of `now_ms`; Codex limit windows the records
-/// carry update the account's limits. Progress and counts commit together, so no line
-/// counts twice. Inputs: the store, the home, its format, the attribution and the time.
+/// carry update the account's limits. Every record is read before the store's write lock
+/// is taken, and a record whose stored progress moved meanwhile is left to the scan that
+/// moved it, so no file read holds the lock and no line counts twice.
+/// Inputs: the store, the home, its format, the attribution and the time.
 /// Output: the tokens added, or `usage_unavailable`.
 pub fn scan_home(
     db: &Connection,
@@ -417,36 +468,35 @@ pub fn scan_home(
 ) -> Result<Tokens, EngineError> {
     checked_attribution(attribution)?;
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
-    let tx = db.unchecked_transaction().map_err(storage)?;
-    let mut added = Tokens::default();
-    let mut limits = None;
+    let mut changed = Vec::new();
     for path in records(home, format) {
         let key = path.to_string_lossy().into_owned();
-        let stored: Option<String> = tx
-            .query_row(
-                "SELECT progress FROM usage_files WHERE path=?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let mut progress: Progress = match stored {
-            Some(text) => serde_json::from_str(&text).map_err(storage)?,
-            None => Progress::default(),
-        };
-        let before = progress.clone();
+        let before = stored_progress(db, &key)?;
+        let mut progress = before.clone();
         let (growth, observed) = read_record(&path, format, &mut progress, now_ms);
-        limits = observed.or(limits);
         if progress != before {
-            tx.execute(
-                "INSERT INTO usage_files (path,progress) VALUES (?1,?2)
-                 ON CONFLICT(path) DO UPDATE SET progress=excluded.progress",
-                params![key, serde_json::to_string(&progress).map_err(storage)?],
-            )
-            .map_err(storage)?;
+            changed.push((key, session_name(&path), before, progress, growth, observed));
         }
-        add_tokens(&tx, hour_ms, attribution, &session_name(&path), growth)?;
+    }
+    if changed.is_empty() {
+        return Ok(Tokens::default());
+    }
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    let mut added = Tokens::default();
+    let mut limits = None;
+    for (key, session, before, progress, growth, observed) in changed {
+        if stored_progress(&tx, &key)? != before {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO usage_files (path,progress) VALUES (?1,?2)
+             ON CONFLICT(path) DO UPDATE SET progress=excluded.progress",
+            params![key, serde_json::to_string(&progress).map_err(storage)?],
+        )
+        .map_err(storage)?;
+        add_tokens(&tx, hour_ms, attribution, &session, growth)?;
         added = added.plus(growth);
+        limits = observed.or(limits);
     }
     if let (Some(observation), Some(account)) = (limits, &attribution.account) {
         record_observation(&tx, account, &observation, LimitSource::Transcript, now_ms)?;
@@ -474,8 +524,9 @@ fn add_tokens(
             input,output,cache_read,cache_write)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session) DO UPDATE SET
-            input=input+excluded.input,output=output+excluded.output,
-            cache_read=cache_read+excluded.cache_read,cache_write=cache_write+excluded.cache_write",
+            input=MIN(input+excluded.input,?13),output=MIN(output+excluded.output,?13),
+            cache_read=MIN(cache_read+excluded.cache_read,?13),
+            cache_write=MIN(cache_write+excluded.cache_write,?13)",
         params![
             hour_ms,
             attribution.kind.name(),
@@ -489,10 +540,35 @@ fn add_tokens(
             clamp(growth.output),
             clamp(growth.cache_read),
             clamp(growth.cache_write),
+            ROW_TOKENS_MAX,
         ],
     )
     .map_err(storage)?;
     Ok(())
+}
+
+/// Counts the usage a harness reported for one turn, such as a piped Claude Code agent that
+/// keeps no records of its own, into the hour of `now_ms`. Inputs: the store, the
+/// attribution, the tokens, the session name and the time. Output: done, or
+/// `usage_attribution_invalid` / `usage_unavailable`.
+pub fn count_reported(
+    db: &Connection,
+    attribution: &Attribution,
+    tokens: Tokens,
+    session: &str,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    checked_attribution(attribution)?;
+    if session.is_empty() || session.len() > NAME_BYTES_MAX {
+        return Err(failure("usage_attribution_invalid"));
+    }
+    add_tokens(
+        db,
+        now_ms - now_ms.rem_euclid(HOUR_MS),
+        attribution,
+        session,
+        tokens,
+    )
 }
 
 /// Counts one finished turn whose home is about to be removed, such as an engine-driven
@@ -509,20 +585,11 @@ pub fn count_turn(
     session: &str,
     now_ms: i64,
 ) -> Result<Tokens, EngineError> {
-    checked_attribution(attribution)?;
-    if session.is_empty() || session.len() > NAME_BYTES_MAX {
-        return Err(failure("usage_attribution_invalid"));
-    }
     let added = if reported.is_empty() {
+        checked_attribution(attribution)?;
         scan_home(db, home, format, attribution, now_ms)?
     } else {
-        add_tokens(
-            db,
-            now_ms - now_ms.rem_euclid(HOUR_MS),
-            attribution,
-            session,
-            reported,
-        )?;
+        count_reported(db, attribution, reported, session, now_ms)?;
         reported
     };
     let prefix = format!("{}/", home.to_string_lossy());
@@ -647,7 +714,7 @@ fn checked_attribution(attribution: &Attribution) -> Result<(), EngineError> {
 }
 
 fn clamp(count: u64) -> i64 {
-    i64::try_from(count).unwrap_or(i64::MAX)
+    i64::try_from(count).unwrap_or(i64::MAX).min(ROW_TOKENS_MAX)
 }
 
 #[cfg(all(test, unix))]

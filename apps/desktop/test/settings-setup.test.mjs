@@ -26,7 +26,7 @@ const pack = [
   entry("linear", "mcp_server", "optional", { state: "failed", reason: "Checksum didn't match." }),
 ];
 const setup = (extra = {}) => ({ dependencies: [], pack, running: false, ...extra });
-const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
+const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", skills: [], onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
 
 const rowOf = (markup, id) => {
   const start = markup.indexOf(`<strong>${id}</strong>`);

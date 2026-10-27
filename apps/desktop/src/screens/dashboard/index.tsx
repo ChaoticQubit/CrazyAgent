@@ -102,7 +102,8 @@ function accountStep(owned: number, usable: AccountView[]): Pick<SetupItem, "bod
  * (signed in, a saved key, or a reachable URL or local model) and names it, Create a pool when one
  * pool exists, Install tools when tmux, uv and graphify are installed; harnesses never block.
  * Accounts that exist but none ready send the owner to Accounts. The panel shows until those
- * three are done. Inputs: the four engine reads. Output: items and whether the panel shows. */
+ * three are done, and never while one of the four reads is still loading, so it cannot flash in
+ * and out. Inputs: the four engine reads. Output: items and whether the panel shows. */
 export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
   tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
   const owned = accounts.kind === "ok" ? accounts.value : [];
@@ -121,7 +122,8 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
     { id: "tools", icon: "wrench", title: "Install tools", ...installTools,
       action: "Set up tools", href: formatRoute({ name: "settings", tab: "pack" }) },
   ];
-  return { items, visible: !(accountsDone && poolsDone && installTools.done) };
+  const settled = [accounts, pools, harnesses, tools].every((read) => read.kind !== "loading");
+  return { items, visible: settled && !(accountsDone && poolsDone && installTools.done) };
 }
 
 /** One Needs you row: the project it is about (none for an account), one sentence and one link. */
@@ -254,7 +256,7 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
 /** Reads setup for the Install tools item, and reads it again every few seconds only while a
  * tool is still being checked or setup is installing. Output: the latest setup read. */
 export function useToolsStatus(): Loaded<SetupStatus> {
-  const [tools, reload] = useLoad(loadSetupStatus);
+  const [tools, reload] = useLoad(loadSetupStatus, [], "setup-status");
   const moving = tools.kind === "ok" && (toolsChecking(tools.value) || setupBusy(tools.value));
   useEffect(() => {
     if (!moving) return;
@@ -268,9 +270,9 @@ export function useToolsStatus(): Loaded<SetupStatus> {
  * work and the suggested memories for Needs you, and renders HomeView with the session's projects. */
 export function Home() {
   const session = useAppSession();
-  const [accounts] = useLoad(listAccounts);
-  const [pools] = useLoad(poolSummaries);
-  const [harnesses] = useLoad(harnessCatalog);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [pools] = useLoad(poolSummaries, [], "pool-summaries");
+  const [harnesses] = useLoad(harnessCatalog, [], "harness-catalog");
   const tools = useToolsStatus();
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
   const activity = useProjectActivity(projects.map((project) => project.id));

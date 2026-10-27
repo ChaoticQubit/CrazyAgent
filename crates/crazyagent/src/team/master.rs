@@ -491,8 +491,8 @@ fn delegate(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(state)?;
-    if let Some(role) = role.and_then(super::names::handle) {
-        super::names::set_task_role(&tx, project, id, &role)?;
+    if let Some(role) = role {
+        super::names::set_task_role(&tx, project, id, role)?;
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {

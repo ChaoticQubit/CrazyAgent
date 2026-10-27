@@ -143,7 +143,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
 
   async function update(set: ChangeSet) {
     setBusy(true);
-    await settle(await updateChange(set.id), () => "The agent is updating its changes onto your branch.");
+    await settle(await updateChange(set.id), () => "Your branch is merged into the agent's copy. The list shows when the agent picks it up.");
   }
 
   async function restore(set: ChangeSet) {

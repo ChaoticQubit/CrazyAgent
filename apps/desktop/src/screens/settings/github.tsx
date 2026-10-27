@@ -50,7 +50,7 @@ export function GitHubSettingsView({ status, signIn, account, onRetry }: {
  * token, and signs out after a confirm. */
 export function GitHubSettings() {
   const session = useAppSession();
-  const [status, reload] = useLoad(loadGitHubStatus);
+  const [status, reload] = useLoad(loadGitHubStatus, [], "github-status");
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
