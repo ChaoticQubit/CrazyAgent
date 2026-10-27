@@ -289,14 +289,17 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
     assert_eq!(
         body["settings"],
         serde_json::json!({
+            "chat.disableAIFeatures": true,
             "chat.mcp.access": "none",
             "chat.extensionTools.enabled": false,
             "workbench.settings.showAISearchToggle": false,
             "extensions.ignoreRecommendations": true,
             "workbench.startupEditor": "none",
             "files.readonlyInclude": {},
+            "git.detectSubmodules": false,
+            "git.autoRepositoryDetection": false,
         }),
-        "the workspace file carries the lock's workspace keys"
+        "the workspace file carries the lock's workspace keys and the git keys"
     );
 }
 

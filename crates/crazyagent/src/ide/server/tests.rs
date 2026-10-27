@@ -337,6 +337,9 @@ fn server_env_holds_only_allowlisted_names() {
         ("DYLD_INSERT_LIBRARIES", "/private/tmp/evil.dylib"),
         ("LC_", "bad"),
         ("LC_lower", "bad"),
+        ("GIT_CONFIG_COUNT", "2"),
+        ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+        ("GIT_CONFIG_VALUE_0", "/private/tmp/evil-monitor"),
     ];
     let source = given
         .iter()
@@ -368,14 +371,18 @@ fn server_env_holds_only_allowlisted_names() {
         crate::ide::settings::LOCKED_VARIABLE,
         "/private/tmp/ide/project/locked-settings.json",
     ));
+    expected.extend(crate::ide::git::CONFIG_ENV);
     expected.sort();
     assert_eq!(seen, expected);
-    assert!(
-        seen.iter()
-            .all(|(name, _)| env::allowed(std::ffi::OsStr::new(name))
-                || *name == env::CAPABILITY_VARIABLE
-                || *name == crate::ide::settings::LOCKED_VARIABLE)
-    );
+    assert!(seen.contains(&("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules")));
+    assert!(seen.iter().all(|(name, _)| {
+        env::allowed(std::ffi::OsStr::new(name))
+            || *name == env::CAPABILITY_VARIABLE
+            || *name == crate::ide::settings::LOCKED_VARIABLE
+            || crate::ide::git::CONFIG_ENV
+                .iter()
+                .any(|(fixed, _)| name == fixed)
+    }));
     assert!(
         !printed.contains("fixture-") && !printed.contains("forged") && !printed.contains("evil")
     );
@@ -848,6 +855,20 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
             .all(|arg| !arg.to_string_lossy().contains(&token))
     );
     assert_eq!(command.get_current_dir(), Some(folder.as_path()));
+    let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
+    for (name, value) in crate::ide::git::CONFIG_ENV {
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new(name),
+                Some(std::ffi::OsStr::new(value))
+            )),
+            "{name}"
+        );
+    }
+    assert!(
+        envs.iter()
+            .all(|(_, value)| value.is_none_or(|value| !value.to_string_lossy().contains(&token)))
+    );
     assert_eq!(mode(&token_path), 0o600);
     let home = folder.join("server-data");
     for path in [

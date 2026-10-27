@@ -4,6 +4,7 @@ pub const FOLDER: &str = "ide";
 
 pub mod bridge;
 pub mod env;
+pub mod git;
 #[cfg(unix)]
 pub mod output;
 #[cfg(unix)]
