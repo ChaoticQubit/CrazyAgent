@@ -63,8 +63,14 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
+/// The Codex 0.164 setting that removes `request_user_input`, the one tool a
+/// tools-off research agent is still offered after the shared tools-off settings.
+const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
+/// The `RunError::Invalid` text of a run whose agent state folder already exists,
+/// so a caller can tell this refusal from the others without reading free text.
+pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
 const PANE_EVENTS_MAX: usize = 200_000;
@@ -1199,7 +1205,7 @@ impl ResearchRunner {
         }
         let agent = self.state.join("agents").join(run.name);
         if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid("read-only run name already used".into()));
+            return Err(RunError::Invalid(RUN_NAME_USED.into()));
         }
         let lease = match run.account {
             ResearchAccount::ManagedCodex { connection, .. }
@@ -1513,7 +1519,10 @@ fn codex_arguments(
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
     if !tools {
-        command.args(["-c", "web_search=\"disabled\""]);
+        for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
+            command.arg("-c").arg(setting);
+        }
+        command.args(["-c", CODEX_NO_USER_INPUT]);
     }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {

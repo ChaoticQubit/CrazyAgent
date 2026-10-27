@@ -67,16 +67,16 @@ fn a_partial_reading_keeps_the_other_window_plan_and_its_manual_reset() {
         five_hour: window(55.0, 4_000),
         weekly: None,
     };
-    record_observation(&db, &codex, &later, LimitSource::Transcript, 200).unwrap();
+    record_observation(&db, &codex, &later, LimitSource::Poll, 200).unwrap();
     let stored = limits(&db, &codex).unwrap().unwrap();
     assert_eq!(stored.plan.as_deref(), Some("pro"));
     assert_eq!(stored.five_hour, window(55.0, 4_000));
     assert_eq!(stored.five_hour_reset_override_ms, None);
     assert_eq!(stored.weekly, window(20.0, 3_000));
     assert_eq!(stored.weekly_reset_override_ms, Some(8_000));
-    assert_eq!(stored.source, Some(LimitSource::Transcript));
+    assert_eq!(stored.source, Some(LimitSource::Poll));
     assert_eq!(stored.observed_ms, Some(200));
-    assert_eq!(stored.checked_ms, Some(100));
+    assert_eq!(stored.checked_ms, Some(200));
 }
 
 #[test]

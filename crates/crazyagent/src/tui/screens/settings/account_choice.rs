@@ -1,7 +1,8 @@
 use crate::pools::PoolSummary;
 use crate::protocol::CredentialRef;
 use crate::scheduling::{
-    AccountPlan, Pin, RANK_MAX, RESERVE_PERCENT_MAX, Schedule, ScheduleChange, Strategy,
+    AccountPlan, Pin, PoolRanking, RANK_MAX, RESERVE_PERCENT_MAX, Schedule, ScheduleChange,
+    Standing, Strategy,
 };
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::ctx::Ctx;
@@ -12,6 +13,7 @@ use ratatui::text::Line;
 
 const RESERVE_STEP: u8 = 5;
 const NAME_WIDTH: usize = 28;
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// The account choice editor over one pool, shown as a modal on Settings, Pools: row 0 is
 /// the app strategy, row 1 the pool's own strategy and each later row one member's rank,
@@ -95,6 +97,114 @@ pub fn plan_line(plan: &AccountPlan) -> String {
         parts.push("used last".into());
     }
     parts.join(", ")
+}
+
+/// A local time a reset or pause ends at: "14:30" today, else "Mon 09:00".
+/// Takes the time and now in ms since the epoch and the UTC offset in seconds.
+/// Returns the text.
+pub fn at_text(at_ms: i64, now_ms: i64, offset: i64) -> String {
+    let day = |ms: i64| (ms.div_euclid(1000) + offset).div_euclid(86_400);
+    let time = crate::tui::clock::clock(at_ms, offset);
+    if day(at_ms) == day(now_ms) {
+        return time;
+    }
+    let weekday = (day(at_ms) + 4).rem_euclid(7);
+    assert!((0..7).contains(&weekday));
+    format!("{} {time}", WEEKDAYS[weekday as usize])
+}
+
+/// Says in a few words why an account stands where it does in its pool's ranking, such
+/// as "resets Mon 09:00, 40% left" or "5-hour cap until 14:30".
+/// Takes the standing, now in ms since the epoch and the UTC offset. Returns the line.
+pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
+    let at = |ms: i64| at_text(ms, now_ms, offset);
+    match *standing {
+        Standing::Next {
+            weekly_resets_ms,
+            weekly_left_percent,
+            use_last,
+        } => {
+            let line = match (weekly_resets_ms, weekly_left_percent) {
+                (Some(resets), Some(left)) => format!("resets {}, {left}% left", at(resets)),
+                (None, Some(left)) => format!("{left}% left"),
+                (_, None) => "no usage read yet".to_owned(),
+            };
+            if use_last {
+                format!("{line}, used last")
+            } else {
+                line
+            }
+        }
+        Standing::Paused { until_ms } => format!("paused until {}", at(until_ms)),
+        Standing::NeverUse => "never use".to_owned(),
+        Standing::FiveHourCap {
+            until_ms: Some(until),
+        } => format!("5-hour cap until {}", at(until)),
+        Standing::FiveHourCap { until_ms: None } => "5-hour cap reached".to_owned(),
+        Standing::ReserveReached {
+            reserve_percent: 0,
+            until_ms,
+        } => until_ms.map_or_else(
+            || "weekly limit used up".to_owned(),
+            |until| format!("weekly limit used up until {}", at(until)),
+        ),
+        Standing::ReserveReached {
+            reserve_percent, ..
+        } => format!("reserve reached ({reserve_percent}%)"),
+    }
+}
+
+/// The "Next accounts" lines for one pool: each account work would try now, numbered in
+/// order, then each held account with why. Takes the pool, its ranking read, now and
+/// the UTC offset. Returns the lines.
+pub fn ranking_lines(
+    pool: &PoolSummary,
+    ranking: Option<&Result<Vec<PoolRanking>, String>>,
+    now_ms: i64,
+    offset: i64,
+) -> Vec<String> {
+    let mut lines = vec!["Next accounts".to_owned()];
+    let found = match ranking {
+        None => {
+            lines.push("  Loading...".into());
+            return lines;
+        }
+        Some(Err(_)) => {
+            lines.push("  Could not read the next accounts.".into());
+            return lines;
+        }
+        Some(Ok(pools)) => pools.iter().find(|ranked| ranked.pool == pool.id),
+    };
+    let Some(found) = found else {
+        lines.push("  This pool has no ranking yet.".into());
+        return lines;
+    };
+    let mut place = 0;
+    for account in &found.accounts {
+        let name = pool
+            .members
+            .iter()
+            .find(|member| member.id == account.connection)
+            .map_or_else(
+                || account.connection.as_str().to_owned(),
+                |member| format!("{} {}", member.provider, member.id.as_str()),
+            );
+        let mark = if matches!(account.standing, Standing::Next { .. }) {
+            place += 1;
+            format!("{place:>2}.")
+        } else {
+            "   ".to_owned()
+        };
+        lines.push(format!(
+            "{mark} {}{}",
+            clipped(&name, NAME_WIDTH - 4),
+            standing_line(&account.standing, now_ms, offset)
+        ));
+    }
+    if found.accounts.is_empty() {
+        lines.push("  No accounts in this pool.".into());
+    }
+    lines
 }
 
 fn pool_strategy(schedule: &Schedule, pool: &CredentialRef) -> Option<Strategy> {
@@ -198,9 +308,16 @@ impl ChoiceEditor {
         })
     }
 
-    /// The editor as a modal: one line per row with the focused row marked.
-    /// Takes the schedule, the pool and the context. Returns the modal and its hints.
-    pub fn modal(&self, schedule: &Schedule, pool: &PoolSummary, ctx: &Ctx) -> (Modal, Vec<Hint>) {
+    /// The editor as a modal: one line per row with the focused row marked, then the
+    /// pool's next accounts. Takes the schedule, the pool, the ranking read and the
+    /// context. Returns the modal and its hints.
+    pub fn modal(
+        &self,
+        schedule: &Schedule,
+        pool: &PoolSummary,
+        ranking: Option<&Result<Vec<PoolRanking>, String>>,
+        ctx: &Ctx,
+    ) -> (Modal, Vec<Hint>) {
         let mark = |row: usize| if row == self.row { "> " } else { "  " };
         let app = schedule.strategy;
         let own = pool_strategy(schedule, &pool.id);
@@ -233,6 +350,17 @@ impl ChoiceEditor {
                 plan_line(&schedule.plan(&member.id))
             )));
         }
+        body.push(Line::default());
+        body.extend(
+            ranking_lines(
+                pool,
+                ranking,
+                crate::tui::clock::now_ms(),
+                crate::tui::clock::local_offset(),
+            )
+            .into_iter()
+            .map(Line::raw),
+        );
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         (
             Modal {

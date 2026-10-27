@@ -180,3 +180,22 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-paths { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .pj-paths li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .pj-paths .pj-mono { min-width: 0; overflow-wrap: anywhere; }
+
+.pj-master-live {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.pj-master-live > .tg-terminal {
+  flex: 1;
+  min-height: 60vh;
+}
+
+.pj-master-earlier {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

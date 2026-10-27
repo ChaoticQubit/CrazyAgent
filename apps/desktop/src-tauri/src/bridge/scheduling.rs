@@ -1,6 +1,6 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
-use crazyagent::scheduling::{Schedule, ScheduleChange};
+use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 
 impl NativeBridge {
     /// Reads the owner's account scheduling choices: the app strategy, pool strategies,
@@ -12,6 +12,19 @@ impl NativeBridge {
         }
         self.controller()?
             .account_schedule()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Reads each pool's account ranking: the order work would try its accounts now and
+    /// why each held account waits.
+    /// Returns one ranking per pool or a plain failure code.
+    pub async fn account_ranking(&mut self) -> Result<Vec<PoolRanking>, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .account_ranking()
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))
     }

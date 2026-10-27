@@ -36,7 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
-use crazyagent::scheduling::{Schedule, ScheduleChange};
+use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
@@ -684,6 +684,21 @@ async fn desktop_team_keep_warm(
     lock(&state)
         .await?
         .team_keep_warm(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_live_master(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_live_master(&id, on, generation)
         .await
 }
 
@@ -1386,6 +1401,15 @@ async fn desktop_account_schedule(
 ) -> Result<Schedule, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.account_schedule().await
+}
+
+#[tauri::command]
+async fn desktop_account_ranking(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<PoolRanking>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.account_ranking().await
 }
 
 #[tauri::command]
@@ -2163,6 +2187,7 @@ pub fn run() {
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
             desktop_team_rename,
@@ -2238,6 +2263,7 @@ pub fn run() {
             desktop_save_owner_profile,
             desktop_pool_summaries,
             desktop_account_schedule,
+            desktop_account_ranking,
             desktop_set_account_schedule,
             desktop_account_catalog,
             desktop_list_accounts,

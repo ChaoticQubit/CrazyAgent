@@ -2463,6 +2463,17 @@ fn owner_read(
         OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
             schedule: crate::scheduling::load(&tx)?,
         },
+        OwnerRead::AccountRanking => OwnerData::AccountRanking {
+            pools: crate::scheduling::ranking(
+                &tx,
+                config
+                    .settings
+                    .model_access
+                    .as_ref()
+                    .unwrap_or(&crate::config::ModelAccess::default()),
+                crate::team::now_ms(),
+            )?,
+        },
         OwnerRead::Page {
             view,
             cursor,
