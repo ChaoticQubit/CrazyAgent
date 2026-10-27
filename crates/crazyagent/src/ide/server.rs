@@ -96,6 +96,10 @@ struct Running {
     info: ServerInfo,
     folder: PathBuf,
     touched: Instant,
+    started: Instant,
+    /// Whether the launch passed [`ready`]: it listens on 127.0.0.1 and no other process
+    /// holds its port. Only a ready launch is handed back to a later open.
+    ready: bool,
     proxy: tokio::task::JoinHandle<()>,
 }
 
@@ -172,9 +176,11 @@ impl Servers {
     /// approvals ([`extensions::on_server_start`]) and the engine proxy in front of it. Returns
     /// once the server listens on 127.0.0.1 and no other process holds its port. The server
     /// runs under its Seatbelt profile from [`sandbox::profile`]; where no sandbox is
-    /// qualified it never starts. Inputs: the project, its canonical folder and the
-    /// canonical root of a verified build. Output: where the IDE is reached, or a plain
-    /// refusal.
+    /// qualified it never starts. The idle watch starts with the launch, so a launch whose
+    /// open is cut while it starts is still stopped once it exits, idles or misses its start
+    /// limit, and is never handed back to a later open. Inputs: the project, its canonical
+    /// folder and the canonical root of a verified build. Output: where the IDE is reached,
+    /// or a plain refusal.
     pub async fn open(
         &self,
         project: &ProjectId,
@@ -262,16 +268,22 @@ impl Servers {
             info: info.clone(),
             folder,
             touched: Instant::now(),
+            started: Instant::now(),
+            ready: false,
             proxy,
         });
+        tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle));
         if let Err(error) = ready(&slot, launch, server_port, group).await {
             stop_launch(&slot, launch).await;
             return Err(error);
         }
-        if let Some(running) = locked(&slot.state).as_mut() {
+        if let Some(running) = locked(&slot.state)
+            .as_mut()
+            .filter(|running| running.launch == launch)
+        {
+            running.ready = true;
             running.touched = Instant::now();
         }
-        tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle));
         Ok(info)
     }
 
@@ -428,20 +440,22 @@ impl Drop for Servers {
     }
 }
 
-/// Hands back the running server of a slot and marks it used; a server that exited is
-/// cleaned up instead. Input: the slot, its start lock held. Output: the server, if alive.
+/// Hands back the running server of a slot and marks it used. A server that exited, or
+/// one that never passed [`ready`] because the open that started it was cut, is stopped
+/// instead, so an open only ever gets a server that listens and owns its port. Input: the
+/// slot, its start lock held. Output: the server, if alive and ready.
 async fn reuse(slot: &Slot) -> Option<ServerInfo> {
-    let dead = {
+    let unusable = {
         let mut state = locked(&slot.state);
         let running = state.as_mut()?;
-        if matches!(running.child.try_wait(), Ok(None)) {
+        if running.ready && matches!(running.child.try_wait(), Ok(None)) {
             running.touched = Instant::now();
             return Some(running.info.clone());
         }
         state.take()
     };
-    if let Some(dead) = dead {
-        finish(dead).await;
+    if let Some(unusable) = unusable {
+        finish(unusable).await;
     }
     None
 }
@@ -474,8 +488,10 @@ async fn ready(slot: &Slot, launch: u64, port: u16, group: Pid) -> Result<(), En
     }
 }
 
-/// Stops a launch once it exited or went untouched for `idle`, checking again under the
-/// start lock so an open that just reused it keeps it. Ends with the launch.
+/// Stops a launch once it exited, went untouched for `idle`, or was not ready within
+/// [`START_LIMIT`] of its start because the open that started it was cut, checking again
+/// under the start lock so an open that is still starting or just reused it keeps it.
+/// Runs from the moment the launch is stored and ends with the launch.
 async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration) {
     loop {
         tokio::time::sleep(WATCH_POLL.min(idle)).await;
@@ -500,11 +516,14 @@ async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration) {
 }
 
 /// Whether a launch should stop: none when the slot holds another launch or none, else
-/// whether it exited or went untouched for `idle`.
+/// whether it exited, went untouched for `idle`, or is still not ready [`START_LIMIT`]
+/// after it started.
 fn due(slot: &Slot, launch: u64, idle: Duration) -> Option<bool> {
     let mut state = locked(&slot.state);
     let running = state.as_mut().filter(|running| running.launch == launch)?;
-    Some(!matches!(running.child.try_wait(), Ok(None)) || running.touched.elapsed() >= idle)
+    let exited = !matches!(running.child.try_wait(), Ok(None));
+    let unready = !running.ready && running.started.elapsed() >= START_LIMIT;
+    Some(exited || unready || running.touched.elapsed() >= idle)
 }
 
 async fn stop_launch(slot: &Slot, launch: u64) {

@@ -222,7 +222,9 @@ async fn handle(
     let Envelope { ide_tab: action } =
         serde_json::from_slice(bytes).map_err(|_| failure("ide_tab_request_invalid"))?;
     {
-        let _barrier = engine.owner_egress.write().await;
+        let _barrier = tokio::time::timeout(engine.timeout, engine.owner_egress.write())
+            .await
+            .map_err(|_| failure("owner_busy"))?;
         if &authority.authenticate(packet)? != admission {
             return Err(failure("owner_grant_stale_or_revoked"));
         }
