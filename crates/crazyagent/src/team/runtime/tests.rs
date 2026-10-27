@@ -1389,7 +1389,7 @@ fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_
 /// and works on it, and no other sub-agent or worktree is started for it.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_resolve_task_runs_in_the_worktree_of_the_sub_agent_it_was_pinned_to() {
+fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let fixture = Fixture::new(2);
     let host = fixture.host();
     let bin = fixture.base.join("bin");
@@ -1474,32 +1474,64 @@ fn a_resolve_task_runs_in_the_worktree_of_the_sub_agent_it_was_pinned_to() {
         f.agent_status(member.id).0 == AgentStatus::Stopped
     });
 
-    let tx = connection.transaction().unwrap();
-    let resolve = crate::team::admit_resolve(
-        &tx,
-        &fixture.setup.project_id,
-        member.id,
-        "Resolve the conflict markers in page.md",
-        now_ms(),
-    )
-    .unwrap()
-    .unwrap();
-    tx.commit().unwrap();
+    let project = fixture.base.join("project");
+    std::fs::write(project.join("OWNER.md"), "Written by the owner.\n").unwrap();
+    for arguments in [&["add", "OWNER.md"][..], &["commit", "-qm", "Owner notes"]] {
+        let status = crate::spawn_gate::spawn(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &fixture.base)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["-c", "user.name=Owner", "-c", "user.email=owner@crazyagent.invalid"])
+                .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"])
+                .args(arguments)
+                .current_dir(&project)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    }
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&db, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].agent.id, member.id.to_string());
+    crate::landing::update(&db, &sets[0].id).unwrap();
+    crate::landing_turns::start_resolve(&db, &sets[0].id).unwrap();
+    let prompt = crate::landing::resolve_task_prompt(&db, &sets[0].id).unwrap();
+    let resolve: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT task FROM team_task_pins WHERE agent=?1",
+            [member.id],
+            |row| row.get(0),
+        )
+        .unwrap();
     fixture.until(
         &mut team,
         "the same sub-agent works on the resolve task",
         |f| f.agent_status(member.id).0 == AgentStatus::Working,
     );
     ran(2);
-    let (agent, status): (Option<i64>, String) = fixture
+    let (agent, status, sent): (Option<i64>, String, String) = fixture
         .connection
         .query_row(
-            "SELECT agent,status FROM team_tasks WHERE id=?1",
+            "SELECT agent,status,prompt FROM team_tasks WHERE id=?1",
             [resolve],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!((agent, status.as_str()), (Some(member.id), "running"));
+    assert_eq!(sent, prompt);
+    assert!(prompt.contains("CrazyAgent merged it into your worktree"), "{prompt}");
+    assert!(
+        project.join(&worktree).join("OWNER.md").is_file(),
+        "the update merged the owner's commit into the sub-agent's worktree"
+    );
     assert_eq!(
         count(
             &fixture.connection,

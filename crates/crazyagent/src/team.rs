@@ -813,18 +813,19 @@ pub fn admit(
     Ok(Ok(id))
 }
 
-/// Queues the task that resolves the conflict markers an Ask agent to update left in a
-/// sub-agent's worktree (DEC-095). The task is pinned to that sub-agent, so it runs in the
-/// same worktree and its end lands in the same change set. Takes the transaction, the
-/// project, the sub-agent, the prompt and the time. Returns the new task id, or a plain
-/// refusal code.
+/// Starts the work that resolves what an Ask agent to update merged into a team agent's
+/// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
+/// worktree and lands in the same change set; the team master gets an engine message. A
+/// sub-agent holds at most one queued resolve task, whose prompt the newest update
+/// replaces, so the global task cap never refuses a merge already made. Takes the
+/// transaction, project, agent, prompt and time. Returns Ok, or a plain refusal code.
 pub fn admit_resolve(
     tx: &Transaction<'_>,
     project: &ProjectId,
     agent: i64,
     prompt: &str,
     now: i64,
-) -> Result<Result<i64, &'static str>, EngineError> {
+) -> Result<Result<(), &'static str>, EngineError> {
     if !text_valid(prompt, TASK_PROMPT_BYTES_MAX) {
         return Ok(Err("team_task_invalid"));
     }
@@ -840,11 +841,37 @@ pub fn admit_resolve(
     let Some((role, harness, tools)) = found else {
         return Ok(Err("team_agent_not_found"));
     };
-    if role != AgentRole::Sub.name() {
-        return Ok(Err("team_resolve_needs_sub_agent"));
+    match AgentRole::parse(&role) {
+        Some(AgentRole::Sub) => {}
+        Some(AgentRole::Master) => {
+            return append_message(
+                tx,
+                project,
+                MessageAuthor::Engine,
+                prompt,
+                MessageState::Pending,
+                now,
+            )
+            .map(|sent| sent.map(|_| ()));
+        }
+        None => return Ok(Err("team_agent_not_found")),
     }
-    if active_tasks(tx, project, None)? >= TASKS_ACTIVE_MAX {
-        return Ok(Err("team_queue_full"));
+    let queued: Option<i64> = tx
+        .query_row(
+            "SELECT t.id FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+             WHERE p.project=?1 AND p.agent=?2 AND t.status=?3",
+            params![project.as_str(), agent, TaskStatus::Queued.name()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(task) = queued {
+        tx.execute(
+            "UPDATE team_tasks SET prompt=?2 WHERE id=?1",
+            params![task, prompt],
+        )
+        .map_err(error)?;
+        return Ok(Ok(()));
     }
     make_room(
         tx,
@@ -878,7 +905,7 @@ pub fn admit_resolve(
         params![task, project.as_str(), agent],
     )
     .map_err(error)?;
-    Ok(Ok(task))
+    Ok(Ok(()))
 }
 
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the

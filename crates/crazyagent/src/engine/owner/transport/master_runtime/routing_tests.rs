@@ -2294,12 +2294,13 @@ async fn a_master_reply_observed_while_another_connection_holds_the_database_is_
 async fn end_tools_turn(
     case: &Fixture,
     prepared: &PreparedMasterTurn,
+    turn: &RequestId,
     edit: impl FnOnce(&Path),
     ending: MasterRuntimeObservation,
 ) -> MasterTurnView {
     let (profile, hold) = case
         .runtime()
-        .acquire_master_profile(prepared, &case.turn.id)
+        .acquire_master_profile(prepared, turn)
         .await
         .unwrap();
     let runtime = MasterRuntimeView {
@@ -2311,7 +2312,7 @@ async fn end_tools_turn(
         .runtime()
         .observe_master_turn(
             prepared,
-            &case.turn.id,
+            turn,
             MasterRuntimeObservation::Running { runtime },
         )
         .await
@@ -2321,7 +2322,7 @@ async fn end_tools_turn(
     edit(&prepared.cwd);
     let ended = case
         .runtime()
-        .observe_master_turn(prepared, &case.turn.id, ending)
+        .observe_master_turn(prepared, turn, ending)
         .await
         .unwrap();
     drop(hold);
@@ -2359,7 +2360,7 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     let (case, prepared) = tools_case(true).await;
     let reply = landing_reply(&prepared);
     let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
-    let ended = end_tools_turn(&case, &prepared, write, reply).await;
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
     let persisted = case.persisted_turn().await;
     let sets = case
         .owner
@@ -2420,7 +2421,7 @@ async fn a_failed_tools_on_master_turn_still_keeps_its_edits_for_review() {
         cause: "master_capture_incomplete".into(),
     };
     let write = |cwd: &Path| fs::write(cwd.join("half.txt"), "Half done.\n").unwrap();
-    let ended = end_tools_turn(&case, &prepared, write, failed).await;
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, write, failed).await;
     let sets = case
         .owner
         .change_sets(case.session.project_id.clone())
@@ -2439,7 +2440,7 @@ async fn a_failed_tools_on_master_turn_still_keeps_its_edits_for_review() {
 async fn a_tools_on_master_turn_that_changed_nothing_and_a_tools_off_turn_leave_no_change_set() {
     let (case, prepared) = tools_case(true).await;
     let reply = landing_reply(&prepared);
-    let ended = end_tools_turn(&case, &prepared, |_| {}, reply).await;
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, |_| {}, reply).await;
     let sets = case
         .owner
         .change_sets(case.session.project_id.clone())
@@ -2455,7 +2456,7 @@ async fn a_tools_on_master_turn_that_changed_nothing_and_a_tools_off_turn_leave_
     let reply = landing_reply(&prepared);
     let stray =
         |cwd: &Path| fs::write(cwd.join("stray.txt"), "Not from a tools-on master.\n").unwrap();
-    let ended = end_tools_turn(&case, &prepared, stray, reply).await;
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, stray, reply).await;
     let sets = case
         .owner
         .change_sets(case.session.project_id.clone())
@@ -2517,4 +2518,46 @@ async fn a_master_worktree_commits_only_into_the_git_folder_its_lease_recorded()
         "another folder that links back is still not the one the lease recorded"
     );
     assert_eq!(restored, recorded);
+}
+
+#[tokio::test]
+async fn asking_a_master_to_update_merges_the_owner_branch_and_its_next_turn_resolves_it() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    let (repository, worktree) = (prepared.repository.clone(), prepared.cwd.clone());
+    drop(prepared);
+    private_file(&repository.join("NOTES.md"), b"Written by the owner.\n");
+    git(&repository, case.root.path(), &["add", "NOTES.md"]);
+    git(&repository, case.root.path(), &["commit", "-qm", "Owner notes"]);
+    let project = case.session.project_id.clone();
+    let pending = case.owner.change_sets(project.clone()).await.unwrap();
+    case.owner
+        .update_changes(pending[0].id.clone())
+        .await
+        .unwrap();
+    let updating = case.owner.change_sets(project.clone()).await.unwrap();
+    let merged = fs::read_to_string(worktree.join("NOTES.md")).unwrap();
+    let second = case.submit("Carry on with the notes.").await;
+    let next = case.prepared(&second).await;
+    let resolve = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Both notes.\n").unwrap();
+    let ended = end_tools_turn(&case, &next, &second, resolve, landing_reply(&next)).await;
+    let reviewed = case.owner.change_sets(project).await.unwrap();
+    let text = next.text.clone();
+    drop(next);
+    case.finish().await;
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(updating[0].state, crate::landing::ChangeState::Updating);
+    assert!(merged.contains("<<<<<<<"), "{merged}");
+    assert!(
+        text.contains("CrazyAgent merged it into your worktree"),
+        "{text}"
+    );
+    assert!(text.contains("\n- NOTES.md\n"), "{text}");
+    assert!(text.ends_with("Carry on with the notes."), "{text}");
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(reviewed.len(), 1, "{reviewed:?}");
+    assert_eq!(reviewed[0].id, pending[0].id);
+    assert_eq!(reviewed[0].state, crate::landing::ChangeState::Pending);
 }
