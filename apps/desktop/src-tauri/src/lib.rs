@@ -1838,7 +1838,7 @@ async fn desktop_remove_finished_agents(
     state: State<'_, NativeState>,
     project_id: String,
     agents: Vec<i64>,
-) -> Result<Vec<i64>, BridgeError> {
+) -> Result<crazyagent::team::cleanup::Removal, BridgeError> {
     main_window(&window)?;
     let call = lock(&state)
         .await?

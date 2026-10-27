@@ -13,6 +13,13 @@ export interface FinishedAgent {
   counted_all: boolean;
 }
 
+/** What one removal did: the agents it removed, in the order asked, and the code of the agent
+ * it kept when it stopped part way, or null when it removed every one. */
+export interface Removal {
+  agents: number[];
+  kept: string | null;
+}
+
 const REFUSALS: Record<string, string> = {
   cleanup_agent_has_task: "An agent has a task waiting for it again. CrazyAgent kept it and stopped there.",
   cleanup_agent_not_found: "An agent is no longer in this project. CrazyAgent kept it and stopped there.",
@@ -51,8 +58,8 @@ export function loadFinishedAgents(projectId: string): Promise<Result<FinishedAg
 }
 
 /** Removes the worktrees and folders of finished agents the owner confirmed; the engine checks
- * each one again and removes none when one changed. Inputs: the project id and the agent ids.
- * Output: the agents removed. */
-export function removeFinishedAgents(projectId: string, agents: number[]): Promise<Result<number[]>> {
-  return call<number[]>("desktop_remove_finished_agents", { projectId, agents });
+ * each one again first and stops at the first one that changed. Inputs: the project id and the
+ * agent ids. Output: what the removal did, or the code when it removed none. */
+export function removeFinishedAgents(projectId: string, agents: number[]): Promise<Result<Removal>> {
+  return call<Removal>("desktop_remove_finished_agents", { projectId, agents });
 }

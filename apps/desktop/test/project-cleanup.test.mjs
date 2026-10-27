@@ -76,3 +76,10 @@ test("the dialog keeps the list it opened with and a changed read asks again bef
   assert.doesNotMatch(same, /The list changed/);
   assert.match(same, /Keep them Remove and free 1\.5 GB/);
 });
+
+test("the outcome says what went, and how many stayed and why when the removal stopped part way", () => {
+  assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [3, 2], kept: null } }), "Removed 2 finished agents and freed 1.5 GB.");
+  assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [3], kept: "cleanup_worktree_dirty" } }),
+    "Removed 1, kept 1: An agent's working copy has changes that aren't saved anywhere else. CrazyAgent kept it and stopped there.");
+  assert.match(view.removalNote(finished, { kind: "error", code: "cleanup_agent_running", message: "" }), /^Couldn't remove every finished agent\. An agent started again\./);
+});

@@ -144,13 +144,27 @@ impl Cleanup {
             (CleanupQuery::Remove { project: asked, .. }, Stage::Removing(agents))
                 if asked == project =>
             {
-                let freed = space(agents);
+                let gone: Vec<FinishedAgent> = match result {
+                    Ok(CleanupReply::Removed(removal)) => agents
+                        .iter()
+                        .filter(|agent| removal.agents.contains(&agent.id))
+                        .cloned()
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let kept = agents.len().saturating_sub(gone.len());
                 self.stage = Stage::Closed;
                 match result {
-                    Ok(CleanupReply::Removed(removed)) => ctx.say(Message::success(
-                        &format!("Removed {}.", agents_word(removed.len())),
-                        &format!("Freed {freed}."),
-                    )),
+                    Ok(CleanupReply::Removed(removal)) => match removal.kept.as_deref() {
+                        None => ctx.say(Message::success(
+                            &format!("Removed {}.", agents_word(gone.len())),
+                            &format!("Freed {}.", space(&gone)),
+                        )),
+                        Some(code) => ctx.say(Message::warning(
+                            &format!("Removed {}, kept {kept}:", gone.len()),
+                            words(code),
+                        )),
+                    },
                     Ok(CleanupReply::Finished(_)) => {}
                     Err(code) => ctx.say(Message::warning(
                         "Cleanup kept an agent and stopped there.",

@@ -2,7 +2,7 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CLEANUP_CODES, OwnerClient};
 use crazyagent::protocol::ProjectId;
-use crazyagent::team::cleanup::FinishedAgent;
+use crazyagent::team::cleanup::{FinishedAgent, Removal};
 use std::sync::Arc;
 
 fn cleanup_error(error: EngineError) -> BridgeError {
@@ -51,12 +51,13 @@ impl NativeBridge {
 
     /// Removes the worktrees and folders of the finished agents the owner confirmed, run
     /// without the bridge lock; the engine checks each one again first. Inputs: the
-    /// project id and the agents. Output: the agents removed, or the code that kept them.
+    /// project id and the agents. Output: the agents removed with the listed code of the one
+    /// kept when the removal stopped part way, or the code that kept them all.
     pub fn remove_finished_agents(
         &self,
         project_id: String,
         agents: Vec<i64>,
-    ) -> Result<Unlocked<Vec<i64>>, BridgeError> {
+    ) -> Result<Unlocked<Removal>, BridgeError> {
         let project = project(project_id)?;
         let client = self.cleanup_client()?;
         Ok(Box::pin(async move {
@@ -64,10 +65,12 @@ impl NativeBridge {
                 .remove_finished_agents(project, agents)
                 .await
                 .map_err(cleanup_error)?;
-            match removal.kept {
-                None => Ok(removal.agents),
-                Some(code) => Err(cleanup_error(EngineError(code))),
-            }
+            Ok(Removal {
+                kept: removal
+                    .kept
+                    .map(|code| cleanup_error(EngineError(code)).code.to_owned()),
+                agents: removal.agents,
+            })
         }))
     }
 }

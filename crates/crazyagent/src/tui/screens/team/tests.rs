@@ -1129,7 +1129,13 @@ fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
         "a removal under way stays on screen"
     );
 
-    shell.arrive(cleanup_reply(remove, Ok(CleanupReply::Removed(vec![4, 2]))));
+    shell.arrive(cleanup_reply(
+        remove,
+        Ok(CleanupReply::Removed(crate::team::cleanup::Removal {
+            agents: vec![4, 2],
+            kept: None,
+        })),
+    ));
     let message = shell.ctx.message().unwrap();
     assert_eq!(message.lead, "Removed 2 finished agents.");
     assert_eq!(message.rest, "Freed 4 MB.");
@@ -1195,6 +1201,44 @@ fn twenty_agents_at_80x24_keep_the_question_and_y_removes_every_one_read() {
         "{}",
         rows.join("\n")
     );
+}
+
+#[test]
+fn a_removal_that_stopped_part_way_says_how_many_went_and_why_one_stayed() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    cleanup_sent(&mut shell);
+    let agents = vec![
+        finished(4, "Ada (@login-page)", 3 * 1024 * 1024),
+        finished(3, "Lin (@docs)", 1024 * 1024),
+        finished(2, "Grace (@signup)", 1024 * 1024),
+    ];
+    shell.arrive(cleanup_reply(read, Ok(CleanupReply::Finished(agents))));
+    shell.key(Key::Char('y'));
+    let sent = cleanup_sent(&mut shell);
+    assert_eq!(
+        sent,
+        vec![CleanupQuery::Remove {
+            project: project(),
+            agents: vec![4, 3, 2],
+        }]
+    );
+    shell.arrive(cleanup_reply(
+        sent[0].clone(),
+        Ok(CleanupReply::Removed(crate::team::cleanup::Removal {
+            agents: vec![4, 3],
+            kept: Some("cleanup_worktree_dirty".into()),
+        })),
+    ));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Removed 2, kept 1:");
+    assert_eq!(
+        message.rest,
+        "An agent's working copy has changes that are not saved anywhere else."
+    );
+    assert!(!render(&mut shell).join("\n").contains("Grace (@signup)"));
 }
 
 #[test]

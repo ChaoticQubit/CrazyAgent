@@ -1,6 +1,6 @@
 use super::settings::connection_lost;
 use super::*;
-use crate::team::cleanup::FinishedAgent;
+use crate::team::cleanup::{FinishedAgent, Removal};
 
 /// One cleanup request the Team screen sends: read a project's finished agents, or remove
 /// the ones the owner confirmed. Runs on the owner worker; the reply arrives as
@@ -16,12 +16,12 @@ pub(in crate::tui) enum CleanupQuery {
     },
 }
 
-/// What the engine answered a cleanup request with: the finished agents, or the agents it
-/// removed.
+/// What the engine answered a cleanup request with: the finished agents, or what a removal
+/// did, with the code of the agent it kept when it stopped part way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CleanupReply {
     Finished(Vec<FinishedAgent>),
-    Removed(Vec<i64>),
+    Removed(Removal),
 }
 
 /// One cleanup reply for the screens: the query it answers and the engine's answer, or a
@@ -90,10 +90,7 @@ impl NativeOwner {
             CleanupQuery::Remove { project, agents } => controller
                 .remove_finished_agents(project, agents)
                 .await
-                .and_then(|removal| match removal.kept {
-                    None => Ok(CleanupReply::Removed(removal.agents)),
-                    Some(code) => Err(crate::engine::EngineError(code)),
-                }),
+                .map(CleanupReply::Removed),
         }
         .map_err(problem)
     }

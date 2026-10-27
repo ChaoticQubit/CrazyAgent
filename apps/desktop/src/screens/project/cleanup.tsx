@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { cleanupNotReady, cleanupRefusal, loadFinishedAgents, removeFinishedAgents, type FinishedAgent } from "../../api-cleanup";
+import type { Result } from "../../api";
+import { cleanupNotReady, cleanupRefusal, loadFinishedAgents, removeFinishedAgents, type FinishedAgent, type Removal } from "../../api-cleanup";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog } from "../../ui";
 import { displayText } from "../conversation";
@@ -33,6 +34,16 @@ export function cleanupRequest(asked: FinishedAgent[] | null, list: Loaded<Finis
   if (asked === null || asked.length === 0) return null;
   if (list.kind === "ok" && !sameAgents(asked, list.value)) return null;
   return asked.map((agent) => agent.id);
+}
+
+/** The line after a removal: what went and the space freed, how many went and stayed with why
+ * when it stopped part way, or why it removed none. Inputs: the agents the owner confirmed and
+ * the engine's answer. Output: the line. */
+export function removalNote(asked: FinishedAgent[], result: Result<Removal>): string {
+  if (result.kind !== "ok") return `Couldn't remove every finished agent. ${cleanupRefusal(result.kind === "error" ? result : { code: "cleanup_unavailable" })}`;
+  const gone = asked.filter((agent) => result.value.agents.includes(agent.id));
+  if (result.value.kept !== null) return `Removed ${gone.length}, kept ${asked.length - gone.length}: ${cleanupRefusal({ code: result.value.kept })}`;
+  return `Removed ${gone.length} finished ${gone.length === 1 ? "agent" : "agents"} and freed ${cleanupSize(gone)}.`;
 }
 
 /** The cleanup row for a given read: nothing while loading, without cleanup in this build or
@@ -92,14 +103,11 @@ export function FinishedAgentsCleanup({ projectId, finished, harness }: { projec
   async function confirm() {
     const ids = cleanupRequest(asked, list);
     if (asked === null || ids === null) return;
-    const size = cleanupSize(asked);
     setPending(true);
     const result = await removeFinishedAgents(projectId, ids);
     setPending(false);
     setAsked(null);
-    setNote(result.kind === "ok"
-      ? `Removed ${result.value.length} finished ${result.value.length === 1 ? "agent" : "agents"} and freed ${size}.`
-      : `Couldn't remove every finished agent. ${cleanupRefusal(result.kind === "error" ? result : { code: "cleanup_unavailable" })}`);
+    setNote(removalNote(asked, result));
     reload();
   }
 
