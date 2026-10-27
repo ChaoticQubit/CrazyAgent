@@ -1543,8 +1543,11 @@ impl TeamRuntime {
 
     /// Keeps a project's live master running while its switch is on: starts it on a ready
     /// pool account of the master harness, briefs it once its thread waits, and stops a
-    /// master whose mode no longer matches the switch. A master that cannot start leaves
-    /// one team note per distinct reason. Takes the setup, live access and paused accounts.
+    /// master whose mode or session no longer matches the switch. Nothing starts while a
+    /// master of the project is still stopping or restarting, so the next start finds it
+    /// stopped and starts it again in its own worktree and home. A master that cannot start
+    /// leaves one team note per distinct reason. Takes the setup, live access and paused
+    /// accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -1553,11 +1556,9 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let on = super::master::live(&self.connection, project)?;
-        if self
-            .workers
-            .values()
-            .any(|w| &w.project == project && w.role == AgentRole::Master && w.restarting)
-        {
+        if self.workers.values().any(|w| {
+            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
+        }) {
             return Ok(());
         }
         let session = crate::master_sessions::live_session(&self.connection, project)?;
@@ -3049,7 +3050,9 @@ impl TeamRuntime {
                 );
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
-                    self.workers.get_mut(&id).expect("worker exists").stopping = true;
+                    let worker = self.workers.get_mut(&id).expect("worker exists");
+                    worker.stopping = true;
+                    let _ = worker.orders.send(Order::Stop);
                 }
                 let turn = super::master::turn_ended(
                     &self.connection,
