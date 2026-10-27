@@ -285,9 +285,9 @@ fn signed(value: u64) -> Result<i64, EngineError> {
     i64::try_from(value).map_err(|_| failure("changes_unavailable"))
 }
 
-/// Writes a change set, adding it or replacing every column of the stored one.
+/// Writes a change set, adding it or updating every column of the row with its id.
 /// Inputs: the store and the record. Output: Ok once stored; a second open change set
-/// for the same worktree is refused by the store's unique index.
+/// for the same worktree is refused with `changes_agent_has_pending` and both rows stay.
 pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> {
     let intent = record
         .intent
@@ -295,10 +295,17 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
         .map(|intent| serde_json::to_string(intent).map_err(storage))
         .transpose()?;
     let conflicts = serde_json::to_string(&record.conflicts).map_err(storage)?;
+    let updates = COLUMNS
+        .split(',')
+        .filter(|column| *column != "id")
+        .map(|column| format!("{column}=excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(",");
     db.execute(
         &format!(
-            "INSERT OR REPLACE INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)"
+            "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26) \
+             ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
             record.id.as_str(),
