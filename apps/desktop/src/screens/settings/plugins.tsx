@@ -465,16 +465,35 @@ export function AddSkillDialog({ open, scope, message, onClose, onAdded }: {
 }
 
 interface SecretRow {
+  id: number;
   name: string;
   value: RefObject<HTMLInputElement | null>;
 }
 
-function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
+/** Reads each secret row's name with the value in that row's own masked field.
+ * Input: the rows. Output: name and value pairs in row order. */
+export function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
   return rows.map((row) => ({ name: row.name, value: row.value.current?.value ?? "" }));
 }
 
 function clearSecrets(rows: SecretRow[]): void {
   for (const row of rows) if (row.value.current) row.value.current.value = "";
+}
+
+/** The secret rows of Add MCP server: a name and a masked value each, keyed by an id that never
+ * changes, so removing one row never moves a typed value onto another row's name. Add secret
+ * stops at the secrets limit. Inputs: the rows and their change handler. */
+export function SecretRows({ rows, onRows }: { rows: SecretRow[]; onRows: (rows: SecretRow[]) => void }) {
+  return <>
+    {rows.map((row) => <div className="row" key={row.id}>
+      <TextField id={`server-secret-name-${row.id}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
+        onValue={(value) => onRows(rows.map((other) => other.id === row.id ? { ...other, name: value } : other))} />
+      <SecretField id={`server-secret-value-${row.id}`} label="Value" inputRef={row.value} />
+      <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; onRows(rows.filter((other) => other.id !== row.id)); }} />
+    </div>)}
+    {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus"
+      onClick={() => onRows([...rows, { id: Math.max(0, ...rows.map((other) => other.id)) + 1, name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+  </>;
 }
 
 /** The Add MCP server dialog: name, a command on this Mac or a URL, and secrets by name.
@@ -531,13 +550,7 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
       <div className="stack-small">
         <span className="title">Secrets</span>
         <p className="secondary">{form.kind === "stdio" ? "Each secret is given to the command as an environment value." : "Each secret is sent to the URL as a header."} CrazyAgent's engine keeps them privately; you won't see them again.</p>
-        {rows.map((row, index) => <div className="row" key={index}>
-          <TextField id={`server-secret-name-${index}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
-            onValue={(value) => setRows(rows.map((other, at) => at === index ? { ...other, name: value } : other))} />
-          <SecretField id={`server-secret-value-${index}`} label="Value" inputRef={row.value} />
-          <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; setRows(rows.filter((_, at) => at !== index)); }} />
-        </div>)}
-        {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus" onClick={() => setRows([...rows, { name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+        <SecretRows rows={rows} onRows={setRows} />
         {errors.secrets && <span className="field-error" role="alert">{errors.secrets}</span>}
       </div>
       {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}
