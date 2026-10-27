@@ -18,7 +18,7 @@ use crate::terminal::tmux::{SOCKET, Tmux, installed};
 
 use std::process::{Command, Stdio};
 
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PROJECT: &str = "team-panes";
 
@@ -2940,13 +2940,13 @@ fn message_interrupted_before_send_is_sent_once() {
     host.close(&[]).unwrap();
 }
 
-/// A message whose master left no session record cannot be told delivered or not; the next
-/// engine fails the message with a note and never types it, and its intent stays pending
+/// A message whose idle master, which no interrupted run holds it for, left no session
+/// record cannot be told delivered or not; the next engine fails the message with a note and never types it, and its intent stays pending
 /// for the owner across starts until the owner dismisses it (DEC-098 addendum 4).
 #[test]
 fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_stays_pending_for_the_owner() {
     let fixture = Fixture::new(1);
-    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
     let message = interrupted_message(&fixture, master);
     let key = format!("team-message/{message}");
 
@@ -3045,13 +3045,14 @@ fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_ow
     );
 }
 
-/// A delivery an engine start found unknown stays unknown at every later start: no later
+/// A delivery no interrupted run holds that an engine start found unknown stays unknown at
+/// every later start: no later
 /// start reads a record for it, so a newer session of the agent that shows the same first
 /// line neither settles it as delivered nor drops it from the owner's list.
 #[test]
 fn an_unknown_delivery_is_not_settled_later_by_a_newer_session() {
     let fixture = Fixture::new(1);
-    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Working);
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
     let message = interrupted_message(&fixture, master);
     let key = format!("team-message/{message}");
 
@@ -3214,4 +3215,144 @@ fn dispatch_interrupted_after_send_is_not_handed_out_again_and_one_before_send_w
     drop(fixture.runtime());
     assert_eq!(task(tasks[0]).0, "failed");
     assert_eq!(task(tasks[1]).0, "queued");
+}
+
+fn running_task(fixture: &Fixture, sub: i64, prompt: &str) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+            params![PROJECT, prompt, sub],
+        )
+        .unwrap();
+    fixture.connection.last_insert_rowid()
+}
+
+/// An agent that starts its harness for each turn keeps no pane record, only the session
+/// record of its running turn. A start reads that record for a delivery intended before
+/// the session started, so a task the session shows is never handed out again, and never
+/// reads an older session left from an earlier turn, so that one stays unknown.
+#[test]
+fn a_per_turn_agent_s_delivery_settles_from_the_session_record_of_its_running_turn() {
+    let fixture = Fixture::new(2);
+    let current = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let earlier = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let prompt = "Write the changelog";
+    let tasks = [current, earlier].map(|sub| {
+        let task = running_task(&fixture, sub, prompt);
+        assert!(
+            delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap()
+        );
+        task
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    let session = |sub: i64, since: SystemTime| {
+        let file = fixture.base.join(format!("session-{sub}.jsonl"));
+        let typed = serde_json::json!({
+            "type": "user",
+            "message": {"content": format!("You are a sub-agent of the project \"Panes\".\nYour task: {prompt}")}
+        });
+        std::fs::write(&file, format!("{typed}\n{TURN_DONE}\n")).unwrap();
+        let record = PaneRecord::new(
+            &Transcript::ClaudeSession { file },
+            &fixture.base,
+            since,
+            4242,
+            None,
+        )
+        .unwrap();
+        crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+    };
+    session(current, SystemTime::now());
+    session(earlier, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    assert!(!fixture.recorded(current) && !fixture.recorded(earlier));
+
+    drop(fixture.runtime());
+    let task = |id: i64| -> (String, Option<String>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        task(tasks[0]),
+        (
+            "failed".to_owned(),
+            Some(delivery::DELIVERED_TASK.to_owned())
+        ),
+        "the running turn's session shows the task"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[0])),
+        [Some("done".to_owned())]
+    );
+    assert_eq!(
+        task(tasks[1]),
+        ("failed".to_owned(), Some(delivery::UNKNOWN_TASK.to_owned())),
+        "a session older than the delivery tells nothing about it"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        [format!("team-task/{}", tasks[1])]
+    );
+}
+
+/// A message its master was answering when the engine stopped is held for the master's
+/// resume: the start neither fails it nor types it. A resume that fails keeps it held for
+/// the owner's retry; a retried resume that fails again gives the run up and lets the
+/// message go, settled as a start settles a message no run holds: failed with a note, its
+/// intent pending for the owner.
+#[test]
+fn a_held_message_waits_for_its_resume_and_a_retried_resume_that_fails_again_lets_it_go() {
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+    let project = fixture.setup.project_id.clone();
+    let runs = |f: &Fixture| crate::recovery::list(&f.base, &project).unwrap();
+    let held = |f: &Fixture| {
+        crate::recovery::holds(&f.connection, crate::recovery::HeldItem::Message(message)).unwrap()
+    };
+
+    let mut team = fixture.runtime();
+    assert_eq!(message_state(&fixture, message), "pending");
+    assert_eq!(outcomes(&fixture, "message", &key), [None]);
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 0);
+    assert!(held(&fixture));
+    fixture.until(&mut team, "the resume fails for its missing record", |f| {
+        runs(f)
+            .first()
+            .is_some_and(|run| run.state == crate::recovery::RunState::Failed)
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        message_state(&fixture, message),
+        "pending",
+        "held for a retry"
+    );
+    assert_eq!(outcomes(&fixture, "message", &key), [None]);
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 0);
+    assert!(held(&fixture));
+
+    assert!(crate::recovery::retry(&fixture.base, master).unwrap());
+    fixture.until(&mut team, "the retried resume fails again", |f| {
+        runs(f)[0].state == crate::recovery::RunState::Failed
+    });
+    assert!(!held(&fixture), "the run let the message go");
+    assert_eq!(runs(&fixture)[0].last_turn.message, None);
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        [key.clone()]
+    );
+    idle_ticks(&mut team);
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
 }

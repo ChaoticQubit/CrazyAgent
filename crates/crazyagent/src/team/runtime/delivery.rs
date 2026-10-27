@@ -5,8 +5,8 @@ use crate::harnesses::interactive::Transcript;
 use crate::harnesses::terminal_session::{PaneRecord, RecordSource};
 use crate::harnesses::transcript::{TranscriptReader, typed_after};
 use crate::ledger::{self, Action, ActionKind, Check, Outcome, Resolution, Resolved};
-use crate::recovery::HeldItem;
 use crate::protocol::ProjectId;
+use crate::recovery::HeldItem;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -70,7 +70,10 @@ pub(super) fn intend(
             return Ok(true);
         }
         let resolution = match kept {
-            Some(kept) => delivered(&kept, latest(connection, Some(kept.agent))?.get(&kept.agent)),
+            Some(kept) => delivered(
+                &kept,
+                latest(connection, Some(kept.agent))?.get(&kept.agent),
+            ),
             None => Resolution::Unknown,
         };
         let outcome = match resolution {
@@ -249,7 +252,11 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
     let (settled, failed) = match item {
         Busy::Message(_) => (settle_message(&tx, &open, arrived, now)?, None),
         Busy::Task(_) => {
-            let reason = if arrived { DELIVERED_TASK } else { UNKNOWN_TASK };
+            let reason = if arrived {
+                DELIVERED_TASK
+            } else {
+                UNKNOWN_TASK
+            };
             let failed = settle_task(&tx, &open, reason, now)?;
             (failed.is_some(), failed)
         }

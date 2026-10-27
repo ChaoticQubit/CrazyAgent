@@ -143,7 +143,8 @@ pub fn list(runtime: &Path, project: &ProjectId) -> Result<Vec<Interrupted>, Eng
 }
 
 /// Starts a failed resume again: the agent's newest failed run waits to resume once more,
-/// on the team runtime's next tick, without its old reason.
+/// on the team runtime's next tick, without its old reason; if that resume fails too, the
+/// run gives up and lets go of its task or message ([`retried`]).
 /// Inputs: the engine root and the team agent. Output: whether a failed run was waiting.
 pub fn retry(runtime: &Path, agent: i64) -> Result<bool, EngineError> {
     let db = open(runtime)?;
@@ -182,6 +183,13 @@ pub(crate) fn mark(
     reason: Option<&str>,
 ) -> Result<bool, EngineError> {
     store::mark(db, run, from, to, reason)
+}
+
+/// Tells whether the owner retried the run, so a failure of its resume gives it up rather
+/// than holding its task or message for one more retry that would fail the same way.
+/// Inputs: the team runtime's connection and the run. Output: the answer.
+pub(crate) fn retried(db: &Connection, run: i64) -> Result<bool, EngineError> {
+    store::retried(db, run)
 }
 
 /// One team task or owner message an interrupted run can hold back for its resume.

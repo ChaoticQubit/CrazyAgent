@@ -210,7 +210,8 @@ impl TeamRuntime {
         }
         let resume = match conversation(run) {
             Ok(resume) => resume,
-            Err(reason) => return self.give_up(run, RunState::Interrupted, reason),
+            Err(NOT_RESUMABLE) => return self.give_up(run, RunState::Interrupted, NOT_RESUMABLE),
+            Err(reason) => return self.fail(run, RunState::Interrupted, reason),
         };
         let terminal = launch_harness(&run.harness)
             .is_some_and(|launch| interactive::support(launch) == Support::Terminal);
@@ -508,7 +509,47 @@ impl TeamRuntime {
         from: RunState,
         reason: &str,
     ) -> Result<(), EngineError> {
-        self.fail(run, from, reason)?;
+        self.failed(run, from, reason, true)
+    }
+
+    /// Records a run's resume failed with its reason and tells the project once, so the
+    /// owner can retry it; a run the owner already retried gives up instead, as
+    /// [`Self::give_up`] does, so its task or message waits behind no more retries.
+    /// Takes the run, the state it is in and the plain reason. Returns any SQLite failure.
+    fn fail(&mut self, run: &Interrupted, from: RunState, reason: &str) -> Result<(), EngineError> {
+        let retried = recovery::retried(&self.connection, run.id)?;
+        self.failed(run, from, reason, retried)
+    }
+
+    /// Records a run's resume failed with its reason and tells the project once, then, when
+    /// it gives up and it was in the expected state, lets go of its task or message and
+    /// settles that item's delivery. Takes the run, its state, the plain reason and whether
+    /// it gives up. Returns any SQLite or ledger failure.
+    fn failed(
+        &mut self,
+        run: &Interrupted,
+        from: RunState,
+        reason: &str,
+        give_up: bool,
+    ) -> Result<(), EngineError> {
+        if !recovery::mark(
+            &self.connection,
+            run.id,
+            from,
+            RunState::Failed,
+            Some(reason),
+        )? {
+            return Ok(());
+        }
+        self.note(
+            &run.project,
+            &full_stop(format!(
+                "An agent cut short when CrazyAgent stopped could not resume: {reason}"
+            )),
+        )?;
+        if !give_up {
+            return Ok(());
+        }
         let (held, busy) = match (run.last_turn.task, run.last_turn.message) {
             (Some(task), _) => (HeldItem::Task(task), Busy::Task(task)),
             (None, Some(message)) => (HeldItem::Message(message), Busy::Message(message)),
@@ -516,26 +557,5 @@ impl TeamRuntime {
         };
         recovery::release(&self.connection, held)?;
         super::delivery::settle_released(&self.connection, busy)
-    }
-
-    /// Records a run's resume failed with its reason and tells the project once, so the
-    /// owner can retry it. Takes the run, the state it is in and the plain reason.
-    /// Returns any SQLite failure.
-    fn fail(&mut self, run: &Interrupted, from: RunState, reason: &str) -> Result<(), EngineError> {
-        if recovery::mark(
-            &self.connection,
-            run.id,
-            from,
-            RunState::Failed,
-            Some(reason),
-        )? {
-            self.note(
-                &run.project,
-                &full_stop(format!(
-                    "An agent cut short when CrazyAgent stopped could not resume: {reason}"
-                )),
-            )?;
-        }
-        Ok(())
     }
 }

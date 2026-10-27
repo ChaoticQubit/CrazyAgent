@@ -8,7 +8,7 @@ use crate::harnesses::terminal_session::{PaneRecord, RecordSource};
 use crate::harnesses::transcript::TranscriptReader;
 use crate::protocol::ProjectId;
 use crate::team::{AgentRole, bound_text, now_ms};
-use rusqlite::{Connection, Row, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -32,7 +32,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS recovery_runs (
     paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1)),
     state TEXT NOT NULL CHECK(state IN ('stopped','interrupted','resuming','resumed','failed')),
     recorded_ms INTEGER,
-    reason TEXT
+    reason TEXT,
+    retried INTEGER NOT NULL DEFAULT 0 CHECK(retried IN (0,1))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS recovery_runs_once ON recovery_runs(agent, at_ms);
 CREATE INDEX IF NOT EXISTS recovery_runs_state ON recovery_runs(state, project, id);
@@ -89,10 +90,29 @@ fn invalid() -> EngineError {
     EngineError("recovery_record_invalid".into())
 }
 
-/// Adds the recovery table to the engine database when missing.
-/// Input: the connection. Output: done, or `recovery_unavailable`.
+/// Adds the recovery table to the engine database when missing, and the `retried` column
+/// to a table made before it. Input: the connection. Output: done, or `recovery_unavailable`.
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(storage)
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    let has = || {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('recovery_runs') WHERE name='retried')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage)
+    };
+    if !has()?
+        && db
+            .execute_batch(
+                "ALTER TABLE recovery_runs ADD COLUMN retried INTEGER NOT NULL DEFAULT 0 CHECK(retried IN (0,1))",
+            )
+            .is_err()
+        && !has()?
+    {
+        return Err(unavailable());
+    }
+    Ok(())
 }
 
 /// Keeps the first non-empty line of what a turn was asked, trimmed and bounded.
@@ -428,17 +448,30 @@ pub(super) fn mark(
     Ok(changed == 1)
 }
 
-/// Sets the agent's newest failed run waiting to resume again, without its reason.
-/// Inputs: the store and the agent. Output: whether a failed run was found.
+/// Sets the agent's newest failed run waiting to resume again, without its reason, marked
+/// retried. Inputs: the store and the agent. Output: whether a failed run was found.
 pub(super) fn retry(db: &Connection, agent: i64) -> Result<bool, EngineError> {
     let changed = db
         .execute(
-            "UPDATE recovery_runs SET state='interrupted', reason=NULL
+            "UPDATE recovery_runs SET state='interrupted', reason=NULL, retried=1
              WHERE id=(SELECT MAX(id) FROM recovery_runs WHERE agent=?1 AND state='failed')",
             [agent],
         )
         .map_err(storage)?;
     Ok(changed == 1)
+}
+
+/// Tells whether the owner retried the run. Inputs: the store and the run.
+/// Output: the answer, false for a run the store no longer has.
+pub(super) fn retried(db: &Connection, run: i64) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT retried FROM recovery_runs WHERE id=?1",
+        [run],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|retried| retried.unwrap_or(false))
+    .map_err(storage)
 }
 
 fn column(item: HeldItem) -> (&'static str, i64) {
