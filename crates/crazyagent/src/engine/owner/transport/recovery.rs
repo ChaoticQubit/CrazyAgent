@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
 pub(super) const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
 
 /// Every code a Recovery request can answer an owner client with: the ledger's refusals,
 /// this protocol's own, and the owner connection's it travels on.
@@ -113,6 +114,11 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// Serves one Recovery request. Under the owner barrier the grant is checked again, the
+/// notice is dismissed and the reply is written within REPLY_WRITE_TIME, so a revocation
+/// that returned saw every dismissal admitted before it and lets none through after, and a
+/// client that stops reading holds the barrier no longer than that. Inputs: the connection,
+/// engine, authority, packet, admission and body. Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -121,7 +127,9 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let reply = match handle(engine, authority, packet, admission, bytes).await {
+    let action = parse(bytes);
+    let _barrier = engine.owner_egress.write().await;
+    let reply = match handle(authority, packet, admission, action).await {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected { code: error.0 },
     };
@@ -132,22 +140,24 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    tokio::time::timeout(REPLY_WRITE_TIME, stream.write_all(&frame))
+        .await
+        .map_err(|_| unknown())?
+        .map_err(io_error)
 }
 
+/// Answers a parsed request under the owner barrier its caller holds: checks the grant
+/// again, then dismisses. Inputs: the authority, packet, admission and the parsed request.
+/// Output: the reply, or the refusal.
 async fn handle(
-    engine: &Arc<Engine>,
-    authority: &Arc<Authority>,
+    authority: &Authority,
     packet: &[u8; 37],
     admission: &Admission,
-    bytes: &[u8],
+    action: Result<Action, EngineError>,
 ) -> Result<Reply, EngineError> {
-    let action = parse(bytes)?;
-    {
-        let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
+    let action = action?;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
     }
     let root = super::changes::engine_root(authority)?;
     tokio::task::spawn_blocking(move || run(&root, action))
