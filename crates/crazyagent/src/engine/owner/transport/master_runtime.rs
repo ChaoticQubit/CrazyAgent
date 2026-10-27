@@ -17,7 +17,7 @@ use crate::sandbox::InstalledSandbox;
 use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
-use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_turn};
+use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_reported, count_turn};
 use std::fs::File;
 #[cfg(unix)]
 use std::io::Seek;
@@ -713,7 +713,7 @@ impl OwnerRuntimeHandle {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
-        self.count_master_usage(prepared, home, active.reported)
+        self.count_master_usage(prepared, Some(home), active.reported)
             .await;
         if let Some(diagnostic) = active.host.diagnostic()
             && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
@@ -752,20 +752,21 @@ impl OwnerRuntimeHandle {
     }
 
     /// Counts one finished master turn under its project's master row before its home is
-    /// removed: the usage Claude Code reported for the turn, or the Codex records in the
-    /// home. A store that cannot be written leaves the turn uncounted and logs only the
-    /// failure code. Inputs: the prepared turn, its home and the reported usage.
-    async fn count_master_usage(
+    /// removed: the usage Claude Code reported for the turn, the Codex records in the home,
+    /// or the usage frames an rcli host reported, which keeps no records. A store that cannot
+    /// be written leaves the turn uncounted and logs only the failure code. Inputs: the
+    /// prepared turn, its home when it has records and the reported usage.
+    pub(super) async fn count_master_usage(
         &self,
         prepared: &PreparedMasterTurn,
-        home: std::path::PathBuf,
+        home: Option<std::path::PathBuf>,
         reported: Tokens,
     ) {
         let connection = &prepared.profile.binding().connection;
         let (format, harness) = match prepared.session.selection.backend {
-            MasterBackend::Claude => (Format::Claude, "claude-code"),
-            MasterBackend::Codex => (Format::Codex, "codex"),
-            MasterBackend::Rcli => return,
+            MasterBackend::Claude => (Some(Format::Claude), "claude-code"),
+            MasterBackend::Codex => (Some(Format::Codex), "codex"),
+            MasterBackend::Rcli => (None, "rcli"),
         };
         let attribution = Attribution {
             kind: RunKind::Master,
@@ -779,15 +780,14 @@ impl OwnerRuntimeHandle {
         let root = super::changes::engine_root(&self.authority);
         let counted = tokio::task::spawn_blocking(move || {
             let db = crate::usage::open(&root?)?;
-            count_turn(
-                &db,
-                &home,
-                format,
-                &attribution,
-                reported,
-                &session,
-                crate::team::now_ms(),
-            )
+            let now_ms = crate::team::now_ms();
+            match (format, home) {
+                (Some(format), Some(home)) => {
+                    count_turn(&db, &home, format, &attribution, reported, &session, now_ms)
+                        .map(|_| ())
+                }
+                _ => count_reported(&db, &attribution, reported, &session, now_ms),
+            }
         })
         .await;
         let problem = match counted {
