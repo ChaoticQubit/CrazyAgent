@@ -823,6 +823,66 @@ fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
 }
 
 #[test]
+fn a_confined_sandbox_guards_a_real_admin_submodule_store_and_refuses_a_planted_one() {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let store = case.project.join(".git/worktrees/one/modules");
+    assert!(fs::symlink_metadata(&store).is_err());
+    let confine =
+        || sandbox(&case, SandboxNetwork::Only(Vec::new())).confine_to_worktree(&worktree);
+    let confined = confine().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(&store).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    assert!(confined.protected_paths().contains(&store));
+    assert!(
+        !sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .protected_paths()
+            .contains(&store)
+    );
+    assert!(confine().unwrap().protected_paths().contains(&store));
+    fs::remove_dir(&store).unwrap();
+    fs::write(&store, b"planted").unwrap();
+    let result = confine();
+    assert!(
+        matches!(result, Err(SandboxError::Invalid(_))),
+        "{:?}",
+        result.map(|sandbox| sandbox.profile())
+    );
+    assert_eq!(fs::read(&store).unwrap(), b"planted");
+    fs::remove_file(&store).unwrap();
+    std::os::unix::fs::symlink(&case.outside, &store).unwrap();
+    assert!(matches!(confine(), Err(SandboxError::Invalid(_))));
+    assert!(
+        fs::symlink_metadata(&store)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
 fn an_agent_cannot_plant_the_git_redirect_files_the_engine_rejects() {
     let plants: [(&str, &str, &str); 12] = [
         (

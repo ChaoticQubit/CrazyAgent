@@ -1371,27 +1371,22 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Creates the two submodule-store folders a later sandbox profile denies writes to, so
-/// every platform guards an existing folder rather than the `.git` root or the lease admin
-/// folder: the repository's common `.git/modules` and this lease's admin `modules`. Both are
-/// owner-owned, mode 0700, and the call is idempotent, so a store a sibling lease already
-/// made is left in place. On Windows the boundary turns a present folder into a deny on the
-/// folder itself while the parent keeps "add entries" (`index.lock`), where a missing folder
-/// would instead deny "add entries" on the parent. Inputs: the repository and the lease
-/// admin git dir. Output: success, or the refusal code.
+/// Makes the two submodule-store folders a sandbox profile denies writes to, the common
+/// `.git/modules` and this lease's admin `modules`, through `sandbox::ensure_store`, so every
+/// platform guards a real folder. A store already there is kept when it is a plain folder;
+/// a file or link there is refused, never trusted. Inputs: the repository and the lease
+/// admin git dir. Output: success, or `submodule_store_invalid` or the filesystem refusal.
 #[cfg(unix)]
 fn ensure_submodule_stores(repository: &Path, admin: &Path) -> Result<(), EngineError> {
-    let common = repository.join(".git").join("modules");
-    let private = admin.join("modules");
-    for store in [&common, &private] {
-        match std::fs::create_dir(store) {
-            Ok(()) => std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o700))
-                .map_err(error)?,
-            Err(problem) if problem.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(problem) => return Err(error(problem)),
-        }
+    for store in [
+        repository.join(".git").join("modules"),
+        admin.join("modules"),
+    ] {
+        crate::sandbox::ensure_store(&store).map_err(|problem| match problem.kind() {
+            std::io::ErrorKind::InvalidData => error("submodule_store_invalid"),
+            _ => error(problem),
+        })?;
     }
-    assert!(common.is_dir() && private.is_dir());
     Ok(())
 }
 
@@ -2117,6 +2112,39 @@ mod tests {
             assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
         }
         ensure_submodule_stores(&repository, &admin).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_submodule_store_that_is_a_file_or_a_link_is_refused_not_trusted() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let admin = temporary.path().join("admin");
+        let elsewhere = temporary.path().join("elsewhere");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir(&admin).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        let common = repository.join(".git").join("modules");
+        std::fs::write(&common, b"planted").unwrap();
+        assert_eq!(
+            ensure_submodule_stores(&repository, &admin).unwrap_err().0,
+            "submodule_store_invalid"
+        );
+        assert_eq!(std::fs::read(&common).unwrap(), b"planted");
+        std::fs::remove_file(&common).unwrap();
+        let private = admin.join("modules");
+        std::os::unix::fs::symlink(&elsewhere, &private).unwrap();
+        assert_eq!(
+            ensure_submodule_stores(&repository, &admin).unwrap_err().0,
+            "submodule_store_invalid"
+        );
+        assert!(
+            std::fs::symlink_metadata(&private)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[test]
