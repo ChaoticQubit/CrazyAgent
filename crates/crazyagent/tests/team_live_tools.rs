@@ -315,10 +315,20 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
 
     let (status, error) = answer(7);
     assert!(!error, "{status}");
+    let writer_line = status
+        .lines()
+        .find(|line| line.starts_with(&writer_label))
+        .unwrap_or_else(|| panic!("no line for {writer_label}:\n{status}"));
     assert!(
-        status.contains(&format!("{writer_label} / codex-{writer} (codex): Working")),
+        writer_line.starts_with(&format!("{writer_label} (codex): Working")),
         "{status}"
     );
+    assert_eq!(
+        writer_line.matches(writer_label.as_str()).count(),
+        1,
+        "the agent is named once: {status}"
+    );
+    assert!(!writer_line.contains(" / "), "{status}");
     assert!(!status.contains("old-job"), "{status}");
     assert!(
         status.contains("asks: Proceed? (owner) Approved: push --force"),

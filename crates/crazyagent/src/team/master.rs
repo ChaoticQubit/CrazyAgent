@@ -989,7 +989,7 @@ fn type_to_agent(
     match super::events::send_to_agent(connection, host, project, &target, text)
         .map_err(unreadable)?
     {
-        Ok(id) => agent_label(connection, id).map_err(unreadable),
+        Ok(id) => super::events::label(connection, id).map_err(unreadable),
         Err("team_message_invalid") => Err(format!(
             "Not sent: give plain text up to {} bytes.",
             super::events::SEND_BYTES_MAX
@@ -1004,15 +1004,6 @@ fn type_to_agent(
     }
 }
 
-fn agent_label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
-    let name = super::names::name(connection, agent)?;
-    Ok(super::names::label(
-        super::AgentRole::Sub,
-        agent,
-        name.as_ref(),
-    ))
-}
-
 fn unreadable(problem: EngineError) -> String {
     format!(
         "Not done: the team state could not be read ({}).",
@@ -1020,16 +1011,14 @@ fn unreadable(problem: EngineError) -> String {
     )
 }
 
-/// Describes a project's running sub-agents for its live master, each named the way the
-/// owner sees it and the way events name it. Takes the database and the project. Returns
-/// the status text, or the plain reason it could not be read.
+/// Describes a project's running sub-agents for its live master, each line naming the agent
+/// once the way the owner sees it ("Ada (@page-writer) (codex): Working"), a name `message`
+/// and `answer` accept. Takes the database and the project. Returns the status text, or the
+/// plain reason it could not be read.
 fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, String> {
-    let mut status = super::events::status(connection, project).map_err(unreadable)?;
-    for line in &mut status.agents {
-        let label = agent_label(connection, line.agent).map_err(unreadable)?;
-        line.label = format!("{label} / {}", line.label);
-    }
-    Ok(status.text())
+    super::events::status(connection, project)
+        .map(|status| status.text())
+        .map_err(unreadable)
 }
 
 #[cfg(all(test, unix))]
