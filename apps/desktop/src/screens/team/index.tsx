@@ -1,12 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { loadTeamGraph } from "../../api";
 import type { Result } from "../../api";
-import type { GraphNode, TeamGraph } from "../../engine-client";
-import { Button, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton, StatusBadge, type IconName } from "../../ui";
+import type { GraphEdge, GraphNode, TeamGraph } from "../../engine-client";
+import { Button, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import {
-  DRAG_SLOP, NODE_HEIGHT, NODE_WIDTH, arrowMove, edgeStatus, graphLive, graphSummary, keepOffsets,
-  layoutGraph, moveNode, nodeDetail, nodeStatus, type Offsets, type PlacedEdge, type PlacedNode,
+  BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, GROUP_HEAD, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, fitView,
+  graphLive, graphSummary, groupTitle, layoutCards, layoutGraph, nodeDetail, nodeStatus, panView, questionCount,
+  tipPlace, viewKey, wheelZoom, zoomView, type Link, type PlacedCard, type PlacedGroup, type Size, type View,
 } from "./graph";
 import { TerminalPanel } from "./terminal-panel";
 import "./team-graph.css";
@@ -15,7 +16,6 @@ export { TerminalPanel } from "./terminal-panel";
 
 export const LIVE_READ_MS = 2_000;
 export const IDLE_READ_MS = 10_000;
-const LABEL_CHARS = 28;
 
 const NODE_ICONS: Record<GraphNode["kind"], IconName> = {
   master: "sparkles",
@@ -23,86 +23,67 @@ const NODE_ICONS: Record<GraphNode["kind"], IconName> = {
   agent: "bot",
 };
 
-/** A short label for a task edge: its status word and the start of the task text.
- * Input: the placed edge. Output: the label text. */
-export function edgeLabel(placed: PlacedEdge): string {
-  const text = placed.edge.text.replace(/\s+/g, " ").trim();
-  const start = text.length > LABEL_CHARS ? `${text.slice(0, LABEL_CHARS - 1).trimEnd()}...` : text;
-  return `${edgeStatus(placed.edge).word}: ${start}`;
-}
-
-/** What a screen reader hears for one node box. Inputs: the node and a harness name lookup.
- * Output: one sentence naming it, its detail, status and what activating it does. */
-export function nodeLabel(node: GraphNode, harness?: (id: string) => string): string {
+/** What a screen reader hears for one card. Inputs: the node, a harness name lookup and the
+ * graph's edges. Output: one sentence naming it, its detail, status, task and what activating
+ * it does; a harness group has no task. */
+export function nodeLabel(node: GraphNode, harness?: (id: string) => string, edges: readonly GraphEdge[] = []): string {
   const status = nodeStatus(node);
   const parts = [node.label, nodeDetail(node, harness), status?.word].filter(Boolean).join(", ");
-  return `${parts}.${node.terminal ? " Opens its terminal." : ""} Arrow keys move it.`;
+  const task = node.kind === "harness_group" ? "" : ` ${cardTask(node, edges).replace(/\s+/g, " ").trim().replace(/[.!?]$/, "")}.`;
+  return `${parts}.${task}${node.terminal ? " Opens its terminal." : ""}`;
 }
 
-function NodeBox({ placed, harness, open, onOpen, onMove }: {
-  placed: PlacedNode;
+/** One fixed-size card: a status dot and the clipped title, the harness line and the clipped
+ * task lines. Activating it opens the agent's terminal; hover or focus shows its full text.
+ * Inputs: the placed card, the edges, a harness name lookup, whether its terminal is open, the
+ * id of its shown hover text, and the open and hover actions. Output: the card button. */
+export function GraphCard({ placed, edges, harness, open, tipId, onOpen, onTip }: {
+  placed: PlacedCard;
+  edges: readonly GraphEdge[];
   harness?: (id: string) => string;
   open: boolean;
+  tipId: string | null;
   onOpen: (id: string) => void;
-  onMove: (id: string, dx: number, dy: number) => void;
+  onTip: (id: string | null) => void;
 }) {
-  const drag = useRef<{ pointer: number; x: number; y: number; moved: boolean } | null>(null);
   const node = placed.node;
   const status = nodeStatus(node);
   const opens = node.terminal !== null;
-  return <button type="button" className={`tg-node ${node.kind}${open ? " open" : ""}`}
-    style={{ left: placed.x, top: placed.y, width: NODE_WIDTH, height: NODE_HEIGHT }}
-    aria-label={displayText(nodeLabel(node, harness))} aria-pressed={opens ? open : undefined}
-    onPointerDown={(event) => {
-      if (event.button !== 0) return;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
-    }}
-    onPointerMove={(event) => {
-      const current = drag.current;
-      if (!current || current.pointer !== event.pointerId) return;
-      const dx = event.clientX - current.x;
-      const dy = event.clientY - current.y;
-      if (!current.moved && Math.hypot(dx, dy) < DRAG_SLOP) return;
-      current.moved = true;
-      current.x = event.clientX;
-      current.y = event.clientY;
-      onMove(node.id, dx, dy);
-    }}
-    onPointerUp={(event) => {
-      const current = drag.current;
-      drag.current = null;
-      if (current && current.pointer === event.pointerId && !current.moved && opens) onOpen(node.id);
-    }}
-    onPointerCancel={() => { drag.current = null; }}
-    onClick={(event) => { if (event.detail === 0 && opens) onOpen(node.id); }}
-    onKeyDown={(event) => {
-      const move = arrowMove(event.key, event.shiftKey);
-      if (!move) return;
-      event.preventDefault();
-      onMove(node.id, move.x, move.y);
-    }}>
-    <span className="tg-node-title"><Icon name={NODE_ICONS[node.kind]} size={14} />{displayText(node.label)}</span>
-    <span className="tg-node-detail">{displayText(nodeDetail(node, harness))}</span>
-    {status && <StatusBadge word={status.word} tone={status.tone} />}
+  const text = cardText({ ...node, label: displayText(node.label) }, edges.map((edge) => ({ ...edge, text: displayText(edge.text) })), harness);
+  return <button type="button" className={`tg-card ${node.kind}${open ? " open" : ""}${opens ? "" : " static"}`}
+    style={{ left: placed.x, top: placed.y, width: placed.width, height: placed.height }}
+    aria-label={displayText(nodeLabel(node, harness, edges))} aria-pressed={opens ? open : undefined}
+    aria-describedby={tipId ?? undefined}
+    onClick={() => { if (opens) onOpen(node.id); }}
+    onPointerEnter={() => onTip(node.id)} onPointerLeave={() => onTip(null)}
+    onFocus={() => onTip(node.id)} onBlur={() => onTip(null)}>
+    <span className="tg-card-title">
+      <span className={`tg-dot tone-${status?.tone ?? "neutral"}`} aria-hidden="true" />
+      <Icon name={NODE_ICONS[node.kind]} size={14} />
+      <span className="tg-clip">{text.title}</span>
+    </span>
+    <span className="tg-card-detail tg-clip">{displayText(text.detail)}</span>
+    <span className="tg-card-task">{text.task.map((line, index) => <span key={index} className="tg-clip">{line}</span>)}</span>
   </button>;
 }
 
-function TaskDetail({ placed, nodes, id, onClose }: { placed: PlacedEdge; nodes: GraphNode[]; id: string; onClose: () => void }) {
-  const { edge } = placed;
-  const status = edgeStatus(edge);
-  const to = nodes.find((node) => node.id === edge.to)?.label ?? edge.to;
-  return <section id={id} className="tg-task" aria-label={`Task ${edge.task_id}`}>
-    <div className="tg-task-head">
-      <strong>{edge.source === "owner" ? "From you" : "From the master"} to {displayText(to)}</strong>
-      <StatusBadge word={status.word} tone={status.tone} />
-      <Button variant="quiet" size="small" icon="x" iconOnly="Close task" onClick={onClose} />
+function GroupFrame({ group, harness }: { group: PlacedGroup; harness?: (id: string) => string }) {
+  return <div className={`tg-group${group.node ? "" : " other"}`} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>
+    <div className="tg-group-head" style={{ height: GROUP_HEAD }} title={displayText(groupTitle(group, harness))}>
+      <Icon name={NODE_ICONS.harness_group} size={14} />
+      <span className="tg-clip">{displayText(groupTitle(group, harness))}</span>
     </div>
-    <p className="tg-task-text">{displayText(edge.text)}</p>
-    {edge.reply
-      ? <><h4 className="tg-task-label">{edge.state === "failed" ? "Problem" : "Reply"}</h4><p className="tg-task-reply">{displayText(edge.reply)}</p></>
-      : <p className="tg-task-label">No reply yet.</p>}
-  </section>;
+  </div>;
+}
+
+function LinkBadges({ link }: { link: Link }) {
+  const label = badgeLabel(link);
+  if (!label) return null;
+  return <span className="tg-badges" role="img" aria-label={label} title={label}
+    style={{ left: link.badge.x - BADGE_WIDTH / 2, top: link.badge.y - BADGE_HEIGHT / 2, width: BADGE_WIDTH, height: BADGE_HEIGHT }}>
+    {link.tasks > 0 && <span className="tg-badge"><Icon name="list-checks" size={12} />{link.tasks}</span>}
+    {link.questions > 0 && <span className="tg-badge question"><Icon name="message-square" size={12} />{link.questions}</span>}
+  </span>;
 }
 
 /** What the graph view shows: the read it draws, and why the latest read failed while an
@@ -146,29 +127,52 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
   return [state, () => setRound((value) => value + 1)];
 }
 
-/** The live team graph of one project: the master, one box per harness group with its agent
- * count, each agent with status and account, and the tasks the master handed out as live
- * edges. Boxes drag; a click on an edge shows the task and its reply; a click on the master
+/** The live team graph of one project: the master card on top, one frame per harness with
+ * its agent cards, and links that carry only live-task and question counts. Drag or the arrow
+ * keys pan, a pinch, Ctrl or Cmd wheel or the buttons zoom, and Fit shows it all; the view fits
+ * itself until the owner moves it. Hovering a card shows its full text; activating the master
  * or an agent opens its terminal beside the graph. Inputs: the project id and an optional
  * harness name lookup. Output: the graph section. */
 export function TeamGraphView({ projectId, harness }: { projectId: string; harness?: (id: string) => string }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
-  const [offsets, setOffsets] = useState<Offsets>(() => new Map());
   const [open, setOpen] = useState<string | null>(null);
-  const [task, setTask] = useState<number | null>(null);
+  const [moved, setMoved] = useState<View | null>(null);
+  const [tip, setTip] = useState<string | null>(null);
+  const [element, setElement] = useState<HTMLDivElement | null>(null);
+  const [port, setPort] = useState<Size>({ width: 0, height: 0 });
+  const sizes = useRef<{ content: Size; port: Size }>({ content: { width: 0, height: 0 }, port });
+  const drag = useRef<{ pointer: number; x: number; y: number; moved: boolean } | null>(null);
+  const panned = useRef(false);
   const ids = useId();
-  const taskRegion = `${ids}-task`;
 
   useEffect(() => {
-    setOffsets(new Map());
     setOpen(null);
-    setTask(null);
+    setMoved(null);
+    setTip(null);
   }, [projectId]);
 
   useEffect(() => {
-    if (graph?.kind === "ok") setOffsets((current) => keepOffsets(current, graph.value));
-  }, [graph]);
+    if (!element) return;
+    const measure = () => setPort({ width: element.clientWidth, height: element.clientHeight });
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(element);
+    const wheel = (event: WheelEvent) => {
+      const factor = wheelZoom(event);
+      if (factor === null) return;
+      event.preventDefault();
+      const box = element.getBoundingClientRect();
+      const { content, port: viewport } = sizes.current;
+      setMoved((current) => zoomView(current ?? fitView(content, viewport), factor,
+        { x: event.clientX - box.left, y: event.clientY - box.top }, content, viewport));
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => {
+      observer?.disconnect();
+      element.removeEventListener("wheel", wheel);
+    };
+  }, [element]);
 
   if (graph === undefined) return <section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>;
   if (graph.kind === "not_ready") return <NotReady what="The team graph" compact />;
@@ -178,40 +182,93 @@ export function TeamGraphView({ projectId, harness }: { projectId: string; harne
       Add a team in the project settings, then ask the master to build something.
     </EmptyState>;
   }
-  const layout = layoutGraph(graph.value, offsets);
-  const openNode = layout.nodes.find((item) => item.node.id === open)?.node;
-  const shownTask = layout.edges.find((item) => item.edge.task_id === task);
-  const move = (id: string, dx: number, dy: number) => setOffsets((current) => moveNode(current, id, dx, dy));
+  const edges = graph.value.edges;
+  const layout = layoutGraph(graph.value);
+  const content = { width: layout.width, height: layout.height };
+  sizes.current = { content, port };
+  const shown = moved ?? fitView(content, port);
+  const cards = layoutCards(layout);
+  const openNode = cards.find((item) => item.node.id === open)?.node;
+  const tipCard = cards.find((item) => item.node.id === tip);
+  const tipId = `${ids}-tip`;
+  const pan = (dx: number, dy: number) => setMoved((current) => panView(current ?? shown, dx, dy, content, port));
+  const zoom = (factor: number) => setMoved((current) => zoomView(current ?? shown, factor, { x: port.width / 2, y: port.height / 2 }, content, port));
+  const place = tipCard && tipPlace(tipCard, shown, port);
+  const questions = cards.reduce((sum, item) => sum + questionCount(item.node), 0);
 
   return <section className="tg" aria-labelledby={`${ids}-title`}>
     <div className="tg-head">
       <h3 id={`${ids}-title`}>Team graph</h3>
-      <span className="tg-summary" role="status">{graphSummary(graph.value)}</span>
+      <span className="tg-summary" role="status">
+        {graphSummary(graph.value)}{questions > 0 ? ` ${questions} ${questions === 1 ? "question" : "questions"} waiting.` : ""}
+      </span>
     </div>
     {read.stale && <Notice tone="warn" alert>
       <span className="grow">{displayText(`Couldn't refresh the team graph. ${read.stale} Showing the last read.`)}</span>
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
     </Notice>}
-    <p className="tg-hint">Drag a box to arrange the graph, or focus it and use the arrow keys. Click the master or an agent to open its terminal.</p>
+    <p className="tg-hint" id={`${ids}-hint`}>Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click the master or an agent to open its terminal.</p>
     <div className={`tg-split${openNode ? " with-terminal" : ""}`}>
-      <div className="tg-canvas-scroll">
-        <div className="tg-canvas" style={{ width: layout.width, height: layout.height }}>
-          <svg className="tg-lines" width={layout.width} height={layout.height} aria-hidden="true">
-            {layout.links.map((link) => <path key={`${link.from}>${link.to}`} className="tg-link" d={link.path} />)}
-            {layout.edges.filter((item) => item.path).map((item) => <path key={item.edge.task_id} className={`tg-edge ${item.edge.state}`} d={item.path} />)}
-          </svg>
-          {layout.nodes.map((item) => <NodeBox key={item.node.id} placed={item} harness={harness} open={item.node.id === open}
-            onOpen={(id) => setOpen(id)} onMove={move} />)}
-          {layout.edges.map((item) => <button type="button" key={item.edge.task_id} className={`tg-edge-label ${item.edge.state}`}
-            style={{ left: item.label.x, top: item.label.y }} aria-expanded={task === item.edge.task_id} aria-controls={taskRegion}
-            aria-label={displayText(`Task ${item.edge.task_id}, ${edgeStatus(item.edge).word}: ${item.edge.text}`)}
-            onClick={() => setTask(task === item.edge.task_id ? null : item.edge.task_id)}>
-            {displayText(edgeLabel(item))}
-          </button>)}
+      <div className="tg-stage">
+        <div className="tg-tools" role="toolbar" aria-label="Graph view">
+          <Button size="small" icon="minus" iconOnly="Zoom out" onClick={() => zoom(1 / ZOOM_STEP)} />
+          <span className="tg-zoom">{Math.round(shown.zoom * 100)}%</span>
+          <Button size="small" icon="plus" iconOnly="Zoom in" onClick={() => zoom(ZOOM_STEP)} />
+          <Button size="small" variant="quiet" icon="square" onClick={() => setMoved(null)}>Fit</Button>
+        </div>
+        <div ref={setElement} className="tg-viewport" tabIndex={0} role="group" aria-label="Team graph view" aria-describedby={`${ids}-hint`}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+            panned.current = false;
+          }}
+          onPointerMove={(event) => {
+            const current = drag.current;
+            if (!current || current.pointer !== event.pointerId) return;
+            const dx = event.clientX - current.x;
+            const dy = event.clientY - current.y;
+            if (!current.moved && Math.hypot(dx, dy) < DRAG_SLOP) return;
+            if (!current.moved) {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              current.moved = true;
+              panned.current = true;
+              setTip(null);
+            }
+            current.x = event.clientX;
+            current.y = event.clientY;
+            pan(dx, dy);
+          }}
+          onPointerUp={() => { drag.current = null; }}
+          onClickCapture={(event) => {
+            if (panned.current && event.detail !== 0) event.stopPropagation();
+            panned.current = false;
+          }}
+          onPointerCancel={() => { drag.current = null; }}
+          onKeyDown={(event) => {
+            const action = viewKey(event.key);
+            if (!action || event.altKey || event.ctrlKey || event.metaKey) return;
+            event.preventDefault();
+            if (action.kind === "pan") pan(action.dx, action.dy);
+            else if (action.kind === "zoom") zoom(action.factor);
+            else setMoved(null);
+          }}>
+          <div className="tg-canvas" style={{ width: layout.width, height: layout.height, transform: `translate(${shown.x}px, ${shown.y}px) scale(${shown.zoom})`,
+            visibility: port.width > 0 ? "visible" : "hidden" }}>
+            {layout.groups.map((group, index) => <GroupFrame key={group.node?.id ?? `other-${index}`} group={group} harness={harness} />)}
+            <svg className="tg-lines" width={layout.width} height={layout.height} aria-hidden="true">
+              {layout.links.map((link, index) => <path key={link.group?.id ?? `other-${index}`} className="tg-link" d={link.path} />)}
+            </svg>
+            {cards.map((item) => <GraphCard key={item.node.id} placed={item} edges={edges} harness={harness} open={item.node.id === open}
+              tipId={item.node.id === tip ? tipId : null} onTip={setTip}
+              onOpen={setOpen} />)}
+            {layout.links.map((link, index) => <LinkBadges key={link.group?.id ?? `other-${index}`} link={link} />)}
+          </div>
+          {tipCard && place && <div id={tipId} role="tooltip" className={`tg-tip${place.above ? " above" : ""}`} style={{ left: place.left, top: place.top }}>
+            {cardTip(tipCard.node, edges, harness).map((line, index) => <p key={index} className={index === 0 ? "tg-tip-title" : undefined}>{displayText(line)}</p>)}
+          </div>}
         </div>
       </div>
       {openNode && <TerminalPanel key={openNode.id} node={openNode} harness={harness} onClose={() => setOpen(null)} />}
     </div>
-    {shownTask && <TaskDetail placed={shownTask} nodes={graph.value.nodes} id={taskRegion} onClose={() => setTask(null)} />}
   </section>;
 }
