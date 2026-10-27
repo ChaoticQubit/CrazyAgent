@@ -290,10 +290,17 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     !agent_env_refused(name)
 }
 
+/// The zsh temp-file prefix inside an agent's temp folder. zsh writes here-documents to
+/// `$TMPPREFIX`, `/tmp/zsh` by default, which no agent sandbox can write, so every agent
+/// shell gets its own. Input: the agent's temp folder. Output: the prefix path.
+pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
+    tmp.join("zsh")
+}
+
 /// Builds the environment of every agent process in launch order: `base`, then the
 /// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`] and
-/// [`AGENT_TLS_ENV`].
+/// `HOME`, `TMPDIR` and `TMPPREFIX` always stay as `base` set them), then `TMPPREFIX` from
+/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
@@ -323,10 +330,17 @@ pub fn agent_env<'a>(
         if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
             return Err(refused());
         }
-        if name == "HOME" || name == "TMPDIR" {
+        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" {
             continue;
         }
         set(&mut env, name, value);
+    }
+    let prefix = env
+        .iter()
+        .find(|(name, _)| name == "TMPDIR")
+        .map(|(_, tmp)| shell_tmp_prefix(Path::new(tmp)));
+    if let Some(prefix) = prefix {
+        set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
     }
     for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));

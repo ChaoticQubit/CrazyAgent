@@ -85,8 +85,12 @@ fn fake_tool_homes(tools: &Path) -> ToolHomes {
 }
 
 fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
+    run_in(sandbox, profile, Path::new("/bin/sh"), script)
+}
+
+fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) -> Output {
     sandbox.install(profile).unwrap();
-    let mut command = sandbox.command(profile, Path::new("/bin/sh"));
+    let mut command = sandbox.command(profile, shell);
     command
         .arg("-c")
         .arg(script)
@@ -471,4 +475,111 @@ fn a_missing_toolchain_is_never_installed_by_an_agent() {
     assert!(stderr.contains("is not installed"), "{stderr}");
     assert!(!case.home.join(".rustup").exists());
     assert_eq!(names(&homes.rustup().join("toolchains")), toolchains_before);
+}
+
+#[test]
+fn a_heredoc_works_in_every_agent_shell() {
+    let case = case();
+    let scratch = toolchains::make_tmp(&case.home).unwrap();
+    let granted = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&scratch)
+    .unwrap();
+    let plain = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    for (sandbox, profile) in [(&granted, "granted.sb"), (&plain, "plain.sb")] {
+        for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            let output = run_in(
+                sandbox,
+                &case.profiles.join(profile),
+                Path::new(shell),
+                "cat <<EOF\nheredoc $((40 + 2))\nEOF\n",
+            );
+            assert!(
+                output.status.success(),
+                "{shell} {profile}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "heredoc 42\n",
+                "{shell} {profile}"
+            );
+        }
+    }
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
+fn an_agent_never_writes_the_owner_toolchains_or_reads_their_credentials() {
+    let case = case();
+    let homes = fake_tool_homes(&case.tools);
+    write(&case.project.join("Cargo.toml"), "[package]\n");
+    toolchains::prepare_cargo_home(&case.home, &homes).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::detect(&case.project, &homes))
+    .unwrap();
+    let profile = case.profiles.join("walls.sb");
+    let readable = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "cat {} {}",
+            quoted(&case.home.join(".cargo/registry/index.txt")),
+            quoted(&case.tools.join(".rustup/settings.toml"))
+        ),
+    );
+    assert!(
+        readable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readable.stderr)
+    );
+    for target in [
+        case.home.join(".cargo/registry/planted"),
+        case.tools.join(".cargo/registry/planted"),
+        case.tools.join(".cargo/bin/planted"),
+        case.tools.join(".cargo/config.toml"),
+        case.tools.join(".rustup/toolchains/stable-x/bin/planted"),
+        case.tools.join(".rustup/settings.toml"),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("echo FIXTURE-PLANTED >> {}", quoted(&target)),
+        );
+        assert!(!output.status.success(), "{} was written", target.display());
+        assert!(
+            !fs::read_to_string(&target)
+                .unwrap_or_default()
+                .contains("FIXTURE-PLANTED"),
+            "{}",
+            target.display()
+        );
+    }
+    let credential = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "cat {}",
+            quoted(&case.tools.join(".cargo/credentials.toml"))
+        ),
+    );
+    assert!(!credential.status.success());
+    assert!(!String::from_utf8_lossy(&credential.stdout).contains("FIXTURE"));
 }

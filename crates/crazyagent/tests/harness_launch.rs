@@ -129,6 +129,10 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         ("LC_ALL".into(), "C".into()),
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("TMPDIR".into(), home_text),
+        (
+            "TMPPREFIX".into(),
+            home.path().join("zsh").to_str().unwrap().to_owned(),
+        ),
     ]);
     expected.extend(
         crazyagent::sandbox::AGENT_GIT_ENV
