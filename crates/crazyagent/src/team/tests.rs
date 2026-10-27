@@ -1196,8 +1196,7 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
     let mut setup = stored(
@@ -1293,8 +1292,7 @@ fn a_master_whose_project_folder_is_gone_names_the_plain_file_code() {
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let mut setup = stored("team-moved", vec![]);
     setup.folder = base.join("moved-away").to_str().unwrap().into();
     connection
@@ -1367,8 +1365,7 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
     let mut setup = stored(
@@ -1769,8 +1766,7 @@ fn a_managed_pool_member_without_a_sign_in_never_starts_an_agent() {
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let mut connection = Connection::open(&database).unwrap();
-    initialize(&connection).unwrap();
-    crate::project_setup::initialize(&connection).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
     let mut setup = stored(
