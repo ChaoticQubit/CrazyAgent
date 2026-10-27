@@ -6,7 +6,6 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::questions::{Ask, EngineSource};
-use crazyagent_desktop::bridge::notify::notice;
 use crazyagent_desktop::bridge::questions::QuestionCount;
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -14,14 +13,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 4] = [
     "desktop_questions",
     "desktop_answer_question",
     "desktop_dismiss_question",
     "desktop_question_counts",
-    "desktop_notify_question",
-    "desktop_notification_target",
-    "desktop_system_notifications",
 ];
 
 #[test]
@@ -29,11 +25,7 @@ fn question_commands_are_registered_in_all_four_places() {
     let build = include_str!("../build.rs");
     let bindings = include_str!("../src/lib.rs");
     let capability = include_str!("../capabilities/main-window.json");
-    let window = [
-        include_str!("../../src/api-questions.ts"),
-        include_str!("../../src/notify.ts"),
-    ]
-    .concat();
+    let window = include_str!("../../src/api-questions.ts");
     for command in COMMANDS {
         assert_eq!(
             build.matches(&format!("\"{command}\"")).count(),
@@ -64,10 +56,6 @@ fn question_commands_are_registered_in_all_four_places() {
             "{command} window"
         );
     }
-    assert!(
-        !capability.contains("notification:"),
-        "the window gets no notification plugin command; the app shows them itself"
-    );
 }
 
 /// The parameters of one command binding in `lib.rs`, one per line as rustfmt writes them.
@@ -107,18 +95,6 @@ fn the_window_passes_only_ids_versions_and_the_choice() {
         parameters("desktop_dismiss_question"),
         [&window[..], &["id: u64,", "version: u64,"]].concat()
     );
-    assert_eq!(
-        parameters("desktop_notify_question"),
-        [
-            &window[..],
-            &[
-                "notices: State<'_, Notices>,",
-                "project_id: String,",
-                "question_id: u64,"
-            ]
-        ]
-        .concat()
-    );
 }
 
 async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
@@ -155,8 +131,8 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     crazyagent::questions::raise(
         &db,
         &project,
-        EngineSource::Mapping,
-        Ask {
+        &EngineSource::Mapping,
+        &Ask {
             question: "Which database should the app use?\nIt stores recipes.".into(),
             options: vec!["Postgres".into(), "SQLite".into()],
             recommended: Some("SQLite".into()),
@@ -166,8 +142,8 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     crazyagent::questions::raise(
         &db,
         &project,
-        EngineSource::Mapping,
-        Ask {
+        &EngineSource::Mapping,
+        &Ask {
             question: "Should recipes be public?".into(),
             options: vec![],
             recommended: None,
@@ -204,30 +180,6 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
             project_id: id.clone(),
             pending: 2
         }]
-    );
-
-    let record = bridge.pending_question(id.clone(), asked.id)?.await?;
-    assert_eq!(record, asked, "the notification reads the engine's record");
-    let shown = notice(Some("Recipe box"), &record);
-    assert_eq!(shown.title, "Recipe box needs your answer");
-    assert_eq!(
-        shown.body,
-        "Project mapping: Which database should the app use?"
-    );
-    assert_eq!(
-        bridge
-            .pending_question(id.clone(), u64::MAX)?
-            .await
-            .unwrap_err()
-            .code,
-        "questions_not_found"
-    );
-    assert!(
-        bridge
-            .pending_question("another-project".into(), asked.id)?
-            .await
-            .is_err(),
-        "another project's notification never reads this question"
     );
 
     assert_eq!(
@@ -276,15 +228,6 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         .unwrap();
     assert_eq!(dismissed.status, "dismissed");
     assert!(bridge.question_counts()?.await?.is_empty());
-    assert_eq!(
-        bridge
-            .pending_question(id.clone(), asked.id)?
-            .await
-            .unwrap_err()
-            .code,
-        "questions_not_found",
-        "a settled question is never notified"
-    );
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { ANSWER_BYTES_MAX, answerQuestion, askerLabel, dismissQuestion, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
+import { ANSWER_BYTES_MAX, answerQuestion, askedInTerminal, askerLabel, dismissQuestion, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
 import type { OwnerQuestion, QuestionChoice, QuestionPage } from "../../api-questions";
 import { Button, ConfirmDialog, TextArea } from "../../ui";
 import { displayText } from "../conversation";
@@ -25,8 +25,9 @@ export function choiceOf(picked: number | null, text: string): QuestionChoice | 
 }
 
 /** One question: who asked and when, the question, its context and, while it waits, the
- * options with the recommended one marked, a field to type an answer, Answer and Dismiss.
- * A settled question shows its status and answer. Inputs: the question, now, whether an
+ * options with the recommended one marked, a field to type an answer, Answer and Dismiss; a
+ * question asked in an agent's terminal is answered there, so it offers only Dismiss. A
+ * settled question shows its status and answer. Inputs: the question, now, whether an
  * action runs and the handlers. Output: the card. */
 export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
   question: OwnerQuestion;
@@ -40,6 +41,7 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
   const name = useId();
   const field = useId();
   const pending = question.status === "pending";
+  const terminal = askedInTerminal(question);
   const choice = choiceOf(picked, text);
   const tooLong = text.trim().length > 0 && typedAnswer(text) === null;
   const badge = statusBadge(question.status);
@@ -55,7 +57,13 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
       <summary>Context</summary>
       <p>{displayText(question.context)}</p>
     </details>}
-    {pending && <>
+    {pending && terminal && <>
+      <p className="pj-small pj-secondary">Answer it in that agent's terminal. It is marked answered here when the question leaves the screen.</p>
+      <div className="pj-row">
+        <Button variant="quiet" disabled={busy} onClick={() => onDismiss(question)}>Dismiss</Button>
+      </div>
+    </>}
+    {pending && !terminal && <>
       {question.options.length > 0 && <fieldset className="qs-options">
         <legend className="pj-small pj-secondary">Pick one</legend>
         {question.options.map((option, index) => <label className="qs-option" key={`${index}:${option}`}>

@@ -2,15 +2,11 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, QUESTIONS_CODES};
 use crazyagent::protocol::ProjectId;
-use crazyagent::questions::{Answer, Question, QuestionStatus, Settlement};
+use crazyagent::questions::{
+    ANSWER_BYTES_MAX, Answer, OPTIONS_MAX, Question, QuestionStatus, Settlement,
+};
 use serde::Serialize;
 use std::sync::Arc;
-
-/// The longest typed answer the window may send, in bytes, as the engine bounds it.
-pub const ANSWER_BYTES_MAX: usize = 4096;
-/// The most options a question has, as the engine bounds it.
-pub const OPTIONS_MAX: u8 = 6;
-const NOTIFY_PAGES_MAX: usize = 4;
 
 /// One question an agent or an engine step asked the owner, as the window shows it: plain
 /// status words and the version an answer or dismissal sends back.
@@ -90,7 +86,7 @@ pub fn questions_error(error: EngineError) -> BridgeError {
 /// Inputs: the option and the text. Output: the answer, or `questions_answer_invalid`.
 pub fn choice(option: Option<u8>, text: Option<String>) -> Result<Answer, BridgeError> {
     match (option, text) {
-        (Some(index), None) if index < OPTIONS_MAX => Ok(Answer::Option(index)),
+        (Some(index), None) if usize::from(index) < OPTIONS_MAX => Ok(Answer::Option(index)),
         (None, Some(text)) if !text.trim().is_empty() && text.len() <= ANSWER_BYTES_MAX => {
             Ok(Answer::Text(text))
         }
@@ -142,45 +138,6 @@ impl NativeBridge {
                 items: page.items.into_iter().map(QuestionRow::from).collect(),
                 next: page.next,
             })
-        }))
-    }
-
-    /// Reads one pending question of a project from the engine, so a notification is built
-    /// from the engine's record and never from the window's words; run without the bridge
-    /// lock. Inputs: the project id and the question id. Output: the question, or
-    /// `questions_not_found` when the project has no such pending question.
-    pub fn pending_question(
-        &self,
-        project_id: String,
-        id: u64,
-    ) -> Result<Unlocked<QuestionRow>, BridgeError> {
-        let project = project(project_id)?;
-        let client = self.questions_client()?;
-        Ok(Box::pin(async move {
-            let mut after = None;
-            for _ in 0..NOTIFY_PAGES_MAX {
-                let page = client
-                    .questions_list(project.clone(), after)
-                    .await
-                    .map_err(questions_error)?;
-                let pending = page
-                    .items
-                    .iter()
-                    .any(|item| item.status == QuestionStatus::Pending);
-                if let Some(found) = page.items.into_iter().find(|item| item.id == id) {
-                    let row = QuestionRow::from(found);
-                    return if row.status == "pending" && row.project_id == project.as_str() {
-                        Ok(row)
-                    } else {
-                        Err(failure("questions_not_found"))
-                    };
-                }
-                match page.next {
-                    Some(next) if pending => after = Some(next),
-                    _ => break,
-                }
-            }
-            Err(failure("questions_not_found"))
         }))
     }
 
@@ -247,10 +204,12 @@ mod tests {
     /// anything else is refused before the engine is asked.
     #[test]
     fn an_answer_is_one_option_or_bounded_text() {
+        let last = u8::try_from(OPTIONS_MAX - 1).unwrap();
+        let past = u8::try_from(OPTIONS_MAX).unwrap();
         assert!(matches!(choice(Some(0), None), Ok(Answer::Option(0))));
         assert!(matches!(
-            choice(Some(OPTIONS_MAX - 1), None),
-            Ok(Answer::Option(index)) if index == OPTIONS_MAX - 1
+            choice(Some(last), None),
+            Ok(Answer::Option(index)) if index == last
         ));
         assert!(matches!(
             choice(None, Some("Use Postgres".into())),
@@ -262,7 +221,7 @@ mod tests {
         );
         for (option, text) in [
             (None, None),
-            (Some(OPTIONS_MAX), None),
+            (Some(past), None),
             (Some(0), Some("both".into())),
             (None, Some(" \n\t".into())),
             (None, Some("a".repeat(ANSWER_BYTES_MAX + 1))),

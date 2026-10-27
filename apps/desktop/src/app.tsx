@@ -2,9 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, type EngineVersions } from "./api";
 import { loadTeamEvents, teamAttention } from "./api-projects";
-import { loadQuestionCounts, loadQuestions, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
-import { FAILED_LINE, freshQuestions, inBackground, notifyQuestion, shouldNotify, systemNotifications, useNotificationClicks } from "./notify";
-import type { PendingQuestion } from "./notify";
+import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -194,21 +192,11 @@ function useShortcuts() {
 
 export const ALERT_READ_MS = 10_000;
 
-/** Reads the pending questions of the projects whose pending count changed since the last
- * read. Inputs: the pending counts now and the counts read before. Output: the pending
- * questions of those projects. */
-async function changedQuestions(pending: ReadonlyMap<string, number>, before: ReadonlyMap<string, number>): Promise<PendingQuestion[]> {
-  const changed = [...pending].filter(([project, count]) => before.get(project) !== count).map(([project]) => project);
-  const pages = await Promise.all(changed.map((project) => loadQuestions(project, null)));
-  return pages.flatMap((page) => page.kind === "ok" ? page.value.items.filter((item) => item.status === "pending") : []);
-}
-
 /** Watches the owner's team notifications and pending questions while the engine runs: every
  * 10 s it reads them, shows a new notification as a toast, keeps the app icon badge at the
- * unseen notifications plus the pending questions, asks for attention when a notification is
- * new, and sends a macOS notification for each new pending question while the window is in
- * the background. Inputs: whether the engine runs and the toast action. Output: what each
- * project's sidebar flag counts. */
+ * unseen notifications plus the pending questions, and asks for attention when a notification
+ * is new. Inputs: whether the engine runs and the toast action. Output: what each project's
+ * sidebar flag counts. */
 function useTeamAlerts(running: boolean, showToast: (message: string) => void): Map<string, number> {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const toast = useRef(showToast);
@@ -219,10 +207,6 @@ function useTeamAlerts(running: boolean, showToast: (message: string) => void): 
     let last: number | null = null;
     let shown = 0;
     let timer = 0;
-    let known: Set<number> | null = null;
-    let before = new Map<string, number>();
-    let failed = false;
-    const system = systemNotifications();
     const read = async () => {
       const [result, questions] = await Promise.all([loadTeamEvents(), loadQuestionCounts()]);
       if (!live || result.kind === "not_ready") return;
@@ -237,20 +221,6 @@ function useTeamAlerts(running: boolean, showToast: (message: string) => void): 
         if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
         shown = total;
       }
-      if (questions.kind === "ok") {
-        const watched = freshQuestions(known, await changedQuestions(pending, before));
-        known = watched.known;
-        before = pending;
-        if (shouldNotify(inBackground(), await system)) {
-          for (const question of watched.fresh) {
-            const sent = await notifyQuestion(question.project_id, question.id);
-            if (sent.kind === "error" && !failed) {
-              failed = true;
-              toast.current(FAILED_LINE);
-            }
-          }
-        }
-      }
       if (live) timer = window.setTimeout(read, ALERT_READ_MS);
     };
     void read();
@@ -262,14 +232,13 @@ function useTeamAlerts(running: boolean, showToast: (message: string) => void): 
   return counts;
 }
 
-/** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch, and the clicks on question notifications. */
+/** The desktop app: one engine session, the hash route, the app-wide shortcuts and the team
+ * notification and question watch. */
 export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
   const alerts = useTeamAlerts(session.engine === "running", session.showToast);
-  useNotificationClicks();
   return <AppView session={session} route={route} alerts={alerts} />;
 }

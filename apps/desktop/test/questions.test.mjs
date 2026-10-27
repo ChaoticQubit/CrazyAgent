@@ -61,6 +61,18 @@ test("a question with no options offers its suggested answer and a field of its 
   assert.doesNotMatch(card(question({ options: [], recommended: null })), /Suggested/);
 });
 
+test("a question asked in an agent's terminal is answered there, so its card offers only Dismiss", () => {
+  const asked = question({ asker: "terminal:2", options: ["Yes", "No"], recommended: "Yes" });
+  assert.equal(client.askedInTerminal(asked), true);
+  assert.equal(client.askedInTerminal(question()), false);
+  const markup = card(asked);
+  assert.match(markup, />Asked in the terminal of agent 2</);
+  assert.match(markup, /marked answered here when the question leaves the screen\.</);
+  assert.doesNotMatch(markup, /type="radio"|<textarea|>Answer<\/button>|Use suggested answer/);
+  assert.match(markup, /<button[^>]*>Dismiss<\/button>/);
+  assert.doesNotMatch(card(question({ asker: "terminal:2", status: "answered_in_terminal", settled_ms: NOW })), />Dismiss</);
+});
+
 test("the answer sent is one option or trimmed text of at most 4096 bytes", () => {
   assert.deepEqual(view.choiceOf(1, ""), { option: 1 });
   assert.deepEqual(view.choiceOf(0, "ignored while an option is picked"), { option: 0 });
@@ -104,7 +116,8 @@ test("askers read as plain words", () => {
   assert.equal(client.askerLabel("engine:planning"), "Roadmap planning");
   assert.equal(client.askerLabel("engine:research:market_research"), "Research: market research");
   assert.equal(client.askerLabel("engine:landing:cs-1"), "Landing changes");
-  assert.equal(client.askerLabel("terminal:claude-2"), "Asked in the terminal of claude-2");
+  assert.equal(client.askerLabel("master:session:s-9"), "Master");
+  assert.equal(client.askerLabel("terminal:2"), "Asked in the terminal of agent 2");
   assert.equal(client.askerLabel("someone"), "someone");
 });
 
@@ -123,9 +136,13 @@ test("a stale answer says the question changed, and every questions code reads a
   assert.ok(start >= 0, "the engine lists its questions codes");
   const own = [...engine.slice(start, engine.indexOf("];", start)).matchAll(/"(questions_[a-z_]+)"/g)].map((match) => match[1]);
   assert.ok(own.length >= 3, `engine questions codes: ${own.length}`);
-  for (const code of own.filter((code) => !["questions_request_bounds", "questions_reply_bounds", "questions_request_invalid"].includes(code))) {
+  const transport = ["questions_request_bounds", "questions_reply_bounds", "questions_request_invalid"];
+  const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_turn_invalid", "questions_page_unavailable"];
+  for (const code of askSide) assert.ok(own.includes(code), `${code} is still an engine code; drop it from the ask-side list when it goes`);
+  for (const code of own.filter((code) => ![...transport, ...askSide].includes(code))) {
     assert.ok(client.QUESTIONS_REFUSALS.includes(code), `${code} has its own sentence`);
   }
+  assert.equal(client.questionsRefusal({ code: "questions_in_terminal" }), "This question was asked in an agent's terminal. Answer it there.");
   assert.equal(client.notReady({ kind: "not_ready" }), true);
   assert.equal(client.notReady({ kind: "error", code: "questions_unavailable", message: "" }), true);
   assert.equal(client.notReady({ kind: "error", code: "questions_stale", message: "" }), false);

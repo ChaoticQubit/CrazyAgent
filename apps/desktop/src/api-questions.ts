@@ -53,6 +53,8 @@ const REFUSALS: Record<string, string> = {
   questions_project_missing: "This project is no longer in CrazyAgent.",
   questions_unavailable: "Questions aren't ready in this engine yet.",
   questions_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
+  questions_in_terminal: "This question was asked in an agent's terminal. Answer it there.",
+  questions_delivery_full: "The master's conversation is full right now. Try again after it reads its messages.",
 };
 
 /** The refusal codes of the questions protocol that have their own sentence. */
@@ -71,14 +73,14 @@ export function notReady<T>(result: Result<T>): boolean {
 }
 
 /** Who asked, in plain words, from the engine's asker name such as `master:<session>`,
- * `agent:<team id>`, `engine:research:<kind>` or `terminal:<agent>`. Input: the asker.
+ * `agent:<team id>`, `engine:research:<kind>` or `terminal:<agent id>`. Input: the asker.
  * Output: the label. */
 export function askerLabel(asker: string): string {
   const [kind, ...rest] = asker.split(":");
   const tail = rest.join(":");
   if (kind === "master") return "Master";
   if (kind === "agent" && tail) return `Agent ${displayText(tail)}`;
-  if (kind === "terminal" && tail) return `Asked in the terminal of ${displayText(tail)}`;
+  if (kind === "terminal" && tail) return `Asked in the terminal of agent ${displayText(tail)}`;
   if (kind === "engine") {
     if (tail === "mapping") return "Project mapping";
     if (tail === "planning") return "Roadmap planning";
@@ -86,6 +88,13 @@ export function askerLabel(asker: string): string {
     if (tail.startsWith("landing:")) return "Landing changes";
   }
   return displayText(asker);
+}
+
+/** Tells whether a question was asked in an agent's own terminal, where the owner answers it;
+ * the engine refuses an answer from the Questions view. Input: the question. Output: the
+ * answer. */
+export function askedInTerminal(question: Pick<OwnerQuestion, "asker">): boolean {
+  return question.asker.startsWith("terminal:");
 }
 
 /** The status word and tone of a question's badge. Input: the status. Output: the badge. */
