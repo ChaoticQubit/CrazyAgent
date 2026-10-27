@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
+import { PROJECT_LIST_MAX, harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
 import { loadSetupStatus } from "../../api-intake";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
 import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
 import { waitingLine } from "../project/research";
@@ -202,14 +203,14 @@ function SetupPanel({ items }: { items: SetupItem[] }) {
 
 function ProjectCard({ project, activity }: { project: ProjectRow; activity: CardActivity | undefined }) {
   return <a className="project-card" href={formatRoute({ name: "project", id: project.id, tab: "overview" })} aria-label={project.name}>
-    <span className="title-row"><Icon name="folder" /><h3 className="ellipsis">{project.name}</h3></span>
+    <span className="title-row"><Icon name="folder" /><h3 className="ellipsis">{displayText(project.name)}</h3></span>
     {activity?.research && <span className={`activity${activity.waiting ? " warn" : ""}`}><Icon name="search" size={14} />{activity.research}</span>}
     {activity?.agents && <span className="activity"><Icon name="bot" size={14} />{activity.agents}</span>}
     <span className="meta"><span>Open project</span><Icon name="chevron-right" size={14} /></span>
   </a>;
 }
 
-function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow[]>; activity: Map<string, CardActivity> | undefined; onRetry: () => void }) {
+function Projects({ projects, more, activity, onRetry }: { projects: Loaded<ProjectRow[]>; more: boolean; activity: Map<string, CardActivity> | undefined; onRetry: () => void }) {
   if (projects.kind === "loading") return <Skeleton shape="card" count={6} />;
   if (projects.kind === "not_ready") return <NotReady what="Projects" compact />;
   if (projects.kind === "error") return <LoadError message="Couldn't load your projects." onRetry={onRetry} />;
@@ -217,16 +218,21 @@ function Projects({ projects, activity, onRetry }: { projects: Loaded<ProjectRow
     action={<a className="btn" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>}>
     Create a project and agents start the research you pick.
   </EmptyState>;
-  return <div className="cards">{projects.value.map((project) => <ProjectCard key={project.id} project={project} activity={activity?.get(project.id)} />)}</div>;
+  return <>
+    <div className="cards">{projects.value.map((project) => <ProjectCard key={project.id} project={project} activity={activity?.get(project.id)} />)}</div>
+    {more && <p className="secondary" role="status">Showing the first {PROJECT_LIST_MAX} projects. The rest are not listed here, in the sidebar or in Go to.</p>}
+  </>;
 }
 
 /** Home as a view of its engine reads: the Add actions (new, clone from GitHub, existing folder),
  * the Needs you strip (three rows, Show all for the rest), the projects folder section, project
- * cards with their live work or the empty state, and the Get set up panel while setup is
- * incomplete. Inputs: the five reads, each card's activity and the suggested memories when read,
+ * cards with their live work or the empty state, a note when the list stops at its bound, and
+ * the Get set up panel while setup is incomplete. Inputs: the five reads, whether the engine
+ * holds more projects than listed, each card's activity and the suggested memories when read,
  * the projects folder section and a retry for the project list. */
-export function HomeView({ projects, accounts, pools, harnesses, tools, activity, suggestions, alerts, found, onRetryProjects }: {
+export function HomeView({ projects, moreProjects = false, accounts, pools, harnesses, tools, activity, suggestions, alerts, found, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
+  moreProjects?: boolean;
   onRetryProjects: () => void;
   accounts: Loaded<AccountView[]>;
   pools: Loaded<PoolSummary[]>;
@@ -248,7 +254,7 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
     </>} />
     {needs.total > 0 && <section className="needs" aria-label="Needs you">
       {(expanded ? needs.all : needs.rows).map((row) => <div className="need" key={row.key}>
-        <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{row.project}</strong>{" "}</>}{row.text}</span></span>
+        <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{displayText(row.project)}</strong>{" "}</>}{row.text}</span></span>
         <a className="btn small" href={row.href}>{row.action}</a>
       </div>)}
       {needs.total > NEEDS_SHOWN && <Button variant="quiet" size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
@@ -256,7 +262,7 @@ export function HomeView({ projects, accounts, pools, harnesses, tools, activity
     </section>}
     {found}
     <div className={`home${setup.visible ? " with-setup" : ""}`}>
-      <Projects projects={projects} activity={activity} onRetry={onRetryProjects} />
+      <Projects projects={projects} more={moreProjects} activity={activity} onRetry={onRetryProjects} />
       {setup.visible && <SetupPanel items={setup.items} />}
     </div>
   </>;
@@ -294,5 +300,5 @@ export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
     return () => { live = false; };
   }, [named]);
   return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} activity={activity} suggestions={suggestions}
-    alerts={alerts} found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
+    alerts={alerts} moreProjects={session.projectsMore} found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
 }

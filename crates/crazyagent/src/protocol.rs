@@ -109,13 +109,16 @@ pub struct ProjectSpec {
 }
 
 impl ProjectSpec {
-    /// Validates a project name and explicit repository declarations.
+    /// Validates a project name and explicit repository declarations. A name may not hold
+    /// controls or characters that hide or reorder what the owner reads (bidi marks, zero-width,
+    /// tag characters), the set `memory::hidden_text` finds; an emoji joiner stays allowed.
     /// Takes an untrusted specification without accessing its paths.
     /// Returns the existing validation error and preserves empty-list compatibility.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.name.trim().is_empty()
             || self.name.len() > 256
             || self.name.chars().any(char::is_control)
+            || crate::memory::hidden_text(&self.name)
             || self.repositories.len() > 64
             || self.repositories.iter().any(|p| {
                 p.is_empty()
@@ -525,5 +528,33 @@ mod tests {
             format!("\"{}\"", u64::MAX)
         );
         assert!(serde_json::from_str::<Cursor>("\"01\"").is_err());
+    }
+
+    #[test]
+    fn a_project_name_that_hides_or_reorders_characters_is_refused() {
+        let spec = |name: &str| ProjectSpec {
+            name: name.into(),
+            repositories: Vec::new(),
+        };
+        for name in [
+            "invoice\u{202e}fdp.exe",
+            "Harbor\u{2066}Notes",
+            "Harbor\u{200b}Notes",
+            "Harbor\u{e0041}",
+            "Harbor\u{061c}Notes",
+        ] {
+            assert_eq!(
+                spec(name).validate().unwrap_err().0,
+                "invalid project specification",
+                "{name:?}"
+            );
+        }
+        for name in [
+            "Harbor Notes",
+            "Café 日本",
+            "Lab \u{1f469}\u{200d}\u{1f4bb}",
+        ] {
+            assert!(spec(name).validate().is_ok(), "{name:?}");
+        }
     }
 }

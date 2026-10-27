@@ -402,3 +402,39 @@ test("each project's onboarding review and settings get their own page, so a swi
   const settings = (id) => Screen({ route: { name: "project", id, tab: "settings" }, session: session({ projects }) });
   assert.notEqual(settings("alpha").key, settings("beta").key);
 });
+
+test("Home, the sidebar and Go to keep every project up to the bound and say when more exist", async () => {
+  const { PROJECT_LIST_MAX, projectList } = await import("../src/api.ts");
+  const rows = (count) => Array.from({ length: count }, (_, at) => ({ id: `p-${at + 1}`, name: `Project ${at + 1}`, repository_count: 0 }));
+  assert.equal(PROJECT_LIST_MAX, 200);
+  assert.deepEqual(projectList(rows(20), false), { items: rows(20), more: false });
+  assert.deepEqual(projectList(rows(200), false), { items: rows(200), more: false });
+  const cut = projectList(rows(208), true);
+  assert.equal(cut.items.length, 200);
+  assert.equal(cut.items.at(-1).id, "p-200");
+  assert.equal(cut.more, true);
+  assert.equal(projectList(rows(205), false).more, true);
+  assert.equal(projectList(rows(16), true).more, true);
+
+  const twenty = render({ projects: ok(rows(20)) });
+  for (const at of [1, 17, 20]) assert.match(twenty, new RegExp(`<span class="name">Project ${at}</span>`));
+  assert.doesNotMatch(twenty, /Showing the first/);
+  const bounded = render({ projects: ok(rows(200)), projectsMore: true });
+  assert.match(bounded, /role="status">Showing the first 200 projects\. The rest are not listed here, in the sidebar or in Go to\.<\/p>/);
+});
+
+test("project names show direction and hidden characters as escapes in the sidebar, Home cards and Needs you", () => {
+  const name = "invoice‮fdp.exe";
+  const markup = render({ projects: ok([{ id: "p-1", name, repository_count: 0 }]) });
+  assert.match(markup, /<span class="name">invoice\\u202efdp\.exe<\/span>/);
+  assert.match(markup, /<h3 class="ellipsis">invoice\\u202efdp\.exe<\/h3>/);
+  assert.ok(!markup.includes("‮"), markup);
+  const needs = renderToStaticMarkup(createElement(HomeView, {
+    projects: ok([{ id: "p-1", name, repository_count: 0 }]), alerts: new Map([["p-1", 1]]), onRetryProjects: () => {},
+    accounts: ok([]), pools: ok([]), harnesses: ok([]), tools: ok({ dependencies: [], pack: [], running: false }),
+  }));
+  assert.match(needs, /<strong>invoice\\u202efdp\.exe<\/strong> 1 new team notification\./);
+  assert.ok(!needs.includes("‮"), needs);
+  const plain = render({ projects: ok([{ id: "p-2", name: "Harbor Notes 👩‍💻", repository_count: 0 }]) });
+  assert.match(plain, /<span class="name">Harbor Notes 👩‍💻<\/span>/);
+});
