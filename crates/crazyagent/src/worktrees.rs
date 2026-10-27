@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
 #[cfg(unix)]
-const TREE_BOUNDS: TreeBounds = TreeBounds {
+pub(crate) const TREE_BOUNDS: TreeBounds = TreeBounds {
     files: 262_144,
     bytes: 2 * 1024 * 1024 * 1024,
     components: 64,
@@ -36,10 +36,10 @@ const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
 /// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
 /// the most content bytes across them, and the most path components in one path.
 #[cfg(unix)]
-struct TreeBounds {
-    files: usize,
-    bytes: u64,
-    components: usize,
+pub(crate) struct TreeBounds {
+    pub(crate) files: usize,
+    pub(crate) bytes: u64,
+    pub(crate) components: usize,
 }
 
 /// One tracked file or symlink of the lease commit. Fields: whether it is a file (and

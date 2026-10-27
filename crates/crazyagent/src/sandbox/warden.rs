@@ -7,6 +7,9 @@ use std::time::Instant;
 /// The variable that hands the session shim the descriptor number of its warden's end.
 pub const WARDEN_FD: &str = "CRAZYAGENT_WARDEN_FD";
 
+/// The plain reason a run ends with when its warden did not confirm its sandbox empty.
+pub const CLEANUP_UNCERTAIN: &str = "The agent's sandbox could not be confirmed empty";
+
 /// How long [`Warden::fire`] waits for the warden to report that it stopped its run.
 pub const FIRE_TIME: Duration = Duration::from_secs(2);
 
@@ -209,14 +212,19 @@ impl Warden {
 }
 
 /// Fires a run's warden, when it has one, for up to [`FIRE_TIME`] and reports on stderr when
-/// the warden does not confirm that it stopped the run's sandbox. Inputs: the warden and the
-/// label of the run's owner, such as `harness`. Output: nothing.
-pub fn fire_reported(warden: Option<Warden>, owner: &str) {
-    if let Some(warden) = warden
-        && let Err(code) = warden.fire(FIRE_TIME)
-    {
+/// the warden does not confirm that it stopped the run's sandbox, as when a process of the
+/// run killed it first. Inputs: the warden and the label of the run's owner, such as
+/// `harness`. Output: Ok with no warden or a confirmed stop, otherwise the warden's code, for
+/// the owner to keep what the run used as its cleanup is uncertain.
+pub fn fire_reported(warden: Option<Warden>, owner: &str) -> Result<(), &'static str> {
+    let Some(warden) = warden else {
+        return Ok(());
+    };
+    let fired = warden.fire(FIRE_TIME);
+    if let Err(code) = fired {
         eprintln!("{owner}_warden_unconfirmed cause={code}");
     }
+    fired
 }
 
 #[cfg(all(test, target_os = "macos"))]

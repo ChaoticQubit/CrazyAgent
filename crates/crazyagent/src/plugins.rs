@@ -415,6 +415,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Can't start: this file can't be run.",
     ),
     ("server_cant_start", "The server can't start."),
+    (
+        "server_cleanup_uncertain",
+        "The server's processes could not be confirmed stopped.",
+    ),
     ("server_exited", "The server stopped before answering."),
     (
         "server_check_timeout",

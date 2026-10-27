@@ -9,10 +9,10 @@ use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
 #[cfg(unix)]
-use crate::research::runner::ReadOnlyEnding;
-#[cfg(unix)]
 use crate::research::runner::ResearchLimits;
-use crate::research::runner::{ReadOnlyRun, ResearchHarness, ResearchRunner, RunError};
+use crate::research::runner::{
+    ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -404,6 +404,7 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
         #[cfg(unix)]
         Ok(GraphEnding::Stopped) => Step::WAITING,
+        Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
         Err(_) => Step::failed(GRAPH_NOT_STARTED),
     }
 }
@@ -464,7 +465,6 @@ fn mapping_step(
     match work.runner.run_read_only(&run, beat) {
         #[cfg(unix)]
         Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
-        #[cfg(unix)]
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
@@ -472,6 +472,10 @@ fn mapping_step(
         Ok(ReadOnlyEnding::Stopped) => (Step::WAITING, base),
         Err(RunError::Busy) => (Step::WAITING, base),
         Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
+        Err(RunError::Uncertain(_)) => (
+            Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
+            base,
+        ),
         Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
     }
 }

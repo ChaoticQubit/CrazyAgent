@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::config::resolve_config;
 use crazyagent::project_setup::load_setup;

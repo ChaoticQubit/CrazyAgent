@@ -1,8 +1,8 @@
 use crazyagent::adapters::codex::{
-    AuthAccount, AuthControl, DEVELOPER_INSTRUCTIONS_BYTES_MAX, FRAME_BYTES_MAX, State,
+    AuthAccount, AuthControl, DEVELOPER_INSTRUCTIONS_BYTES_MAX, State,
 };
 use crazyagent::adapters::events::{EventKind, TokenUsage, TurnOutcome};
-use crazyagent::adapters::{NativeAction, NativeHarness};
+use crazyagent::adapters::{LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::engine::codex_host::{CodexHostBatch, CodexHostProtocol};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
 use serde_json::{Value, json};
@@ -631,7 +631,7 @@ fn codex_host_stale_native_thread_and_oversize_frame_fail_without_normalized_suc
     assert_eq!(host.state(), State::Failed);
     let mut other = protocol();
     other.initialize().unwrap();
-    assert!(other.receive(&vec![b'x'; FRAME_BYTES_MAX + 1]).is_err());
+    assert!(other.receive(&vec![b'x'; LINE_BYTES_MAX + 1]).is_err());
     assert_eq!(other.state(), State::Failed);
 }
 

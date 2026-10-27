@@ -1,6 +1,6 @@
 use crazyagent::adapters::claude::{ClaudeProtocol, ProtocolError, State};
 use crazyagent::adapters::events::{Capability, EventKind, Support, TurnOutcome};
-use crazyagent::adapters::{NativeAction, NativeHarness};
+use crazyagent::adapters::{LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, FRAME_BYTES_MAX, RequestId, SessionId};
 use serde_json::{Value, json};
 
@@ -316,7 +316,7 @@ fn duplicate_keys_at_every_depth_are_rejected_before_normalization() {
 fn frame_output_and_event_counts_are_bounded() {
     let mut p = protocol();
     assert_eq!(
-        p.receive(&vec![b'x'; FRAME_BYTES_MAX + 1]),
+        p.receive(&vec![b'x'; LINE_BYTES_MAX + 1]),
         Err(ProtocolError::FrameTooLarge)
     );
     let mut p = ready();

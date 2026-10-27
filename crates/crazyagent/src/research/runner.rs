@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIT: &str = "/usr/bin/git";
-const GIT_SAFE: [&str; 10] = [
+pub(crate) const GIT_SAFE: [&str; 10] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -192,7 +192,8 @@ pub struct ResearchRun {
     pub process_group: Option<u32>,
 }
 
-/// A runner failure outside the agent's own outcome.
+/// A runner failure outside the agent's own outcome. `Uncertain` carries the code of a
+/// warden that did not confirm the agent's sandbox empty after the agent stopped.
 #[derive(Debug)]
 pub enum RunError {
     Invalid(String),
@@ -201,6 +202,7 @@ pub enum RunError {
     Context(LaunchError),
     Account(String),
     Busy,
+    Uncertain(&'static str),
     Io(io::Error),
 }
 
@@ -213,6 +215,7 @@ impl fmt::Display for RunError {
             Self::Context(error) => write!(f, "research context: {}", error.0),
             Self::Account(code) => write!(f, "research account: {code}"),
             Self::Busy => write!(f, "research account busy"),
+            Self::Uncertain(code) => write!(f, "research agent cleanup uncertain: {code}"),
             Self::Io(error) => write!(f, "research I/O: {error}"),
         }
     }
@@ -591,11 +594,18 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let reason = match error {
-                    RunError::Context(_) => "Could not give the agent this project's context",
-                    _ => "Could not prepare the research sandbox",
+                let (reason, attempts_max) = match error {
+                    RunError::Context(_) => (
+                        "Could not give the agent this project's context",
+                        self.limits.attempts_max,
+                    ),
+                    RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN, 1),
+                    _ => (
+                        "Could not prepare the research sandbox",
+                        self.limits.attempts_max,
+                    ),
                 };
-                jobs.fail(&job, reason, self.limits.attempts_max)?;
+                jobs.fail(&job, reason, attempts_max)?;
                 Err(error)
             }
         }
@@ -832,6 +842,8 @@ impl ResearchRunner {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let ending = self.supervise(jobs, job, &mut running, &counted, &limited)?;
+        let stopped = running.stop();
+        let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         drop(running);
         let draining = Instant::now();
         while drains.iter().any(|drain| !drain.is_finished()) && draining.elapsed() < DRAIN_WAIT {
@@ -846,6 +858,13 @@ impl ResearchRunner {
             ending
         };
         drop(installed);
+        if let Err(code) = stopped {
+            if let Some(credential) = credential {
+                credential.retain();
+            }
+            std::mem::forget(lease);
+            return Err(RunError::Uncertain(code));
+        }
         drop(credential);
         drop(lease);
         Ok((ending, group, output))
@@ -914,8 +933,8 @@ impl ResearchRunner {
     }
 
     /// Follows a direct agent process until it exits, its stderr shows it waiting out a
-    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes, then
-    /// stops its process group. Takes the job store, the job, the process, its output count
+    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes; the
+    /// caller then stops it. Takes the job store, the job, the process, its output count
     /// and the limit flag its stderr drain sets. Returns how the run ended.
     fn supervise(
         &self,
@@ -953,8 +972,6 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
-        agent.stop();
-        let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         Ok(ending)
     }
 
@@ -1088,7 +1105,6 @@ pub(crate) struct ReadOnlyRun<'a> {
 pub(crate) enum ReadOnlyEnding {
     #[cfg(unix)]
     Answered(String),
-    #[cfg(unix)]
     Failed(String),
     #[cfg(unix)]
     TimedOut,
@@ -1111,6 +1127,9 @@ impl ResearchRunner {
     ) -> Result<ReadOnlyEnding, RunError> {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+            return Ok(ReadOnlyEnding::Failed(line.into()));
         }
         let folder = run.folder.canonicalize()?;
         if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
@@ -1244,10 +1263,17 @@ impl ResearchRunner {
             }
             std::thread::sleep(POLL);
         };
-        running.stop();
+        let stopped = running.stop();
         drop(running);
         for handle in drains {
             let _ = handle.join();
+        }
+        if let Err(code) = stopped {
+            if let Some(credential) = credential {
+                credential.retain();
+            }
+            std::mem::forget(lease);
+            return Err(RunError::Uncertain(code));
         }
         drop(credential);
         drop(lease);
@@ -1271,11 +1297,11 @@ impl ResearchRunner {
         })
     }
 
-    /// Asks the Windows boundary for a read-only run's network reach before any agent
-    /// state is made. A read-only run always limits the agent to its model endpoint, which
-    /// the AppContainer boundary refuses until its firewall rule exists rather than widen it.
-    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, or the boundary's
-    /// `Unavailable` refusal.
+    /// Refuses a read-only run on Windows before any agent state is made: V1 runs no such
+    /// agent there, so the run fails with the owner's plain line. Past that line, the
+    /// AppContainer boundary refuses the endpoint-only reach until its firewall rule exists.
+    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, the plain failure,
+    /// or the boundary's `Unavailable` refusal.
     #[cfg(windows)]
     pub(crate) fn run_read_only(
         &self,
@@ -1284,6 +1310,9 @@ impl ResearchRunner {
     ) -> Result<ReadOnlyEnding, RunError> {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+            return Ok(ReadOnlyEnding::Failed(line.into()));
         }
         let network = SandboxNetwork::Only(vec![model_remote(run.account)?]);
         let refusal = crate::sandbox::windows::capabilities(&network)
@@ -1709,13 +1738,17 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     Ok(())
 }
 
-/// The owner's line for a team agent or research job on a system that runs no agent
-/// confined to its own git worktree: Linux in V1 (DEC-094), whose boundaries cannot keep the
-/// worktree's git links and shared objects read-only. Input: the operating system name as
-/// `std::env::consts::OS` gives it. Output: the line, or None where such agents run.
+/// The owner's line for a team agent, research job or onboarding mapping run on a system
+/// that runs no such agent in V1: Linux (DEC-094), whose boundaries cannot keep a worktree's
+/// git links read-only, and Windows, which cannot load the Seatbelt profile they run under.
+/// Input: the operating system name as `std::env::consts::OS` gives it. Output: the line,
+/// or None where such agents run.
 pub(crate) fn confined_unavailable(os: &str) -> Option<&'static str> {
-    (os == "linux")
-        .then_some("Team agents and research are not available on Linux in this version.")
+    match os {
+        "linux" => Some("Team agents and research are not available on Linux in this version."),
+        "windows" => Some("Team agents and research are not available on Windows in this version."),
+        _ => None,
+    }
 }
 
 /// Refuses to add a worktree with git under a Seatbelt profile, which Windows cannot load;
@@ -1819,7 +1852,7 @@ fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
 /// and still succeeds. Takes the NUL-separated keys of `git config --list --name-only -z`.
 /// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
 #[cfg(unix)]
-fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
+pub(crate) fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
     let refused = || {
         RunError::Invalid(
             "the repository configures a git filter the engine cannot switch off; name its filters with letters, digits, dots, dashes or underscores".into(),
@@ -1907,7 +1940,8 @@ fn stop_timed_out(child: &mut Child) {
 /// then has the agent's warden, where its sandbox gives one, stop every process
 /// left in that sandbox, those that left the group included, so no agent
 /// process outlives the run that started it. If the engine itself dies first,
-/// its [`Lifeline`] kills the group and the warden stops the sandbox.
+/// its [`Lifeline`] kills the group and the warden stops the sandbox. `cleanup`
+/// holds the code of a warden that did not confirm the sandbox empty.
 pub(crate) struct AgentProcess {
     pub(crate) child: Child,
     pub(crate) group: u32,
@@ -1915,6 +1949,7 @@ pub(crate) struct AgentProcess {
     lifeline: Lifeline,
     warden: Option<Warden>,
     stopped: bool,
+    cleanup: Result<(), &'static str>,
 }
 
 impl AgentProcess {
@@ -1942,7 +1977,7 @@ impl AgentProcess {
                 stop_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
-                crate::sandbox::warden::fire_reported(warden, "agent");
+                let _ = crate::sandbox::warden::fire_reported(warden, "agent");
                 return Err(error);
             }
         };
@@ -1953,42 +1988,48 @@ impl AgentProcess {
             lifeline,
             warden,
             stopped: false,
+            cleanup: Ok(()),
         })
     }
 
-    /// Kills the agent's group once, reaps the agent and waits for the group
-    /// to empty. Later calls do nothing, so a reused group id is never killed.
+    /// Kills the agent's group once, reaps the agent, waits for the group to
+    /// empty and fires its warden. Later calls do nothing, so a reused group id
+    /// is never killed. Returns, on every call, Ok or the code of a warden that
+    /// did not confirm the sandbox empty, for the caller to keep what the agent used.
     #[cfg(unix)]
-    pub(crate) fn stop(&mut self) {
-        if self.stopped {
-            return;
+    pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
+        if !self.stopped {
+            stop_group(self.group);
+            let _ = self.child.wait();
+            await_group_exit(self.group);
+            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.lifeline.release();
+            self.stopped = true;
         }
-        stop_group(self.group);
-        let _ = self.child.wait();
-        await_group_exit(self.group);
-        crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
-        self.lifeline.release();
-        self.stopped = true;
+        assert!(self.warden.is_none());
+        self.cleanup
     }
 
     /// Kills the agent and reaps it where no process group exists, once; later calls do
-    /// nothing. Takes the process. Returns nothing.
+    /// nothing. Takes the process. Returns, on every call, Ok or the warden's code.
     #[cfg(not(unix))]
-    pub(crate) fn stop(&mut self) {
-        if self.stopped {
-            return;
+    pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
+        if !self.stopped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
+            self.stopped = true;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
-        self.stopped = true;
+        assert!(self.warden.is_none());
+        self.cleanup
     }
 }
 
 impl Drop for AgentProcess {
-    /// Stops the agent's process group if the run did not already stop it.
+    /// Stops the agent's process group if the run did not already stop it. A run that
+    /// fails before its own stop has no outcome left to report; the warden logs one.
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 
@@ -2434,14 +2475,16 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn only_linux_refuses_team_agents_and_research_with_a_plain_line() {
+    fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {
         assert_eq!(
             confined_unavailable("linux"),
             Some("Team agents and research are not available on Linux in this version.")
         );
-        for os in ["macos", "windows"] {
-            assert_eq!(confined_unavailable(os), None, "{os}");
-        }
+        assert_eq!(
+            confined_unavailable("windows"),
+            Some("Team agents and research are not available on Windows in this version.")
+        );
+        assert_eq!(confined_unavailable("macos"), None);
     }
 
     /// Setting up one project's repository must not wait for another project's setup:
@@ -2972,6 +3015,7 @@ mod tests {
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn adding_an_agent_worktree_never_runs_the_project_fsmonitor() {
         let temp = tempfile::tempdir().unwrap();
@@ -3017,6 +3061,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     fn repository_git(project: &Path, arguments: &[&str]) {
         let status = crate::spawn_gate::status(
             Command::new(GIT)
@@ -3069,6 +3114,7 @@ mod tests {
         assert!(filter_overrides(&many).is_err());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn adding_an_agent_worktree_runs_no_command_the_repository_configures() {
         let mut problems = Vec::new();
@@ -3245,6 +3291,43 @@ mod tests {
             "a folder the engine made gets its repository"
         );
         ensure_repository(&created, &home).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_read_only_run_on_windows_stops_with_the_plain_unavailable_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let engine = base.join("engine");
+        fs::create_dir(&engine).unwrap();
+        let database = engine.join("engine.db");
+        let sqlite = rusqlite::Connection::open(&database).unwrap();
+        sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+        sqlite.close().map_err(|(_, error)| error).unwrap();
+        let state = engine.join("research");
+        fs::create_dir(&state).unwrap();
+        let runner =
+            ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "windows-model".into(),
+        };
+        let run = ReadOnlyRun {
+            name: "onboard-m-windows",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+        };
+        assert_eq!(
+            runner.run_read_only(&run, &|| false).unwrap(),
+            ReadOnlyEnding::Failed(
+                "Team agents and research are not available on Windows in this version.".into()
+            )
+        );
+        assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
     }
 }
 

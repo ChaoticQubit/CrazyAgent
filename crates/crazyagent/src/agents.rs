@@ -1462,20 +1462,24 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
 
 /// Stops an owned agent's session, then ends what still holds its output log, such as a
 /// child that left the agent's group with setsid. Inputs: the session and its log path.
-/// Output: the exit code, and true once no holder of the log is left.
+/// Output: the exit code, and true once no holder of the log is left and no warden of the
+/// session failed to confirm its sandbox empty.
 #[cfg(unix)]
 fn end_session(session: Session, output: &Path) -> (Option<i32>, bool) {
     let group = session.process_group();
-    let code = session.stop();
+    let stopped = session.stop();
     let complete = log_probe(output).is_some_and(|probe| kill_holders(group, output, &probe));
-    (code, complete)
+    let confirmed = stopped.is_ok();
+    (stopped.ok().flatten(), complete && confirmed)
 }
 
 /// Stops an owned agent's session where no output log lock exists. Inputs: the session
-/// and the log path, unused. Output: the exit code and true.
+/// and the log path, unused. Output: the exit code, and true unless the stop was uncertain.
 #[cfg(not(unix))]
 fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
-    (session.stop(), true)
+    let stopped = session.stop();
+    let confirmed = stopped.is_ok();
+    (stopped.ok().flatten(), confirmed)
 }
 
 /// Opens an agent output log read-only to probe its lock, refusing a link, anything but

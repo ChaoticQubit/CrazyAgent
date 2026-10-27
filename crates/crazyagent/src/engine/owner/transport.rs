@@ -1310,6 +1310,7 @@ impl OwnerServer {
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
+        let upkeep = tokio::spawn(changes::upkeep(self.authority.clone()));
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
             let dispatching = self.authority.native_auth_dispatch_pending();
@@ -1367,6 +1368,7 @@ impl OwnerServer {
             assert!(tasks.custody.len() <= 1);
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
+        upkeep.abort();
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }

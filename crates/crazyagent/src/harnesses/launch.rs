@@ -23,7 +23,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const LINE_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX;
+const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
+/// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
+/// for the JSON-RPC envelope around it.
+const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -690,7 +693,7 @@ impl Driver {
     }
 
     fn send(&mut self, text: &str) -> Result<Option<Vec<u8>>, LaunchError> {
-        if text.trim().is_empty() || text.contains('\0') || text.len() > LINE_BYTES_MAX / 2 {
+        if text.trim().is_empty() || text.contains('\0') || text.len() > PROMPT_BYTES_MAX {
             return Err(failure("launch_prompt_invalid"));
         }
         match self {
@@ -948,9 +951,11 @@ impl Driver {
 /// A running harness process driven through its headless interface.
 /// The process leads its own process group, and a harness on pipes has a warden in its
 /// sandbox, so stop reaches every descendant, those in their own sessions included.
+/// `uncertain` is set once its warden did not confirm that sandbox empty.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
+    uncertain: bool,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1069,6 +1074,7 @@ impl Session {
         let mut session = Self {
             child,
             warden,
+            uncertain: false,
             stdin,
             lines,
             driver,
@@ -1167,9 +1173,15 @@ impl Session {
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
     /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally.
-    pub fn stop(mut self) -> Option<i32> {
-        self.stop_group()
+    /// Output: the leader's exit code when it exited normally, or
+    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
+    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+        let code = self.stop_group();
+        assert!(self.stopped && self.warden.is_none());
+        if self.uncertain {
+            return Err(failure("harness_cleanup_uncertain"));
+        }
+        Ok(code)
     }
 
     fn require_live(&self) -> Result<(), LaunchError> {
@@ -1234,7 +1246,8 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
-        crate::sandbox::warden::fire_reported(self.warden.take(), "harness");
+        self.uncertain =
+            crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
         assert!(self.warden.is_none());
         code.or_else(|| status.and_then(|status| status.code()))

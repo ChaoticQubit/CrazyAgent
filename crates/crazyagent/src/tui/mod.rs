@@ -1,7 +1,7 @@
 pub mod app;
 mod brand;
 mod client;
-mod clock;
+pub(crate) mod clock;
 mod ctx;
 mod dispatch;
 mod frame;

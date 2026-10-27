@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub mod buffer;
+mod kept;
 #[cfg(unix)]
 pub mod tmux;
 #[cfg(target_os = "windows")]
@@ -284,23 +285,28 @@ pub fn plain_reason(code: &str) -> &'static str {
     }
 }
 
-/// Opens this platform's terminal host for an engine: the private tmux server on macOS and Linux.
+/// Opens this platform's terminal host for an engine: the private tmux server on macOS and Linux,
+/// keeping the last screen of each terminal it ends.
 /// Takes the engine root; tmux keeps its socket in `<root>/terminal` and is looked for there first.
 /// Returns whether the host can run now, and the host; one that cannot reports `terminal_unavailable`.
 #[cfg(unix)]
 pub fn platform(engine_root: &Path) -> (bool, Arc<dyn Host>) {
     let found = tmux::installed(engine_root);
     let ready = found.is_some();
-    let host: Arc<dyn Host> = Arc::new(tmux::Tmux::open(found, &engine_root.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(kept::LastScreenHost::new(tmux::Tmux::open(
+        found,
+        &engine_root.join(FOLDER),
+    )));
     (ready, host)
 }
 
-/// Opens this platform's terminal host for an engine: the ConPTY host on Windows.
+/// Opens this platform's terminal host for an engine: the ConPTY host on Windows, keeping the
+/// last screen of each terminal it ends.
 /// Takes the engine root, unused because ConPTY needs no server or socket.
 /// Returns that the host can run, and the host.
 #[cfg(target_os = "windows")]
 pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
-    let host: Arc<dyn Host> = Arc::new(windows::ConptyHost::new());
+    let host: Arc<dyn Host> = Arc::new(kept::LastScreenHost::new(windows::ConptyHost::new()));
     (true, host)
 }
 

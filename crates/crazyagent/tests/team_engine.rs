@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "macos")]
 
 use crazyagent::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crazyagent::protocol::{Outcome, ProjectId, ProjectSpec, StoredProject};
