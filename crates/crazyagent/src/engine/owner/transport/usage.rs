@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::{CredentialRef, encode_frame};
+use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::report::UsageReport;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ pub const USAGE_CODES: &[&str] = &[
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
     Report {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
         since_ms: Option<i64>,
         offset_minutes: i32,
     },
@@ -62,15 +64,18 @@ fn unknown() -> EngineError {
 }
 
 impl OwnerClient {
-    /// Reads the usage page's numbers for the range starting at `since_ms`, None for all
-    /// time, with days cut at the viewer's local midnight. Inputs: the range start and the
-    /// viewer's offset east of UTC in minutes. Output: the report.
+    /// Reads the usage page's numbers for one project, None for every project, over the
+    /// range starting at `since_ms`, None for all time, with days cut at the viewer's local
+    /// midnight. Inputs: the project, the range start and the viewer's offset east of UTC in
+    /// minutes. Output: the report.
     pub async fn usage_report(
         &self,
+        project: Option<ProjectId>,
         since_ms: Option<i64>,
         offset_minutes: i32,
     ) -> Result<UsageReport, EngineError> {
         let action = Action::Report {
+            project,
             since_ms,
             offset_minutes,
         };
@@ -197,10 +202,17 @@ async fn handle(
         let now = crate::team::now_ms();
         Ok(match action {
             Action::Report {
+                project,
                 since_ms,
                 offset_minutes,
             } => Reply::Report {
-                report: Box::new(usage::report::report(&db, since_ms, offset_minutes, now)?),
+                report: Box::new(usage::report::report(
+                    &db,
+                    project.as_ref(),
+                    since_ms,
+                    offset_minutes,
+                    now,
+                )?),
             },
             Action::Refresh => {
                 usage::service::request_refresh(&db, now)?;

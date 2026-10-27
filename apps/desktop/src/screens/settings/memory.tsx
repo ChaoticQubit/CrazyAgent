@@ -156,7 +156,7 @@ export function MemorySettings() {
   const [scope, setScope] = useState("");
   const [search, setSearch] = useState("");
   const [first, reloadSaved] = useLoad(() => savedMemories(scope || null, search), [scope, search]);
-  const [suggested, reloadSuggested] = useLoad(() => memorySuggestions(projects), [projectKey]);
+  const [suggested, reloadSuggested] = useLoad(() => memorySuggestions(projects), [projectKey], "memory-suggestions");
   const [older, setOlder] = useState<SavedMemoryPage>();
   const [deleting, setDeleting] = useState<SavedMemory>();
   const [failure, setFailure] = useState("");

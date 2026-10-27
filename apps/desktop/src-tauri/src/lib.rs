@@ -36,6 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::scheduling::{Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
@@ -1379,6 +1380,29 @@ async fn desktop_pool_summaries(
 }
 
 #[tauri::command]
+async fn desktop_account_schedule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Schedule, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.account_schedule().await
+}
+
+#[tauri::command]
+async fn desktop_set_account_schedule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    change: ScheduleChange,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_account_schedule(change, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_account_catalog(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1501,6 +1525,26 @@ async fn desktop_skill_detail(
 ) -> Result<crazyagent::skills::SkillDetail, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.skill_detail(id, project_id).await
+}
+
+#[tauri::command]
+async fn desktop_skill_import_scan(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.skill_import_scan().await
+}
+
+#[tauri::command]
+async fn desktop_import_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    folder: String,
+    replace: Option<String>,
+) -> Result<crazyagent::skills::import::Imported, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.import_skill(folder, replace).await
 }
 
 #[tauri::command]
@@ -1705,11 +1749,14 @@ async fn desktop_restart_agent(
 async fn desktop_usage_report(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    project_id: Option<String>,
     since_ms: Option<i64>,
     offset_minutes: i32,
 ) -> Result<UsageReport, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.usage_report(since_ms, offset_minutes)?;
+    let call = lock(&state)
+        .await?
+        .usage_report(project_id, since_ms, offset_minutes)?;
     call.await
 }
 
@@ -2202,6 +2249,8 @@ pub fn run() {
             desktop_owner_profile,
             desktop_save_owner_profile,
             desktop_pool_summaries,
+            desktop_account_schedule,
+            desktop_set_account_schedule,
             desktop_account_catalog,
             desktop_list_accounts,
             desktop_add_account,
@@ -2215,6 +2264,8 @@ pub fn run() {
             desktop_set_skill_enabled,
             desktop_remove_skill,
             desktop_skill_detail,
+            desktop_skill_import_scan,
+            desktop_import_skill,
             desktop_add_mcp_server,
             desktop_update_mcp_server,
             desktop_approve_mcp_server,

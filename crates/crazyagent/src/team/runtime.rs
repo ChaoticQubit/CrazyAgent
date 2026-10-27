@@ -201,6 +201,9 @@ enum Report {
     Progress {
         bytes: usize,
     },
+    Usage {
+        tokens: crate::usage::capture::Tokens,
+    },
     Finished {
         text: String,
         end: TurnEnd,
@@ -1112,11 +1115,39 @@ impl TeamRuntime {
                 "Sign in to an account in this project's pool to run {harness}"
             ));
         }
-        pick_account(&accounts, &|c: &CredentialRef| self.load(c), paused)
-            .cloned()
-            .ok_or_else(|| {
-                "Every account in this project's pool is resting after a rate limit".into()
+        let pools: Vec<&CredentialRef> = access
+            .pools
+            .iter()
+            .filter(|pool| {
+                pool.projects
+                    .iter()
+                    .any(|id| id.as_str() == project.as_str())
             })
+            .map(|pool| &pool.id)
+            .collect();
+        let choice = crate::scheduling::Choice::read(
+            &self.connection,
+            access,
+            Some(project.as_str()),
+            &pools,
+            super::now_ms(),
+        )
+        .map_err(|_| "Could not read the account scheduling settings".to_owned())?;
+        if let Some(account) = pick_account(
+            &accounts,
+            &|c: &CredentialRef| self.load(c),
+            paused,
+            &choice,
+        ) {
+            return Ok(account.clone());
+        }
+        if accounts
+            .iter()
+            .any(|account| !paused.contains(&account.connection))
+        {
+            return Err("Every account in this project's pool is at its usage limit, held in reserve or set to Never use".into());
+        }
+        Err("Every account in this project's pool is resting after a rate limit".into())
     }
 
     /// Tells why an account cannot take agent work now: endpoints always can, managed
@@ -2259,6 +2290,36 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Counts the usage a piped agent's harness reported for a turn under the agent's
+    /// project, account and agent row; a store that cannot be written leaves the turn
+    /// uncounted and logs only the failure code. Inputs: the agent id and the tokens.
+    fn count_usage(&self, id: i64, tokens: crate::usage::capture::Tokens) {
+        let worker = &self.workers[&id];
+        let attribution = crate::usage::service::team_attribution(
+            id,
+            worker.project.as_str(),
+            worker.role == AgentRole::Master,
+            &worker.harness,
+            Some(worker.connection.as_str()),
+            &(self.access)().unwrap_or_default(),
+        );
+        let counted = crate::usage::initialize(&self.connection).and_then(|()| {
+            crate::usage::capture::count_reported(
+                &self.connection,
+                &attribution,
+                tokens,
+                "headless",
+                now_ms(),
+            )
+        });
+        if let Err(problem) = counted {
+            eprintln!(
+                "team usage not counted: {}",
+                crate::usage::service::failure_code(&problem)
+            );
+        }
+    }
+
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         match report {
             Report::Ready { group, pane } => {
@@ -2302,6 +2363,10 @@ impl TeamRuntime {
                         params![id, now_ms()],
                     )
                     .map_err(error)?;
+                Ok(false)
+            }
+            Report::Usage { tokens } => {
+                self.count_usage(id, tokens);
                 Ok(false)
             }
             Report::Finished { text, end, cause } => {
@@ -3314,6 +3379,9 @@ fn turn(
                 text.push_str(&part);
             }
             Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
+            Ok(Some(LaunchEvent::Usage { tokens })) => {
+                let _ = reports.send(Report::Usage { tokens });
+            }
             Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
                 break if success {

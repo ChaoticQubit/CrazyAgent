@@ -33,4 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
- a Add skill   m Add MCP server   Space On or off   Enter Details   Shift-←→ Sections   Esc Home                 ? Help 
+ a Add skill   m Add MCP server   Space On or off   Enter Details   i Import   Shift-←→ Sections   Esc Home      ? Help 

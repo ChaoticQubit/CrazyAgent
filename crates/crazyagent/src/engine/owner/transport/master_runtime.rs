@@ -1,6 +1,6 @@
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::adapters::codex::{AuthAccount, AuthControl};
-use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TokenUsage, TurnOutcome};
+use crate::adapters::events::{EventKind, ObservedEvent, Provenance, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::agents::{Hold, Holder};
 use crate::config::ModelAuthentication;
@@ -870,7 +870,7 @@ impl OwnerRuntimeHandle {
             validate_event(&active.provenance, turn_id, &event)?;
             active.capture.record(&event)?;
             if let EventKind::TurnFinished { usage, .. } = &event.kind {
-                active.reported = reported_tokens(usage);
+                active.reported = Tokens::reported(usage);
             }
             if let Some(native) = event
                 .native_session_id
@@ -961,17 +961,6 @@ impl OwnerRuntimeHandle {
                 _ => {}
             }
         }
-    }
-}
-
-/// The tokens a harness reported for a turn, with an unreported count as zero.
-/// Input: the reported usage. Output: the count.
-fn reported_tokens(usage: &TokenUsage) -> Tokens {
-    Tokens {
-        input: usage.input_tokens.unwrap_or(0),
-        output: usage.output_tokens.unwrap_or(0),
-        cache_read: usage.cache_read_input_tokens.unwrap_or(0),
-        cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
     }
 }
 

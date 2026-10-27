@@ -14,6 +14,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
     use crazyagent::protocol::ProjectSpec;
+    use crazyagent::scheduling::ScheduleChange;
     match command {
         "desktop_connect" => {
             let result: Result<_, BridgeError> = async { let mut bridge = lock(state).await?; bridge.connect().await }.await;
@@ -1068,6 +1069,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.pool_summaries().await }.await;
             routed(result)
         }
+        "desktop_account_schedule" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.account_schedule().await }.await;
+            routed(result)
+        }
+        "desktop_set_account_schedule" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                change: ScheduleChange,
+                generation: u64,
+            }
+            let Args { change, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_account_schedule(change, generation) .await }.await;
+            routed(result)
+        }
         "desktop_account_catalog" => {
             let result: Result<_, BridgeError> = async { lock(state).await?.account_catalog().await }.await;
             routed(result)
@@ -1219,6 +1238,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state).await?.skill_detail(id, project_id).await }.await;
+            routed(result)
+        }
+        "desktop_skill_import_scan" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.skill_import_scan().await }.await;
+            routed(result)
+        }
+        "desktop_import_skill" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                folder: String,
+                replace: Option<String>,
+            }
+            let Args { folder, replace } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.import_skill(folder, replace).await }.await;
             routed(result)
         }
         "desktop_remove_skill" => {
@@ -1458,14 +1495,15 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
+                project_id: Option<String>,
                 since_ms: Option<i64>,
                 offset_minutes: i32,
             }
-            let Args { since_ms, offset_minutes } = match parse(args) {
+            let Args { project_id, since_ms, offset_minutes } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_report(since_ms, offset_minutes)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_report(project_id, since_ms, offset_minutes)?; call.await }.await;
             routed(result)
         }
         "desktop_usage_refresh" => {

@@ -90,6 +90,17 @@ impl Tokens {
     pub fn is_empty(self) -> bool {
         self == Tokens::default()
     }
+
+    /// The tokens a harness reported for a turn, with an unreported count as zero.
+    /// Input: the reported usage. Output: the count.
+    pub fn reported(usage: &crate::adapters::events::TokenUsage) -> Tokens {
+        Tokens {
+            input: usage.input_tokens.unwrap_or(0),
+            output: usage.output_tokens.unwrap_or(0),
+            cache_read: usage.cache_read_input_tokens.unwrap_or(0),
+            cache_write: usage.cache_creation_input_tokens.unwrap_or(0),
+        }
+    }
 }
 
 /// The kind of run a transcript belongs to.
@@ -495,6 +506,30 @@ fn add_tokens(
     Ok(())
 }
 
+/// Counts the usage a harness reported for one turn, such as a piped Claude Code agent that
+/// keeps no records of its own, into the hour of `now_ms`. Inputs: the store, the
+/// attribution, the tokens, the session name and the time. Output: done, or
+/// `usage_attribution_invalid` / `usage_unavailable`.
+pub fn count_reported(
+    db: &Connection,
+    attribution: &Attribution,
+    tokens: Tokens,
+    session: &str,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    checked_attribution(attribution)?;
+    if session.is_empty() || session.len() > NAME_BYTES_MAX {
+        return Err(failure("usage_attribution_invalid"));
+    }
+    add_tokens(
+        db,
+        now_ms - now_ms.rem_euclid(HOUR_MS),
+        attribution,
+        session,
+        tokens,
+    )
+}
+
 /// Counts one finished turn whose home is about to be removed, such as an engine-driven
 /// master turn: the usage the harness reported for the turn when it reported any, else
 /// what the home's records hold; then forgets the home's records so nothing stays behind.
@@ -509,20 +544,11 @@ pub fn count_turn(
     session: &str,
     now_ms: i64,
 ) -> Result<Tokens, EngineError> {
-    checked_attribution(attribution)?;
-    if session.is_empty() || session.len() > NAME_BYTES_MAX {
-        return Err(failure("usage_attribution_invalid"));
-    }
     let added = if reported.is_empty() {
+        checked_attribution(attribution)?;
         scan_home(db, home, format, attribution, now_ms)?
     } else {
-        add_tokens(
-            db,
-            now_ms - now_ms.rem_euclid(HOUR_MS),
-            attribution,
-            session,
-            reported,
-        )?;
+        count_reported(db, attribution, reported, session, now_ms)?;
         reported
     };
     let prefix = format!("{}/", home.to_string_lossy());
