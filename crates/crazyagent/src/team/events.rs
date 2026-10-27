@@ -1207,16 +1207,15 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     })
 }
 
+/// Writes one event as the master reads it: the agent's text keeps no square brackets, so
+/// a tag such as `[owner]` inside it can never pass for a speaker. Takes the event.
+/// Returns the line.
 fn line(event: &TeamEvent) -> String {
     let task = event
         .task
         .map_or_else(String::new, |task| format!(" [task {task}]"));
-    format!(
-        "[team] {} {}: {}{task}",
-        event.label,
-        event.kind.verb(),
-        event.text
-    )
+    let text = event.text.replace('[', "(").replace(']', ")");
+    format!("[team] {} {}: {text}{task}", event.label, event.kind.verb())
 }
 
 /// Turns a terminal screen, as an attach redraws it, into its text rows: escape sequences
