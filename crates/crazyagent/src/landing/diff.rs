@@ -1,6 +1,7 @@
 use super::git::{OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
+use crate::ide::agent_config;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -10,8 +11,6 @@ const DIFF_TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
 const PAGE_BUDGET: usize = 24 * 1024;
 const RECENT_BYTES_MAX: usize = 16 * 1024 * 1024;
 const RECENT_MAX: usize = 32;
-const IDE_FOLDER: &str = ".vscode";
-const WORKSPACE_SUFFIX: &str = ".code-workspace";
 
 /// A change's diff computed once: its files and plain patch text, each cut into pages,
 /// and whether git's output stopped at the byte bound.
@@ -153,22 +152,11 @@ fn kind_of(mode: &str, binary: bool) -> FileKind {
     }
 }
 
+/// Whether a path's file name opens the same file as `name` on a case-insensitive APFS
+/// volume, as git and the IDE open it there. Inputs: the path and a lower-case ASCII name.
+/// Output: true for that file.
 fn named(path: &str, name: &str) -> bool {
-    path.rsplit('/').next() == Some(name)
-}
-
-/// Whether the IDE reads a path as its settings: anything under a `.vscode` folder at any
-/// depth, or a `*.code-workspace` file, compared without letter case as macOS opens them.
-/// Input: the repository path. Output: true for IDE settings.
-fn ide_config(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    path.split('/')
-        .any(|part| part.eq_ignore_ascii_case(IDE_FOLDER))
-        || name
-            .len()
-            .checked_sub(WORKSPACE_SUFFIX.len())
-            .and_then(|start| name.get(start..))
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(WORKSPACE_SUFFIX))
+    agent_config::same_name(path.rsplit('/').next().unwrap_or(path), name)
 }
 
 /// Lists the files a change touches with their status, kind and the marks the owner
@@ -233,7 +221,7 @@ pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFi
         if old_mode != "000000" && new_mode != "000000" && old_mode != new_mode {
             marks.push(FileMark::Mode);
         }
-        if ide_config(path) || old_path.is_some_and(ide_config) {
+        if agent_config::is_ide_config(path) || old_path.is_some_and(agent_config::is_ide_config) {
             marks.push(FileMark::IdeConfig);
         }
         files.push(ChangedFile {
