@@ -2,9 +2,11 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
+use crate::engine::owner::{ProcessText, SavedText};
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
+use crate::tui::client::conflict::{CHOICES, Conflict, LINES_SHOWN_MAX};
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
@@ -44,7 +46,7 @@ enum Seed {
 enum State {
     Loading,
     Failed(String),
-    Ready { saved: String },
+    Ready { saved: String, version: u64 },
 }
 
 /// One catalog skill the editor tags: its name as characters, its engine id and its name.
@@ -172,6 +174,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_text_unsafe" => "The instructions file is a link or not a plain file, so CrazyAgent won't read it. Replace it with a plain file.".into(),
         "process_text_unreadable" => "The instructions file couldn't be read. Check it, then try again.".into(),
         "process_text_unwritable" => "The instructions couldn't be saved. Check the folder, then try again.".into(),
+        "process_text_stale" => "These instructions changed since you opened them, so yours were not saved.".into(),
         "process_project_folder_missing" => "This project keeps its files without a .crazyagent folder, so it can't hold project instructions.".into(),
         "process_project_unknown" => "This project has no setup yet, so it can't hold instructions.".into(),
         "process_import_missing" => "There is no ~/.claude/CLAUDE.md to import.".into(),
@@ -201,6 +204,22 @@ pub(in crate::tui) fn size(bytes: usize) -> String {
 /// The character the editor draws for one text character: a tab as a space, and a
 /// control, escape or zero-width character as `?`, so stored text never reaches the
 /// terminal as a command. Input: the character. Output: a printable character.
+/// Splits untrusted text into printable lines that fit beside a one-cell gutter, keeping
+/// blank lines. Inputs: the text and the width in cells. Output: the lines.
+fn quoted(text: &str, width: usize) -> Vec<String> {
+    crate::tui::screens::project_markdown::sanitize(text)
+        .split('\n')
+        .flat_map(|line| {
+            let wrapped = wrap(line, width.saturating_sub(2).max(1));
+            if wrapped.is_empty() {
+                vec![String::new()]
+            } else {
+                wrapped
+            }
+        })
+        .collect()
+}
+
 fn shown(character: char) -> char {
     match character {
         '\t' => ' ',
@@ -378,12 +397,15 @@ impl Editor {
 /// The Process page: the owner's instructions every agent gets, app-wide in Settings or
 /// for one project. Reads the saved text on opening, edits it in place and saves it only on
 /// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
-/// process, each into a preview first. One request runs at a time.
+/// process, each into a preview first. A stale save shows the conflict and keeps the draft
+/// until the owner reloads the saved text (Ctrl-R) or keeps their own (Ctrl-Y). One request
+/// runs at a time.
 pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
     editor: Editor,
     problem: Option<String>,
+    conflict: Option<Conflict>,
     pending: Option<ProcessQuery>,
     preview: Option<(Seed, String)>,
     preview_top: usize,
@@ -399,6 +421,7 @@ impl ProcessPage {
             state: State::Loading,
             editor: Editor::new(""),
             problem: None,
+            conflict: None,
             pending: None,
             preview: None,
             preview_top: 0,
@@ -422,7 +445,7 @@ impl ProcessPage {
     }
 
     fn changed(&self) -> bool {
-        matches!(&self.state, State::Ready { saved } if *saved != self.editor.text())
+        matches!(&self.state, State::Ready { saved, .. } if *saved != self.editor.text())
     }
 
     fn invalid(&self) -> Option<String> {
@@ -437,11 +460,49 @@ impl ProcessPage {
         if !self.changed() {
             return;
         }
+        let State::Ready { version, .. } = self.state else {
+            return;
+        };
         let query = ProcessQuery::Save {
             project: self.project(),
             text: self.editor.text(),
+            version,
+            opened: None,
         };
         self.send(query, ctx);
+    }
+
+    fn keep_mine(&mut self, ctx: &mut Ctx) {
+        if let Some(problem) = self.invalid() {
+            self.problem = Some(problem);
+            return;
+        }
+        let Some(conflict) = &self.conflict else {
+            return;
+        };
+        let (version, opened) = conflict.keep_mine();
+        let query = ProcessQuery::Save {
+            project: self.project(),
+            text: self.editor.text(),
+            version,
+            opened,
+        };
+        self.send(query, ctx);
+    }
+
+    fn reload(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(conflict) = self.conflict.take() else {
+            return;
+        };
+        self.editor = Editor::new(&conflict.current);
+        self.state = State::Ready {
+            saved: conflict.current,
+            version: conflict.version,
+        };
+        self.problem = self.invalid();
     }
 
     fn skill_at_cursor(&self) -> Option<&Skill> {
@@ -479,36 +540,62 @@ impl ProcessPage {
             return;
         }
         self.pending = None;
-        let result = match &event.result {
-            Ok(ProcessReply::Text(text)) => Ok(text),
-            Ok(ProcessReply::Agent(_)) => return,
-            Err(code) => Err(code),
-        };
-        match (&event.query, result) {
-            (ProcessQuery::Read { .. }, Ok(text)) => {
+        match (&event.query, &event.result) {
+            (
+                ProcessQuery::Read { .. },
+                Ok(ProcessReply::Current(ProcessText { text, version })),
+            ) => {
                 self.editor = Editor::new(text);
                 self.state = State::Ready {
                     saved: text.clone(),
+                    version: *version,
                 };
+                self.conflict = None;
             }
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
-            (ProcessQuery::Save { text, .. }, Ok(_)) => {
-                if let State::Ready { saved } = &mut self.state {
+            (
+                ProcessQuery::Save { text, .. },
+                Ok(ProcessReply::Saved(SavedText::Saved { version: next })),
+            ) => {
+                if let State::Ready { saved, version } = &mut self.state {
+                    assert!(*next > *version);
                     saved.clone_from(text);
+                    *version = *next;
                 }
                 self.problem = None;
+                self.conflict = None;
                 ctx.say(Message::success(
                     "Instructions saved.",
                     "Agents started from now on get them.",
                 ));
             }
+            (
+                ProcessQuery::Save { .. },
+                Ok(ProcessReply::Saved(SavedText::Stale {
+                    version,
+                    current,
+                    writer,
+                })),
+            ) => {
+                self.problem = Some(message("process_text_stale"));
+                self.conflict = Some(Conflict {
+                    opened: *version,
+                    version: current.version,
+                    current: current.text.clone(),
+                    writer: writer.clone(),
+                });
+            }
             (ProcessQuery::Save { .. }, Err(code)) => self.problem = Some(message(code)),
-            (ProcessQuery::ImportGlobal, Ok(text)) => self.open_preview(Seed::Import, text),
-            (ProcessQuery::Default, Ok(text)) => self.open_preview(Seed::Default, text),
+            (ProcessQuery::ImportGlobal, Ok(ProcessReply::Text(text))) => {
+                self.open_preview(Seed::Import, text);
+            }
+            (ProcessQuery::Default, Ok(ProcessReply::Text(text))) => {
+                self.open_preview(Seed::Default, text);
+            }
             (ProcessQuery::ImportGlobal | ProcessQuery::Default, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
-            (ProcessQuery::Agent { .. }, _) => {}
+            _ => {}
         }
     }
 
@@ -575,6 +662,30 @@ impl ProcessPage {
             }
             State::Ready { .. } => {}
         }
+        if let Some(conflict) = &self.conflict {
+            lines.extend(
+                wrap(&conflict.heading(), width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Warning, theme)),
+            );
+            let body = quoted(&conflict.current, width);
+            let more = body.len().saturating_sub(LINES_SHOWN_MAX);
+            lines.extend(body.into_iter().take(LINES_SHOWN_MAX).map(|text| {
+                Line::from(vec![
+                    Span::styled(format!("{} ", ctx.glyphs.vline), theme.muted),
+                    Span::raw(text),
+                ])
+            }));
+            if more > 0 {
+                lines.push(styled(format!("{more} more lines"), Role::Muted, theme));
+            }
+            lines.extend(
+                wrap(CHOICES, width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            lines.push(Line::default());
+        }
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
             .max(EDITOR_ROWS_MIN);
@@ -595,17 +706,7 @@ impl ProcessPage {
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
-            let body: Vec<String> = crate::tui::screens::project_markdown::sanitize(text)
-                .split('\n')
-                .flat_map(|line| {
-                    let wrapped = wrap(line, width.saturating_sub(2).max(1));
-                    if wrapped.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        wrapped
-                    }
-                })
-                .collect();
+            let body = quoted(text, width);
             self.preview_top = self.preview_top.min(body.len().saturating_sub(1));
             lines.extend(
                 body.into_iter()
@@ -689,7 +790,12 @@ impl Screen for ProcessPage {
             State::Failed(_) => return vec![hint("r", "Try again"), back],
             State::Loading => return vec![back],
         }
-        let mut hints = vec![hint("Ctrl-S", "Save")];
+        let mut hints = Vec::new();
+        if self.conflict.is_some() {
+            hints.push(hint("Ctrl-R", "Reload"));
+            hints.push(hint("Ctrl-Y", "Keep mine"));
+        }
+        hints.push(hint("Ctrl-S", "Save"));
         if !self.skills.is_empty() {
             hints.push(hint("Ctrl-O", "Open skill"));
         }
@@ -732,6 +838,14 @@ impl Screen for ProcessPage {
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('o')) => self.open_skill(ctx),
+            (State::Ready { .. }, Key::Ctrl('r')) if self.conflict.is_some() => {
+                self.reload();
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('y')) if self.conflict.is_some() => {
+                self.keep_mine(ctx);
+                Flow::Handled
+            }
             (State::Ready { .. }, key) if self.editor.key(key) => {
                 self.problem = self.invalid();
                 Flow::Handled

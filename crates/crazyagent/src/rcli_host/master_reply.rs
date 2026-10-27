@@ -2,6 +2,7 @@ use super::master::{RcliMasterCompletion, RcliMasterStatus};
 use super::master_launch::error;
 use super::{Event, EventBody, TurnStatus};
 use crate::protocol::{ProtocolError, RequestId};
+use crate::usage::capture::Tokens;
 use std::time::{Duration, Instant};
 
 const REPLY_BYTES_MAX: usize = 1_048_576;
@@ -20,6 +21,8 @@ pub(super) struct TurnCapture {
     messages: Vec<Message>,
     retained_bytes: usize,
     observed_bytes: usize,
+    usage: Tokens,
+    usage_through: u64,
 }
 
 impl TurnCapture {
@@ -31,6 +34,8 @@ impl TurnCapture {
             messages: Vec::new(),
             retained_bytes: 0,
             observed_bytes: 0,
+            usage: Tokens::default(),
+            usage_through: 0,
         };
         assert!(capture.messages.is_empty());
         assert_eq!(capture.retained_bytes, 0);
@@ -118,10 +123,21 @@ impl TurnCapture {
             }
             EventBody::Output { turn_id, .. } => self.scope(turn_id)?,
             EventBody::Ready {} => return Err(error("rcli_master_message_order")),
+            EventBody::UsageObservation { usage, .. } if event.0.sequence > self.usage_through => {
+                self.usage_through = event.0.sequence;
+                self.usage = self.usage.plus(usage.tokens());
+            }
             _ => {}
         }
         assert!(self.retained_bytes <= REPLY_BYTES_MAX);
         Ok(None)
+    }
+
+    /// Hands over the tokens the turn's usage frames reported since the last call, each
+    /// provider call's frame counted once by its sequence, so a repeated or older frame adds
+    /// nothing. Output: the count, zero when no new frame came.
+    pub(super) fn take_usage(&mut self) -> Tokens {
+        std::mem::take(&mut self.usage)
     }
 
     fn scope(&self, turn_id: &RequestId) -> Result<(), ProtocolError> {

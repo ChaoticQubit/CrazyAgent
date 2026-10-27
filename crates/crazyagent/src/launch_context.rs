@@ -269,6 +269,25 @@ impl AgentContext {
             .collect()
     }
 
+    /// Adds the owner's own instructions for one team agent after the app and project text
+    /// this context writes into its home. Inputs: a connection to `engine.db`, the project
+    /// and the agent id, above 0. Output: the context, or `launch_context_unavailable`.
+    pub fn for_agent(
+        mut self,
+        connection: &Connection,
+        project: &ProjectId,
+        agent: i64,
+    ) -> Result<Self, LaunchError> {
+        let tx = connection.unchecked_transaction().map_err(unavailable)?;
+        let (text, _) =
+            crate::storage::agent_text::read(&tx, project, agent).map_err(unavailable)?;
+        drop(tx);
+        if let Some(process) = self.process.as_mut() {
+            process.text = crate::agent_home::with_agent(std::mem::take(&mut process.text), &text);
+        }
+        Ok(self)
+    }
+
     /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path

@@ -494,6 +494,7 @@ pub(in crate::tui) enum ProjectReply {
         decision: ReviewDecision,
     },
     Open(OpenRequest),
+    Edit(OpenRequest),
     PickPool,
     Assign(Option<crate::protocol::CredentialRef>),
     Send(String),
@@ -1046,19 +1047,29 @@ impl ProjectScreen {
         counts
     }
 
-    /// Names one context file to open: the folder its context paths start from and the
-    /// path inside it. Takes the path inside the project folder.
+    /// Names one context file to open: the folder its context paths start from, as the
+    /// engine listed them, and the path inside it. Takes the path inside that folder.
     /// Returns the request, or none before the folder is known.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
         let folder = self
-            .setup
+            .context
             .as_ref()
-            .map(|setup| setup.folder.clone())
-            .or_else(|| self.context.as_ref().map(|context| context.folder.clone()))?;
+            .map(|context| context.folder.clone())
+            .or_else(|| {
+                self.setup
+                    .as_ref()
+                    .map(|setup| setup.state_folder().to_string_lossy().into_owned())
+            })?;
         Some(OpenRequest::Context {
             folder,
             path: path.to_owned(),
         })
+    }
+
+    /// The project's own folder, where the owner's copies of changed files live.
+    /// Takes the screen. Returns the folder, or none before the setup is read.
+    pub fn project_folder(&self) -> Option<PathBuf> {
+        self.setup.as_ref().map(StoredSetup::project_folder)
     }
 
     /// Handles one key for the open tab, the edit box or the delete question.
@@ -1757,6 +1768,11 @@ impl ProjectScreen {
             KeyCode::Char('o') => {
                 if let Some(request) = item.and_then(|item| self.context_request(&item.path)) {
                     return ProjectReply::Open(request);
+                }
+            }
+            KeyCode::Char('v') => {
+                if let Some(request) = item.and_then(|item| self.context_request(&item.path)) {
+                    return ProjectReply::Edit(request);
                 }
             }
             KeyCode::Char('a') => {

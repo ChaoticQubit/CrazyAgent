@@ -473,6 +473,7 @@ struct Authority {
     deferred: std::sync::atomic::AtomicUsize,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
+    ide: crate::ide::bridge::Grants,
 }
 
 impl Authority {
@@ -842,11 +843,12 @@ impl Authority {
         result.and(cleanup)
     }
 
-    /// Unlinks the owner socket, both owner keys and every runner key this server made,
-    /// each only while it is still the engine's own file, and tries all of them even after
-    /// one fails. Input: none. Output: Ok, or the first failure.
+    /// Unlinks the owner socket, both owner keys, every runner key and every IDE capability
+    /// file this server made, each only while it is still the engine's own file, and tries
+    /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
         let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
             Ok(slots) => {
                 for (i, slot) in slots.iter().enumerate() {
@@ -1079,6 +1081,43 @@ impl OwnerRuntimeHandle {
     }
 }
 
+impl OwnerRuntimeHandle {
+    /// The IDE bridge's view of this owner server: its capability grants, the engine root
+    /// that holds `ide/` and the owner socket path. Fails with `ide_unavailable` once the
+    /// server stopped or its root was replaced. Input: none. Output: the view.
+    pub(crate) fn ide(&self) -> Result<crate::ide::bridge::IdeHost<'_>, EngineError> {
+        if !self
+            .authority
+            .usable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(failure("ide_unavailable"));
+        }
+        self.authority
+            .root
+            .verify()
+            .map_err(|_| failure("ide_unavailable"))?;
+        let root = self
+            .authority
+            .root
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| failure("ide_unavailable"))?;
+        Ok(crate::ide::bridge::IdeHost {
+            grants: &self.authority.ide,
+            root,
+            socket: self.authority.root.path.join(SOCKET),
+        })
+    }
+
+    /// This owner server's IDE capability grants, whether or not it still runs, so a
+    /// capability can be revoked after the server stopped. Input: none. Output: the grants.
+    pub(crate) fn ide_grants(&self) -> &crate::ide::bridge::Grants {
+        &self.authority.ide
+    }
+}
+
 pub struct OwnerServer {
     listener: UnixListener,
     engine: Arc<Engine>,
@@ -1182,6 +1221,7 @@ impl OwnerServer {
                 deferred: std::sync::atomic::AtomicUsize::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
+                ide: crate::ide::bridge::Grants::default(),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1237,6 +1277,22 @@ impl OwnerServer {
             tasks.terminals.spawn(async move {
                 terminal::serve(stream, auth, engine, authority, deadline).await;
             });
+            return;
+        }
+        if &auth[..4] == crate::ide::bridge::MAGIC {
+            while let Some(result) = tasks.ides.try_join_next() {
+                log_panic(&result, "owner_ide_panicked");
+            }
+            if tasks.ides.len() >= crate::ide::bridge::CONNECTIONS_MAX {
+                return;
+            }
+            let runtime = OwnerRuntimeHandle {
+                engine: self.engine.clone(),
+                authority: self.authority.clone(),
+            };
+            tasks
+                .ides
+                .spawn(crate::ide::bridge::serve(stream, auth, runtime, deadline));
             return;
         }
         if &auth[..4] == b"CAN1" {
@@ -1342,6 +1398,9 @@ impl OwnerServer {
                 result=tasks.terminals.join_next(), if !tasks.terminals.is_empty() => {
                     if let Some(result)=result {log_panic(&result, "owner_terminal_panicked");}
                 }
+                result=tasks.ides.join_next(), if !tasks.ides.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_ide_panicked");}
+                }
                 result=tasks.refusals.join_next(), if !tasks.refusals.is_empty() => {
                     if let Some(result)=result {log_panic(&result, "owner_refusal_panicked");}
                 }
@@ -1372,6 +1431,7 @@ impl OwnerServer {
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
+            assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         upkeep.abort();
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
@@ -1385,8 +1445,10 @@ impl OwnerServer {
         tasks.custody.abort_all();
         tasks.clients.abort_all();
         tasks.terminals.abort_all();
+        tasks.ides.abort_all();
         tasks.refusals.abort_all();
         while tasks.terminals.join_next().await.is_some() {}
+        while tasks.ides.join_next().await.is_some() {}
         while handshakes.join_next().await.is_some() {}
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
@@ -2192,12 +2254,14 @@ impl Drop for Deferral<'_> {
 }
 
 /// The owner server's running tasks: owner and runner requests, the native auth
-/// custody channel, terminal viewers and busy refusals, each bounded by its own maximum.
+/// custody channel, terminal viewers, IDE bridge connections and busy refusals, each
+/// bounded by its own maximum.
 #[derive(Default)]
 struct Tasks {
     clients: tokio::task::JoinSet<()>,
     custody: tokio::task::JoinSet<()>,
     terminals: tokio::task::JoinSet<()>,
+    ides: tokio::task::JoinSet<()>,
     refusals: tokio::task::JoinSet<()>,
 }
 

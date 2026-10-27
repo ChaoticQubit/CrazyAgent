@@ -1,8 +1,16 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::project_setup::{StoredSetup, TeamPlan};
+use crate::storage::versioned::LastWriter;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+fn shown(text: &str, version: u64) -> ProcessText {
+    ProcessText {
+        text: text.into(),
+        version,
+    }
+}
 
 fn private_root(prefix: &str) -> tempfile::TempDir {
     let root = tempfile::Builder::new()
@@ -54,6 +62,8 @@ fn a_request_without_a_trusted_connection_answers_for_its_own_query() {
     let query = ProcessQuery::Save {
         project: None,
         text: "rule".into(),
+        version: 0,
+        opened: None,
     };
     let event = ProcessEvent::unavailable(query.clone());
     assert_eq!(event.query, query);
@@ -83,22 +93,33 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let read = |project: Option<ProjectId>| ProcessQuery::Read { project };
     let event = native.process(read(None)).await;
     assert_eq!(event.query, read(None));
-    assert_eq!(event.result, Ok(ProcessReply::Text(String::new())));
+    assert_eq!(event.result, Ok(ProcessReply::Current(shown("", 0))));
     for (scope, text) in [
         (None, "APP-RULE-51\n"),
         (Some(project.clone()), "PROJECT-RULE-52\n"),
     ] {
-        let save = ProcessQuery::Save {
+        let save = |version| ProcessQuery::Save {
             project: scope.clone(),
             text: text.into(),
+            version,
+            opened: None,
         };
         assert_eq!(
-            native.process(save).await.result,
-            Ok(ProcessReply::Text(String::new()))
+            native.process(save(0)).await.result,
+            Ok(ProcessReply::Saved(SavedText::Saved { version: 1 }))
         );
         assert_eq!(
-            native.process(read(scope)).await.result,
-            Ok(ProcessReply::Text(text.into()))
+            native.process(read(scope.clone())).await.result,
+            Ok(ProcessReply::Current(shown(text, 1)))
+        );
+        assert_eq!(
+            native.process(save(0)).await.result,
+            Ok(ProcessReply::Saved(SavedText::Stale {
+                version: 0,
+                current: shown(text, 1),
+                writer: LastWriter::Owner,
+            })),
+            "a save from a screen opened before the last save is refused with that text"
         );
     }
     assert_eq!(
@@ -184,6 +205,8 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let over = ProcessQuery::Save {
         project: None,
         text: "a".repeat(crate::agent_home::TEXT_BYTES_MAX + 1),
+        version: 1,
+        opened: None,
     };
     assert_eq!(
         native.process(over).await.result,
@@ -191,7 +214,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     );
     assert_eq!(
         native.process(read(None)).await.result,
-        Ok(ProcessReply::Text("APP-RULE-51\n".into())),
+        Ok(ProcessReply::Current(shown("APP-RULE-51\n", 1))),
         "a refused save keeps the saved text"
     );
     service.shutdown().await.unwrap();

@@ -29,6 +29,8 @@ const MESSAGE_ROWS: usize = 6;
 const UPDATED_NOTICE: &str =
     "Your branch is merged into the agent's copy. The list shows when the agent picks it up.";
 const WAITING_NOTE: &str = "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.";
+const NO_FILE_SHOWN: &str = "Scroll the diff to a changed text file to open it in your editor.";
+const DIFF_HEADER: &str = "diff --git ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {
@@ -71,6 +73,7 @@ pub(in crate::tui) struct ProjectChanges {
     sent: Option<ChangesQuery>,
     stale: bool,
     read_ms: i64,
+    edit: Option<String>,
 }
 
 impl ProjectChanges {
@@ -93,6 +96,7 @@ impl ProjectChanges {
             sent: None,
             stale: true,
             read_ms: 0,
+            edit: None,
         }
     }
 
@@ -255,8 +259,9 @@ impl ProjectChanges {
 
     /// Handles one key: move through the change sets, open a diff and scroll it,
     /// accept after editing the commit message or discard after a yes, ask the agent to
-    /// update, or restore. Takes the key event. Returns true when the view used the key;
-    /// other keys, including Esc on the list, are left to the host.
+    /// update, restore, or name the file shown in the diff for the owner's editor.
+    /// Takes the key event. Returns true when the view used the key; other keys,
+    /// including Esc on the list, are left to the host.
     pub fn key(&mut self, key: KeyEvent, now_ms: i64) -> bool {
         if self.asking == Some(Ask::Accept) {
             match key.code {
@@ -313,11 +318,54 @@ impl ProjectChanges {
                 self.restore();
                 true
             }
+            (KeyCode::Char('v'), _) if self.diff.is_some() => {
+                self.edit = self.shown_file();
+                if self.edit.is_none() {
+                    self.notice = Some(Notice::problem(NO_FILE_SHOWN));
+                }
+                true
+            }
             _ if self.diff.is_some() => self.diff_key(key.code),
             _ => self.list_key(key.code),
         };
         self.clamp();
         used
+    }
+
+    /// Takes the changed file the owner asked to open in their editor with `v`.
+    /// Takes the view. Returns the path the change set lists, once per ask.
+    pub fn take_edit(&mut self) -> Option<String> {
+        self.edit.take()
+    }
+
+    /// Names the changed file whose diff section is at the top of the diff view, from that
+    /// section's `+++ b/` line, or its `--- a/` line for a deleted file, read only before
+    /// its first hunk. Takes the view. Returns the path, only when the change set lists it
+    /// as a text file, so a quoted, binary or unlisted path names none.
+    fn shown_file(&self) -> Option<String> {
+        let diff = self.diff.as_ref()?;
+        let last = diff.lines.len().checked_sub(1)?;
+        let start = diff.lines[..=diff.top.min(last)]
+            .iter()
+            .rposition(|line| line.starts_with(DIFF_HEADER))?;
+        let (mut new, mut old) = (None, None);
+        for line in diff.lines[start + 1..]
+            .iter()
+            .take_while(|line| !line.starts_with(DIFF_HEADER) && !line.starts_with("@@"))
+        {
+            if let Some(path) = line.strip_prefix("+++ b/") {
+                new = Some(path);
+            } else if let Some(path) = line.strip_prefix("--- a/") {
+                old = Some(path);
+            }
+        }
+        let named = new.or(old)?;
+        let file = diff.files.iter().find(|file| {
+            file.kind == FileKind::Text
+                && (file.path == named
+                    || named.strip_suffix(TAB_SPACES) == Some(file.path.as_str()))
+        })?;
+        Some(file.path.clone())
     }
 
     /// Tells whether the owner is editing the Accept commit message, so the host leaves
@@ -639,6 +687,7 @@ impl ProjectChanges {
             }
         }
         if self.diff.is_some() {
+            help.push(("v", "$EDITOR"));
             help.push(("Esc", "Back to the list"));
         } else {
             help.extend([TABS, ("Esc", "Home")]);

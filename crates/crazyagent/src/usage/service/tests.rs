@@ -88,3 +88,45 @@ fn the_master_counts_as_its_projects_master_and_an_agent_without_an_account_is_u
         ]
     );
 }
+
+#[test]
+fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch(
+        "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
+            connection TEXT, status TEXT, stopped_ms INTEGER);
+         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL);
+         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL);
+         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0);",
+    )
+    .unwrap();
+    append(
+        &team.join("agents/agent-1/home/projects/f/s1.jsonl"),
+        &assistant("m1", 50),
+    );
+    let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    usage.step(NOW).unwrap();
+    usage.step(NOW + 1).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2).unwrap();
+    assert_eq!(report.total.input, 50);
+    assert_eq!(report.not_reported_by, ["OpenCode"]);
+    assert_eq!(
+        report
+            .agents
+            .iter()
+            .map(|row| (row.key.as_str(), row.not_reported_by.as_deref()))
+            .collect::<Vec<_>>(),
+        [("master-alpha", None), ("team-2", Some("OpenCode"))],
+        "a long-stopped agent is not scanned, so it is not marked"
+    );
+    let marks: i64 = db
+        .query_row("SELECT COUNT(*) FROM usage_unreported", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(marks, 1, "two steps in one hour keep one mark");
+}

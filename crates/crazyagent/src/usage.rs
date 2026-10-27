@@ -198,7 +198,8 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
             return Err(failure("usage_unavailable"));
         }
     }
-    db.execute_batch(capture::SCHEMA).map_err(storage)
+    db.execute_batch(capture::SCHEMA).map_err(storage)?;
+    db.execute_batch(report::SCHEMA).map_err(storage)
 }
 
 fn has_polled_copies(db: &Connection) -> Result<bool, EngineError> {
