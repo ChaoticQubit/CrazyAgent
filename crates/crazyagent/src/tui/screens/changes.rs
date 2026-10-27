@@ -545,15 +545,25 @@ impl ProjectChanges {
             ));
             lines.extend(details(set, content, now_ms, look).into_iter().skip(1));
         }
-        for file in diff.files.iter().take(FILES_SHOWN) {
+        let listed = listed_files(&diff.files);
+        for file in listed.shown {
             lines.push(Row::of(format!("  {}", file_line(file)), look.fg));
             for mark in file_marks(file) {
                 lines.push(Row::of(format!("    ! {mark}"), look.warning));
             }
         }
-        if diff.files.len() > FILES_SHOWN {
+        if listed.marked_hidden > 0 {
             lines.push(Row::of(
-                format!("  and {} more files", diff.files.len() - FILES_SHOWN),
+                match listed.marked_hidden {
+                    1 => "  1 more file needs checking before you accept.".to_owned(),
+                    hidden => format!("  {hidden} more files need checking before you accept."),
+                },
+                look.warning,
+            ));
+        }
+        if listed.plain_hidden > 0 {
+            lines.push(Row::of(
+                format!("  and {} more files", listed.plain_hidden),
                 look.muted,
             ));
         }
@@ -805,6 +815,39 @@ fn file_line(file: &ChangedFile) -> String {
         (Some(old), FileStatus::Renamed) => format!("Renamed {old} to {}", file.path),
         _ => format!("{word} {}", file.path),
     }
+}
+
+/// The changed files the diff view names, with counts of those it leaves out.
+struct ListedFiles<'a> {
+    shown: Vec<&'a ChangedFile>,
+    marked_hidden: usize,
+    plain_hidden: usize,
+}
+
+/// Picks the files the diff view names: every file the engine marked comes first, so a risk
+/// mark never hides behind plain files, then plain files, at most `FILES_SHOWN` in all.
+/// Input: the diff's files. Output: the files to name and how many marked and plain files
+/// are left out.
+fn listed_files(files: &[ChangedFile]) -> ListedFiles<'_> {
+    let (marked, plain): (Vec<&ChangedFile>, Vec<&ChangedFile>) =
+        files.iter().partition(|file| !file_marks(file).is_empty());
+    let marked_shown = marked.len().min(FILES_SHOWN);
+    let plain_shown = plain.len().min(FILES_SHOWN - marked_shown);
+    let listed = ListedFiles {
+        shown: marked[..marked_shown]
+            .iter()
+            .chain(&plain[..plain_shown])
+            .copied()
+            .collect(),
+        marked_hidden: marked.len() - marked_shown,
+        plain_hidden: plain.len() - plain_shown,
+    };
+    assert!(listed.shown.len() <= FILES_SHOWN);
+    assert_eq!(
+        listed.shown.len() + listed.marked_hidden + listed.plain_hidden,
+        files.len()
+    );
+    listed
 }
 
 fn file_marks(file: &ChangedFile) -> Vec<&'static str> {

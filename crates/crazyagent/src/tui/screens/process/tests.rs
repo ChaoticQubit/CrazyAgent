@@ -116,6 +116,36 @@ fn the_editor_shows_control_and_escape_characters_as_marks_and_follows_the_curso
 }
 
 #[test]
+fn end_on_a_pasted_100k_character_line_scrolls_at_once_and_keeps_wide_characters_whole() {
+    let mut editor = Editor::new("");
+    editor.key(&Key::Paste("x".repeat(100_000)));
+    editor.key(&Key::Home);
+    let (_, cursor) = editor.view(80, 10);
+    assert_eq!(cursor, (0, 0));
+    let started = std::time::Instant::now();
+    editor.key(&Key::End);
+    let (lines, cursor) = editor.view(80, 10);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "End on a long line took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(cursor, (79, 0));
+    assert_eq!(editor.left, 100_000 - 79);
+    assert_eq!(lines[0], "x".repeat(79));
+
+    let mut wide = Editor::new(&"\u{4e2d}".repeat(50));
+    wide.key(&Key::End);
+    let (lines, (column, _)) = wide.view(21, 1);
+    assert_eq!(
+        column, 20,
+        "ten wide characters fill the cells before the cursor"
+    );
+    assert_eq!(wide.left, 40);
+    assert_eq!(lines[0], "\u{4e2d}".repeat(10));
+}
+
+#[test]
 fn the_app_page_reads_the_saved_text_and_saves_only_on_ctrl_s() {
     let mut shell = opened(Scope::App, "Use tdd.\n");
     let shown = screen(&mut shell);
@@ -187,6 +217,53 @@ fn a_save_a_claude_master_may_refuse_warns_with_the_limit() {
         "exactly the limit is no warning: {shown}"
     );
     assert!(!shown.contains("Shorten"), "{shown}");
+}
+
+#[test]
+fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
+    let mut shell = opened(Scope::App, "Use tdd.");
+    shell.key(Key::End);
+    typed(&mut shell, " Always.");
+    let mut filled = 0;
+    while filled < 64 && {
+        shell.ctx.try_request(Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+            },
+        })
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Too many requests are waiting.")
+    );
+    assert!(!shell.busy(), "a refused save is not waiting on the engine");
+    let shown = screen(&mut shell);
+    assert!(!shown.contains("Saving..."), "{shown}");
+    assert!(shown.contains("Not saved yet"), "{shown}");
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "the refused save never queued"
+    );
+
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Use tdd. Always.".into(),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![save.clone()],
+        "once the queue drains the same Ctrl-S saves"
+    );
+    assert!(shell.busy());
+    shell.arrive(reply(save, Ok("")));
+    assert!(!screen(&mut shell).contains("Not saved yet"));
 }
 
 #[test]
