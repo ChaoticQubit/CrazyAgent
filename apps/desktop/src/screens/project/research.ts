@@ -366,6 +366,12 @@ export function taskLines(turn: MasterTurn): string[] {
   return (turn.tasks ?? []).map((task) => task.note ?? `Task ${task.task} is still with a sub-agent.`);
 }
 
+/** The engine's note when a master turn's edits wait for the owner in Changes. Input: the turn.
+ * Output: the note, or null when the turn left nothing to review. */
+export function changesLine(turn: MasterTurn): string | null {
+  return turn.changes?.trim() ? turn.changes : null;
+}
+
 /** Tells whether a task some turn handed to the team has not ended yet, so the conversation
  * keeps reading until its note arrives. Input: the turns. Output: true while one is open. */
 export function delegating(turns: MasterTurn[]): boolean {

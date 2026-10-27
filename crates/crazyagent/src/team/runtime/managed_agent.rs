@@ -301,7 +301,15 @@ impl ManagedAgent {
             },
         };
         let (_, plan, mode) = runtime
-            .prepare(&setup, AGENT, AgentRole::Sub, harness, true, &account)
+            .prepare(
+                &setup,
+                AGENT,
+                AgentRole::Sub,
+                harness,
+                true,
+                &account,
+                false,
+            )
             .unwrap();
         let home = match mode {
             Mode::PerTurn { home, .. } => home,

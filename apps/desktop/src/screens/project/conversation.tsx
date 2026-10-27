@@ -7,7 +7,7 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, delegating, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, changesLine, delegating, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
@@ -212,6 +212,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
           <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}
         {taskLines(turn).map((line, index) => <p key={`task-${index}`} className="pj-small pj-muted" data-testid="master-task">{displayText(line)}</p>)}
+        {changesLine(turn) !== null && <p className="pj-small pj-muted" data-testid="master-changes">{displayText(changesLine(turn) ?? "")}</p>}
         {accountLines(turn).map((line) => <p key={line} className="pj-small pj-muted" data-testid="master-account">{displayText(line)}</p>)}
         {again !== null && turn.ordinal === latest && <button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button>}
       </div>)}

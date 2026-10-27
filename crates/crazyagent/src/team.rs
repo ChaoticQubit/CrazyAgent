@@ -681,6 +681,18 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 record TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_task_pins (
+                task INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_worktrees (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                worktree TEXT NOT NULL,
+                git_dir TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -799,6 +811,101 @@ pub fn admit(
     let id = tx.last_insert_rowid();
     assert!(id > 0);
     Ok(Ok(id))
+}
+
+/// Starts the work that resolves what an Ask agent to update merged into a team agent's
+/// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
+/// worktree and lands in the same change set; the team master gets an engine message. A
+/// sub-agent holds at most one queued resolve task, whose prompt the newest update
+/// replaces, so the global task cap never refuses a merge already made. Takes the
+/// transaction, project, agent, prompt and time. Returns Ok, or a plain refusal code.
+pub fn admit_resolve(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    prompt: &str,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if !text_valid(prompt, TASK_PROMPT_BYTES_MAX) {
+        return Ok(Err("team_task_invalid"));
+    }
+    let found: Option<(String, String, bool)> = tx
+        .query_row(
+            "SELECT a.role,a.harness,a.tools FROM team_agents a JOIN team_worktrees w ON w.agent=a.id
+             WHERE a.id=?1 AND a.project=?2 AND w.project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((role, harness, tools)) = found else {
+        return Ok(Err("team_agent_not_found"));
+    };
+    match AgentRole::parse(&role) {
+        Some(AgentRole::Sub) => {}
+        Some(AgentRole::Master) => {
+            return append_message(
+                tx,
+                project,
+                MessageAuthor::Engine,
+                prompt,
+                MessageState::Pending,
+                now,
+            )
+            .map(|sent| sent.map(|_| ()));
+        }
+        None => return Ok(Err("team_agent_not_found")),
+    }
+    let queued: Option<i64> = tx
+        .query_row(
+            "SELECT t.id FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+             WHERE p.project=?1 AND p.agent=?2 AND t.status=?3",
+            params![project.as_str(), agent, TaskStatus::Queued.name()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(task) = queued {
+        tx.execute(
+            "UPDATE team_tasks SET prompt=?2 WHERE id=?1",
+            params![task, prompt],
+        )
+        .map_err(error)?;
+        return Ok(Ok(()));
+    }
+    make_room(
+        tx,
+        "team_tasks",
+        TASK_HISTORY,
+        project,
+        TASKS_PER_PROJECT_MAX,
+    )?;
+    tx.execute(
+        "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,NULL,?3,?4,?5,?6,?7)",
+        params![
+            project.as_str(),
+            TaskSource::Owner.name(),
+            harness,
+            tools,
+            prompt,
+            TaskStatus::Queued.name(),
+            now
+        ],
+    )
+    .map_err(error)?;
+    let task = tx.last_insert_rowid();
+    assert!(task > 0);
+    tx.execute(
+        "DELETE FROM team_task_pins WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        params![task, project.as_str(), agent],
+    )
+    .map_err(error)?;
+    Ok(Ok(()))
 }
 
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the

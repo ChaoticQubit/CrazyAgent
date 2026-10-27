@@ -724,3 +724,11 @@ test("Cmd+Enter and the Send button follow one rule", () => {
   assert.equal(research.canSend("a".repeat(8193), false), false);
   assert.equal(research.canSend("é".repeat(4097), false), false);
 });
+
+test("a master turn whose edits wait in Changes shows the engine's note, and a turn without one shows nothing", () => {
+  const waiting = "The edits from this turn are waiting for you in Changes.";
+  assert.equal(research.changesLine({ id: "t1", ordinal: 1, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: waiting }), waiting);
+  assert.equal(research.changesLine({ id: "t2", ordinal: 2, phase: "failed", reason: null, reply: null, changes: null }), null);
+  assert.equal(research.changesLine({ id: "t3", ordinal: 3, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
+  assert.equal(research.changesLine({ id: "t4", ordinal: 4, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: "  " }), null);
+});

@@ -112,6 +112,13 @@ pub(crate) enum MasterRuntimeCommand {
         reason: MasterReason,
         cause: String,
     },
+    Changes {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        note: String,
+    },
     Checked {
         provisioned: Box<crate::worktrees::Provisioned>,
         prepare: Box<MasterRuntimeCommand>,
@@ -137,6 +144,7 @@ pub(crate) enum MasterRuntimeObservation {
 
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
+    pub(crate) message: String,
     pub(crate) instructions: String,
     pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
@@ -2146,7 +2154,7 @@ fn prompt(
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
     let message = turn_message(tx, session, turn)?;
-    let context = prompt_context(tx, session)?;
+    let context = with_resolve(tx, session, prompt_context(tx, session)?)?;
     let entries = prior_turns(tx, session, turn)?;
     let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
         + HISTORY_HEADER.len()
@@ -2198,6 +2206,41 @@ fn preflight_turn(
     }
 }
 
+/// Whether this session's master turns run with file tools: a Claude or Codex master in a
+/// project whose launch context turns them on. Inputs: the transaction and the session.
+/// Output: the flag.
+fn turn_tools(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<bool, EngineError> {
+    Ok(matches!(
+        session.selection.backend,
+        MasterBackend::Claude | MasterBackend::Codex
+    ) && crate::launch_context::master_tools(tx, &session.project_id)
+        .map_err(|problem| EngineError(problem.0))?)
+}
+
+/// Puts the resolve prompt an Ask agent to update left for this master after the context
+/// of its next tools-on turn, so that turn resolves the merge (DEC-095). Inputs: the
+/// transaction, the session and the context. Output: the context with the resolve prompt
+/// after it when one waits, else the context unchanged.
+fn with_resolve(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    context: Option<String>,
+) -> Result<Option<String>, EngineError> {
+    if !turn_tools(tx, session)? {
+        return Ok(context);
+    }
+    let resolve = crate::landing_turns::resolve_prompt_for(
+        tx,
+        &session.project_id,
+        crate::landing::AgentKind::Master,
+        session.session_id.as_str(),
+    )?;
+    Ok(match (context, resolve) {
+        (Some(context), Some(resolve)) => Some(format!("{context}\n\n{resolve}")),
+        (context, resolve) => context.or(resolve),
+    })
+}
+
 fn bundle(
     tx: &Transaction<'_>,
     session: MasterSessionView,
@@ -2208,11 +2251,7 @@ fn bundle(
         .attempt
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
-    let tools = matches!(
-        session.selection.backend,
-        MasterBackend::Claude | MasterBackend::Codex
-    ) && crate::launch_context::master_tools(tx, &session.project_id)
-        .map_err(|problem| EngineError(problem.0))?;
+    let tools = turn_tools(tx, &session)?;
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => {
@@ -2222,6 +2261,7 @@ fn bundle(
     };
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
+        message: turn_message(tx, &session, turn)?,
         instructions,
         tools,
         session,
@@ -3442,6 +3482,13 @@ pub(super) fn runtime(
             session_id,
             turn_id,
             ..
+        }
+        | MasterRuntimeCommand::Changes {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
         } => (host, project_id, session_id, turn_id),
     };
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
@@ -3595,6 +3642,18 @@ pub(super) fn runtime(
                 persist_runtime(&tx, config, &mut session, &turn)?;
                 assert!(session.current_turn.is_none());
             }
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+        MasterRuntimeCommand::Changes { ref note, .. } => {
+            if turn.phase.outstanding() {
+                return Err(error("master_turn_not_ended"));
+            }
+            if note.trim().is_empty() || note.len() > crate::team::NOTE_BYTES_MAX {
+                return Err(error("master_changes_note_bounds"));
+            }
+            turn.changes = Some(note.clone());
+            persist_runtime(&tx, config, &mut session, &turn)?;
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
@@ -3822,6 +3881,7 @@ fn execute(
                 reply: None,
                 accounts: Vec::new(),
                 tasks: Vec::new(),
+                changes: None,
                 detail: None,
                 cause: None,
             };

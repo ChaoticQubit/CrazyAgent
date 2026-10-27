@@ -2290,3 +2290,278 @@ async fn a_master_reply_observed_while_another_connection_holds_the_database_is_
     assert_eq!(persisted.phase, MasterTurnPhase::Succeeded);
     assert_eq!(persisted.reply, Some(reply));
 }
+
+async fn end_tools_turn(
+    case: &Fixture,
+    prepared: &PreparedMasterTurn,
+    turn: &RequestId,
+    edit: impl FnOnce(&Path),
+    ending: MasterRuntimeObservation,
+) -> MasterTurnView {
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(prepared, turn)
+        .await
+        .unwrap();
+    let runtime = MasterRuntimeView {
+        runtime_ref: RequestId::new("landing-runtime").unwrap(),
+        artifact_sha256: "a".repeat(64),
+        native_session_id: None,
+    };
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            prepared,
+            turn,
+            MasterRuntimeObservation::Running { runtime },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    assert_eq!(running.changes, None);
+    edit(&prepared.cwd);
+    let ended = case
+        .runtime()
+        .observe_master_turn(prepared, turn, ending)
+        .await
+        .unwrap();
+    drop(hold);
+    drop(profile);
+    ended
+}
+
+fn landing_reply(prepared: &PreparedMasterTurn) -> MasterRuntimeObservation {
+    MasterRuntimeObservation::Response {
+        reply: MasterReply {
+            text: "I wrote the notes.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: prepared.attempt.request.id.clone(),
+                runtime_ref: RequestId::new("landing-runtime").unwrap(),
+                capture_ref: RequestId::new("landing-capture").unwrap(),
+                capture_sequence: 2,
+            },
+        },
+        delegations: vec![],
+    }
+}
+
+async fn tools_case(tools: bool) -> (Fixture, Box<PreparedMasterTurn>) {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, tools);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.tools, tools);
+    assert!(prepared.cwd.join(".git").is_file());
+    (case, prepared)
+}
+
+#[tokio::test]
+async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set_and_a_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    let persisted = case.persisted_turn().await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    let session = case.session.session_id.clone();
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: session.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: prepared.repository.clone(),
+        worktree: prepared.cwd.clone(),
+        git_dir: crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap(),
+    };
+    let end = |turn: &str| crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: turn.into(),
+        prompt_line: "Another turn".into(),
+    };
+    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn")).unwrap();
+    fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn")).unwrap();
+    drop(db);
+    drop(prepared);
+    case.finish().await;
+    use crate::landing_turns::Landed;
+    assert_eq!(
+        quiet,
+        Landed::Waiting(sets[0].id.clone()),
+        "a turn that added nothing"
+    );
+    assert_eq!(
+        more,
+        Landed::Added(sets[0].id.clone()),
+        "a later turn adds to the same set"
+    );
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Master);
+    assert_eq!(sets[0].agent.id, session.as_str());
+    assert_eq!(sets[0].files, 1);
+    assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+}
+
+#[tokio::test]
+async fn a_failed_tools_on_master_turn_still_keeps_its_edits_for_review() {
+    let (case, prepared) = tools_case(true).await;
+    let failed = MasterRuntimeObservation::Failed {
+        reason: MasterReason::CaptureIncomplete,
+        cause: "master_capture_incomplete".into(),
+    };
+    let write = |cwd: &Path| fs::write(cwd.join("half.txt"), "Half done.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, write, failed).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Failed);
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Failed);
+}
+
+#[tokio::test]
+async fn a_tools_on_master_turn_that_changed_nothing_and_a_tools_off_turn_leave_no_change_set() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, |_| {}, reply).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes, None);
+    assert!(sets.is_empty(), "{sets:?}");
+
+    let (case, prepared) = tools_case(false).await;
+    let reply = landing_reply(&prepared);
+    let stray =
+        |cwd: &Path| fs::write(cwd.join("stray.txt"), "Not from a tools-on master.\n").unwrap();
+    let ended = end_tools_turn(&case, &prepared, &case.turn.id, stray, reply).await;
+    let sets = case
+        .owner
+        .change_sets(case.session.project_id.clone())
+        .await
+        .unwrap();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(ended.changes, None);
+    assert!(sets.is_empty(), "{sets:?}");
+}
+
+#[tokio::test]
+async fn a_master_worktree_commits_only_into_the_git_folder_its_lease_recorded() {
+    let (case, prepared) = tools_case(true).await;
+    let db = case.db();
+    let recorded = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    let pointer = fs::read(prepared.cwd.join(".git")).unwrap();
+    let elsewhere = case.root.path().join("elsewhere-git");
+    private_directory(&elsewhere);
+    fs::write(
+        prepared.cwd.join(".git"),
+        format!("gitdir: {}\n", elsewhere.display()),
+    )
+    .unwrap();
+    let repointed = crate::worktrees::lease_git_dir(&db, &prepared.lease);
+    let sibling = recorded.with_file_name("sibling-lease");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        sibling.join("gitdir"),
+        format!("{}/.git\n", prepared.lease.path),
+    )
+    .unwrap();
+    fs::write(
+        prepared.cwd.join(".git"),
+        format!("gitdir: {}\n", sibling.display()),
+    )
+    .unwrap();
+    let swapped = crate::worktrees::lease_git_dir(&db, &prepared.lease);
+    fs::write(prepared.cwd.join(".git"), pointer).unwrap();
+    let restored = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    drop(db);
+    let repository = prepared.repository.clone();
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(
+        recorded.parent(),
+        Some(repository.join(".git/worktrees").as_path())
+    );
+    assert_eq!(
+        repointed.unwrap_err().0,
+        "worktree_metadata_escape",
+        "a folder outside the repository's worktrees is refused"
+    );
+    assert_eq!(
+        swapped.unwrap_err().0,
+        "worktree_identity_changed",
+        "another folder that links back is still not the one the lease recorded"
+    );
+    assert_eq!(restored, recorded);
+}
+
+#[tokio::test]
+async fn asking_a_master_to_update_merges_the_owner_branch_and_its_next_turn_resolves_it() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    let (repository, worktree) = (prepared.repository.clone(), prepared.cwd.clone());
+    drop(prepared);
+    private_file(&repository.join("NOTES.md"), b"Written by the owner.\n");
+    git(&repository, case.root.path(), &["add", "NOTES.md"]);
+    git(
+        &repository,
+        case.root.path(),
+        &["commit", "-qm", "Owner notes"],
+    );
+    let project = case.session.project_id.clone();
+    let pending = case.owner.change_sets(project.clone()).await.unwrap();
+    case.owner
+        .update_changes(pending[0].id.clone())
+        .await
+        .unwrap();
+    let updating = case.owner.change_sets(project.clone()).await.unwrap();
+    let merged = fs::read_to_string(worktree.join("NOTES.md")).unwrap();
+    let second = case.submit("Carry on with the notes.").await;
+    let next = case.prepared(&second).await;
+    let resolve = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Both notes.\n").unwrap();
+    let ended = end_tools_turn(&case, &next, &second, resolve, landing_reply(&next)).await;
+    let reviewed = case.owner.change_sets(project).await.unwrap();
+    let text = next.text.clone();
+    drop(next);
+    case.finish().await;
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(updating[0].state, crate::landing::ChangeState::Updating);
+    assert!(merged.contains("<<<<<<<"), "{merged}");
+    assert!(
+        text.contains("CrazyAgent merged it into your worktree"),
+        "{text}"
+    );
+    assert!(text.contains("\n- NOTES.md\n"), "{text}");
+    assert!(text.ends_with("Carry on with the notes."), "{text}");
+    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(reviewed.len(), 1, "{reviewed:?}");
+    assert_eq!(reviewed[0].id, pending[0].id);
+    assert_eq!(reviewed[0].state, crate::landing::ChangeState::Pending);
+}

@@ -35,6 +35,12 @@ const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 const STORAGE_BUSY: &str = "database is locked";
 const BUSY_ATTEMPTS: u32 = 5;
 const BUSY_PAUSE: Duration = Duration::from_millis(250);
+/// The note under a tools-on master turn whose edits now wait for the owner in Changes.
+pub(super) const CHANGES_WAITING: &str = "The edits from this turn are waiting for you in Changes.";
+/// How the note under a tools-on master turn starts when its edits could not be kept for
+/// review; the refusal code follows in brackets.
+pub(super) const CHANGES_NOT_KEPT: &str =
+    "The edits from this turn could not be kept for review and stay only in the master's worktree.";
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
@@ -402,8 +408,94 @@ impl OwnerRuntimeHandle {
         })
         .await?;
         match observed {
+            MasterRuntimeResult::Turn(turn) if prepared.tools && !turn.phase.outstanding() => {
+                Ok(self.land_master_turn(prepared, *turn).await)
+            }
             MasterRuntimeResult::Turn(turn) => Ok(*turn),
             _ => Err(failure("master_runtime_result")),
+        }
+    }
+
+    /// Lands what an ended tools-on master turn changed in its worktree (DEC-095): the
+    /// engine commits it into that worktree's change set and the turn gets a note for the
+    /// owner. Landing never fails the turn; when it fails the note says why. Inputs: the
+    /// prepared turn and the ended turn as stored. Output: the turn as stored now.
+    async fn land_master_turn(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn: MasterTurnView,
+    ) -> MasterTurnView {
+        assert!(prepared.tools && !turn.phase.outstanding());
+        assert_eq!(prepared.session.current_turn.as_ref(), Some(&turn.id));
+        let project = prepared.session.project_id.clone();
+        let agent = crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: prepared.session.session_id.as_str().to_owned(),
+            label: "Master".into(),
+        };
+        let repository = prepared.repository.clone();
+        let worktree = prepared.cwd.clone();
+        let end = crate::landing::TurnEnd {
+            outcome: match turn.phase {
+                MasterTurnPhase::Succeeded => crate::landing::TurnOutcome::Succeeded,
+                MasterTurnPhase::Cancelled => crate::landing::TurnOutcome::Cancelled,
+                _ => crate::landing::TurnOutcome::Failed,
+            },
+            turn: turn.id.as_str().to_owned(),
+            prompt_line: prepared
+                .message
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        let root = self.authority.root.verify().ok().and_then(|()| {
+            self.authority
+                .root
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+        let lease = prepared.lease.clone();
+        let landed = tokio::task::spawn_blocking(move || {
+            let root = root.ok_or_else(|| failure("changes_unavailable"))?;
+            let db = crate::landing::open(&root)?;
+            let workspace = crate::landing::Workspace {
+                project,
+                agent,
+                repository,
+                worktree,
+                git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
+            };
+            crate::landing_turns::record(&db, &workspace, &end)
+        })
+        .await
+        .unwrap_or_else(|_| Err(failure("changes_unavailable")));
+        let note = match landed {
+            Ok(
+                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
+            ) => {
+                return turn;
+            }
+            Ok(crate::landing_turns::Landed::Added(_)) => CHANGES_WAITING.to_owned(),
+            Err(error) => format!(
+                "{CHANGES_NOT_KEPT} ({})",
+                crate::protocol::plain_code(&error.0)
+            ),
+        };
+        let noted = when_storage_frees(|| {
+            self.master_runtime_command(MasterRuntimeCommand::Changes {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn.id.clone(),
+                note: note.clone(),
+            })
+        })
+        .await;
+        match noted {
+            Ok(MasterRuntimeResult::Turn(noted)) => *noted,
+            _ => turn,
         }
     }
 

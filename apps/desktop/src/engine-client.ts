@@ -1484,6 +1484,7 @@ export interface MasterTurn {
   detail?: string | null;
   cause?: string | null;
   tasks?: MasterTask[];
+  changes?: string | null;
 }
 
 /** One task a master turn handed to the project's team, with the engine's note once it ended. */

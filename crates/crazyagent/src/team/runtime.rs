@@ -246,6 +246,7 @@ pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
 /// their own git worktrees. The engine admits every task; agents only propose.
 pub struct TeamRuntime {
     connection: Connection,
+    root: PathBuf,
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
@@ -343,8 +344,13 @@ impl TeamRuntime {
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
+        let root = database
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| EngineError("team_state_not_canonical".into()))?;
         Ok(Self {
             connection,
+            root,
             state: state.to_path_buf(),
             executables,
             access,
@@ -1477,21 +1483,25 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let queued: Vec<(i64, String, String)> = {
+        let queued: Vec<(i64, String, String, Option<i64>)> = {
             let mut statement = self
                 .connection
-                .prepare("SELECT id,harness,prompt FROM team_tasks WHERE project=?1 AND status='queued' ORDER BY id LIMIT 64")
+                .prepare(
+                    "SELECT t.id,t.harness,t.prompt,p.agent FROM team_tasks t
+                     LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
+                     WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
+                )
                 .map_err(error)?;
             statement
                 .query_map([project.as_str()], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })
                 .map_err(error)?
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
-        for (task, harness, prompt) in queued {
+        for (task, harness, prompt, pin) in queued {
             let Some(slot) = stored
                 .team
                 .sub_harnesses
@@ -1504,18 +1514,44 @@ impl TeamRuntime {
             let idle = self
                 .workers
                 .iter()
-                .find(|(_, w)| {
+                .find(|(id, w)| {
                     &w.project == project
                         && w.role == AgentRole::Sub
                         && w.harness == harness
                         && w.busy.is_none()
                         && !w.stopping
                         && !paused.contains(&w.connection)
+                        && pin.is_none_or(|pin| pin == **id)
                 })
                 .map(|(id, _)| *id);
-            let agent = match idle {
-                Some(agent) => agent,
-                None => {
+            let agent = match (idle, pin) {
+                (Some(agent), _) => agent,
+                (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
+                (None, Some(pinned)) => {
+                    if self.live(project, AgentRole::Sub, Some(&harness))
+                        >= usize::from(slot.agents)
+                        || self.live(project, AgentRole::Sub, None) >= subs_max
+                    {
+                        continue;
+                    }
+                    let Ok(account) = self.account_for(access, project, &harness, paused) else {
+                        continue;
+                    };
+                    match self.revive(stored, pinned, &harness, slot.tools, &account)? {
+                        Ok(agent) => agent,
+                        Err(problem) => {
+                            self.fail_task(
+                                task,
+                                &format!(
+                                    "The sub-agent could not start again in its worktree: {}",
+                                    bound_text(&problem, 300)
+                                ),
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+                (None, None) => {
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
@@ -1719,7 +1755,81 @@ impl TeamRuntime {
             .map_err(error)?;
         let id = self.connection.last_insert_rowid();
         assert!(id > 0);
-        let prepared = self.prepare(stored, id, role, harness, tools, account);
+        self.launch(stored, id, role, harness, tools, account, again, None)
+    }
+
+    /// Starts a stopped sub-agent again under its own id in the worktree it left, for a task
+    /// pinned to it, so that task's end lands in the same change set (DEC-095). Takes the
+    /// setup, the sub-agent, its harness and tools switch and the account to run on.
+    /// Returns its id, or the plain reason it could not start; the worktree must still be
+    /// the one recorded when the agent was first started.
+    fn revive(
+        &mut self,
+        stored: &StoredSetup,
+        id: i64,
+        harness: &str,
+        tools: bool,
+        account: &TeamAccount,
+    ) -> Result<Result<i64, String>, EngineError> {
+        if self.panes(&stored.project_id) >= PANES_PER_PROJECT_MAX {
+            return Ok(Err(format!(
+                "the project already runs {PANES_PER_PROJECT_MAX} agents, the most one project may run at once"
+            )));
+        }
+        let kept: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![id, stored.project_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((repository, worktree, git_dir)) = kept else {
+            return Ok(Err("the sub-agent's worktree is no longer known".into()));
+        };
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, heartbeat_ms=?4
+                 WHERE id=?1 AND project=?2 AND role='sub' AND status IN ('stopped','failed')",
+                params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms()],
+            )
+            .map_err(error)?;
+        if changed != 1 {
+            return Ok(Err("the sub-agent is not stopped".into()));
+        }
+        let kept = [repository, worktree, git_dir];
+        self.launch(
+            stored,
+            id,
+            AgentRole::Sub,
+            harness,
+            tools,
+            account,
+            None,
+            Some(kept),
+        )
+    }
+
+    /// Prepares and starts the agent of one `team_agents` row: a new agent in a new
+    /// worktree, or with `kept` a revived one in the worktree recorded for it. Takes the
+    /// setup, the row id, role, harness, tools switch, account, the register restart if any
+    /// and the kept worktree. Returns the id, or the plain reason it failed, which the row
+    /// then records.
+    #[allow(clippy::too_many_arguments)]
+    fn launch(
+        &mut self,
+        stored: &StoredSetup,
+        id: i64,
+        role: AgentRole,
+        harness: &str,
+        tools: bool,
+        account: &TeamAccount,
+        again: Option<&HostedRestart>,
+        kept: Option<[String; 3]>,
+    ) -> Result<Result<i64, String>, EngineError> {
+        let prepared = self.prepare(stored, id, role, harness, tools, account, kept.is_some());
         let (root, plan, mode) = match prepared {
             Ok(prepared) => prepared,
             Err(problem) => {
@@ -1740,10 +1850,39 @@ impl TeamRuntime {
                     .map(|p| p.display().to_string())
             })
             .flatten();
+        let landing = match agent_git_dir(&root, &plan.working_dir) {
+            Ok(landing) if kept.as_ref().is_none_or(|kept| kept == &landing) => landing,
+            Ok(_) => {
+                let problem =
+                    with_code("the agent worktree changed", Some("team_worktree_changed"));
+                self.connection
+                    .execute(
+                        "UPDATE team_agents SET status='failed', error=?2, stopped_ms=?3 WHERE id=?1",
+                        params![id, bound_text(&problem, 400), now_ms()],
+                    )
+                    .map_err(error)?;
+                return Ok(Err(problem));
+            }
+            Err(problem) => {
+                self.connection
+                    .execute(
+                        "UPDATE team_agents SET status='failed', error=?2, stopped_ms=?3 WHERE id=?1",
+                        params![id, bound_text(&problem, 400), now_ms()],
+                    )
+                    .map_err(error)?;
+                return Ok(Err(problem));
+            }
+        };
         self.connection
             .execute(
                 "UPDATE team_agents SET worktree=?2 WHERE id=?1",
                 params![id, worktree],
+            )
+            .map_err(error)?;
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![id, stored.project_id.as_str(), landing[0], landing[1], landing[2]],
             )
             .map_err(error)?;
         let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
@@ -1830,6 +1969,7 @@ impl TeamRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &self,
         stored: &StoredSetup,
@@ -1838,6 +1978,7 @@ impl TeamRuntime {
         harness: &str,
         tools: bool,
         account: &TeamAccount,
+        adopt: bool,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = self
@@ -1917,8 +2058,11 @@ impl TeamRuntime {
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
-        add_worktree(&sandbox, &profile, &worktree)
-            .map_err(|e| with_code("the agent worktree could not be added", Some(run_code(&e))))?;
+        if !adopt {
+            add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
+                with_code("the agent worktree could not be added", Some(run_code(&e)))
+            })?;
+        }
         let working_dir = worktree
             .canonicalize()
             .map_err(|e| with_code("the agent worktree could not be opened", Some(io_code(&e))))?;
@@ -2160,6 +2304,7 @@ impl TeamRuntime {
                     }
                     None => {}
                 }
+                self.land(id, &project, busy, end)?;
                 if !matches!(
                     end,
                     TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
@@ -2196,6 +2341,7 @@ impl TeamRuntime {
                     )?,
                     None => {}
                 }
+                self.land(id, &worker.project, worker.busy, TurnEnd::Closed)?;
                 let status = if problem.is_some() && !worker.stopping {
                     AgentStatus::Failed
                 } else {
@@ -2239,6 +2385,110 @@ impl TeamRuntime {
                 Ok(true)
             }
         }
+    }
+
+    /// Lands what one agent's ended turn changed in its worktree (DEC-095): the engine
+    /// commits it into that worktree's change set and the team chat says the edits wait in
+    /// Changes, or why they could not be kept. Landing never fails the agent or its work.
+    /// Inputs: the agent, its project, the work that ended and how. Output: any SQLite
+    /// failure writing the note.
+    fn land(
+        &mut self,
+        id: i64,
+        project: &ProjectId,
+        busy: Option<Busy>,
+        end: TurnEnd,
+    ) -> Result<(), EngineError> {
+        let Some(busy) = busy else {
+            return Ok(());
+        };
+        type Row = (String, String, String, String, String);
+        let row: Option<Row> = self
+            .connection
+            .query_row(
+                "SELECT a.role,a.harness,w.repository,w.worktree,w.git_dir FROM team_worktrees w
+                 JOIN team_agents a ON a.id=w.agent WHERE w.agent=?1 AND w.project=?2",
+                params![id, project.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((role, harness, repository, worktree, git_dir)) = row else {
+            return Ok(());
+        };
+        let harness = excerpt(&harness, 64);
+        let prompt = |sql: &str, key: i64| -> Result<String, EngineError> {
+            self.connection
+                .query_row(sql, [key], |row| row.get::<_, String>(0))
+                .optional()
+                .map(Option::unwrap_or_default)
+                .map_err(error)
+        };
+        let (turn, line, what) = match busy {
+            Busy::Task(task) => (
+                format!("task-{task}"),
+                prompt("SELECT prompt FROM team_tasks WHERE id=?1", task)?,
+                format!("task {task} ({harness}, sub-agent {id})"),
+            ),
+            Busy::Message(message) => (
+                format!("message-{message}"),
+                prompt("SELECT text FROM team_messages WHERE id=?1", message)?,
+                format!("the team master's turn ({harness}, agent {id})"),
+            ),
+        };
+        let label = if AgentRole::parse(&role) == Some(AgentRole::Master) {
+            format!("Team master ({harness})")
+        } else {
+            format!("Sub-agent {id} ({harness})")
+        };
+        let workspace = crate::landing::Workspace {
+            project: project.clone(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: id.to_string(),
+                label,
+            },
+            repository: PathBuf::from(repository),
+            worktree: PathBuf::from(worktree),
+            git_dir: PathBuf::from(git_dir),
+        };
+        let ended = crate::landing::TurnEnd {
+            outcome: match end {
+                TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
+                TurnEnd::Cancelled | TurnEnd::Interrupted => crate::landing::TurnOutcome::Cancelled,
+                _ => crate::landing::TurnOutcome::Failed,
+            },
+            turn,
+            prompt_line: line.lines().next().unwrap_or_default().to_owned(),
+        };
+        let landed = crate::landing::open(&self.root)
+            .and_then(|db| crate::landing_turns::record(&db, &workspace, &ended));
+        let note = match landed {
+            Ok(
+                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
+            ) => {
+                return Ok(());
+            }
+            Ok(crate::landing_turns::Landed::Added(_)) => {
+                format!("The edits from {what} are waiting for you in Changes.")
+            }
+            Err(problem) => with_code(
+                &format!(
+                    "The edits from {what} could not be kept for review and stay only in its worktree"
+                ),
+                Some(&problem.0),
+            ),
+        };
+        assert!(note.len() <= NOTE_BYTES_MAX);
+        self.note(project, &note)
     }
 
     fn pause(&mut self, connection: &CredentialRef) -> Result<(), EngineError> {
@@ -2862,6 +3112,43 @@ fn full_stop(line: String) -> String {
     } else {
         line + "."
     }
+}
+
+/// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
+/// so the engine's later commits never rely on what the agent may write: a folder directly
+/// in the project's `.git/worktrees` whose `gitdir` file names this worktree. Inputs: the
+/// project root and the worktree. Output: the root, worktree and metadata folder as text,
+/// or the plain reason.
+fn agent_git_dir(root: &Path, worktree: &Path) -> Result<[String; 3], String> {
+    use std::io::Read;
+    let read = |path: &Path| -> Result<String, String> {
+        let mut text = String::new();
+        std::fs::File::open(path)
+            .and_then(|file| file.take(4096).read_to_string(&mut text))
+            .map_err(|e| with_code("the agent worktree could not be checked", Some(io_code(&e))))?;
+        Ok(text)
+    };
+    let refused = || {
+        with_code(
+            "the agent worktree could not be checked",
+            Some("team_worktree_git_dir"),
+        )
+    };
+    let pointer = read(&worktree.join(".git"))?;
+    let git_dir = pointer
+        .strip_prefix("gitdir: ")
+        .and_then(|path| path.strip_suffix('\n'))
+        .map(PathBuf::from)
+        .ok_or_else(refused)?;
+    if git_dir.parent() != Some(root.join(".git").join("worktrees").as_path())
+        || read(&git_dir.join("gitdir"))? != format!("{}\n", worktree.join(".git").display())
+    {
+        return Err(refused());
+    }
+    let text = |path: &Path| path.to_str().map(str::to_owned).ok_or_else(refused);
+    let found = [text(root)?, text(worktree)?, text(&git_dir)?];
+    assert!(found[2].starts_with(&found[0]) && found[1].starts_with(&found[0]));
+    Ok(found)
 }
 
 /// The plain code for a failed file step, named by its kind so an owner line never quotes

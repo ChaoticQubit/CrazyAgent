@@ -387,6 +387,8 @@ pub struct MasterTurnView {
     pub accounts: Vec<MasterAccountState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<MasterTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<String>,
 }
 
 /// One task a master turn handed to the project's team, with the engine's note on how it
