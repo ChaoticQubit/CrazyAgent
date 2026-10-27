@@ -1,7 +1,7 @@
 import { deleteMemory, editProjectMemory, nextGeneration, savedMemories } from "../../api";
 import type { Result, SavedMemory } from "../../api";
 import { useEffect, useState } from "react";
-import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, promoteProjectMemory, reviewMemory } from "../../api-projects";
+import { failureCopy, loadAllProjectMemories, promoteProjectMemory, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog, StatusBadge } from "../../ui";
@@ -11,19 +11,6 @@ import { memoryGroups, changeOutcome } from "./research";
 import { useLoad } from "../../state";
 import { NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
-
-async function loadAll(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
-  const items: MemoryItem[] = [];
-  let after: string | null = null;
-  for (let page = 0; page < MEMORY_PAGES_MAX; page += 1) {
-    const batch = await loadProjectMemories(id, after);
-    if (batch.kind !== "ok") return batch;
-    if (batch.value.length === 0) return { kind: "ok", value: { items, more: false } };
-    items.push(...batch.value);
-    after = batch.value[batch.value.length - 1].id;
-  }
-  return { kind: "ok", value: { items, more: true } };
-}
 
 /** One research memory waiting for the owner, like the TUI's y Save to memory, n Dismiss and
  * e Edit first. The row shows the exact stored text with hidden characters as escapes, never a
@@ -80,7 +67,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
 
   useEffect(() => {
     let live = true;
-    void loadAll(data.id).then((result) => { if (live) setMemories(result); });
+    void loadAllProjectMemories(data.id).then((result) => { if (live) setMemories(result); });
     return () => { live = false; };
   }, [data.id, round]);
 

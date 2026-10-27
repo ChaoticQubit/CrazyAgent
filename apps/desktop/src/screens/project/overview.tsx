@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
 import { listMcpServers, listSkills, nextGeneration, poolSummaries } from "../../api";
-import { failureCopy, loadProjectMemories, retryResearch } from "../../api-projects";
+import { failureCopy, loadAllProjectMemories, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
@@ -45,7 +45,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const [suggested, setSuggested] = useState(0);
   useEffect(() => {
     let live = true;
-    void loadProjectMemories(data.id, null).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value).suggested.length : 0); });
+    void loadAllProjectMemories(data.id).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value.items).suggested.length : 0); });
     return () => { live = false; };
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);

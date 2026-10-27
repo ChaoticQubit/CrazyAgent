@@ -808,3 +808,19 @@ test("a master turn whose edits wait in Changes shows the engine's note, and a t
   assert.equal(research.changesLine({ id: "t3", ordinal: 3, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
   assert.equal(research.changesLine({ id: "t4", ordinal: 4, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: "  " }), null);
 });
+
+test("Overview counts suggested memories across every memory batch, the way the Memory panel lists them", () => {
+  const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
+  const overview = source("screens/project/overview.tsx");
+  const memory = source("screens/project/memory.tsx");
+  assert.equal(typeof api.loadAllProjectMemories, "function");
+  assert.match(overview, /loadAllProjectMemories\(data\.id\)\.then\(\(result\) => \{[^}]*memoryGroups\(result\.value\.items\)\.suggested\.length/);
+  assert.doesNotMatch(overview, /loadProjectMemories\(/, "one engine batch holds at most 8 entries of any status");
+  assert.match(memory, /loadAllProjectMemories\(data\.id\)/);
+  assert.doesNotMatch(memory, /loadProjectMemories\(/);
+  const all = source("api-projects.ts").match(/export async function loadAllProjectMemories[\s\S]*?\n}\n/)?.[0] ?? "";
+  assert.match(all, /page < MEMORY_PAGES_MAX/);
+  assert.match(all, /loadProjectMemories\(id, after\)/);
+  assert.match(all, /after = batch\.value\[batch\.value\.length - 1\]\.id/);
+  assert.match(all, /batch\.value\.length === 0\) return \{ kind: "ok", value: \{ items, more: false \} \}/);
+});
