@@ -64,6 +64,8 @@ mod native_auth_restart_tests;
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
+#[cfg(all(test, unix))]
+mod usage_tests;
 
 const SOCKET: &str = "owner.sock";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
