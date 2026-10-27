@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -110,6 +111,41 @@ test("the device code shows how long it still works and only GitHub pages open",
   assert.equal(intake.gitHubPage("https://github.com.evil.test/login/device"), null);
   assert.equal(intake.gitHubPage("http://github.com/login/device"), null);
   assert.equal(intake.gitHubPage("javascript:alert(1)"), null);
+});
+
+test("the device sign-in polls only while its code works and the owner isn't signed in yet", () => {
+  const device = { code: { expires_s: 900 }, started: 1_000 };
+  assert.equal(intake.devicePolling(null, false, 1_000), false, "no code, nothing to poll");
+  assert.equal(intake.devicePolling(device, false, 1_000), true);
+  assert.equal(intake.devicePolling(device, false, 1_000 + 899_999), true);
+  assert.equal(intake.devicePolling(device, false, 1_000 + 900_000), false, "polling stops at the code's deadline");
+  assert.equal(intake.devicePolling(device, false, 1_000 + 3_600_000), false);
+  assert.equal(intake.devicePolling(device, true, 1_000), false, "a signed-in owner is not polled for");
+  const clone = readFileSync(new URL("../src/screens/intake/clone.tsx", import.meta.url), "utf8");
+  assert.match(clone, /const polling = devicePolling\(device, status\.signed_in, now\);\s*useEffect\(\(\) => \{\s*if \(!polling\) return;/,
+    "the status poll runs only while devicePolling says so");
+  assert.match(clone, /if \(devicePolling\(device, false, at\)\) reloadStatus\(\);/, "the tick at the deadline does not ask again");
+  assert.match(clone, /\}, \[device, polling\]\);/, "the poll stops when the code expires or the owner signs in");
+});
+
+test("each folder chooser names what the folder is for, and adding a project never asks for a skill folder", () => {
+  const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  assert.match(source("../src/api.ts"), /export function pickFolder\(purpose: FolderPurpose\)[^{]*\{\s*return call<string \| null>\("desktop_pick_folder", \{ purpose \}\);/);
+  for (const [file, purpose, count] of [
+    ["../src/screens/intake/add-folder.tsx", "project", 1],
+    ["../src/screens/intake/home-folder.tsx", "projects_home", 1],
+    ["../src/screens/settings/projects-home.tsx", "projects_home", 1],
+    ["../src/screens/settings/plugins.tsx", "skill", 2],
+  ]) {
+    const calls = [...source(file).matchAll(/\bpickFolder\(([^)]*)\)/g)].map((call) => call[1]);
+    assert.deepEqual(calls, Array(count).fill(`"${purpose}"`), file);
+  }
+  const lib = source("../src-tauri/src/lib.rs");
+  assert.match(lib, /async fn desktop_pick_folder\(\s*window: WebviewWindow,\s*purpose: FolderPurpose,\s*\)/);
+  assert.match(lib, /bridge::picker::choose\(purpose\.script\(\)\)/);
+  const picker = source("../src-tauri/src/bridge/picker.rs");
+  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*\}/,
+    "the web view's purpose names are the engine's");
 });
 
 test("the GitHub account line names the sign-in method", () => {

@@ -131,6 +131,14 @@ export function deviceLine(expiresS: number, startedMs: number, nowMs: number): 
   return { expired: false, text: `Enter this code on the GitHub page. It works for ${minutes} more ${minutes === 1 ? "minute" : "minutes"}.` };
 }
 
+/** Whether the GitHub device sign-in still asks for its status: a code is out, the owner isn't
+ * signed in yet and the code hasn't expired, so nothing is polled past the code's deadline.
+ * Inputs: the device flow (its code's lifetime and when it arrived) or null, whether the owner
+ * is signed in, and now in milliseconds. Output: true while the status should be polled. */
+export function devicePolling(device: { code: { expires_s: number }; started: number } | null, signedIn: boolean, nowMs: number): boolean {
+  return device !== null && !signedIn && !deviceLine(device.code.expires_s, device.started, nowMs).expired;
+}
+
 /** Allows only a GitHub page over https as the device sign-in page.
  * Input: the page the engine sent. Output: the same address, or null when it is anything else. */
 export function gitHubPage(uri: string): string | null {
