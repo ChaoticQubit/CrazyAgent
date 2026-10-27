@@ -18,7 +18,8 @@ const set = (extra = {}) => ({
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
 
 test("a change set reads as its agent, a state word, its size and that CrazyAgent did not check it", () => {
-  assert.equal(model.agentName(set()), "Sub-agent agent-1");
+  assert.equal(model.agentName(set()), "agent-1");
+  assert.equal(model.agentName(set({ agent: { kind: "sub", id: "7", label: "Ada (@onboarding-fix) \u00b7 Claude Code" } })), "Ada (@onboarding-fix) \u00b7 Claude Code");
   assert.equal(model.agentName(set({ agent: { kind: "master", id: "s-1", label: "master" } })), "Master");
   assert.equal(model.sizeLine(set()), "3 files, 12 lines added, 4 removed");
   assert.equal(model.sizeLine(set({ files: 1, added: 1, removed: 0 })), "1 file, 1 line added, 0 removed");

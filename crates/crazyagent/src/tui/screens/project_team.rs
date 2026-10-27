@@ -721,7 +721,10 @@ impl TeamView {
                 };
                 rows.push(spread(
                     content,
-                    Row::of(agent.label.clone(), look.heading),
+                    Row::of(
+                        crate::team::names::line(&agent.label, &agent.harness, &agent.status_label),
+                        look.heading,
+                    ),
                     Row::of(when, look.muted),
                 ));
                 rows.push(entry(

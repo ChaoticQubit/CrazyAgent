@@ -5753,10 +5753,12 @@ fallback_allowed = false
             crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),
+                role: None,
             },
             crate::team::Delegation {
                 harness: Some("claude-code".into()),
                 prompt: "Check the tests".into(),
+                role: None,
             },
         ];
         case.reply_with("I handed the README to a sub-agent.", delegations, 2)
@@ -5807,6 +5809,7 @@ fallback_allowed = false
             vec![crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),
+                role: None,
             }],
             1,
         )

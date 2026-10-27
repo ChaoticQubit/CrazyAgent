@@ -89,6 +89,7 @@ export interface TeamAgentRow {
   word: string;
   task: string;
   folder: string;
+  rename: { agent: number; handle: string } | null;
 }
 
 export interface TeamTaskRow {
@@ -104,6 +105,7 @@ export interface TeamTaskRow {
 }
 
 const WAITING: TeamTaskStatus[] = ["queued", "needs_pool"];
+const LIVE_AGENT: TeamAgentStatus[] = ["starting", "idle", "working"];
 const SUMMARY_MAX = 200;
 const MARKER = /^(?:#{1,6}|[-*+]|>|\d+\.)\s+/u;
 
@@ -126,7 +128,7 @@ export function accountName(accounts: { id: string; name: string }[], id: string
  * (between tasks, its last one) and the folder it works in (the master in the project folder, a
  * sub-agent in its own worktree), then the tasks handed from the master or the owner to a
  * sub-agent. "running" hides stopped agents and finished tasks. Each agent keeps the engine's
- * name, such as "Sub-agent 3", as in the graph.
+ * name, such as "Ada (@onboarding-fix)" or "Sub-agent 3", as in the graph.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
  * Output: the agent rows and task rows in engine order. */
 export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
@@ -146,6 +148,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (held ? firstLine(held.prompt) : last ? `Last task: ${firstLine(last.prompt)}` : agent.status === "idle" ? "Waiting for work" : ""),
       folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
+      rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({

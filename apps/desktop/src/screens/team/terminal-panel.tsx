@@ -3,9 +3,9 @@ import type { ITerminalOptions } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
-import { Button, Icon, NotReady, StatusBadge, sendsMessage } from "../../ui";
+import { Button, Icon, NotReady, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
-import { nodeDetail, nodeStatus } from "./graph";
+import { nodeLine } from "./graph";
 import { encodeBinary, encodeTyped, endCopy, jobQueue, keyQueue, muteQueries, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const RESIZE_PAUSE_MS = 120;
@@ -95,7 +95,6 @@ export function TerminalPanel({ node, harness, onClose }: {
   const [view, setView] = useState<View>({ kind: "connecting" });
   const [round, setRound] = useState(0);
   const name = node.terminal;
-  const status = nodeStatus(node);
 
   useEffect(() => {
     const element = screen.current;
@@ -201,9 +200,8 @@ export function TerminalPanel({ node, harness, onClose }: {
 
   return <section className="tg-terminal" aria-label={`${node.label} terminal`}>
     <div className="tg-terminal-head">
-      <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(node.label)}</span>
-      <span className="tg-terminal-detail">{displayText(nodeDetail(node, harness))}</span>
-      {status && <StatusBadge word={status.word} tone={status.tone} />}
+      <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(nodeLine(node, harness))}</span>
+      {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
       <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />
     </div>
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}

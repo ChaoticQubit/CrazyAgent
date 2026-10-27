@@ -718,6 +718,22 @@ async fn desktop_team_hand_off(
 }
 
 #[tauri::command]
+async fn desktop_team_rename(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    handle: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_rename(&id, agent, handle, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_graph(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2059,6 +2075,7 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_pause,
             desktop_team_hand_off,
+            desktop_team_rename,
             desktop_team_graph,
             desktop_terminal_attach,
             desktop_terminal_input,

@@ -681,6 +681,8 @@ export interface TeamAgent {
   created_ms: number;
   heartbeat_ms: number;
   stopped_ms: number | null;
+  persona?: string | null;
+  handle?: string | null;
 }
 
 export interface TeamTask {
@@ -762,6 +764,12 @@ export function teamPause(id: string, paused: boolean, generation: number): Prom
 
 export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
+}
+
+/** Renames a live sub-agent's role handle. Inputs: project id, team agent id, the new handle
+ * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
+export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.
