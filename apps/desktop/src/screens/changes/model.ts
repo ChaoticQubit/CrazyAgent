@@ -102,11 +102,10 @@ export function conflictNote(set: ChangeSet): string | null {
   return set.state === "conflict" ? changesRefusal({ code: "changes_conflict", files: set.conflicts.map(displayText) }) : null;
 }
 
-/** What an Accept did, in one sentence. Input: the engine's outcome. Output: the line. */
-export function acceptNote(outcome: AcceptOutcome): string {
-  return outcome.kind === "landed"
-    ? `Accepted as ${outcome.commit.slice(0, 7)} on ${displayText(outcome.branch)}.`
-    : changesRefusal({ code: "changes_conflict", files: outcome.files.map(displayText) });
+/** What a landed Accept did, in one sentence; a conflict is told by the change set's own
+ * note instead. Input: the engine's outcome. Output: the line, or null for a conflict. */
+export function acceptNote(outcome: AcceptOutcome): string | null {
+  return outcome.kind === "landed" ? `Accepted as ${outcome.commit.slice(0, 7)} on ${displayText(outcome.branch)}.` : null;
 }
 
 /** One line for a changed file: how it changed and its path. Input: the file. */

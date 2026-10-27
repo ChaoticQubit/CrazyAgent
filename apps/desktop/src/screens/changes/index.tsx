@@ -99,14 +99,14 @@ export function ChangesTab({ data }: { data: ProjectData }) {
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
-  async function settle<T>(result: Result<T>, done: (value: T) => string, worked: (value: T) => boolean = () => true) {
+  async function settle<T>(result: Result<T>, done: (value: T) => string | null) {
     setBusy(false);
     setAsking(null);
-    if (result.kind === "ok" && worked(result.value)) {
+    if (result.kind === "ok") {
       setNote("");
-      data.notify(done(result.value));
-    } else if (result.kind === "ok") setNote(done(result.value));
-    else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
+      const message = done(result.value);
+      if (message !== null) data.notify(message);
+    } else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
     setRound((value) => value + 1);
   }
 
@@ -114,7 +114,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     if (!asking) return;
     const { kind, set } = asking;
     setBusy(true);
-    if (kind === "accept") await settle(await acceptChange(set.id, set.head), acceptNote, (outcome) => outcome.kind === "landed");
+    if (kind === "accept") await settle(await acceptChange(set.id, set.head), acceptNote);
     else await settle(await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
   }
 

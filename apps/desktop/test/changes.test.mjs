@@ -51,7 +51,7 @@ test("each state offers only the actions the engine can take", () => {
   assert.equal(model.conflictNote(set({ state: "conflict" })), "These changes conflict with your branch. Ask the agent to update, or discard.");
   assert.equal(model.conflictNote(set({ conflicts: ["a.ts"] })), null);
   assert.equal(model.acceptNote({ kind: "landed", commit: "c".repeat(40), branch: "main" }), "Accepted as ccccccc on main.");
-  assert.equal(model.acceptNote({ kind: "conflict", files: ["src/app.ts"] }), "These files also changed on your branch: src/app.ts. Ask the agent to update, or discard.");
+  assert.equal(model.acceptNote({ kind: "conflict", files: ["src/app.ts"] }), null, "a conflict is told once, by the change set's own note");
 });
 
 test("every file says how it changed and marks what can change more than its text", () => {
