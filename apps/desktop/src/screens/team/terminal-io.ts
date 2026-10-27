@@ -114,6 +114,31 @@ export function inputQueue(send: (chunk: number[]) => Promise<boolean>, stopped:
   return keyQueue(jobQueue(stopped), send);
 }
 
+/** Calls `settle` once, on the first frame after which no queued output write is still being
+ * parsed, so a new view keeps the pane's size until the attach's history and screen are both
+ * drawn; a resize partway would push history rows off the view. Inputs: a frame scheduler that
+ * returns its cancel, and the action. Output: a function to call as each write is queued; it
+ * returns that write's done callback. */
+export function settleAfterWrites(frame: (run: () => void) => () => void, settle: () => void): () => () => void {
+  let pending = 0;
+  let settled = false;
+  let cancel = () => {};
+  return () => {
+    pending += 1;
+    cancel();
+    return () => {
+      pending -= 1;
+      assert(pending >= 0, "every write is done once");
+      if (settled || pending > 0) return;
+      cancel = frame(() => {
+        if (settled || pending > 0) return;
+        settled = true;
+        settle();
+      });
+    };
+  };
+}
+
 export const PROMPT_BYTES_MAX = 4096;
 
 /** Checks a composer prompt before it is sent as the owner's explicit message. The engine

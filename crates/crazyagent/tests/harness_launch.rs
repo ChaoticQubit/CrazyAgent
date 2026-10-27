@@ -46,6 +46,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
         model: Some(LOCAL_MODEL.into()),
         tools: false,
         sandbox_profile: Some(project_profile(work, home)),
+        git_identity: None,
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),
             ..LaunchLimits::default()
@@ -204,6 +205,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_holds_only_the_rel
         model: None,
         tools: false,
         sandbox_profile: Some(project_profile(work.path(), home.path())),
+        git_identity: None,
         limits: LaunchLimits::default(),
     };
     assert_eq!(
@@ -518,6 +520,7 @@ fn sandboxed_stand_in(
         model: None,
         tools: false,
         sandbox_profile: Some(profile),
+        git_identity: None,
         limits: LaunchLimits::default(),
     })
     .unwrap();

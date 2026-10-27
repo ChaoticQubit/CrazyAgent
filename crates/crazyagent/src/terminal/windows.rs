@@ -197,6 +197,7 @@ impl Host for ConptyHost {
             agent: agent.clone(),
             cols: view.cols,
             rows: view.rows,
+            history: Vec::new(),
             screen,
             chunks,
         })

@@ -1,10 +1,10 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
+export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -26,6 +26,7 @@ const COPY: Record<string, string> = {
   engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
   pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
+  change_may_be_recorded: "This change may still go through, so it can't be dismissed. Use Check again.",
   stale_revision: "This changed since you opened it. Review and save again.",
   stale_model_access: "This changed since you opened it. Review and save again.",
   stale_config: "This changed since you opened it. Review and save again.",
@@ -104,6 +105,16 @@ const COPY: Record<string, string> = {
   knowledge_version_conflict: "This memory changed. Reload it and try again.",
   knowledge_source_revoked: "The research this came from was deleted.",
   invalid_knowledge_text: "Write the memory as plain text, up to 4096 bytes, without hidden or direction-changing characters.",
+  read_path_not_absolute: "Type the full path of a folder, starting with /.",
+  read_path_missing: "That folder doesn't exist on this computer.",
+  read_path_not_folder: "That path is a file. Add a folder.",
+  read_path_holds_home: "Agents can't read your whole home folder. Add a folder inside it.",
+  read_path_credentials: "That folder holds or sits in a credential location, such as .ssh or .aws, so agents can never read it.",
+  read_path_engine_data: "That folder holds CrazyAgent's own data, so agents can never read it.",
+  read_path_refused: "That folder can't be shared with agents. Pick another folder.",
+  read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
+  read_paths_too_many: "A project can share at most 8 extra folders.",
+  read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -243,6 +254,12 @@ export function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_retry_intent");
 }
 
+/** Drops the kept change once the engine said it never recorded it, so it never goes
+ * through. Output: the connection, or why it can't be dropped while it may still land. */
+export function dropUnconfirmed(): Promise<Result<ConnectionStatus>> {
+  return call<ConnectionStatus>("desktop_drop_intent");
+}
+
 /** Pauses before each automatic check of an unconfirmed change, in milliseconds. */
 export const UNCONFIRMED_CHECKS_MS: readonly number[] = [2000, 4000, 8000, 16000, 30000];
 
@@ -269,6 +286,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   research_memory: "saving research to memory",
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
+  project_read_paths: "saving extra folders agents can read",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
@@ -308,7 +326,7 @@ function capital(text: string): string {
  * check's outcome, or null before any check. Output: the line naming the change. */
 export function unconfirmedLine(intent: PendingIntent, outcome: ActionReceipt["outcome"] | null): string {
   const label = changeLabel(intent);
-  if (outcome === "not_recorded_at_barrier") return `${capital(label)} hasn't reached the engine. Retry sends the same change again.`;
+  if (outcome === "not_recorded_at_barrier") return `${capital(label)} never reached the engine. Retry sends it again, or Dismiss drops it.`;
   return `We couldn't confirm ${label}. Other changes wait until it's checked.`;
 }
 
@@ -596,6 +614,13 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<Sk
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
 export function removeSkill(id: string): Promise<Result<void>> {
   return call<void>("desktop_remove_skill", { id });
+}
+
+/** Reads one skill for its detail view: the skill with the project's switch when a project
+ * is given, its full SKILL.md text and its files. Inputs: skill id and optional project id.
+ * Output: the detail, or the engine's refusal such as a removed skill. */
+export function skillDetail(id: string, projectId?: string): Promise<Result<SkillDetail>> {
+  return call<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
 }
 
 /** Reads MCP servers for global settings (no project) or one project's settings.

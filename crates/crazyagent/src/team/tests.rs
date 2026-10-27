@@ -143,15 +143,18 @@ fn delegation_lines_are_read_from_a_master_reply() {
         [
             Delegation {
                 harness: None,
-                prompt: "Write apple.txt".into()
+                prompt: "Write apple.txt".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("codex".into()),
-                prompt: "List the files".into()
+                prompt: "List the files".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("claude-code".into()),
-                prompt: "Review the notes".into()
+                prompt: "Review the notes".into(),
+                role: None,
             },
         ]
     );
@@ -567,6 +570,127 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
     );
     assert_eq!(team.harnesses[0].delegation, Some(DelegationPath::Reply));
     assert_eq!(team.harnesses[1].agents_max, 1);
+}
+
+#[test]
+fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-names",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-names", &["local-a"]);
+    let agent = |role: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('team-names',?1,'codex',0,'working',1,1)",
+                [role],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let master = agent("master");
+    let first = agent("sub");
+    let second = agent("sub");
+    let unnamed = agent("sub");
+    for sub in [first, second] {
+        names::assign_persona(&connection, &project, sub).unwrap();
+    }
+    names::assign_role(&connection, &project, first, "onboarding-fix")
+        .unwrap()
+        .unwrap();
+    let rename = |agent: i64, handle: &str| TeamAction::Rename {
+        project_id: project.clone(),
+        agent,
+        handle: handle.into(),
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "@docs-pass")).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "onboarding-fix")).unwrap(),
+        rejected("team_handle_taken")
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(second, "Docs Pass")).unwrap(),
+        rejected("team_handle_invalid")
+    );
+    assert_eq!(
+        execute(&tx, &pool, &rename(master, "lead")).unwrap(),
+        rejected("team_agent_unknown")
+    );
+    for invalid in [rename(second, &"a".repeat(34)), rename(0, "docs")] {
+        assert_eq!(
+            execute(&tx, &pool, &invalid).unwrap_err().0,
+            "team_handle_invalid"
+        );
+    }
+    tx.commit().unwrap();
+    let team = status(&connection, &setup).unwrap();
+    let shown: Vec<(i64, &str, Option<&str>, Option<&str>)> = team
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.id,
+                a.label.as_str(),
+                a.persona.as_deref(),
+                a.handle.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (master, "Master", None, None),
+            (
+                first,
+                &*format!("{} (@onboarding-fix)", names::PERSONAS[0]),
+                Some(names::PERSONAS[0]),
+                Some("onboarding-fix")
+            ),
+            (
+                second,
+                &*format!("{} (@docs-pass)", names::PERSONAS[1]),
+                Some(names::PERSONAS[1]),
+                Some("docs-pass")
+            ),
+            (unnamed, &*format!("Sub-agent {unnamed}"), None, None),
+        ]
+    );
+    assert_eq!(
+        graph(&team)
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Agent)
+            .map(|node| node.label.clone())
+            .collect::<Vec<_>>(),
+        [
+            format!("{} (@onboarding-fix)", names::PERSONAS[0]),
+            format!("{} (@docs-pass)", names::PERSONAS[1]),
+            format!("Sub-agent {unnamed}"),
+        ]
+    );
+    assert_eq!(
+        names::resolve(&connection, &project, "@docs-pass").unwrap(),
+        Some(second)
+    );
 }
 
 #[test]
@@ -1211,6 +1335,14 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
         "the plan's two warm sub-agents start once and are not started again: {cold:#?}"
     );
     assert!(cold.agents.iter().all(|a| a.status == AgentStatus::Failed));
+    assert_eq!(
+        cold.agents
+            .iter()
+            .map(|a| a.label.as_str())
+            .collect::<Vec<_>>(),
+        [names::PERSONAS[0], names::PERSONAS[1]],
+        "each sub-agent gets its own persona when it starts: {cold:#?}"
+    );
     assert!(
         cold.messages.iter().any(|m| m.state == MessageState::Note
             && m.text.starts_with("Keeping sub-agents warm was turned off")),
@@ -2131,4 +2263,204 @@ fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one
             2
         )]
     );
+}
+
+#[test]
+fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_live_and_stopped() {
+    use crate::agents::tests::{alive, until};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "lb52-browsky",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 4,
+            tools: true,
+        }],
+    );
+    setup.team.min_agents = 5;
+    setup.team.max_agents = 5;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("lb52-browsky", &["local-a", "local-b"]);
+    let warm = |connection: &mut Connection, on: bool| {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::KeepWarm {
+                    project_id: setup.project_id.clone(),
+                    on,
+                }
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+    };
+    warm(&mut connection, true);
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 300\n");
+    let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
+    let source = pool.clone();
+    let team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone());
+    let service = runtime::TeamService::start(team, std::time::Duration::from_millis(50));
+    let project = setup.project_id.clone();
+    let running = |connection: &Connection| {
+        status(connection, &setup)
+            .unwrap()
+            .agents
+            .iter()
+            .filter(|a| a.status.live() && a.process_group.is_some())
+            .count()
+    };
+    until("four warm codex sub-agents", || running(&connection) == 4);
+
+    let live = status(&connection, &setup).unwrap();
+    let ids: Vec<i64> = live.agents.iter().map(|agent| agent.id).collect();
+    assert_eq!(ids.len(), 4, "{live:#?}");
+    let groups: Vec<i32> = live
+        .agents
+        .iter()
+        .map(|agent| i32::try_from(agent.process_group.unwrap()).unwrap())
+        .collect();
+    assert!(groups.iter().all(|group| alive(*group)));
+    let listed = agents
+        .list(Some(&project), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    let mut registered: Vec<String> = listed.iter().map(|entry| entry.label.clone()).collect();
+    registered.sort();
+    let mut expected: Vec<String> = ids
+        .iter()
+        .map(|id| format!("Team sub-agent {id}"))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        registered, expected,
+        "the register names each agent by its id"
+    );
+    for agent in &live.agents {
+        assert_eq!(agent.role, AgentRole::Sub);
+        assert_eq!(agent.label, format!("Sub-agent {}", agent.id));
+        assert!(agent.account.is_some(), "{agent:?}");
+    }
+
+    let shape = [ids[0], ids[1], ids[2], ids[3], ids[2]];
+    for (index, agent) in shape.iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,result,delivered,created_ms,started_ms,finished_ms)
+                 VALUES (?1,'owner','codex',1,?2,'done',?3,1,?4,1,?5,?5,?5)",
+                params![
+                    project.as_str(),
+                    format!("Browsky task {}", index + 1),
+                    agent,
+                    format!("Result {}", index + 1),
+                    now_ms()
+                ],
+            )
+            .unwrap();
+    }
+    let edges = |graph: &TeamGraph| -> Vec<String> {
+        graph.edges.iter().map(|edge| edge.to.clone()).collect()
+    };
+    let expected_edges: Vec<String> = shape.iter().map(|agent| format!("team-{agent}")).collect();
+
+    let live = graph(&status(&connection, &setup).unwrap());
+    let nodes: Vec<&GraphNode> = live
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Agent)
+        .collect();
+    assert_eq!(nodes.len(), 4, "{live:#?}");
+    for (node, id) in nodes.iter().zip(&ids) {
+        assert_eq!(node.label, format!("Sub-agent {id}"));
+        assert!(node.status.is_some_and(AgentStatus::live), "{node:?}");
+        assert_eq!(
+            node.terminal,
+            Some(crate::terminal::AgentId::team(*id).unwrap())
+        );
+        assert_eq!(node.parent.as_deref(), Some("group:codex"));
+    }
+    assert_eq!(edges(&live), expected_edges);
+
+    warm(&mut connection, false);
+    for entry in &listed {
+        agents.stop(&entry.id).unwrap();
+    }
+    until("every stand-in process group to end", || {
+        groups.iter().all(|group| !alive(*group))
+    });
+    until("every sub-agent to read stopped", || {
+        status(&connection, &setup)
+            .unwrap()
+            .agents
+            .iter()
+            .all(|agent| agent.status == AgentStatus::Stopped)
+    });
+    let stopped = status(&connection, &setup).unwrap();
+    assert_eq!(stopped.agents.len(), 4, "a stopped agent is not replaced");
+    assert!(stopped.agents.iter().all(|agent| agent.task.is_none()));
+    let stopped = graph(&stopped);
+    let nodes: Vec<&GraphNode> = stopped
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Agent)
+        .collect();
+    assert_eq!(
+        nodes.len(),
+        4,
+        "stopped sub-agents stay listed: {stopped:#?}"
+    );
+    for (node, id) in nodes.iter().zip(&ids) {
+        assert_eq!(node.label, format!("Sub-agent {id}"));
+        assert_eq!(node.status, Some(AgentStatus::Stopped));
+        assert_eq!(node.status_label.as_deref(), Some("Stopped"));
+        assert_eq!(node.terminal, None);
+        assert!(node.account.is_some());
+    }
+    assert_eq!(
+        edges(&stopped),
+        expected_edges,
+        "each task still points at the agent that ran it"
+    );
+    service.stop();
 }

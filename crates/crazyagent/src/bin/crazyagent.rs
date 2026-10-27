@@ -695,10 +695,36 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     };
                 }
             };
+            let usage_upkeep = if team.is_some() {
+                let mut executables = std::collections::BTreeMap::new();
+                if let Some(executable) = harnesses.codex.as_deref() {
+                    executables.insert("codex", executable.to_path_buf());
+                }
+                if let Some(executable) = harnesses.claude.as_deref() {
+                    executables.insert("claude-code", executable.to_path_buf());
+                }
+                match crazyagent::usage::service::start_for_engine(
+                    runtime_dir,
+                    &global,
+                    &project,
+                    executables,
+                ) {
+                    Ok(usage) => Some(usage),
+                    Err(problem) => {
+                        eprintln!("usage is not counted ({problem})");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let terminal = service
                 .owner_runtime()
                 .and_then(|runtime| runtime.terminal().ok());
             let result = service.run(stopped).await.map_err(|e| e.to_string());
+            if let Some(upkeep) = usage_upkeep {
+                let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
+            }
             if research.is_some() || onboarding.is_some() {
                 let _ = tokio::task::spawn_blocking(move || stop_background(research, onboarding))
                     .await;

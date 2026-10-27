@@ -62,6 +62,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         [Delegation {
             harness: Some("codex".into()),
             prompt: "Write apple.txt".into(),
+            role: None,
         }]
     );
 

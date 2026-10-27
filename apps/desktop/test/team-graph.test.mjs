@@ -16,7 +16,7 @@ const edge = (task_id, from, to, state, extra = {}) => ({ from, to, task_id, sou
 const team = {
   project_id: "chores",
   nodes: [
-    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "Work ChatGPT", terminal: "team-2" }),
+    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "acct-work", terminal: "team-2" }),
     node("g-codex", "harness_group", { parent: "m", label: "Codex", agents: 2 }),
     node("m", "master", { label: "Master", status: "idle", terminal: "team-9" }),
     node("team-1", "agent", { parent: "g-codex", label: "codex-1", status: "idle", terminal: "team-1" }),
@@ -29,108 +29,13 @@ const team = {
   ],
 };
 
-const at = (layout, id) => {
-  const placed = layout.nodes.find((item) => item.node.id === id);
-  assert.ok(placed, `${id} is placed`);
-  return { x: placed.x, y: placed.y };
-};
+const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? "An account in the pool");
 
-test("the graph lays out the master on top, harness groups under it and agents under their group", () => {
-  const layout = graph.layoutGraph(team);
-  const column = (index) => graph.MARGIN + index * (graph.NODE_WIDTH + graph.COLUMN_GAP);
-  const row = (index) => graph.MARGIN + index * (graph.NODE_HEIGHT + graph.ROW_GAP);
-  assert.deepEqual(at(layout, "g-claude"), { x: column(0), y: row(1) });
-  assert.deepEqual(at(layout, "team-1"), { x: column(1), y: row(2) });
-  assert.deepEqual(at(layout, "team-2"), { x: column(2), y: row(2) });
-  assert.deepEqual(at(layout, "g-codex"), { x: (column(1) + column(2)) / 2, y: row(1) });
-  assert.deepEqual(at(layout, "m"), { x: column(1), y: row(0) });
-  assert.equal(layout.nodes.length, 5);
-  assert.equal(layout.width, column(2) + graph.NODE_WIDTH + graph.MARGIN);
-  assert.equal(layout.height, row(2) + graph.NODE_HEIGHT + graph.MARGIN);
-  assert.deepEqual(layout.links.map((link) => `${link.from}>${link.to}`).sort(), ["g-codex>team-1", "g-codex>team-2", "m>g-claude", "m>g-codex"]);
-  const masterBottom = { x: column(1) + graph.NODE_WIDTH / 2, y: row(0) + graph.NODE_HEIGHT };
-  const claudeTop = { x: column(0) + graph.NODE_WIDTH / 2, y: row(1) };
-  const middle = (masterBottom.y + claudeTop.y) / 2;
-  assert.equal(layout.links.find((link) => link.to === "g-claude").path,
-    `M ${masterBottom.x} ${masterBottom.y} C ${masterBottom.x} ${middle}, ${claudeTop.x} ${middle}, ${claudeTop.x} ${claudeTop.y}`);
-});
-
-test("live task edges come first, newest first, with labels halfway along each edge", () => {
-  const layout = graph.layoutGraph(team);
-  assert.deepEqual(layout.edges.map((item) => item.edge.task_id), [8, 7, 3]);
-  const sent = layout.edges[0];
-  const column = (index) => graph.MARGIN + index * (graph.NODE_WIDTH + graph.COLUMN_GAP);
-  assert.deepEqual(sent.label, {
-    x: (column(1) + column(0)) / 2 + graph.NODE_WIDTH / 2,
-    y: (graph.MARGIN + graph.NODE_HEIGHT + graph.MARGIN + graph.NODE_HEIGHT + graph.ROW_GAP) / 2,
-  });
-  const twice = graph.layoutGraph({ ...team, edges: [edge(11, "m", "team-1", "running"), edge(12, "m", "team-1", "sent")] });
-  assert.equal(twice.edges[1].label.y - twice.edges[0].label.y, graph.LABEL_STACK);
-  const lost = graph.layoutGraph({ ...team, edges: [edge(13, "m", "team-404", "running")] });
-  assert.deepEqual(lost.edges, []);
-  const waiting = graph.layoutGraph({ ...team, edges: [edge(14, "m", "m", "sent"), edge(15, "m", "m", "sent")] });
-  const master = at(waiting, "m");
-  assert.deepEqual(waiting.edges.map((item) => item.path), ["", ""]);
-  assert.deepEqual(waiting.edges.map((item) => item.label), [
-    { x: master.x + graph.NODE_WIDTH / 2, y: master.y + graph.NODE_HEIGHT + graph.LABEL_STACK },
-    { x: master.x + graph.NODE_WIDTH / 2, y: master.y + graph.NODE_HEIGHT + graph.LABEL_STACK * 2 },
-  ]);
-});
-
-test("only a bounded number of edges and nodes are drawn", () => {
-  const many = Array.from({ length: graph.EDGES_SHOWN_MAX + 6 }, (_, index) => edge(index + 1, "m", "team-1", index % 2 ? "done" : "running"));
-  const shown = graph.shownEdges(many);
-  assert.equal(shown.length, graph.EDGES_SHOWN_MAX);
-  assert.deepEqual(shown.map((item) => item.state), [...Array(15).fill("running"), ...Array(9).fill("done")]);
-  assert.deepEqual(shown.slice(0, 2).map((item) => item.task_id), [29, 27]);
-  assert.deepEqual(shown.slice(15, 17).map((item) => item.task_id), [30, 28]);
-  const crowd = { project_id: "p", nodes: Array.from({ length: graph.NODES_MAX + 6 }, (_, index) => node(`team-${index + 1}`, "agent")), edges: [] };
-  assert.equal(graph.layoutGraph(crowd).nodes.length, graph.NODES_MAX);
-});
-
-test("agents without a known group get their own column after the groups", () => {
-  const layout = graph.layoutGraph({ ...team, nodes: [...team.nodes, node("research-1", "agent", { parent: null, label: "Market research" })] });
-  const column = (index) => graph.MARGIN + index * (graph.NODE_WIDTH + graph.COLUMN_GAP);
-  assert.equal(at(layout, "research-1").x, column(3));
-  assert.equal(at(layout, "m").x, column(1.5));
-});
-
-test("a master alone is laid out in one row", () => {
-  const layout = graph.layoutGraph({ project_id: "p", nodes: [node("m", "master")], edges: [] });
-  assert.deepEqual(at(layout, "m"), { x: graph.MARGIN, y: graph.MARGIN });
-  assert.equal(layout.height, graph.MARGIN * 2 + graph.NODE_HEIGHT);
-  assert.equal(layout.width, graph.MARGIN * 2 + graph.NODE_WIDTH);
-});
-
-test("dragged nodes move by their offset, stay on the canvas, and the canvas grows to hold them", () => {
-  let offsets = new Map();
-  offsets = graph.moveNode(offsets, "team-1", -500, 10);
-  offsets = graph.moveNode(offsets, "team-2", 300.4, 400.6);
-  const layout = graph.layoutGraph(team, offsets);
-  const before = graph.layoutGraph(team);
-  assert.deepEqual(at(layout, "team-1"), { x: 0, y: at(before, "team-1").y + 10 });
-  assert.deepEqual(at(layout, "team-2"), { x: at(before, "team-2").x + 300, y: at(before, "team-2").y + 401 });
-  assert.equal(layout.width, at(layout, "team-2").x + graph.NODE_WIDTH + graph.MARGIN);
-  assert.equal(layout.height, at(layout, "team-2").y + graph.NODE_HEIGHT + graph.MARGIN);
-  assert.ok(layout.links.find((link) => link.to === "team-1").path.endsWith(`${graph.NODE_WIDTH / 2} ${at(layout, "team-1").y}`));
-  const far = graph.moveNode(new Map(), "m", 99_999, -99_999);
-  assert.deepEqual(far.get("m"), { x: 4000, y: -4000 });
-  const again = graph.moveNode(offsets, "team-1", 4, 0);
-  assert.deepEqual(offsets.get("team-1"), { x: -500, y: 10 });
-  assert.deepEqual(again.get("team-1"), { x: -496, y: 10 });
-});
-
-test("offsets of nodes that left the graph are dropped", () => {
-  const offsets = new Map([["team-1", { x: 5, y: 5 }]]);
-  assert.equal(graph.keepOffsets(offsets, team), offsets);
-  const gone = graph.keepOffsets(new Map([["team-1", { x: 5, y: 5 }], ["team-77", { x: 1, y: 1 }]]), team);
-  assert.deepEqual([...gone.keys()], ["team-1"]);
-});
-
-test("arrow keys move a focused node, Shift moves it further", () => {
-  assert.deepEqual(graph.arrowMove("ArrowLeft", false), { x: -graph.ARROW_STEP, y: 0 });
-  assert.deepEqual(graph.arrowMove("ArrowDown", true), { x: 0, y: graph.ARROW_STEP_LARGE });
-  assert.equal(graph.arrowMove("Enter", false), null);
+test("graph nodes name their account as the Team panel does, never by its id", () => {
+  assert.deepEqual(named.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
+  assert.equal(team.nodes[0].account, "acct-work", "the engine's graph is left as it was");
+  assert.deepEqual(graph.namedAccounts(team, () => "x").edges, team.edges);
+  assert.equal(view.nodeLabel(named.nodes[0]), "codex-2, codex, Work ChatGPT, Working. No task yet. Opens its terminal.");
 });
 
 test("nodes and edges use the engine's status words with fixed tones", () => {
@@ -144,8 +49,15 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[1], name), "Codex, 2 agents");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1 })), "codex, 1 agent");
   assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1, status_label: "1 of 2 agents" }), name), "Codex, 1 of 2 agents");
-  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, Work ChatGPT");
+  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, acct-work");
+  assert.equal(graph.nodeDetail(named.nodes[0], name), "Codex, Work ChatGPT");
   assert.equal(graph.nodeDetail(team.nodes[3], name), "Codex");
+  const ada = node("team-7", "agent", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
+  assert.equal(graph.nodeLine(ada, name), "Ada (@onboarding-fix) \u00b7 Claude Code \u00b7 working");
+  assert.equal(graph.cardText(ada, [], name).title, "Ada (@onboarding-fix)");
+  assert.equal(graph.cardTip(ada, [], name)[0], "Ada (@onboarding-fix)");
+  assert.equal(graph.nodeLine(team.nodes[2], name), "Master \u00b7 Codex \u00b7 idle");
+  assert.equal(graph.nodeLine(node("team-8", "agent", { label: "Grace" })), "Grace \u00b7 codex");
 });
 
 test("the graph reads again quickly only while work is live", () => {
@@ -245,20 +157,12 @@ test("terminal channel messages become output, the attached size, or a plain end
   assert.deepEqual(io.terminalEvent({ kind: "closed", reason: "something_new" }), { kind: "ended", copy: "This terminal closed." });
 });
 
-test("edge and node labels read as plain sentences", () => {
-  const layout = graph.layoutGraph({ ...team, edges: [edge(4, "m", "team-1", "running", { text: "Write   the chores list\nfor every helper in the house" })] });
-  assert.equal(view.edgeLabel(layout.edges[0]), "Running: Write the chores list for e...");
-  assert.equal(view.edgeLabel(graph.layoutGraph(team).edges[2]), "Done: Task 3");
-  assert.equal(view.nodeLabel(team.nodes[0]), "codex-2, codex, Work ChatGPT, Working. Opens its terminal. Arrow keys move it.");
-  assert.equal(view.nodeLabel(team.nodes[1]), "Codex, codex, 2 agents. Arrow keys move it.");
-});
-
 test("the terminal panel names the agent, says it is connecting and offers Close", () => {
   const html = renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], onClose() {} }));
   assert.match(html, /aria-label="codex-2 terminal"/);
   assert.match(html, /aria-label="Close terminal"/);
   assert.match(html, /Connecting to the terminal\.\.\./);
-  assert.match(html, /Working/);
+  assert.match(html, /codex-2 \u00b7 codex \u00b7 working<\/span><span class="tg-terminal-detail">acct-work</);
   const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "agent"), onClose() {} }));
   assert.match(none, /This agent has no terminal yet/);
   assert.doesNotMatch(none, /Connecting/);
@@ -333,8 +237,8 @@ test("the composer names who reads the prompt and says a sub-agent's master is t
   const sub = panel(team.nodes[0]);
   assert.match(sub, /<label for="tg-prompt-team-2" class="pj-sr">Prompt codex-2<\/label>/);
   assert.match(sub, /placeholder="Tell codex-2 what to do\. Its master is told what you send\."/);
-  assert.match(sub, /<textarea id="tg-prompt-team-2"[^>]* disabled=""/);
-  assert.match(sub, /Opens once the terminal is live\./);
+  assert.doesNotMatch(sub, /<textarea id="tg-prompt-team-2"[^>]* disabled=""/, "the draft box takes typing before the terminal is live");
+  assert.match(sub, /Sends once the terminal is live\./);
   assert.match(sub, /<button type="submit" class="btn primary small" disabled=""/);
   const master = panel(team.nodes[2]);
   assert.match(master, /Prompt the master/);

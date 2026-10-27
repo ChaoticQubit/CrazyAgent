@@ -25,7 +25,8 @@ mod migrations;
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    close_master_for_removal, native_sign_in, validate_configured_initial_conversation_receipt,
+    close_master_for_removal, master_resolve_ready, native_sign_in,
+    validate_configured_initial_conversation_receipt,
 };
 mod native_auth;
 #[cfg(all(test, unix))]
@@ -2381,6 +2382,14 @@ fn owner_read(
         OwnerRead::ProjectSetup { project_id } => OwnerData::ProjectSetup {
             project_id: project_id.clone(),
             setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
+        },
+        OwnerRead::ProjectReadPaths { project_id } => OwnerData::ProjectReadPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::extra_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
         },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(

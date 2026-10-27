@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 pub mod direct;
 pub mod graph;
 pub mod master;
+pub mod names;
 pub mod runtime;
 pub mod tool;
 
@@ -66,6 +67,16 @@ impl AgentRole {
             "master" => Some(Self::Master),
             "sub" => Some(Self::Sub),
             _ => None,
+        }
+    }
+
+    /// Names one team agent the same way in the team list and the team graph of every client.
+    /// Takes the role and the agent's id.
+    /// Returns "Master", or "Sub-agent" and the id.
+    pub fn agent_label(self, id: i64) -> String {
+        match self {
+            Self::Master => "Master".into(),
+            Self::Sub => format!("Sub-agent {id}"),
         }
     }
 }
@@ -358,6 +369,11 @@ pub enum TeamAction {
         reply: i64,
         step: u8,
     },
+    Rename {
+        project_id: ProjectId,
+        agent: i64,
+        handle: String,
+    },
 }
 
 impl TeamAction {
@@ -394,6 +410,12 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::Rename { agent, handle, .. } => {
+                if *agent <= 0 || handle.len() > names::HANDLE_CHARS_MAX + 1 {
+                    return Err(failure("team_handle_invalid"));
+                }
+                Ok(())
+            }
             Self::KeepWarm { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
@@ -413,7 +435,8 @@ impl TeamAction {
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
-            | Self::HandOff { project_id, .. } => project_id,
+            | Self::HandOff { project_id, .. }
+            | Self::Rename { project_id, .. } => project_id,
         }
     }
 }
@@ -555,11 +578,13 @@ pub fn pick_account<'a>(
         .map(|(_, account)| account)
 }
 
-/// One task the master asked for in its reply.
+/// One task the master asked for in its reply, with the role handle it gave the job, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
     pub harness: Option<String>,
     pub prompt: String,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Reads delegation lines from a master reply: `DELEGATE: task` or `DELEGATE harness: task`.
@@ -608,6 +633,7 @@ fn delegation(target: &str, task: &str) -> Option<Delegation> {
     Some(Delegation {
         harness: (!target.is_empty()).then_some(target),
         prompt: task.to_owned(),
+        role: None,
     })
 }
 
@@ -715,6 +741,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         )
         .map_err(error)?;
     master::initialize(connection)?;
+    names::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1217,6 +1244,12 @@ pub fn execute(
                 },
             )
         }
+        TeamAction::Rename { agent, handle, .. } => {
+            Ok(match names::rename(tx, project, *agent, handle)? {
+                Ok(_) => Outcome::Applied,
+                Err(code) => rejected(code),
+            })
+        }
     }
 }
 
@@ -1291,6 +1324,7 @@ pub fn plan_steps(
 pub struct TeamAgent {
     pub id: i64,
     pub role: AgentRole,
+    pub label: String,
     pub harness: String,
     pub tools: bool,
     pub account: Option<String>,
@@ -1304,6 +1338,10 @@ pub struct TeamAgent {
     pub created_ms: i64,
     pub heartbeat_ms: i64,
     pub stopped_ms: Option<i64>,
+    #[serde(default)]
+    pub persona: Option<String>,
+    #[serde(default)]
+    pub handle: Option<String>,
 }
 
 /// One sub-agent task as the clients poll it.
@@ -1383,9 +1421,18 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
     let role: String = row.get(1)?;
     let status: String = row.get(6)?;
     let status = AgentStatus::parse(&status).ok_or_else(|| invalid_row("status"))?;
+    let id: i64 = row.get(0)?;
+    let role = AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?;
+    let persona: Option<String> = row.get(14)?;
+    let handle: Option<String> = row.get(15)?;
+    let kept = persona.clone().map(|persona| names::AgentName {
+        persona,
+        handle: handle.clone(),
+    });
     Ok(TeamAgent {
-        id: row.get(0)?,
-        role: AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?,
+        id,
+        role,
+        label: names::label(role, id, kept.as_ref()),
         harness: row.get(2)?,
         tools: row.get(3)?,
         account: row.get(4)?,
@@ -1399,10 +1446,12 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         created_ms: row.get(11)?,
         heartbeat_ms: row.get(12)?,
         stopped_ms: row.get(13)?,
+        persona,
+        handle,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id)";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents

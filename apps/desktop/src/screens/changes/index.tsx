@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
 import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet } from "../../api-changes";
-import { ConfirmDialog } from "../../ui";
+import { Button, ConfirmDialog, Dialog, TextArea } from "../../ui";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptNote, actions, agentName, checkedNote, conflictNote, diffText, fileLine, fileMarks, outcomeNote, restoreNote, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, outcomeNote, restoreNote, sizeLine, stateBadge, updatingNote } from "./model";
 import "./changes.css";
 
 const LIST_POLL_MS = 5000;
@@ -21,6 +21,27 @@ export function DiffText({ text }: { text: string }) {
 /** The plain Not ready yet notice for an engine or build that cannot land changes yet. */
 export function ChangesNotReady() {
   return <NotReady what="reviewing and landing agent changes isn't in this engine yet." />;
+}
+
+/** The Accept dialog: says where the changes land and shows the proposed commit message
+ * for the owner to edit first; Accept stays off while the message is empty or too long.
+ * Inputs: the change set, whether the accept runs, and the handlers. Output: the dialog. */
+export function AcceptDialog({ set, pending, onCancel, onAccept }: {
+  set: ChangeSet;
+  pending: boolean;
+  onCancel: () => void;
+  onAccept: (message: string) => void;
+}) {
+  const [text, setText] = useState(set.message);
+  const id = useId();
+  const message = commitMessage(text);
+  return <Dialog open title="Accept these changes?" onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
+      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message); }}>Accept</Button></>}>
+    <p>They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.</p>
+    <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
+      error={message === null ? "Write a commit message of up to 4096 bytes to accept." : undefined} />
+  </Dialog>;
 }
 
 function refusalOf(failure: Failure): string {
@@ -110,12 +131,14 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     setRound((value) => value + 1);
   }
 
-  async function confirm() {
-    if (!asking) return;
-    const { kind, set } = asking;
+  async function accept(set: ChangeSet, message: string) {
     setBusy(true);
-    if (kind === "accept") await settle(await acceptChange(set.id, set.head), acceptNote);
-    else await settle(await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
+    await settle(await acceptChange(set.id, set.head, message), acceptNote);
+  }
+
+  async function discard(set: ChangeSet) {
+    setBusy(true);
+    await settle(await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
   }
 
   async function update(set: ChangeSet) {
@@ -146,12 +169,11 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       </li>)}</ul>
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} />}
     </div>}
-    <ConfirmDialog open={asking !== null} pending={busy} title={asking?.kind === "accept" ? "Accept these changes?" : "Discard these changes?"}
-      confirmLabel={asking?.kind === "accept" ? "Accept" : "Discard"} cancelLabel="Keep reviewing"
-      onCancel={() => setAsking(null)} onConfirm={() => void confirm()}>
-      {asking?.kind === "accept"
-        ? "They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them."
-        : "The agent's working copy goes back to your branch. You can restore these changes for 7 days."}
+    {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
+      onCancel={() => setAsking(null)} onAccept={(message) => void accept(asking.set, message)} />}
+    <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
+      onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
+      The agent's working copy goes back to your branch. You can restore these changes for 7 days.
     </ConfirmDialog>
   </div>;
 }

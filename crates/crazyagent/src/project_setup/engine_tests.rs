@@ -1237,3 +1237,103 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
     drop(owner);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert!(
+        owner
+            .project_read_paths(project.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let shared = tempfile::Builder::new()
+        .prefix("ca-read-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let real = std::fs::canonicalize(shared.path()).unwrap();
+    let docs = real.join("docs");
+    std::fs::create_dir(&docs).unwrap();
+    let alias = real.join("alias");
+    std::os::unix::fs::symlink(&docs, &alias).unwrap();
+    let file = real.join("notes.txt");
+    std::fs::write(&file, "notes").unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+
+    let saved = owner
+        .set_project_read_paths(project.clone(), vec![text(&alias), text(&docs)], 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        vec![text(&docs)],
+        "a link is saved as the folder it names, once"
+    );
+
+    let owner_home = crate::sandbox::toolchains::ToolHomes::owner()
+        .unwrap()
+        .home()
+        .to_path_buf();
+    assert!(owner_home.join(".cargo").is_dir());
+    let probe = engine.root.path().join("read-probe");
+    std::fs::create_dir(&probe).unwrap();
+    let refusals = [
+        ("docs".to_owned(), "read_path_not_absolute"),
+        (text(&real.join("gone")), "read_path_missing"),
+        (text(&file), "read_path_not_folder"),
+        (text(&owner_home), "read_path_holds_home"),
+        ("/Users".to_owned(), "read_path_holds_home"),
+        (text(&owner_home.join(".cargo")), "read_path_credentials"),
+        (text(&probe), "read_path_engine_data"),
+        (
+            text(&std::fs::canonicalize(engine.root.path()).unwrap()),
+            "read_path_engine_data",
+        ),
+    ];
+    let mut generation = 3;
+    for (typed, code) in refusals {
+        let refused = owner
+            .set_project_read_paths(
+                project.clone(),
+                vec![text(&docs), typed.clone()],
+                generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result(refused), rejected(code), "{typed}");
+        generation += 1;
+    }
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        vec![text(&docs)],
+        "a refused change keeps the saved folders"
+    );
+
+    let removed = owner
+        .remove_project(project.clone(), generation + 1)
+        .await
+        .unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_read_paths WHERE project='setup-pooled'"),
+        0,
+        "the project's read-only folders go with it"
+    );
+    drop(owner);
+    engine.stop().await;
+}

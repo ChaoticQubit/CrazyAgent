@@ -290,7 +290,11 @@ async fn open(
         },
     )
     .await?;
-    for chunk in viewer.screen.chunks(CHUNK_BYTES_MAX) {
+    for chunk in viewer
+        .history
+        .chunks(CHUNK_BYTES_MAX)
+        .chain(viewer.screen.chunks(CHUNK_BYTES_MAX))
+    {
         write(
             stream,
             &TerminalFrame::Output {

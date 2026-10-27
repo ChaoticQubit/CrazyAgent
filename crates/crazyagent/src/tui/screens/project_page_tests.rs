@@ -136,6 +136,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::TeamChange { .. } => "team change",
                         SetupQuery::Library(_) => "library",
                         SetupQuery::Log { .. } => "log",
+                        SetupQuery::ReadPaths { .. } => "read paths",
                     });
                     connection.project_setup(query).unwrap();
                 }

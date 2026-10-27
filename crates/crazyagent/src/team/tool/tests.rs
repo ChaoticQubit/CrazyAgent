@@ -90,15 +90,80 @@ fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
             Delegation {
                 harness: None,
                 prompt: "Write apple.txt".into(),
+                role: None,
             },
             Delegation {
                 harness: Some("claude-code".into()),
                 prompt: "Review the notes".into(),
+                role: None,
             },
         ]
     );
     assert!(!drop.exists(), "taking the proposals clears the record");
     assert!(take(&drop).is_empty(), "a proposal is taken once");
+}
+
+#[test]
+fn the_delegate_tool_keeps_the_role_the_master_gives_a_job_as_a_handle() {
+    let directory = tempfile::tempdir().unwrap();
+    let drop = directory.path().join(DROP_FILE);
+    let answers = by_id(&served(
+        requests(&[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+            call_line(
+                2,
+                json!({"task": "Fix onboarding", "role": "Onboarding Fix"}),
+            ),
+            call_line(3, json!({"task": "Write docs", "role": "@docs"})),
+            call_line(4, json!({"task": "No role", "role": "  "})),
+            call_line(5, json!({"task": "Bad role", "role": "???"})),
+            call_line(6, json!({"task": "Long role", "role": "a".repeat(65)})),
+        ]),
+        &drop,
+    ));
+    let schema = &answers["1"]["result"]["tools"][0]["inputSchema"];
+    assert_eq!(schema["properties"]["role"]["type"], "string");
+    assert_eq!(schema["required"], json!(["task"]));
+    for id in ["2", "3", "4"] {
+        assert_eq!(answers[id]["result"]["isError"], false, "{id}");
+    }
+    for id in ["5", "6"] {
+        assert_eq!(answers[id]["result"]["isError"], true, "{id}");
+        assert_eq!(answers[id]["result"]["content"][0]["text"], INVALID);
+    }
+    assert_eq!(
+        take(&drop),
+        [
+            Delegation {
+                harness: None,
+                prompt: "Fix onboarding".into(),
+                role: Some("onboarding-fix".into()),
+            },
+            Delegation {
+                harness: None,
+                prompt: "Write docs".into(),
+                role: Some("docs".into()),
+            },
+            Delegation {
+                harness: None,
+                prompt: "No role".into(),
+                role: None,
+            },
+        ]
+    );
+    std::fs::write(
+        &drop,
+        "{\"harness\":null,\"task\":\"Edited\",\"role\":\"Not A Handle!!\"}\n{\"harness\":null,\"task\":\"Odd\",\"role\":\"!!!\"}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        take(&drop)
+            .into_iter()
+            .map(|found| found.role)
+            .collect::<Vec<_>>(),
+        [Some("not-a-handle".into()), None],
+        "a role read back from the record is a handle again or nothing"
+    );
 }
 
 #[test]
@@ -172,10 +237,12 @@ fn the_engine_keeps_only_valid_recorded_proposals() {
             Delegation {
                 harness: Some("codex".into()),
                 prompt: "Write a.txt".into(),
+                role: None,
             },
             Delegation {
                 harness: None,
                 prompt: "Write d.txt".into(),
+                role: None,
             },
         ]
     );

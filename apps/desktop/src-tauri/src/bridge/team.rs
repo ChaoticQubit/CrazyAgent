@@ -147,6 +147,25 @@ impl NativeBridge {
         .await
     }
 
+    /// Renames a live sub-agent's role handle, the `@name` the owner and master address it by.
+    /// Takes the project id, the team agent id, the new kebab-case handle and the client generation.
+    /// Returns the actual commit receipt; a taken or malformed handle is a plain rejection.
+    pub async fn team_rename(
+        &mut self,
+        id: &str,
+        agent: i64,
+        handle: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = TeamAction::Rename {
+            project_id,
+            agent,
+            handle,
+        };
+        self.team_action(action, generation).await
+    }
+
     async fn team_action(
         &mut self,
         action: TeamAction,

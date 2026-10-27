@@ -47,6 +47,7 @@ fn agent(
     TeamAgent {
         id,
         role,
+        label: role.agent_label(id),
         harness: harness.into(),
         tools: true,
         account: Some(
@@ -69,6 +70,8 @@ fn agent(
         created_ms: NOW - 20 * MINUTE,
         heartbeat_ms: NOW,
         stopped_ms: None,
+        persona: None,
+        handle: None,
     }
 }
 
@@ -241,10 +244,10 @@ fn the_team_draws_agents_and_tasks_at_120_and_80_columns() {
     let master = find(&wide, "> Master");
     assert!(master.contains("Codex") && master.contains("ChatGPT Pro - main"));
     assert!(master.contains("Waiting for work"));
-    let sub = find(&wide, "Sub-agent 1");
+    let sub = find(&wide, "Sub-agent 2");
     assert!(sub.contains("Claude Max - work"));
     assert!(sub.contains("Working  Build the charts component"));
-    assert!(find(&wide, "Sub-agent 2").contains("Stopped"));
+    assert!(find(&wide, "Sub-agent 4").contains("Stopped"));
     let charts = find(&wide, "    Build the charts component");
     assert!(charts.contains("Master") && charts.contains("Running  6 min"));
     assert!(find(&wide, "Write the readings API").contains("You"));
@@ -281,6 +284,79 @@ fn the_team_draws_agents_and_tasks_at_120_and_80_columns() {
 }
 
 #[test]
+fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
+    let graph = crate::team::graph(&team());
+    let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
+    assert_eq!(working.label, "Sub-agent 2");
+    let mut view = loaded();
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Working  Build the charts component").contains("Sub-agent 2"));
+    assert!(find(&rows, "Sub-agent 4").contains("Stopped"));
+    assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Agent         Sub-agent 2"))
+    );
+}
+
+#[test]
+fn a_named_sub_agent_shows_its_persona_and_role_in_the_list_panel_and_graph() {
+    let mut status = team();
+    status.agents[1].persona = Some("Ada".into());
+    status.agents[1].handle = Some("charts".into());
+    status.agents[1].label = "Ada (@charts)".into();
+    let graph = crate::team::graph(&status);
+    let named = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
+    assert_eq!(named.label, "Ada (@charts)");
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Ada (@charts)").contains("Working  Build the charts component"));
+    view.key(press(KeyCode::Down));
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Ada (@charts) \u{b7} Claude Code \u{b7} working")),
+        "{}",
+        rows.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Agent         Ada (@charts)"))
+    );
+}
+
+#[test]
+fn every_sub_agent_row_shows_its_current_task_or_its_last_one() {
+    let mut status = team();
+    status.tasks[0].agent = Some(4);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Sub-agent 2").contains("Working  Build the charts component"));
+    assert!(
+        find(&rows, "Sub-agent 4").contains("Stopped  Last task: Set up the project"),
+        "{}",
+        rows.join("\n")
+    );
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.agent_cursor, 2);
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Last task     Set up the project")),
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn the_panel_follows_the_focused_task() {
     let mut view = loaded();
     assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
@@ -290,7 +366,7 @@ fn the_panel_follows_the_focused_task() {
     assert!(find(&rows, "Use the readings API.").starts_with("  "));
     assert!(
         rows.iter()
-            .any(|row| row.contains("Agent         Sub-agent 1"))
+            .any(|row| row.contains("Agent         Sub-agent 2"))
     );
     view.key(press(KeyCode::Down));
     view.key(press(KeyCode::Down));

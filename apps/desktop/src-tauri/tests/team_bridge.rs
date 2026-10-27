@@ -21,6 +21,7 @@ const COMMANDS: [&str; 8] = [
     "desktop_team_live_master",
     "desktop_team_pause",
     "desktop_team_hand_off",
+    "desktop_team_rename",
 ];
 
 #[test]
@@ -201,6 +202,18 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         bridge
             .team_hand_off(&id, owner_message, 8, 11)
+            .await
+            .unwrap_err()
+            .code,
+        "team_action_invalid"
+    );
+    let gone = bridge.team_rename(&id, 99, "docs-pass".into(), 12).await?;
+    assert_eq!(gone.rejection.as_deref(), Some("team_agent_unknown"));
+    let malformed = bridge.team_rename(&id, 99, "Docs Pass".into(), 13).await?;
+    assert_eq!(malformed.rejection.as_deref(), Some("team_handle_invalid"));
+    assert_eq!(
+        bridge
+            .team_rename(&id, 0, "docs".into(), 14)
             .await
             .unwrap_err()
             .code,
