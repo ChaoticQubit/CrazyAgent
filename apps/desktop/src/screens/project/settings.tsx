@@ -4,6 +4,7 @@ import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { ProjectCatalog, StoredSetup } from "../../api-projects";
+import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -229,6 +230,19 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
   return { paths: [...paths, path] };
 }
 
+/** What the folders list says after a save refused because the folders changed since it read
+ * them, once it shows the saved folders again. */
+export const READ_PATHS_STALE = "These folders changed since you opened them. The list now shows the saved folders; make your change again.";
+
+/** Whether a read-only folders save was refused because the folders changed since the screen
+ * read them, so the screen reads them again instead of resending the same old version.
+ * Input: the save's result. Output: true for that refusal. */
+export function readPathsStale(result: Result<IntentReceipt>): boolean {
+  if (result.kind !== "ok") return result.kind === "error" && result.code === "stale_revision";
+  const state = receiptState(result.value);
+  return state.kind === "rejected" && state.code === "stale_revision";
+}
+
 function SandboxSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<ReadPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
@@ -253,18 +267,29 @@ function SandboxSection({ data }: { data: ProjectData }) {
     setNote("");
   }
 
+  async function reread(): Promise<boolean> {
+    const fresh = await loadReadPaths(data.id);
+    if (fresh.kind !== "ok") return false;
+    setSaved(fresh.value);
+    setPaths(fresh.value.paths);
+    return true;
+  }
+
   async function save() {
     if (saved === null) return;
     setBusy(true);
     const result = await saveReadPaths(data.id, paths, saved.version, nextGeneration());
+    if (readPathsStale(result)) {
+      const shown = await reread();
+      setBusy(false);
+      return setNote(shown ? READ_PATHS_STALE : "These folders changed since you opened them. Reopen this page to see them.");
+    }
     if (result.kind !== "ok") { setBusy(false); return setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result)); }
     const state = receiptState(result.value);
     if (state.kind !== "applied") { setBusy(false); return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again."); }
-    const fresh = await loadReadPaths(data.id);
+    const shown = await reread();
     setBusy(false);
-    if (fresh.kind !== "ok") return setNote("Read-only folders saved. Reopen this page to change them again.");
-    setSaved(fresh.value);
-    setPaths(fresh.value.paths);
+    if (!shown) return setNote("Read-only folders saved. Reopen this page to change them again.");
     setNote("");
     data.notify("Read-only folders saved. Agents started from now on get them.");
   }

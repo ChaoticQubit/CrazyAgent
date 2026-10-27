@@ -575,8 +575,9 @@ impl TeamView {
         Some((own, own.unwrap_or(fallback)))
     }
 
-    /// Gives the version of a level's own rule the last read showed, 0 when it has none.
-    /// Takes the level. Returns the version a change of that level sends.
+    /// Gives the version of a level the last read showed: its own rule's, else for an agent
+    /// level the version its cleared rule left, else 0 for a level never set. Takes the level.
+    /// Returns the version a change of that level sends.
     fn wake_version(&self, level: WakeLevel) -> u64 {
         let Some(status) = self.status.as_ref() else {
             return 0;
@@ -589,7 +590,14 @@ impl TeamView {
                 .agents
                 .iter()
                 .find(|rule| rule.agent == id)
-                .map_or(0, |rule| rule.version),
+                .map(|rule| rule.version)
+                .or_else(|| {
+                    wake.cleared
+                        .iter()
+                        .find(|level| level.agent == id)
+                        .map(|level| level.version)
+                })
+                .unwrap_or(0),
         }
     }
 

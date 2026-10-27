@@ -279,3 +279,17 @@ test("the import list shows plain loading, not ready and error states", () => {
   const failed = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "error", code: "skill_import_home_unknown", message: api.plainError("skill_import_home_unknown") })));
   assert.match(failed, /Your home folder is unknown, so your skills can&#x27;t be found\./);
 });
+
+test("a stale skill or server change reads the list again, so the owner sees the newer state before trying again", async () => {
+  const { readFileSync } = await import("node:fs");
+  const refused = (code) => ({ kind: "error", code, message: api.plainError(code) });
+  assert.equal(plugins.readsAgain(refused("stale_revision")), true, "another window or the TUI changed the item since it was shown");
+  assert.equal(plugins.readsAgain(refused("plugin_changed")), true);
+  assert.equal(plugins.readsAgain(refused("plugin_not_found")), true);
+  assert.equal(plugins.readsAgain(refused("plugins_failed")), false, "a plain failure keeps the list as shown");
+  assert.equal(plugins.readsAgain({ kind: "not_ready" }), false);
+  assert.equal(api.plainError("stale_revision"), "This changed since you opened it. Review and save again.");
+  const source = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.match(source, /else \{ setFailure\(result\.kind === "not_ready" \? NOT_READY : result\.message\); if \(readsAgain\(result\)\) reload\(\); \}/, "the list reads again");
+  assert.match(source, /if \(readsAgain\(result\)\) \{ reload\(\); onChanged\(\); \}/, "the skill detail and the list behind it read again");
+});

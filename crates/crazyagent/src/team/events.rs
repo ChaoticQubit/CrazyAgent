@@ -316,9 +316,17 @@ pub struct AgentRule {
     pub version: u64,
 }
 
+/// One agent level the owner cleared: it has no rule of its own any more, yet its version
+/// moved on, and a change of that level sends this version back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearedRule {
+    pub agent: i64,
+    pub version: u64,
+}
+
 /// The wake rules a project's settings show: what is stored at each level with the version a
 /// change sends back, and the rule in force for the project with the level it came from. A
-/// level with no rule of its own is at version 0.
+/// level never set is at version 0; an agent level cleared since is listed in `cleared`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WakeView {
     pub app: Option<WakeRule>,
@@ -328,6 +336,8 @@ pub struct WakeView {
     #[serde(default)]
     pub project_version: u64,
     pub agents: Vec<AgentRule>,
+    #[serde(default)]
+    pub cleared: Vec<ClearedRule>,
     pub effective: WakeRule,
     pub level: RuleLevel,
 }
@@ -1518,6 +1528,7 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
         .iter()
         .position(|(agent, _)| *agent == 0)
         .map(|at| own.remove(at).1);
+    let cleared = cleared_levels(connection, project, &own)?;
     let (effective, level) = rule(connection, Some(project), None)?;
     let paused: bool = connection
         .query_row(
@@ -1558,11 +1569,53 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
                     })
                 })
                 .collect::<Result<_, EngineError>>()?,
+            cleared,
             effective,
             level,
         },
         questions: questions(connection, project)?,
     })
+}
+
+/// Reads the agent levels a screen can edit that hold no rule of their own but whose version
+/// moved on, because the owner cleared their rule, so the next change of such a level sends
+/// the current version. Covers the sub-agents among the newest `STATUS_AGENTS_MAX` agents of
+/// the project, the ones the team status lists. Takes the connection, the project and the
+/// agent levels with a rule. Returns the levels in agent order, at most `STATUS_AGENTS_MAX`.
+fn cleared_levels(
+    connection: &Connection,
+    project: &ProjectId,
+    ruled: &[(i64, WakeRule)],
+) -> Result<Vec<ClearedRule>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM (SELECT id,role FROM team_agents WHERE project=?1 ORDER BY id DESC LIMIT ?2)
+             WHERE role='sub' ORDER BY id",
+        )
+        .map_err(error)?;
+    let listed: Vec<i64> = statement
+        .query_map(params![project.as_str(), STATUS_AGENTS_MAX], |row| {
+            row.get(0)
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let mut cleared = Vec::new();
+    for agent in listed {
+        if ruled.iter().any(|(own, _)| *own == agent) {
+            continue;
+        }
+        let target = RuleTarget::Agent {
+            project_id: project.clone(),
+            agent,
+        };
+        let version = rule_version(connection, &target)?;
+        if version > 0 {
+            cleared.push(ClearedRule { agent, version });
+        }
+    }
+    assert!(cleared.len() <= usize::try_from(STATUS_AGENTS_MAX).unwrap_or(usize::MAX));
+    Ok(cleared)
 }
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
