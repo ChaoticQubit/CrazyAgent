@@ -1207,6 +1207,9 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     })
 }
 
+/// Writes one event as the master reads it: the agent's text keeps no square brackets, so
+/// a tag such as `[owner]` inside it can never pass for a speaker. Takes the event.
+/// Returns the line.
 fn line(event: &TeamEvent) -> String {
     let task = event
         .task

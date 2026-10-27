@@ -115,6 +115,7 @@ pub enum MasterBackend {
 #[serde(rename_all = "snake_case")]
 pub enum MasterSessionPhase {
     Configured,
+    Parked,
     Closing,
     Closed,
 }
@@ -517,6 +518,18 @@ pub enum MasterOwnerAction {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    NewSession {
+        project_id: ProjectId,
+        expected_config_id: ConfigId,
+        expected_source_hash: String,
+        selection: Box<MasterSelection>,
+        cancel_running: bool,
+    },
+    Resume {
+        project_id: ProjectId,
+        session_id: SessionId,
+        cancel_running: bool,
+    },
     Resolve {
         project_id: ProjectId,
         session_id: SessionId,
@@ -556,6 +569,12 @@ pub(crate) fn validate_action(action: &MasterOwnerAction) -> Result<(), EngineEr
             expected_source_hash,
             selection,
             ..
+        }
+        | MasterOwnerAction::NewSession {
+            expected_config_id,
+            expected_source_hash,
+            selection,
+            ..
         } => {
             if !is_hex_id(expected_config_id.as_str()) || !is_hex_id(expected_source_hash) {
                 return Err(error("master_source_basis"));
@@ -569,6 +588,7 @@ pub(crate) fn validate_action(action: &MasterOwnerAction) -> Result<(), EngineEr
         }
         MasterOwnerAction::Cancel { .. }
         | MasterOwnerAction::Close { .. }
+        | MasterOwnerAction::Resume { .. }
         | MasterOwnerAction::Resolve { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {}
     }

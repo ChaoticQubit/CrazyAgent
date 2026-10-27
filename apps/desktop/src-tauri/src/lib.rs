@@ -1259,6 +1259,77 @@ async fn desktop_close_master(
 }
 
 #[tauri::command]
+async fn desktop_master_sessions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+) -> Result<bridge::master::MasterSessions, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.master_sessions(&ticket).await
+}
+
+#[tauri::command]
+async fn desktop_master_inputs(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cursors: Vec<String>,
+) -> Result<bridge::master::MasterInputs, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .master_inputs(&ticket, &session_id, &cursors)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_session_turns(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cursor: Option<crazyagent::master_session::MasterCursor>,
+) -> Result<bridge::master::MasterTurns, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .session_turns(&ticket, &session_id, cursor)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_new_master_session(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    cancel_running: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .new_master_session(&ticket, cancel_running, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_resume_master_session(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cancel_running: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .resume_master_session(&ticket, &session_id, cancel_running, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_cancel_master_turn(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2303,6 +2374,11 @@ pub fn run() {
             desktop_open_master,
             desktop_submit_master,
             desktop_close_master,
+            desktop_master_sessions,
+            desktop_master_session_turns,
+            desktop_master_inputs,
+            desktop_new_master_session,
+            desktop_resume_master_session,
             desktop_cancel_master_turn,
             desktop_pending_intent,
             desktop_reconcile_intent,
