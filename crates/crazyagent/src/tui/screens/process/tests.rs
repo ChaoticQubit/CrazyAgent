@@ -291,6 +291,97 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
 }
 
 #[test]
+fn stale_save_shows_the_conflict_choices() {
+    let stale = |named: u64, text: &str| {
+        Ok(ProcessReply::Saved(SavedText::Stale {
+            version: named,
+            current: ProcessText {
+                text: text.into(),
+                version: named + 1,
+            },
+            writer: crate::storage::versioned::LastWriter::Agent(
+                crate::terminal::AgentId::team(3).unwrap(),
+            ),
+        }))
+    };
+    let mut shell = opened(Scope::App, "Old rule.");
+    typed(&mut shell, "Mine. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(answered(save, stale(READ_VERSION, "Agent rule.")));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Changed by Agent 3 since you opened it."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Agent rule."),
+        "the text that landed: {shown}"
+    );
+    assert!(
+        shown.contains("Mine. Old rule."),
+        "the draft stays: {shown}"
+    );
+    assert!(
+        shown.contains("Ctrl-R Reload") && shown.contains("Ctrl-Y Keep mine"),
+        "{shown}"
+    );
+    assert!(
+        requests(&mut shell).is_empty(),
+        "nothing is written until the owner chooses"
+    );
+
+    shell.key(Key::Ctrl('y'));
+    let keep = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION + 1,
+        opened: Some(READ_VERSION),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![keep.clone()],
+        "Keep mine names the version shown and the one opened, so the engine records it"
+    );
+    shell.arrive(answered(keep, stale(READ_VERSION + 1, "Newer rule.")));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Newer rule.") && !shown.contains("Agent rule."),
+        "a Keep mine refused again shows the newer text: {shown}"
+    );
+
+    shell.key(Key::Ctrl('r'));
+    assert!(requests(&mut shell).is_empty(), "Reload writes nothing");
+    let shown = screen(&mut shell);
+    assert!(
+        !shown.contains("Changed by") && !shown.contains("Keep mine"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("Mine. Old rule.") && !shown.contains("Not saved yet"),
+        "Reload puts the text that landed in the editor: {shown}"
+    );
+    typed(&mut shell, "Edit. ");
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Save {
+            project: None,
+            text: "Edit. Newer rule.".into(),
+            version: READ_VERSION + 2,
+            opened: None,
+        }],
+        "after Reload a save names the version that landed"
+    );
+}
+
+#[test]
 fn a_text_over_64_kb_says_why_and_is_never_sent() {
     let mut shell = opened(Scope::App, "");
     shell.key(Key::Paste("a".repeat(TEXT_BYTES_MAX + 1)));
