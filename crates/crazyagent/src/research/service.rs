@@ -72,9 +72,8 @@ pub fn progress(jobs: &ResearchJobs, project: &str) -> Result<Vec<ResearchProgre
 /// Background loop that keeps every project's research moving: for each
 /// project and job harness it parks jobs whose pool has no account that
 /// harness can use, or only accounts paused after a rate limit with the
-/// `rate_limited` code and the pause's end, resumes them once one is free,
-/// starts queued jobs up to the per-project limit, and adds the owner's answers
-/// to roadmap planning questions to each project's roadmap.
+/// `rate_limited` code and the pause's end, resumes them once one is free, and
+/// starts queued jobs up to the per-project limit.
 pub struct ResearchService {
     runner: Arc<ResearchRunner>,
     stop: Arc<AtomicBool>,
@@ -134,7 +133,6 @@ where
     };
     while !stop.load(Ordering::SeqCst) {
         let _ = jobs.recover_stale(STALE_MS);
-        let _ = crate::planning::record_answers(runner.database());
         for (project, harness) in jobs.work().unwrap_or_default() {
             if stop.load(Ordering::SeqCst) || runs.len() >= RUNS_MAX {
                 break;
