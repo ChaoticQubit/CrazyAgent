@@ -1,12 +1,16 @@
 use super::*;
 use crate::protocol::encode_frame;
-use crate::questions::{self, Question, Refusal};
+use crate::questions::{self, Answer, Page, Settlement};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 16 * 1024;
 pub(super) const QUESTIONS_TIMEOUT: Duration = Duration::from_secs(30);
 
-const _: () = assert!(4 * questions::ANSWER_BYTES_MAX + 1024 <= REQUEST_BYTES_MAX);
+const _: () = assert!(2 * questions::ANSWER_BYTES_MAX + 1024 <= REQUEST_BYTES_MAX);
+const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
+const _: () = assert!(
+    questions::COUNTED_PROJECTS_MAX as usize * 160 + 64 <= crate::protocol::FRAME_BYTES_MAX
+);
 
 /// Every code a Questions request can answer an owner client with: the questions log's
 /// refusals, this protocol's own, and the owner connection's it travels on.
@@ -22,17 +26,24 @@ pub const QUESTIONS_CODES: &[&str] = &[
     "owner_socket_replaced",
     "owner_socket_unsafe",
     "peer_owner_mismatch",
-    "question_delivery_full",
-    "question_in_terminal",
-    "question_invalid",
-    "question_missing",
-    "question_not_terminal",
-    "question_project_unknown",
+    "questions_answer_invalid",
+    "questions_ask_invalid",
+    "questions_asker_full",
+    "questions_delivery_full",
+    "questions_full",
+    "questions_in_terminal",
+    "questions_not_found",
+    "questions_not_terminal",
+    "questions_notes_invalid",
+    "questions_option_invalid",
     "questions_outcome_unknown",
+    "questions_owner_turn_invalid",
     "questions_page_unavailable",
+    "questions_project_missing",
     "questions_reply_bounds",
     "questions_request_bounds",
     "questions_request_invalid",
+    "questions_text_invalid",
     "questions_unavailable",
     "versioned_item_invalid",
     "versioned_unavailable",
@@ -43,20 +54,21 @@ pub const QUESTIONS_CODES: &[&str] = &[
 enum Action {
     List {
         project: ProjectId,
-        pending_only: bool,
-        before: Option<i64>,
+        after: Option<u64>,
     },
     Answer {
-        project: ProjectId,
-        id: i64,
+        id: u64,
         version: u64,
-        answer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     Dismiss {
-        project: ProjectId,
-        id: i64,
+        id: u64,
         version: u64,
     },
+    Counts {},
 }
 
 #[derive(Serialize, Deserialize)]
@@ -68,10 +80,9 @@ struct Envelope {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Listed { questions: Vec<Question> },
-    Answered,
-    Dismissed,
-    Stale { question: Box<Question> },
+    Page { page: Page },
+    Settled { settlement: Settlement },
+    Counts { counts: Vec<(ProjectId, u32)> },
     Rejected { code: String },
 }
 
@@ -80,67 +91,70 @@ fn unknown() -> EngineError {
 }
 
 impl OwnerClient {
-    /// Lists one project's owner questions newest first, at most one frame of them: only the
-    /// pending ones, or all, older than `before` when given. Inputs: the project, the filter
-    /// and the paging id. Output: the questions with the version each answer names.
+    /// Reads one page of a project's owner questions, the pending ones first, with the
+    /// version each answer or dismissal names. Inputs: the project and the `next` of the
+    /// page before, none for the first. Output: the page.
     pub async fn questions_list(
         &self,
-        project: &ProjectId,
-        pending_only: bool,
-        before: Option<i64>,
-    ) -> Result<Vec<Question>, EngineError> {
-        let action = Action::List {
-            project: project.clone(),
-            pending_only,
-            before,
-        };
-        match self.questions_exchange(action).await? {
-            Reply::Listed { questions } => Ok(questions),
+        project: ProjectId,
+        after: Option<u64>,
+    ) -> Result<Page, EngineError> {
+        match self
+            .questions_exchange(Action::List { project, after })
+            .await?
+        {
+            Reply::Page { page } => Ok(page),
             _ => Err(unknown()),
         }
     }
 
-    /// Answers one owner question, naming the version the owner read; the engine delivers the
-    /// answer to the asker once. Inputs: the project, the question id, the version and the
-    /// answer. Output: Ok(Ok) once recorded, or Ok(Err) with the question as it now stands
-    /// when it was settled or changed since it was read.
-    pub async fn question_answer(
+    /// Answers one owner question with an option or typed text, naming the version the
+    /// owner read; the engine tells the asker once. Inputs: the question id, the version and
+    /// the answer. Output: Settled once recorded, or Stale when it was settled or changed
+    /// since it was read.
+    pub async fn questions_answer(
         &self,
-        project: &ProjectId,
-        id: i64,
+        id: u64,
         version: u64,
-        answer: &str,
-    ) -> Result<Result<(), Box<Question>>, EngineError> {
+        answer: Answer,
+    ) -> Result<Settlement, EngineError> {
+        let (option, text) = match answer {
+            Answer::Option(index) => (Some(index), None),
+            Answer::Text(text) => (None, Some(text)),
+        };
         let action = Action::Answer {
-            project: project.clone(),
             id,
             version,
-            answer: answer.to_owned(),
+            option,
+            text,
         };
         match self.questions_exchange(action).await? {
-            Reply::Answered => Ok(Ok(())),
-            Reply::Stale { question } => Ok(Err(question)),
+            Reply::Settled { settlement } => Ok(settlement),
             _ => Err(unknown()),
         }
     }
 
     /// Dismisses one owner question the owner will not answer, naming the version the owner
-    /// read. Inputs: the project, the question id and the version. Output: as
-    /// `question_answer`.
-    pub async fn question_dismiss(
+    /// read. Inputs: the question id and the version. Output: as `questions_answer`.
+    pub async fn questions_dismiss(
         &self,
-        project: &ProjectId,
-        id: i64,
+        id: u64,
         version: u64,
-    ) -> Result<Result<(), Box<Question>>, EngineError> {
-        let action = Action::Dismiss {
-            project: project.clone(),
-            id,
-            version,
-        };
-        match self.questions_exchange(action).await? {
-            Reply::Dismissed => Ok(Ok(())),
-            Reply::Stale { question } => Ok(Err(question)),
+    ) -> Result<Settlement, EngineError> {
+        match self
+            .questions_exchange(Action::Dismiss { id, version })
+            .await?
+        {
+            Reply::Settled { settlement } => Ok(settlement),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Counts the questions waiting for the owner in each project that has any. Output: the
+    /// projects and their counts.
+    pub async fn questions_counts(&self) -> Result<Vec<(ProjectId, u32)>, EngineError> {
+        match self.questions_exchange(Action::Counts {}).await? {
+            Reply::Counts { counts } => Ok(counts),
             _ => Err(unknown()),
         }
     }
@@ -244,40 +258,32 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 }
 
 /// Runs one authenticated Questions action against the engine database in the engine root.
-/// Inputs: the engine root and the action. Output: the reply, or the log's refusal.
+/// An answer names exactly one of an option position or typed text. Inputs: the engine root
+/// and the action. Output: the reply, or the log's refusal.
 fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = questions::open(root)?;
-    let now = crate::team::now_ms();
-    let settled = |outcome: Result<(), Refusal>, done: Reply| match outcome {
-        Ok(()) => Ok(done),
-        Err(Refusal::Stale(question)) => Ok(Reply::Stale { question }),
-        Err(Refusal::Code(code)) => Err(failure(code)),
-    };
+    let settlement = |settlement| Ok(Reply::Settled { settlement });
     match action {
-        Action::List {
-            project,
-            pending_only,
-            before,
-        } => Ok(Reply::Listed {
-            questions: questions::list(&db, &project, pending_only, before)?,
+        Action::List { project, after } => Ok(Reply::Page {
+            page: questions::page(&db, &project, after)?,
         }),
         Action::Answer {
-            project,
             id,
             version,
-            answer,
-        } => settled(
-            questions::answer(&db, &project, id, version, &answer, now)?,
-            Reply::Answered,
-        ),
-        Action::Dismiss {
-            project,
-            id,
-            version,
-        } => settled(
-            questions::dismiss(&db, &project, id, version, now)?,
-            Reply::Dismissed,
-        ),
+            option,
+            text,
+        } => {
+            let answer = match (option, text) {
+                (Some(index), None) => Answer::Option(index),
+                (None, Some(text)) => Answer::Text(text),
+                _ => return Err(failure("questions_answer_invalid")),
+            };
+            settlement(questions::answer(&db, id, version, &answer)?)
+        }
+        Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),
+        Action::Counts {} => Ok(Reply::Counts {
+            counts: questions::count_pending(&db)?,
+        }),
     }
 }
 
