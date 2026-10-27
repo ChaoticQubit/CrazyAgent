@@ -33,5 +33,5 @@ test("the terminal hands Shift+Enter to the key override before xterm reads it",
   const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
   assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*const override = keyOverride\(event\);/);
   const page = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
-  assert.match(page, /active === "conversation" && <MasterArea data=\{data\} \/>/);
+  assert.match(page, /active === "conversation" && <TeamActivity data=\{data\}><MasterArea data=\{data\} \/><\/TeamActivity>/);
 });
