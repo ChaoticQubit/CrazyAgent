@@ -509,7 +509,7 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
     assert!(!output.status.success());
     assert_eq!(fs::read(&index).ok(), before);
 
-    let case = case();
+    let case = self::case();
     for arguments in [
         &["init", "-q"][..],
         &["commit", "-q", "--allow-empty", "-m", "start"],
@@ -531,7 +531,7 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
         ],
     );
     assert!(added.status.success(), "{added:?}");
-    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+    let confined = self::sandbox(&case, SandboxNetwork::Only(Vec::new()))
         .confine_to_worktree(&worktree)
         .unwrap();
     let profile = case.profiles.join("confined.sb");
