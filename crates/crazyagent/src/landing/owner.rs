@@ -364,9 +364,9 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let agent = flow::agent(&record)?;
-    if agent.commit_of("HEAD")?.as_deref() != Some(record.head.as_str())
-        || !flow::holds_only(&agent, &record.head)?
+    let agent = flow::agent(db, &record)?;
+    if agent.head().ok().as_deref() != Some(record.head.as_str())
+        || !flow::holds_only(&agent.repo, &record.head)?
     {
         return Err(failure("changes_agent_busy"));
     }
@@ -472,11 +472,14 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             }
         }
         Some(Intent::Reset { target }) => {
-            let agent = flow::agent(record)?;
-            let current = agent
-                .commit_of("HEAD")?
-                .ok_or_else(|| failure("changes_git_failed"))?;
-            let reset = flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
+            let agent = flow::agent(db, record)?;
+            let reset = match agent.head() {
+                Ok(current) => {
+                    flow::holds_only(&agent.repo, &target)?
+                        || flow::holds_only(&agent.repo, &current)?
+                }
+                Err(_) => false,
+            };
             if reset {
                 flow::reset_agent(&agent, &target)?;
             }

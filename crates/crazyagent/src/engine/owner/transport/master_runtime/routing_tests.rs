@@ -2414,6 +2414,74 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
 }
 
 #[tokio::test]
+async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_no_branch() {
+    let (case, prepared) = tools_case(true).await;
+    let read = |args: &[&str]| -> String {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&prepared.repository)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let owner = read(&["symbolic-ref", "HEAD"]).trim().to_owned();
+    let branches = || {
+        read(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/",
+        ])
+    };
+    let before = branches();
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let git_dir = crate::worktrees::lease_git_dir(&db, &prepared.lease).unwrap();
+    let lease = format!("ref: refs/heads/{}\n", prepared.lease.branch);
+    assert_eq!(fs::read_to_string(git_dir.join("HEAD")).unwrap(), lease);
+    assert_ne!(owner, format!("refs/heads/{}", prepared.lease.branch));
+    fs::write(git_dir.join("HEAD"), format!("ref: {owner}\n")).unwrap();
+    fs::write(prepared.cwd.join("NOTES.md"), "Written past the lease.\n").unwrap();
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: case.session.session_id.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: prepared.repository.clone(),
+        worktree: prepared.cwd.clone(),
+        git_dir: git_dir.clone(),
+    };
+    let end = crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: "away-turn".into(),
+        prompt_line: "Write past the lease".into(),
+    };
+    let refused = crate::landing_turns::record(&db, &workspace, &end).unwrap_err();
+    assert_eq!(refused.0, "changes_workspace_invalid");
+    assert_eq!(branches(), before);
+    assert!(
+        crate::landing::list(&db, &case.session.project_id)
+            .unwrap()
+            .is_empty()
+    );
+    fs::write(git_dir.join("HEAD"), &lease).unwrap();
+    fs::remove_file(prepared.cwd.join("NOTES.md")).unwrap();
+    drop(db);
+    drop(prepared);
+    case.finish().await;
+}
+
+#[tokio::test]
 async fn a_failed_tools_on_master_turn_still_keeps_its_edits_for_review() {
     let (case, prepared) = tools_case(true).await;
     let failed = MasterRuntimeObservation::Failed {

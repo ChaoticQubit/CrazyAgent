@@ -1,7 +1,7 @@
 use super::diff::{self, plain};
 use super::git::{Repo, failure, object_id};
 use super::store::{self, Intent, Record};
-use super::{ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
+use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::engine::EngineError;
 use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
@@ -30,6 +30,7 @@ const LOCAL_ROOTS: [&str; 10] = [
     "/opt/",
 ];
 const LINK_BYTES_MAX: usize = 4096;
+const HEAD_BYTES_MAX: usize = 512;
 const CONFLICTS_SHOWN_MAX: usize = 50;
 static BUSY: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 static FREED: Condvar = Condvar::new();
@@ -100,7 +101,12 @@ pub(super) fn check_places(
 
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|_| invalid())?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_| invalid())?;
     if !file.metadata().is_ok_and(|found| found.is_file()) {
         return Err(invalid());
     }
@@ -255,10 +261,198 @@ pub(super) fn shared(record_repository: &Path) -> Result<Repo, EngineError> {
     Repo::open(&record_repository.join(".git"), None)
 }
 
-/// Opens an agent worktree through the git folder the engine recorded for it.
-pub(super) fn agent(record: &Record) -> Result<Repo, EngineError> {
-    check_places(&record.repository, &record.worktree, &record.git_dir)?;
-    Repo::open(&record.git_dir, Some(&record.worktree))
+/// The HEAD an agent worktree must hold for the engine to read or move it: a detached
+/// commit for a sub-agent, exactly its lease branch for the master.
+pub(super) enum Pointer {
+    Detached,
+    Branch(String),
+}
+
+/// An agent worktree opened for engine work. Its HEAD is read and moved only through
+/// [`Agent::head`] and [`Agent::move_head`], never through a ref or link the agent chose.
+pub(super) struct Agent {
+    pub(super) repo: Repo,
+    repository: PathBuf,
+    git_dir: PathBuf,
+    pointer: Pointer,
+}
+
+impl Agent {
+    /// Reads the commit HEAD names from the git folder without following a link,
+    /// refusing `changes_workspace_invalid` unless HEAD has the pointer's shape.
+    /// Takes nothing. Returns the commit.
+    pub(super) fn head(&self) -> Result<String, EngineError> {
+        let bytes = bounded_read(&self.git_dir.join("HEAD"), HEAD_BYTES_MAX)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+        let commit = match &self.pointer {
+            Pointer::Detached => detached(text)?.to_owned(),
+            Pointer::Branch(branch) if text == format!("ref: refs/heads/{branch}\n") => self
+                .repo
+                .commit_of(&format!("refs/heads/{branch}"))?
+                .ok_or_else(|| failure("changes_git_failed"))?,
+            Pointer::Branch(_) => return Err(invalid()),
+        };
+        if self.repo.commit_of(&commit)?.as_deref() != Some(commit.as_str()) {
+            return Err(invalid());
+        }
+        Ok(commit)
+    }
+
+    /// Moves HEAD from `old`, when given, to `new`. A detached HEAD is rewritten by the
+    /// engine under git's own `HEAD.lock` with no reflog; the master's lease branch is
+    /// moved by its name in the shared repository with no dereference, after its reflog
+    /// is checked to be a real file. Inputs: both commits and the reason. Output: Ok once
+    /// moved, or `changes_git_failed` when HEAD changed meanwhile or is locked.
+    pub(super) fn move_head(
+        &self,
+        old: Option<&str>,
+        new: &str,
+        message: &str,
+    ) -> Result<(), EngineError> {
+        assert!(super::git::is_object_id(new));
+        let branch = match &self.pointer {
+            Pointer::Detached => return move_detached(&self.git_dir, old, new),
+            Pointer::Branch(branch) => format!("refs/heads/{branch}"),
+        };
+        let common = self.repository.join(".git");
+        plain_log(&common, &branch)?;
+        let env = [
+            ("GIT_COMMITTER_NAME", ENGINE.0),
+            ("GIT_COMMITTER_EMAIL", ENGINE.1),
+        ];
+        let mut args = vec![
+            "update-ref",
+            "--no-deref",
+            "-m",
+            message,
+            branch.as_str(),
+            new,
+        ];
+        args.extend(old);
+        let moved = shared(&self.repository)?.exec(&args, None, &env, 256)?;
+        if moved.code != 0 {
+            return Err(failure("changes_git_failed"));
+        }
+        Ok(())
+    }
+}
+
+/// Reads a detached HEAD's text as its object id. Input: the text. Output: the id, or
+/// `changes_workspace_invalid` for a symbolic or malformed HEAD.
+fn detached(text: &str) -> Result<&str, EngineError> {
+    text.strip_suffix('\n')
+        .filter(|id| super::git::is_object_id(id))
+        .ok_or_else(invalid)
+}
+
+/// Rewrites a detached HEAD the way git's own lock does, without git: `HEAD.lock` is
+/// created only when absent and never through a link, HEAD is checked under it to still
+/// be detached and hold `old`, then the lock is renamed over HEAD, which replaces a link
+/// rather than following it. No reflog is written. Inputs: the git folder and both
+/// commits. Output: Ok once moved, or `changes_git_failed` with the lock removed.
+fn move_detached(git_dir: &Path, old: Option<&str>, new: &str) -> Result<(), EngineError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = git_dir.join("HEAD.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&lock)
+        .map_err(|_| failure("changes_git_failed"))?;
+    let git_failed = |_: std::io::Error| failure("changes_git_failed");
+    let moved = bounded_read(&git_dir.join("HEAD"), HEAD_BYTES_MAX)
+        .and_then(|bytes| {
+            let text = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+            match detached(text)? {
+                current if old.is_some_and(|old| old != current) => {
+                    Err(failure("changes_git_failed"))
+                }
+                _ => Ok(()),
+            }
+        })
+        .and_then(|()| {
+            file.write_all(format!("{new}\n").as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(git_failed)
+        })
+        .and_then(|()| std::fs::rename(&lock, git_dir.join("HEAD")).map_err(git_failed));
+    if moved.is_err() {
+        let _ = std::fs::remove_file(&lock);
+    }
+    moved
+}
+
+/// Refuses a reflog git would append to through a link: each folder on the way to
+/// `logs/<reference>` in the git folder that exists must be a real folder and the log,
+/// when present, a regular file. Inputs: the git folder and the reference. Output: Ok
+/// when git appends only to a real file or, with `core.logAllRefUpdates` off, logs nothing.
+fn plain_log(git_dir: &Path, reference: &str) -> Result<(), EngineError> {
+    let mut path = git_dir.join("logs");
+    let mut parts = reference.split('/');
+    loop {
+        let found = match std::fs::symlink_metadata(&path) {
+            Ok(found) => found,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(failure("changes_git_failed")),
+        };
+        let Some(part) = parts.next() else {
+            return if found.is_file() {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
+        };
+        if !found.is_dir() || part.is_empty() || part == "." || part == ".." {
+            return Err(invalid());
+        }
+        path.push(part);
+    }
+}
+
+/// Opens an agent worktree for engine work through the git folder the engine computed,
+/// with the HEAD shape its kind requires: detached for a sub-agent, the lease branch of
+/// its worktree for the master. Inputs: the store, the kind and the three paths.
+/// Output: the agent, or `changes_workspace_invalid`.
+pub(super) fn open_agent(
+    db: &Connection,
+    kind: AgentKind,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Agent, EngineError> {
+    check_places(repository, worktree, git_dir)?;
+    let pointer = match kind {
+        AgentKind::Sub => Pointer::Detached,
+        AgentKind::Master => crate::worktrees::lease_branch(db, worktree)
+            .ok()
+            .filter(|branch| {
+                branch
+                    .strip_prefix("crazyagent/")
+                    .is_some_and(super::git::is_object_id)
+            })
+            .map(Pointer::Branch)
+            .ok_or_else(invalid)?,
+    };
+    Ok(Agent {
+        repo: Repo::open(git_dir, Some(worktree))?,
+        repository: repository.to_path_buf(),
+        git_dir: git_dir.to_path_buf(),
+        pointer,
+    })
+}
+
+/// Opens the agent worktree of a change set through the git folder the engine recorded
+/// for it. Inputs: the store and the change set. Output: the agent.
+pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineError> {
+    open_agent(
+        db,
+        record.agent.kind,
+        &record.repository,
+        &record.worktree,
+        &record.git_dir,
+    )
 }
 
 /// Says whether an agent worktree holds exactly a commit: nothing staged or changed in
@@ -284,22 +478,10 @@ pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError>
 /// Points an agent worktree at a commit: its index and tracked files first, then its
 /// HEAD, so a stop between the two leaves a state an engine start can finish.
 /// Inputs: the worktree and the commit. Output: Ok once it holds the commit.
-pub(super) fn reset_agent(repo: &Repo, target: &str) -> Result<(), EngineError> {
-    repo.run(&["read-tree", "-u", "--reset", target])?;
-    let env = [
-        ("GIT_COMMITTER_NAME", ENGINE.0),
-        ("GIT_COMMITTER_EMAIL", ENGINE.1),
-    ];
-    let moved = repo.exec(
-        &["update-ref", "-m", "CrazyAgent: reset", "HEAD", target],
-        None,
-        &env,
-        256,
-    )?;
-    if moved.code != 0 {
-        return Err(failure("changes_git_failed"));
-    }
-    assert_eq!(repo.commit_of("HEAD")?.as_deref(), Some(target));
+pub(super) fn reset_agent(agent: &Agent, target: &str) -> Result<(), EngineError> {
+    agent.repo.run(&["read-tree", "-u", "--reset", target])?;
+    agent.move_head(None, target, "CrazyAgent: reset")?;
+    assert_eq!(agent.head()?, target);
     Ok(())
 }
 
@@ -315,8 +497,8 @@ pub(super) fn reset_if_quiet(
     target: &str,
 ) -> Result<(), EngineError> {
     assert!(!record.is_open());
-    let repo = agent(record)?;
-    if repo.commit_of("HEAD")?.as_deref() != Some(expected) || !holds_only(&repo, expected)? {
+    let agent = agent(db, record)?;
+    if agent.head().ok().as_deref() != Some(expected) || !holds_only(&agent.repo, expected)? {
         record.intent = None;
         store::save(db, record)?;
         return store::set_base(db, &record.worktree, expected);
@@ -325,7 +507,7 @@ pub(super) fn reset_if_quiet(
         target: target.to_owned(),
     });
     store::save(db, record)?;
-    reset_agent(&repo, target)?;
+    reset_agent(&agent, target)?;
     store::set_base(db, &record.worktree, target)?;
     record.intent = None;
     store::save(db, record)
@@ -550,11 +732,8 @@ pub(super) fn start(
     git_dir: &Path,
 ) -> Result<(), EngineError> {
     store::initialize(db)?;
-    check_places(repository, worktree, git_dir)?;
     let _held = hold(repository);
-    let head = Repo::open(git_dir, Some(worktree))?
-        .commit_of("HEAD")?
-        .ok_or_else(|| failure("changes_git_failed"))?;
+    let head = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?.head()?;
     store::set_base(db, worktree, &head)
 }
 
@@ -590,10 +769,15 @@ pub(super) fn record(
     {
         return Err(failure("changes_agent_has_pending"));
     }
-    let repo = Repo::open(&workspace.git_dir, Some(&workspace.worktree))?;
-    let head = repo
-        .commit_of("HEAD")?
-        .ok_or_else(|| failure("changes_git_failed"))?;
+    let agent = open_agent(
+        db,
+        workspace.agent.kind,
+        &workspace.repository,
+        &workspace.worktree,
+        &workspace.git_dir,
+    )?;
+    let repo = &agent.repo;
+    let head = agent.head()?;
     let base = match store::base_of(db, worktree)? {
         Some(base) if repo.commit_of(&base)?.as_deref() == Some(base.as_str()) => base,
         _ => head.clone(),
@@ -605,7 +789,7 @@ pub(super) fn record(
         .as_ref()
         .map_or(base.as_str(), |record| record.head.as_str());
     if above != head {
-        check_change(&repo, &workspace.repository, above, &head, fresh, bounds)?;
+        check_change(repo, &workspace.repository, above, &head, fresh, bounds)?;
     }
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
     let line = subject(&turn.prompt_line, &roots);
@@ -615,7 +799,7 @@ pub(super) fn record(
         store::outcome_name(turn.outcome)
     );
     let committed = commit_worktree(
-        &repo,
+        repo,
         &workspace.worktree,
         &workspace.repository,
         above,
@@ -664,28 +848,15 @@ pub(super) fn record(
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
     record.head = current.clone();
-    let stats = diff::stats(&repo, &record.base, &record.head)?;
+    let stats = diff::stats(repo, &record.base, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
-    record.message = proposed(&repo, &record, &roots)?;
+    record.message = proposed(repo, &record, &roots)?;
     record.updated_ms = now;
     store::save(db, &record)?;
     let shared = shared(&workspace.repository)?;
     shared.run(&["update-ref", &pending_ref(&record.id), &current])?;
     if let Some(commit) = committed {
-        let env = [
-            ("GIT_COMMITTER_NAME", ENGINE.0),
-            ("GIT_COMMITTER_EMAIL", ENGINE.1),
-        ];
-        let message = "CrazyAgent: turn end";
-        let moved = repo.exec(
-            &["update-ref", "-m", message, "HEAD", &commit, &head],
-            None,
-            &env,
-            256,
-        )?;
-        if moved.code != 0 {
-            return Err(failure("changes_git_failed"));
-        }
+        agent.move_head(Some(&head), &commit, "CrazyAgent: turn end")?;
     }
     Ok(Some(record.id))
 }
@@ -791,12 +962,10 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     if store::open_for(db, worktree)?.is_some() {
         return Err(failure("changes_agent_has_pending"));
     }
-    let repo = agent(&record)?;
-    let current = repo
-        .commit_of("HEAD")?
-        .ok_or_else(|| failure("changes_git_failed"))?;
+    let agent = agent(db, &record)?;
+    let current = agent.head()?;
     if store::base_of(db, worktree)?.as_deref() != Some(current.as_str())
-        || !holds_only(&repo, &current)?
+        || !holds_only(&agent.repo, &current)?
     {
         return Err(failure("changes_agent_busy"));
     }
@@ -809,7 +978,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         target: record.head.clone(),
     });
     store::save(db, &record)?;
-    reset_agent(&repo, &record.head)?;
+    reset_agent(&agent, &record.head)?;
     record.intent = None;
     store::save(db, &record)?;
     shared.run(&["update-ref", "-d", &discarded_ref(id)])?;

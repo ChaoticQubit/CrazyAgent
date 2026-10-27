@@ -641,6 +641,108 @@ fn restore_refuses_while_the_worktree_holds_commits_made_after_its_turn_and_keep
 }
 
 #[test]
+fn an_agent_head_pointed_at_the_owners_branch_is_never_read_through_or_moved() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Move the owner's branch".into(),
+    };
+    for linked in [false, true] {
+        let case = Case::new();
+        let head_file = case.workspace.git_dir.join("HEAD");
+        let detached = std::fs::read_to_string(&head_file).unwrap();
+        let tip = case.tip();
+        let point_at_main = || {
+            std::fs::remove_file(&head_file).unwrap();
+            if linked {
+                std::os::unix::fs::symlink(case.repo.join(".git/refs/heads/main"), &head_file)
+                    .unwrap();
+            } else {
+                std::fs::write(&head_file, "ref: refs/heads/main\n").unwrap();
+            }
+        };
+        point_at_main();
+        case.edit("README", "agent work\n");
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_workspace_invalid",
+            "linked: {linked}"
+        );
+        assert_eq!(case.tip(), tip, "linked: {linked}");
+        assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+        std::fs::remove_file(&head_file).unwrap();
+        std::fs::write(&head_file, &detached).unwrap();
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        point_at_main();
+        discard(&case.db, &id, &head, NOW_MS).unwrap();
+        assert_eq!(case.tip(), tip, "linked: {linked}");
+        assert_eq!(
+            refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+            "changes_workspace_invalid",
+            "linked: {linked}"
+        );
+        assert_eq!(case.tip(), tip, "linked: {linked}");
+        let agent = flow::open_agent(
+            &case.db,
+            AgentKind::Sub,
+            &case.workspace.repository,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+        )
+        .unwrap();
+        assert_eq!(refused(agent.head()), "changes_workspace_invalid");
+        assert!(flow::reset_agent(&agent, &head).is_err());
+        assert_eq!(case.tip(), tip, "linked: {linked}");
+        assert!(
+            std::fs::symlink_metadata(case.workspace.git_dir.join("HEAD.lock")).is_err(),
+            "linked: {linked}"
+        );
+        if !linked {
+            assert_eq!(
+                std::fs::read_to_string(&head_file).unwrap(),
+                "ref: refs/heads/main\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn engine_head_moves_never_follow_a_reflog_link_in_the_agent_admin_folder() {
+    let case = Case::new();
+    let config = case.repo.join(".git/config");
+    let shallow = case.repo.join(".git/shallow");
+    let before = std::fs::read(&config).unwrap();
+    let logs = case.workspace.git_dir.join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let _ = std::fs::remove_file(logs.join("HEAD"));
+    std::os::unix::fs::symlink(&config, logs.join("HEAD")).unwrap();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    assert_eq!(case.agent_head(), head);
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    std::fs::remove_file(logs.join("HEAD")).unwrap();
+    std::os::unix::fs::symlink(&shallow, logs.join("HEAD")).unwrap();
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(case.agent_head(), case.tip());
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    assert_eq!(case.agent_head(), head);
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert!(std::fs::symlink_metadata(&shallow).is_err());
+    assert!(
+        std::fs::symlink_metadata(logs.join("HEAD"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        case.owner(&["config", "--get", "user.name"]).trim(),
+        "Repo Owner"
+    );
+}
+
+#[test]
 fn a_discarded_change_set_ref_is_pruned_after_seven_days() {
     let case = Case::new();
     case.edit("src/new.rs", "fn main() {}\n");
