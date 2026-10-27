@@ -55,6 +55,12 @@ impl NativeOwner {
             SetupQuery::Context { project } => {
                 SetupView::Context(controller.project_context(project).await.map_err(problem)?)
             }
+            SetupQuery::ReadPaths { project } => SetupView::ReadPaths(
+                controller
+                    .project_read_paths(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             SetupQuery::Item {
                 project,
                 path,
@@ -178,6 +184,11 @@ impl NativeOwner {
                     }
                     SetupAction::RetryResearch { project_id, job } => {
                         controller.retry_research(project_id, job, generation).await
+                    }
+                    SetupAction::SetReadPaths { project_id, paths } => {
+                        controller
+                            .set_project_read_paths(project_id, paths, generation)
+                            .await
                     }
                 }
                 .map_err(problem)?;

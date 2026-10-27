@@ -597,16 +597,16 @@ test("the Team panel names each agent, its account and current task, and lists t
   const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
-    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder" },
-    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2" },
-    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "" },
+    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder", rename: null },
+    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null },
+    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "", rename: null },
   ]);
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
-  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "" });
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null });
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Sub-agent 2", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
@@ -615,6 +615,14 @@ test("the Team panel names each agent, its account and current task, and lists t
   ]);
   assert.equal(all.tasks[2].result, "## Summary\n\nLogin screen built, 4 tests pass.");
   assert.deepEqual(research.teamPanel({ agents: [], tasks: [] }, [], label, "all", 0), { agents: [], tasks: [] });
+  const named = research.teamPanel({
+    agents: [teamAgent(5, "working", { task: 20, label: "Ada (@onboarding-fix)", persona: "Ada", handle: "onboarding-fix" }), teamAgent(6, "idle")],
+    tasks: [teamTask(20, "running", { agent: 5, prompt: "Fix onboarding", started_ms: 0 })],
+  }, accounts, label, "all", 0);
+  assert.deepEqual(named.agents.map((row) => [row.name, row.harness, row.rename]), [["Ada (@onboarding-fix)", "Codex", { agent: 5, handle: "onboarding-fix" }], ["Sub-agent 6", "Codex", null]]);
+  const stopped = research.teamPanel({ agents: [teamAgent(7, "stopped", { label: "Grace (@docs)", persona: "Grace", handle: "docs" })], tasks: [] }, [], label, "all", 0);
+  assert.equal(stopped.agents[0].rename, null);
+  assert.equal(named.tasks[0].to, "Ada (@onboarding-fix)");
 });
 
 test("a task result summary is its first plain line", () => {
@@ -761,7 +769,7 @@ test("a failed add offers a single picked path to retry and never several joined
   assert.equal(research.retryPath([]), "");
 });
 
-test("Cmd+Enter and the Send button follow one rule", () => {
+test("Enter and the Send button follow one rule", () => {
   assert.equal(research.MESSAGE_BYTES_MAX, 8192);
   assert.equal(research.canSend("hello", false), true);
   assert.equal(research.canSend("hello", true), false);

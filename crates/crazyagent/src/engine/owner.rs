@@ -22,7 +22,9 @@ pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
+pub use transport::process::PROCESS_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
+pub use transport::usage::USAGE_CODES;
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };
@@ -144,6 +146,10 @@ pub enum OwnerMutation {
     DeleteProjectContext {
         project_id: ProjectId,
         path: String,
+    },
+    SetProjectReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
     },
     Team {
         action: crate::team::TeamAction,
@@ -301,6 +307,14 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::DeleteContext {
                     project_id: project_id.clone(),
                     path: path.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectReadPaths { project_id, paths } => {
+                let action = crate::project_setup::SetupAction::SetReadPaths {
+                    project_id: project_id.clone(),
+                    paths: paths.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -551,6 +565,9 @@ pub enum OwnerRead {
     ProjectSetup {
         project_id: ProjectId,
     },
+    ProjectReadPaths {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -652,6 +669,7 @@ impl OwnerRead {
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
+            | Self::ProjectReadPaths { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -989,6 +1007,10 @@ pub enum OwnerData {
     ProjectSetup {
         project_id: ProjectId,
         setup: Option<Box<crate::project_setup::StoredSetup>>,
+    },
+    ProjectReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
     },
     ResearchJobs {
         project_id: ProjectId,

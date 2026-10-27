@@ -123,11 +123,44 @@ impl Case {
         self.owner(&["rev-parse", "main"]).trim().to_owned()
     }
 
+    fn start(&self) {
+        record_worktree_start(
+            &self.db,
+            &self.workspace.repository,
+            &self.workspace.worktree,
+            &self.workspace.git_dir,
+        )
+        .unwrap();
+    }
+
+    fn agent_commit(&self, message: &str) -> String {
+        self.agent(&["add", "-A"]);
+        self.agent(&[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ]);
+        self.agent_head()
+    }
+
+    fn agent_head(&self) -> String {
+        self.agent(&["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
     fn turn(&self, outcome: TurnOutcome) -> Option<ChangeSetId> {
+        self.turn_with(outcome, "Add the fourth line\nand more")
+    }
+
+    fn turn_with(&self, outcome: TurnOutcome, prompt: &str) -> Option<ChangeSetId> {
         let turn = TurnEnd {
             outcome,
             turn: "turn-1".into(),
-            prompt_line: "Add the fourth line\nand more".into(),
+            prompt_line: prompt.into(),
         };
         record_turn_end(&self.db, &self.workspace, &turn).unwrap()
     }
@@ -141,7 +174,21 @@ impl Case {
     }
 
     fn accept(&self, id: &ChangeSetId) -> Result<AcceptOutcome, EngineError> {
-        accept(&self.db, &self.home, id, &self.view(id).head)
+        self.accept_with(id, None)
+    }
+
+    fn accept_with(
+        &self,
+        id: &ChangeSetId,
+        message: Option<&str>,
+    ) -> Result<AcceptOutcome, EngineError> {
+        accept(&self.db, &self.home, id, &self.view(id).head, message)
+    }
+
+    fn landed_message(&self, commit: &str) -> String {
+        self.owner(&["log", "-1", "--format=%B", commit])
+            .trim_end()
+            .to_owned()
     }
 
     /// Hashes everything an owner sees in the checkout: its files, HEAD, index, refs
@@ -356,7 +403,7 @@ fn a_dirty_detached_busy_or_conflicting_checkout_refuses_accept_and_changes_noth
         );
     }
     assert_eq!(
-        refused(accept(&case.db, &case.home, &id, &case.tip())),
+        refused(accept(&case.db, &case.home, &id, &case.tip(), None)),
         "changes_stale"
     );
     case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
@@ -599,7 +646,7 @@ fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() 
         let head = case.view(&id).head;
         let tip = case.tip();
         let before = case.checkout();
-        let stopped = owner::accept(&case.db, &case.home, &id, &head, &|at| at == step);
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
         assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
         assert_eq!(store::in_flight(&case.db).unwrap().len(), 1, "{step:?}");
         reconcile(&case.db).unwrap();
@@ -773,4 +820,266 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
     );
     let past = diff(&case.db, &id, page + 5).unwrap();
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
+}
+
+#[test]
+fn commits_the_agent_made_in_a_clean_tree_open_a_change_set_above_the_worktree_start() {
+    let case = Case::new();
+    let start = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let second = case.agent_commit("Add a main");
+    assert_ne!(first, second);
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        (
+            view.state,
+            view.base.as_str(),
+            view.head.as_str(),
+            view.files,
+            view.added,
+            view.removed
+        ),
+        (
+            ChangeState::Pending,
+            start.as_str(),
+            second.as_str(),
+            2,
+            2,
+            0
+        )
+    );
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(case.view(&id).head, second);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the agent's commits did not land");
+    };
+    assert_eq!(
+        case.owner(&["show", "main:README"]),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(case.owner(&["show", "main:src/new.rs"]), "fn main() {}\n");
+    assert_eq!(case.agent_head(), commit);
+    assert_eq!(case.turn(TurnOutcome::Succeeded), None);
+}
+
+#[test]
+fn commits_plus_uncommitted_work_land_together_and_later_commits_join_the_open_set() {
+    let case = Case::new();
+    let start = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let committed = case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.base.as_str(), view.files, view.added, view.removed),
+        (start.as_str(), 2, 2, 0)
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), committed);
+    assert_eq!(view.head, case.agent_head());
+    case.edit("LATER", "later\n");
+    let later = case.agent_commit("Add a later file");
+    assert_eq!(case.turn(TurnOutcome::Failed), Some(id.clone()));
+    let view = case.view(&id);
+    assert_eq!(
+        (
+            view.state,
+            view.head.as_str(),
+            view.files,
+            view.last_outcome
+        ),
+        (ChangeState::Pending, later.as_str(), 3, TurnOutcome::Failed)
+    );
+}
+
+#[test]
+fn the_worktree_start_moves_to_where_accept_or_discard_leaves_the_worktree() {
+    let case = Case::new();
+    case.start();
+    case.edit("A", "a\n");
+    case.agent_commit("Add A");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let owner_tip = case.owner_commit("OWNER", "owner\n", "Owner work");
+    discard(&case.db, &first, &case.view(&first).head, NOW_MS).unwrap();
+    assert_eq!(case.agent_head(), owner_tip);
+    assert_eq!(case.turn(TurnOutcome::Succeeded), None);
+    case.edit("B", "b\n");
+    let reviewed = case.agent_commit("Add B");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&second);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (owner_tip.as_str(), reviewed.as_str(), 1)
+    );
+    case.edit("C", "c\n");
+    let newer = case.agent_commit("Add C");
+    assert!(matches!(
+        case.accept(&second).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(case.agent_head(), newer);
+    let third = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&third);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (reviewed.as_str(), newer.as_str(), 1)
+    );
+    assert!(matches!(
+        case.accept(&third).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    for (path, landed) in [("A", false), ("B", true), ("C", true)] {
+        let shown = case.owner(&["ls-tree", "--name-only", "main", path]);
+        assert_eq!(!shown.is_empty(), landed, "{path}");
+    }
+}
+
+#[test]
+fn a_worktree_with_no_recorded_start_keeps_opening_above_its_head() {
+    let case = Case::new();
+    case.edit("A", "a\n");
+    case.agent_commit("Add A");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), None);
+    case.edit("B", "b\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).files, 1);
+}
+
+#[test]
+fn commits_the_agent_made_past_the_file_bound_are_refused_and_change_nothing() {
+    let case = Case::new();
+    case.start();
+    let bounds = crate::worktrees::TreeBounds {
+        files: 3,
+        bytes: 64,
+        components: 3,
+    };
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Too much".into(),
+    };
+    for path in ["a", "b", "c", "d"] {
+        case.edit(path, "x");
+    }
+    let head = case.agent_commit("Add four files");
+    assert_eq!(
+        refused(flow::record(
+            &case.db,
+            &case.workspace,
+            &turn,
+            &bounds,
+            NOW_MS
+        )),
+        "changes_too_large"
+    );
+    assert_eq!(case.agent_head(), head);
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+}
+
+#[test]
+fn the_proposed_message_reuses_the_agent_commit_subjects_newest_first_and_lands() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let tree = case.workspace.worktree.display().to_string();
+    case.agent_commit(&format!("Add a main in {tree}/src/new.rs\n\nBody text"));
+    case.edit("LATER", "later\n");
+    let id = case
+        .turn_with(TurnOutcome::Succeeded, "Ignored prompt line")
+        .unwrap();
+    let message = "Add a main in src/new.rs\n\n- Add the fourth line";
+    assert_eq!(case.view(&id).message, message);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), message);
+}
+
+#[test]
+fn without_agent_commits_the_message_is_the_prompt_line_with_local_paths_cut_at_a_word() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let prompt = format!(
+        "Fix the parser in {}/src/parse.rs per (/Users/someone/Downloads/spec.pdf), \
+         ~/notes/todo.md and keep going with words\nsecond line",
+        case.repo.display()
+    );
+    let id = case.turn_with(TurnOutcome::Succeeded, &prompt).unwrap();
+    let message = "Fix the parser in src/parse.rs per (spec.pdf), todo.md and keep going";
+    assert_eq!(case.view(&id).message, message);
+    assert_eq!(
+        case.agent(&["log", "-1", "--format=%s", "HEAD"]).trim(),
+        message
+    );
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), message);
+    let roots = [case.repo.as_path()];
+    let long = "x".repeat(80);
+    assert_eq!(flow::subject(&long, &roots), "x".repeat(72));
+    assert_eq!(flow::subject(&format!("Rename {long}"), &roots), "Rename");
+    assert_eq!(
+        flow::subject("Fix\u{202E}\ttabs  and /api/users routes", &roots),
+        "Fix tabs and /api/users routes"
+    );
+}
+
+#[test]
+fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let before = case.checkout();
+    let long = "x".repeat(MESSAGE_BYTES_MAX + 1);
+    for message in [
+        " \r\n\t ",
+        "Bad \u{1b}[31m red",
+        "Bad\rreturn",
+        long.as_str(),
+    ] {
+        assert_eq!(
+            refused(case.accept_with(&id, Some(message))),
+            "changes_message_invalid"
+        );
+        assert_eq!(case.checkout(), before);
+        let view = case.view(&id);
+        assert_eq!(
+            (view.state, view.head.as_str()),
+            (ChangeState::Pending, head.as_str())
+        );
+    }
+    let edited = "  Owner title\r\n\r\nWhy it changed\twith a tab\n";
+    let AcceptOutcome::Landed { commit, .. } = case.accept_with(&id, Some(edited)).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.landed_message(&commit),
+        "Owner title\n\nWhy it changed\twith a tab"
+    );
+}
+
+#[test]
+fn a_store_from_before_proposed_messages_gains_the_column_and_falls_back_to_the_prompt() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.db
+        .execute_batch("ALTER TABLE landing_change_sets DROP COLUMN message")
+        .unwrap();
+    store::initialize(&case.db).unwrap();
+    assert_eq!(case.view(&id).message, "Add the fourth line");
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), "Add the fourth line");
 }

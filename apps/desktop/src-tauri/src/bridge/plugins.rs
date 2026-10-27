@@ -76,6 +76,21 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
+    /// Reads one skill's detail: the skill with the project's switch when a project is
+    /// given, its full SKILL.md text and its files. Inputs: skill id and optional project id.
+    pub async fn skill_detail(
+        &mut self,
+        id: String,
+        project_id: Option<String>,
+    ) -> Result<crazyagent::skills::SkillDetail, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .skill_detail(id, project)
+            .await
+            .map_err(plugin_failure)
+    }
+
     /// Removes a skill and the engine's copy of its folder.
     pub async fn remove_skill(&mut self, id: String) -> Result<(), BridgeError> {
         self.plugins_ready()?;

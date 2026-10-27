@@ -30,16 +30,21 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     restorable_until_ms INTEGER,
     pruned INTEGER NOT NULL DEFAULT 0 CHECK(pruned IN (0,1)),
     landed TEXT,
-    intent TEXT
+    intent TEXT,
+    message TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
 CREATE INDEX IF NOT EXISTS landing_change_sets_project
-    ON landing_change_sets(project, updated_ms);";
+    ON landing_change_sets(project, updated_ms);
+CREATE TABLE IF NOT EXISTS landing_bases (
+    worktree TEXT PRIMARY KEY,
+    base TEXT NOT NULL
+);";
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
-    restorable_until_ms,pruned,landed,intent";
+    restorable_until_ms,pruned,landed,intent,message";
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
@@ -82,6 +87,7 @@ pub(super) struct Record {
     pub(super) pruned: bool,
     pub(super) landed: Option<String>,
     pub(super) intent: Option<Intent>,
+    pub(super) message: String,
 }
 
 impl Record {
@@ -101,6 +107,22 @@ impl Record {
             updated_ms: self.updated_ms,
             restorable_until_ms: self.restorable_until_ms,
             conflicts: self.conflicts.clone(),
+            message: self.message(),
+        }
+    }
+
+    /// The commit message an Accept proposes: the one made from the agent's own commits,
+    /// else the prompt line, else a line naming the agent. Output: the message.
+    pub(super) fn message(&self) -> String {
+        if !self.message.is_empty() {
+            self.message.clone()
+        } else if !self.prompt_line.is_empty() {
+            self.prompt_line.clone()
+        } else {
+            format!(
+                "Changes from {}",
+                super::flow::subject(&self.agent.label, &[])
+            )
         }
     }
 
@@ -116,8 +138,29 @@ fn storage(_: impl std::fmt::Display) -> EngineError {
     failure("changes_unavailable")
 }
 
+/// Creates the store's tables, and adds the message column to a store made before it.
+/// Input: the store. Output: Ok once the store has every column.
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(storage)
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    let has_message = || {
+        db.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('landing_change_sets') WHERE name='message'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(storage)
+    };
+    if has_message()? == 0
+        && db
+            .execute_batch(
+                "ALTER TABLE landing_change_sets ADD COLUMN message TEXT NOT NULL DEFAULT ''",
+            )
+            .is_err()
+        && has_message()? == 0
+    {
+        return Err(failure("changes_unavailable"));
+    }
+    Ok(())
 }
 
 fn kind_name(kind: AgentKind) -> &'static str {
@@ -216,6 +259,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         pruned: row.get::<_, bool>(21)?,
         landed: row.get(22)?,
         intent,
+        message: text(24)?,
     })
 }
 
@@ -241,7 +285,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
     db.execute(
         &format!(
             "INSERT OR REPLACE INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)"
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)"
         ),
         params![
             record.id.as_str(),
@@ -268,6 +312,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
             record.pruned,
             record.landed,
             intent,
+            record.message,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
@@ -275,6 +320,40 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
         _ => storage(error),
     })?;
     Ok(())
+}
+
+/// Stores the commit the next change set of a worktree opens above. Inputs: the store,
+/// the worktree and the commit. Output: Ok once stored.
+pub(super) fn set_base(
+    db: &Connection,
+    worktree: &std::path::Path,
+    base: &str,
+) -> Result<(), EngineError> {
+    assert!(super::git::is_object_id(base));
+    db.execute(
+        "INSERT OR REPLACE INTO landing_bases(worktree,base) VALUES (?1,?2)",
+        params![path_text(worktree)?, base],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Reads the commit the next change set of a worktree opens above. Inputs: the store
+/// and the worktree path. Output: the commit, None when none is recorded, or
+/// `changes_unavailable` for a stored value that is not an object id.
+pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>, EngineError> {
+    let base: Option<String> = db
+        .query_row(
+            "SELECT base FROM landing_bases WHERE worktree=?1",
+            [worktree],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match base {
+        Some(base) if !super::git::is_object_id(&base) => Err(failure("changes_unavailable")),
+        base => Ok(base),
+    }
 }
 
 /// Reads one change set. Inputs: the store and the id. Output: the record, or

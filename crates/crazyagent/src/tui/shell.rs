@@ -71,6 +71,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Place",
         place: Place::Home,
     });
+    out.push(Target {
+        label: "Usage".into(),
+        kind: "Place",
+        place: Place::Usage,
+    });
     for section in SettingsSection::ALL {
         out.push(Target {
             label: format!("Settings / {}", section.label()),
