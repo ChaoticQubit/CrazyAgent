@@ -16,9 +16,9 @@ pub(in crate::tui) struct MasterRead<'a> {
 
 /// Builds the Conversation transcript from the engine's master turns.
 /// Takes the read, the master harness name, the account label, whether tools are on and the UTC offset.
-/// Returns the transcript: the owner's messages, the master's real replies, a notice per task a reply
-/// handed to the team, the engine's note when a turn's edits wait in Changes and a plain notice
-/// for a stopped turn.
+/// Returns the transcript: the owner's messages, or the engine's plain line for a turn it asked
+/// for, the master's real replies, a notice per task a reply handed to the team, the engine's note
+/// when a turn's edits wait in Changes and a plain notice for a stopped turn.
 pub(in crate::tui) fn transcript_from(
     read: &MasterRead<'_>,
     harness: &str,
@@ -40,6 +40,13 @@ pub(in crate::tui) fn transcript_from(
                 speaker: Speaker::You,
                 time: None,
                 text: entry.text.clone(),
+                error: false,
+            });
+        } else if let Some(request) = &turn.engine_request {
+            messages.push(Message {
+                speaker: Speaker::Notice,
+                time: None,
+                text: request.line.clone(),
                 error: false,
             });
         }
@@ -287,6 +294,7 @@ mod tests {
             accounts: Vec::new(),
             tasks: Vec::new(),
             changes: None,
+            engine_request: None,
             detail: None,
             cause: None,
         }
@@ -733,6 +741,41 @@ mod tests {
                 (Speaker::Master, "I fixed the README.", false),
                 (Speaker::Notice, "Task 8 is still with a sub-agent.", false),
                 (Speaker::Notice, waiting, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_the_engine_asked_for_shows_its_plain_line_before_the_master_s_reply() {
+        use crate::master_session::{MasterEngineRequest, MasterReply, MasterReplyProvenance};
+        let inputs = [entry(3, "Fix the README.")];
+        let line = "CrazyAgent asked the master to resolve the conflicts in NOTES.md.";
+        let mut asked = turn(2, 5, MasterTurnPhase::Succeeded, None);
+        asked.engine_request = Some(MasterEngineRequest {
+            change_set: crate::landing::ChangeSetId::new("0".repeat(32)).unwrap(),
+            line: line.into(),
+            text: "Resolve every conflict in NOTES.md.".into(),
+        });
+        asked.reply = Some(MasterReply {
+            text: "I kept both notes.".into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-2").unwrap(),
+                runtime_ref: RequestId::new("runtime-2").unwrap(),
+                capture_ref: RequestId::new("capture-2").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[turn(1, 3, MasterTurnPhase::Succeeded, None), asked],
+            &inputs,
+        );
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Fix the README.", false),
+                (Speaker::Notice, line, false),
+                (Speaker::Master, "I kept both notes.", false),
             ]
         );
     }

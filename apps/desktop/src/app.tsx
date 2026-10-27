@@ -155,6 +155,8 @@ export function AppView({ session, route }: { session: Session; route: Route }) 
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
         <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+        {session.unconfirmed.outcome === "not_recorded_at_barrier" &&
+          <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.dropUnconfirmed()}>Dismiss</Button>}
       </span>}>
         {unconfirmedLine(session.unconfirmed.intent, session.unconfirmed.outcome)}
       </Banner>}

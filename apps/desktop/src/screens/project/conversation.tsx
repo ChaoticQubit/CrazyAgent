@@ -7,7 +7,7 @@ import { harnessName } from "../new-project/team-editor";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { MarkdownView } from "./markdown";
-import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, changesLine, delegating, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, canSend, changesLine, delegating, engineLine, masterMissingLine, masterStatus, nearBottom, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, keyLabel, shortcutKey, type Tone } from "../../ui";
@@ -36,6 +36,16 @@ function confirm(receipt: IntentReceipt) {
   const state = receiptState(receipt);
   if (state.kind === "rejected") throw { code: state.code };
   if (state.kind === "unconfirmed") throw { code: "master_outcome_pending" };
+}
+
+/** What opens a master turn in the thread: the owner's message as this window sent it, the
+ * engine's plain line for a turn Ask agent to update started, or a placeholder for a
+ * message another window sent. Inputs: the turn and the text this window sent, if any. */
+export function TurnOpening({ turn, sent }: { turn: MasterTurn; sent: string | undefined }) {
+  if (sent !== undefined) return <div className="pj-msg-owner"><p>{displayText(sent)}</p></div>;
+  const line = engineLine(turn);
+  if (line !== null) return <p className="pj-small pj-muted" data-testid="master-engine-request">{displayText(line)}</p>;
+  return <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>;
 }
 
 /** Conversation tab: the project's master conversation with replies as safe Markdown.
@@ -205,9 +215,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
       {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">
         Ask the master anything about {displayText(data.name || "this project")}. It has read the brief, documents and research.</ProjectEmpty>}
       {turns.map((turn) => <div key={turn.id} className="pj-turn" data-testid="master-turn">
-        {sent[turn.id] !== undefined
-          ? <div className="pj-msg-owner"><p>{displayText(sent[turn.id])}</p></div>
-          : <p className="pj-small pj-muted">Your message {turn.ordinal} (its text stays in the window that sent it)</p>}
+        <TurnOpening turn={turn} sent={sent[turn.id]} />
         {turn.reply ? <div className="pj-msg-master"><ProjectMark />
           <div className="pj-msg-body" data-testid="master-reply"><MarkdownView source={turn.reply.text} onOpenLink={open} /></div></div>
           : <p className={`pj-small ${turnSettled(turn) && turn.phase !== "succeeded" ? "pj-warn-text" : "pj-muted"}`}>{turn.phase === "running" ? thinkingLine(sentAtByProject.get(data.id)?.[turn.id], now) : turnLine(turn)}</p>}

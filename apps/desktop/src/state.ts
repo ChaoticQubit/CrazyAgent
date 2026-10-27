@@ -1020,6 +1020,7 @@ export interface Session {
   retry: () => void;
   checkUnconfirmed: () => Promise<void>;
   retryUnconfirmed: () => Promise<void>;
+  dropUnconfirmed: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   refreshProjects: () => Promise<void>;
   showToast: (message: string) => void;
@@ -1120,6 +1121,12 @@ export function useSession(): Session {
     retry: () => { void start(); },
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     retryUnconfirmed: async () => { await settle(api.retryUnconfirmed); },
+    dropUnconfirmed: async () => {
+      setUnconfirmed((old) => old && { ...old, busy: true });
+      const dropped = noteResult(await api.dropUnconfirmed());
+      if (dropped.kind === "error") showToast(dropped.message);
+      await loadUnconfirmed();
+    },
     refreshProfile,
     refreshProjects,
     showToast,
