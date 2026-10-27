@@ -31,8 +31,9 @@ pub fn private_folder(path: &Path) -> io::Result<()> {
 /// Writes a new connection token for one server launch into a project's private IDE folder:
 /// [`TOKEN_BYTES`] random bytes as hex digits, in a file created new with mode 0600, never
 /// through a link. The previous launch's token file is removed first, so no two launches
-/// share a token. Input: the project's IDE folder. Output: the token file's path.
-pub fn issue(folder: &Path) -> io::Result<PathBuf> {
+/// share a token. Input: the project's IDE folder. Output: the token file's path and the
+/// token, which the engine keeps in memory for its proxy and log redaction.
+pub fn issue(folder: &Path) -> io::Result<(PathBuf, String)> {
     remove(folder)?;
     let mut bytes = [0u8; TOKEN_BYTES];
     getrandom::fill(&mut bytes).map_err(|_| io::Error::other("ide_token_entropy_unavailable"))?;
@@ -50,7 +51,7 @@ pub fn issue(folder: &Path) -> io::Result<PathBuf> {
     let metadata = file.metadata()?;
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(metadata.len(), text.len() as u64);
-    Ok(path)
+    Ok((path, text))
 }
 
 /// Removes a project's token file, once its server has stopped or before a new launch.

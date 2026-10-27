@@ -38,18 +38,21 @@ pub struct Written {
 
 /// Writes the lock before each server start: the Remote settings file
 /// `<server data>/data/Machine/settings.json`, which VSCodium reh-web reads above the owner's
-/// User settings, holding every [`locked`] key over the owner's own keys there, which are
-/// kept; and `<folder>/locked-settings.json` for the extension. Each file is written whole in
+/// User settings, holding every [`locked`] key and the `extensions.allowed` pin list of the
+/// owner's approved extensions ([`super::extensions::allowed_setting`]) over the owner's own
+/// keys there, which are kept; and `<folder>/locked-settings.json` for the extension. Each file is written whole in
 /// the engine's private IDE folder and renamed into place, so the server never reads a
 /// partial file and a link to the old file changes nothing. A Remote settings file that is
 /// not a JSON object is kept aside as `settings.json.unreadable`; a link there is replaced,
 /// never followed. The server's profile locks the whole Remote settings folder
 /// ([`machine_folder`]), so the server can never write, add, remove or move anything there.
-/// Inputs: the project's IDE folder and the server data folder inside it. Output: the
-/// written files, or a plain refusal.
+/// Inputs: the project's IDE folder, the server data folder inside it and the engine's data
+/// folder above both. Output: the written files, or a plain refusal.
 #[cfg(unix)]
-pub fn write(folder: &Path, server_data: &Path) -> Result<Written, EngineError> {
+pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, EngineError> {
     if !folder.is_absolute()
+        || !folder.starts_with(data)
+        || folder == data
         || !server_data.starts_with(folder)
         || server_data == folder
         || server_data
@@ -58,7 +61,7 @@ pub fn write(folder: &Path, server_data: &Path) -> Result<Written, EngineError> 
     {
         return Err(failure("ide_settings_invalid"));
     }
-    let user_data = server_data.join(USER_DATA);
+    let user_data = user_data_folder(server_data);
     let machine = machine_folder(server_data);
     for path in [folder, server_data, user_data.as_path(), machine.as_path()] {
         super::bridge::private_folder(path)?;
@@ -74,6 +77,12 @@ pub fn write(folder: &Path, server_data: &Path) -> Result<Written, EngineError> 
     };
     let locked = locked();
     settings.extend(locked.clone());
+    settings.extend(super::extensions::allowed_setting(data));
+    assert!(
+        locked
+            .iter()
+            .all(|(key, value)| settings.get(key) == Some(value))
+    );
     replace(folder, MACHINE_TEMPORARY, &target, &Value::Object(settings))?;
     let locked_path = folder.join(LOCKED_FILE);
     replace(
@@ -91,7 +100,7 @@ pub fn write(folder: &Path, server_data: &Path) -> Result<Written, EngineError> 
 /// Refuses the lock where the engine has no Unix file modes, so no IDE server starts.
 /// Takes the folders, unused. Returns `ide_unavailable`.
 #[cfg(not(unix))]
-pub fn write(_folder: &Path, _server_data: &Path) -> Result<Written, EngineError> {
+pub fn write(_folder: &Path, _server_data: &Path, _data: &Path) -> Result<Written, EngineError> {
     Err(failure("ide_unavailable"))
 }
 
@@ -101,7 +110,15 @@ pub fn write(_folder: &Path, _server_data: &Path) -> Result<Written, EngineError
 /// leaves the granted parents movable. A read-only file mode alone is not enough: the
 /// workbench offers to overwrite it. Input: the server data folder. Output: the folder.
 pub fn machine_folder(server_data: &Path) -> PathBuf {
-    server_data.join(USER_DATA).join(MACHINE)
+    user_data_folder(server_data).join(MACHINE)
+}
+
+/// The user data folder `<server data>/data` the server is started with as its
+/// `--user-data-dir`, the server's own default place, so its Remote settings folder is the
+/// one [`write`] fills and the profile locks. Input: the server data folder. Output: the
+/// folder.
+pub fn user_data_folder(server_data: &Path) -> PathBuf {
+    server_data.join(USER_DATA)
 }
 
 /// Every locked key with its value: the Remote settings, workspace and application keys.

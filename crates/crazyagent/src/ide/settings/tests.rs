@@ -32,6 +32,10 @@ impl Case {
         }
     }
 
+    fn data(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
     fn machine(&self) -> PathBuf {
         self.server_data
             .join("data")
@@ -42,6 +46,19 @@ impl Case {
 
 fn read(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn built_in() -> &'static str {
+    super::super::bridge::EXTENSION
+        .strip_prefix(super::super::extensions::BUILT_IN)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap()
+}
+
+fn expected_machine() -> Value {
+    let mut machine = expected_locks();
+    machine["extensions.allowed"] = json!({ super::super::extensions::BUILT_IN: [built_in()] });
+    machine
 }
 
 fn expected_locks() -> Value {
@@ -74,15 +91,15 @@ fn expected_locks() -> Value {
 #[test]
 fn written_remote_settings_hold_every_locked_key() {
     let case = Case::new();
-    let written = write(&case.folder, &case.server_data).unwrap();
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
     assert_eq!(written.machine, case.machine());
     assert_eq!(written.locked, case.folder.join(LOCKED_FILE));
 
     let machine = read(&written.machine);
     assert_eq!(
         machine,
-        expected_locks(),
-        "a fresh Remote settings file holds the locks and nothing else"
+        expected_machine(),
+        "a fresh Remote settings file holds the locks and the pin list, nothing else"
     );
     assert_eq!(machine["chat.disableAIFeatures"], json!(true));
     assert_eq!(read(&written.locked), expected_locks());
@@ -115,8 +132,8 @@ fn written_remote_settings_hold_every_locked_key() {
     );
 
     let before = std::fs::symlink_metadata(&written.machine).unwrap().ino();
-    let again = write(&case.folder, &case.server_data).unwrap();
-    assert_eq!(read(&again.machine), expected_locks());
+    let again = write(&case.folder, &case.server_data, &case.data()).unwrap();
+    assert_eq!(read(&again.machine), expected_machine());
     assert_ne!(
         std::fs::symlink_metadata(&again.machine).unwrap().ino(),
         before,
@@ -127,14 +144,14 @@ fn written_remote_settings_hold_every_locked_key() {
 #[test]
 fn owner_settings_outside_the_locked_keys_are_kept() {
     let case = Case::new();
-    write(&case.folder, &case.server_data).unwrap();
+    write(&case.folder, &case.server_data, &case.data()).unwrap();
     std::fs::write(
         case.machine(),
-        r#"{"editor.fontSize": 15, "workbench.preferredDarkColorTheme": "Solarized Dark", "chat.disableAIFeatures": false, "update.mode": "start"}"#,
+        r#"{"editor.fontSize": 15, "workbench.preferredDarkColorTheme": "Solarized Dark", "chat.disableAIFeatures": false, "update.mode": "start", "extensions.allowed": {"*": true}}"#,
     )
     .unwrap();
 
-    let written = write(&case.folder, &case.server_data).unwrap();
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
     let machine = read(&written.machine);
     assert_eq!(machine["editor.fontSize"], json!(15));
     assert_eq!(
@@ -144,7 +161,12 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
     );
     assert_eq!(machine["chat.disableAIFeatures"], json!(true));
     assert_eq!(machine["update.mode"], json!("none"));
-    let mut expected = expected_locks();
+    assert_eq!(
+        machine["extensions.allowed"],
+        expected_machine()["extensions.allowed"],
+        "the engine's pin list replaces the owner's own"
+    );
+    let mut expected = expected_machine();
     expected["editor.fontSize"] = json!(15);
     expected["workbench.preferredDarkColorTheme"] = json!("Solarized Dark");
     assert_eq!(machine, expected);
@@ -156,8 +178,8 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
 
     let unreadable = "// my notes\n{\"editor.fontSize\": 16,}\n";
     std::fs::write(case.machine(), unreadable).unwrap();
-    let written = write(&case.folder, &case.server_data).unwrap();
-    assert_eq!(read(&written.machine), expected_locks());
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
+    assert_eq!(read(&written.machine), expected_machine());
     assert_eq!(
         std::fs::read_to_string(case.machine().with_file_name(UNREADABLE)).unwrap(),
         unreadable,
@@ -168,7 +190,7 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
     std::fs::write(&elsewhere, r#"{"editor.fontSize": 18}"#).unwrap();
     std::fs::remove_file(case.machine()).unwrap();
     std::os::unix::fs::symlink(&elsewhere, case.machine()).unwrap();
-    let written = write(&case.folder, &case.server_data).unwrap();
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
     assert!(
         std::fs::symlink_metadata(&written.machine)
             .unwrap()
@@ -176,7 +198,7 @@ fn owner_settings_outside_the_locked_keys_are_kept() {
     );
     assert_eq!(
         read(&written.machine),
-        expected_locks(),
+        expected_machine(),
         "a link is replaced, never followed"
     );
     assert_eq!(
@@ -236,13 +258,120 @@ fn settings_outside_the_ide_folder_are_refused() {
         case.folder.join("..").join("server"),
     ] {
         assert_eq!(
-            write(&case.folder, &server_data).unwrap_err().0,
+            write(&case.folder, &server_data, &case.data())
+                .unwrap_err()
+                .0,
             "ide_settings_invalid",
             "{}",
             server_data.display()
         );
     }
     assert!(!case.root.join("server").exists());
+    for data in [case.root.join("other"), case.folder.clone()] {
+        assert_eq!(
+            write(&case.folder, &case.server_data, &data).unwrap_err().0,
+            "ide_settings_invalid",
+            "{}",
+            data.display()
+        );
+    }
+    assert!(!case.server_data.exists());
+}
+
+/// A real loopback HTTP server laid out like Open VSX's API for one release, `acme.tool`
+/// 1.0.0, serving `vsix` with its true sha256. Output: the server and its registry.
+#[cfg(target_os = "macos")]
+fn registry(
+    vsix: &'static [u8],
+) -> (
+    crate::github::test_server::Server,
+    super::super::extensions::Registry,
+) {
+    use crate::github::test_server::{Answer, Server};
+    use sha2::Digest;
+    let server = Server::start(move |seen, _| {
+        let host = seen.header("host").unwrap_or_default().to_owned();
+        let file = "/api/acme/tool/1.0.0/file/acme.tool-1.0.0";
+        match seen.path.strip_prefix(file) {
+            Some(".vsix") => Answer::bytes(200, vsix.to_vec()),
+            Some(".sha256") => Answer::bytes(
+                200,
+                format!("{:x}  acme.tool-1.0.0.vsix\n", sha2::Sha256::digest(vsix)).into_bytes(),
+            ),
+            _ if seen.path == "/api/acme/tool/1.0.0" => Answer::json(
+                200,
+                json!({
+                    "namespace": "acme",
+                    "name": "tool",
+                    "version": "1.0.0",
+                    "files": {
+                        "download": format!("http://{host}{file}.vsix"),
+                        "sha256": format!("http://{host}{file}.sha256"),
+                    },
+                }),
+            ),
+            _ => Answer::bytes(404, Vec::new()),
+        }
+    });
+    let registry =
+        super::super::extensions::Registry::at(&format!("http://127.0.0.1:{}/api/", server.port));
+    (server, registry)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
+    use super::super::extensions::{Asked, BUILT_IN, approve, ask};
+    let case = Case::new();
+    let project = crate::protocol::ProjectId::new("alpha").unwrap();
+    let (_server, registry) = registry(b"tool one");
+    let pins = |written: &Written| read(&written.machine)["extensions.allowed"].clone();
+
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
+    assert_eq!(
+        pins(&written),
+        json!({ BUILT_IN: [built_in()] }),
+        "with nothing approved the server allows only the built-in"
+    );
+
+    assert_eq!(
+        ask(
+            &case.data(),
+            &project,
+            "acme.tool",
+            "1.0.0",
+            1_700_000_000_000
+        )
+        .unwrap(),
+        Asked::Confirm
+    );
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
+    assert_eq!(
+        pins(&written),
+        json!({ BUILT_IN: [built_in()] }),
+        "an ask from the IDE pins nothing"
+    );
+
+    approve(
+        &case.data(),
+        &registry,
+        &project,
+        "acme.tool",
+        "1.0.0",
+        1_700_000_000_001,
+    )
+    .unwrap();
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
+    assert_eq!(
+        pins(&written),
+        json!({ "acme.tool": ["1.0.0"], BUILT_IN: [built_in()] }),
+        "the next server start pins the approved extension at its exact version"
+    );
+    assert_eq!(
+        read(&written.locked),
+        expected_locks(),
+        "the pin list is the engine's Remote settings key, never a key the extension re-asserts"
+    );
 }
 
 /// Runs a shell command under the IDE server's real profile, built and installed by
@@ -289,7 +418,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
 #[test]
 fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
     let case = Case::new();
-    let written = write(&case.folder, &case.server_data).unwrap();
+    let written = write(&case.folder, &case.server_data, &case.data()).unwrap();
     let file = written.machine.display().to_string();
     let machine = case.server_data.join("data").join("Machine");
     let data = case.server_data.join("data");
@@ -322,7 +451,11 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
             !sandboxed(&case, &attempt),
             "the server could run: {attempt}"
         );
-        assert_eq!(read(&written.machine), expected_locks(), "after: {attempt}");
+        assert_eq!(
+            read(&written.machine),
+            expected_machine(),
+            "after: {attempt}"
+        );
     }
     assert!(!case.server_data.join("linked.json").exists());
     assert!(
@@ -334,7 +467,7 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         ),
         "the server still writes the rest of its data folder"
     );
-    assert_eq!(read(&written.machine), expected_locks());
+    assert_eq!(read(&written.machine), expected_machine());
     assert!(case.server_data.join("data").join("Machine").is_dir());
     assert_eq!(
         std::fs::read_dir(case.server_data.join("data").join("Machine"))

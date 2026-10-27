@@ -1,11 +1,11 @@
 use super::ports::{self, Ports};
-use super::{env, sandbox, settings, token, webview};
+use super::{env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{PipeWriter, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -31,15 +31,22 @@ pub const SERVERS_MAX: usize = 8;
 /// [`env::CAPABILITY_VARIABLE`]; the engine bridge writes the capability there.
 pub const CAPABILITY: &str = "capability";
 
-/// The file in a project's IDE folder that holds the running server's output, new each launch.
+/// The file in a project's IDE folder that holds the running server's output, new each
+/// launch, every line through [`output::redact`].
 pub const LOG: &str = "server.log";
 
-/// The workspace file the engine writes in a project's IDE folder for the server to open.
-pub const WORKSPACE: &str = "crazyagent.code-workspace";
+/// How long the server keeps a closed workbench's extension host for a reconnect; its own
+/// default is three hours.
+pub const RECONNECTION_GRACE: Duration = Duration::from_secs(30);
+
+/// The workspace file the engine writes in a project's IDE folder for the server to open,
+/// the only one the proxy lets the workbench open.
+pub const WORKSPACE: &str = super::workspace::FILE;
 
 const GROUP: &str = "server.pid";
-const SERVER_DATA: &str = "server";
+const SERVER_DATA: &str = "server-data";
 const EXTENSIONS: &str = "extensions";
+const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
 const PROJECTS_MAX: usize = 256;
 const GROUP_BYTES_MAX: u64 = 256;
@@ -51,16 +58,19 @@ const KILL_WAIT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const LISTENERS_BYTES_MAX: usize = 64 * 1024;
 
-/// Where one project's running IDE server is reached: the workbench URL on 127.0.0.1, its
-/// port, the webview host's port, the per-launch token file the desktop sets the session
-/// cookie from, and the capability file the server's extension host reads.
+/// Where one project's running IDE is reached: the workbench URL on the engine proxy at
+/// 127.0.0.1, the proxy's port, which also serves the webview hosts, the server's own port
+/// behind it, the per-launch token file the desktop sets the session cookie from, the
+/// capability file the server's extension host reads, and the workspace file the workbench
+/// is pinned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerInfo {
     pub url: String,
     pub port: u16,
-    pub webview_port: u16,
+    pub server_port: u16,
     pub token_path: PathBuf,
     pub capability_path: PathBuf,
+    pub workspace: PathBuf,
 }
 
 /// The engine's IDE servers: at most one per project, each in its own process group on
@@ -86,7 +96,7 @@ struct Running {
     info: ServerInfo,
     folder: PathBuf,
     touched: Instant,
-    webview: tokio::task::JoinHandle<()>,
+    proxy: tokio::task::JoinHandle<()>,
 }
 
 fn failure(code: &str) -> EngineError {
@@ -158,11 +168,13 @@ impl Servers {
 
     /// Opens a project's IDE server, starting it from `build` unless it already runs: the
     /// recorded ports while free, a new token, the allowlisted environment, its own process
-    /// group, and the webview host. Returns once the server listens on 127.0.0.1 and no
-    /// other process holds its port. The server runs under its Seatbelt profile from
-    /// [`sandbox::profile`]; where no sandbox is qualified it never starts. Inputs: the
-    /// project, its canonical folder and the canonical root of a verified build. Output:
-    /// where the server is reached, or a plain refusal.
+    /// group, its output redacted into [`LOG`], its extensions brought to the owner's
+    /// approvals ([`extensions::on_server_start`]) and the engine proxy in front of it. Returns
+    /// once the server listens on 127.0.0.1 and no other process holds its port. The server
+    /// runs under its Seatbelt profile from [`sandbox::profile`]; where no sandbox is
+    /// qualified it never starts. Inputs: the project, its canonical folder and the
+    /// canonical root of a verified build. Output: where the IDE is reached, or a plain
+    /// refusal.
     pub async fn open(
         &self,
         project: &ProjectId,
@@ -187,46 +199,61 @@ impl Servers {
         let folder = self.prepare(project)?;
         sweep(&folder).await;
         let recorded = ports::recorded(&folder);
-        let (listener, webview_port) = webview::bind(recorded.map(|known| known.webview))
+        let (listener, port) = proxy::bind(recorded.map(|known| known.proxy))
             .await
             .map_err(|_| failure("ide_port_unavailable"))?;
-        let port = match recorded {
-            Some(known) if known.server != webview_port && ports::free(known.server) => {
-                known.server
-            }
-            _ => ports::pick(webview_port).map_err(|_| failure("ide_port_unavailable"))?,
+        let server_port = match recorded {
+            Some(known) if known.server != port && ports::free(known.server) => known.server,
+            _ => ports::pick(port).map_err(|_| failure("ide_port_unavailable"))?,
         };
         let chosen = Ports {
-            server: port,
-            webview: webview_port,
+            server: server_port,
+            proxy: port,
         };
         if recorded != Some(chosen) {
             ports::record(&folder, chosen).map_err(|_| failure("ide_state_unavailable"))?;
         }
-        let token_path = token::issue(&folder).map_err(|_| failure("ide_token_unavailable"))?;
+        let (token_path, token) =
+            token::issue(&folder).map_err(|_| failure("ide_token_unavailable"))?;
         let info = ServerInfo {
             url: format!("http://127.0.0.1:{port}/"),
             port,
-            webview_port,
+            server_port,
             token_path,
             capability_path: folder.join(CAPABILITY),
+            workspace: folder.join(WORKSPACE),
         };
-        let child = command(&build, &folder, root, &info)
-            .and_then(|mut command| {
-                crate::spawn_gate::spawn(&mut command)
-                    .map_err(|_| failure("ide_server_start_failed"))
-            })
-            .inspect_err(|_| {
-                let _ = token::remove(&folder);
-            })?;
+        let Some(workspace) = info.workspace.to_str().map(str::to_owned) else {
+            let _ = token::remove(&folder);
+            return Err(failure("ide_folder_unsafe"));
+        };
+        let started = match output::start(&folder.join(LOG), &token)
+            .map_err(|_| failure("ide_state_unavailable"))
+            .and_then(|output| command(&build, &folder, root, &info, output))
+        {
+            Ok(mut command) => match self.prepare_extensions(&build, &folder).await {
+                Ok(()) => crate::spawn_gate::spawn(&mut command)
+                    .map_err(|_| failure("ide_server_start_failed")),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        let child = started.inspect_err(|_| {
+            let _ = token::remove(&folder);
+        })?;
         let group = Pid::from_child(&child);
         assert!(group.as_raw_nonzero().get() > 1);
         record_group(&folder, group);
         let launch = self.launches.fetch_add(1, Ordering::SeqCst);
-        let webview = tokio::spawn(webview::serve(
+        let proxy = tokio::spawn(proxy::serve(
             listener,
-            build.join(webview::PRE),
-            webview_port,
+            proxy::Site {
+                port,
+                upstream: server_port,
+                pre: build.join(proxy::PRE),
+                token,
+                workspace,
+            },
         ));
         *locked(&slot.state) = Some(Running {
             launch,
@@ -235,9 +262,9 @@ impl Servers {
             info: info.clone(),
             folder,
             touched: Instant::now(),
-            webview,
+            proxy,
         });
-        if let Err(error) = ready(&slot, launch, port, group).await {
+        if let Err(error) = ready(&slot, launch, server_port, group).await {
             stop_launch(&slot, launch).await;
             return Err(error);
         }
@@ -335,6 +362,37 @@ impl Servers {
             .count()
     }
 
+    /// Brings a project's server extensions to the owner's approvals before it starts, after
+    /// [`command`] wrote the pin list into its Remote settings: every approved extension
+    /// installed from its verified VSIX and every other one but the built-in removed
+    /// ([`extensions::on_server_start`]), off the async runtime. A failure stops the start.
+    /// Inputs: the build root and the project's IDE folder. Output: Ok, or a plain refusal.
+    async fn prepare_extensions(&self, build: &Path, folder: &Path) -> Result<(), EngineError> {
+        let data = self
+            .folder
+            .parent()
+            .ok_or_else(|| failure("ide_state_unavailable"))?
+            .to_path_buf();
+        assert!(folder.starts_with(&self.folder));
+        let (build, extensions, home) = (
+            build.to_path_buf(),
+            folder.join(EXTENSIONS),
+            folder.join(SERVER_DATA),
+        );
+        tokio::task::spawn_blocking(move || {
+            extensions::on_server_start(
+                &data,
+                &extensions::Registry::open_vsx(),
+                &build,
+                &extensions,
+                &home,
+                crate::team::now_ms(),
+            )
+        })
+        .await
+        .map_err(|_| failure("ide_extension_install_failed"))?
+    }
+
     fn prepare(&self, project: &ProjectId) -> Result<PathBuf, EngineError> {
         let folder = self.project_folder(project)?;
         for path in [
@@ -358,7 +416,7 @@ impl Drop for Servers {
             let Some(mut running) = locked(&slot.state).take() else {
                 continue;
             };
-            running.webview.abort();
+            running.proxy.abort();
             if matches!(running.child.try_wait(), Ok(None)) || group_present(running.group) {
                 let _ = rustix::process::kill_process_group(running.group, Signal::KILL);
             }
@@ -456,10 +514,10 @@ async fn stop_launch(slot: &Slot, launch: u64) {
     }
 }
 
-/// Ends a launch: the webview host, the process group, its token and group record.
+/// Ends a launch: the proxy, the process group, its token and group record.
 async fn finish(mut running: Running) {
-    running.webview.abort();
-    let _ = (&mut running.webview).await;
+    running.proxy.abort();
+    let _ = (&mut running.proxy).await;
     end_group(&mut running.child, running.group).await;
     let _ = token::remove(&running.folder);
     let _ = fs::remove_file(running.folder.join(GROUP));
@@ -504,37 +562,33 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
     let real = fs::canonicalize(build).map_err(|_| failure("ide_build_invalid"))?;
     let kind = |path: PathBuf| fs::symlink_metadata(path).map(|metadata| metadata.file_type());
     if real != build
+        || !kind(real.join(LAUNCHER)).is_ok_and(|found| found.is_file())
         || !kind(real.join("node")).is_ok_and(|found| found.is_file())
         || !kind(real.join(SERVER_MAIN)).is_ok_and(|found| found.is_file())
-        || !kind(real.join(webview::PRE)).is_ok_and(|found| found.is_dir())
+        || !kind(real.join(proxy::PRE)).is_ok_and(|found| found.is_dir())
     {
         return Err(failure("ide_build_invalid"));
     }
     Ok(real)
 }
 
-/// The server's command line under the Seatbelt profile installed for this launch, after
-/// the AI lock is written ([`settings::write`]); a lock that cannot be written stops the
-/// start. Loopback host and port, the token file (never the token), its own data folder
-/// with the Remote settings folder locked, the locked-keys file readable, its extensions
-/// folder read only, telemetry off, a cleared environment holding only
-/// [`env::server_env`] with TMPDIR at its short temp folder, output to the launch's log, and
-/// its own process group.
+/// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
+/// this launch, after the AI lock is written ([`settings::write`]); a lock that cannot be
+/// written stops the start. The build's launcher on 127.0.0.1 at the server port, the token
+/// file (never the token), its own server data folder, the user data folder inside it whose
+/// Remote settings folder is locked, the locked-keys file readable, the extensions folder
+/// read only, license accepted, telemetry off, workspace trust off and a 30 s reconnection
+/// grace; a cleared environment holding only [`env::server_env`] with TMPDIR at its short
+/// temp folder, stdout and stderr into the redacting `output` pipe, and its own process
+/// group.
 fn command(
     build: &Path,
     folder: &Path,
     root: &Path,
     info: &ServerInfo,
+    output: PipeWriter,
 ) -> Result<Command, EngineError> {
-    let log = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(folder.join(LOG))
-        .map_err(|_| failure("ide_state_unavailable"))?;
-    let errors = log
+    let errors = output
         .try_clone()
         .map_err(|_| failure("ide_state_unavailable"))?;
     let data = folder
@@ -542,11 +596,12 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let written = settings::write(folder, &home)?;
+    let written = settings::write(folder, &home, data)?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
-    let (extensions, workspace) = (folder.join(EXTENSIONS), folder.join(WORKSPACE));
+    let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));
     let machine = settings::machine_folder(&home);
+    assert!(machine.starts_with(&user_data) && user_data.starts_with(&home));
     let grants = sandbox::Grants {
         data,
         root,
@@ -558,25 +613,29 @@ fn command(
         readable: &[
             info.token_path.as_path(),
             info.capability_path.as_path(),
-            workspace.as_path(),
+            info.workspace.as_path(),
             written.locked.as_path(),
         ],
         locked: &[machine.as_path()],
     };
-    let profile = sandbox::install(folder, &grants, info.port)?;
-    let mut command = sandbox::command(&profile, &build.join("node"));
+    let profile = sandbox::install(folder, &grants, info.server_port)?;
+    let mut command = sandbox::command(&profile, &build.join(LAUNCHER));
     command
-        .arg(build.join(SERVER_MAIN))
         .args(["--host", "127.0.0.1", "--port"])
-        .arg(info.port.to_string())
+        .arg(info.server_port.to_string())
         .arg("--connection-token-file")
         .arg(&info.token_path)
-        .arg("--accept-server-license-terms")
         .arg("--server-data-dir")
         .arg(&home)
+        .arg("--user-data-dir")
+        .arg(&user_data)
         .arg("--extensions-dir")
-        .arg(folder.join(EXTENSIONS))
+        .arg(&extensions)
+        .arg("--accept-server-license-terms")
         .args(["--telemetry-level", "off"])
+        .arg("--disable-workspace-trust")
+        .arg("--reconnection-grace-time")
+        .arg(RECONNECTION_GRACE.as_secs().to_string())
         .current_dir(folder)
         .env_clear()
         .envs(env::server_env(
@@ -586,7 +645,7 @@ fn command(
         ))
         .env("TMPDIR", &tmp)
         .stdin(Stdio::null())
-        .stdout(log)
+        .stdout(output)
         .stderr(errors)
         .process_group(0);
     assert!(
