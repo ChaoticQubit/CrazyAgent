@@ -433,15 +433,18 @@ function renderInline(nodes: Inline[], open: (href: string, text: string) => voi
 }
 
 /** Renders untrusted Markdown as React elements; raw HTML stays visible text. Every link shows
- * its target on hover, and one whose URL text names another host asks before it opens.
- * Inputs: the source, a link handler and an optional per-heading action.
- * Output: the rendered report. */
-export function MarkdownView({ source, onOpenLink, headingAction }: {
+ * its target on hover, and one whose URL text names another host asks before it opens, in the
+ * report and in its optional Sources list alike.
+ * Inputs: the source, a link handler, an optional per-heading action and whether to list the
+ * report's links as Sources. Output: the rendered report. */
+export function MarkdownView({ source, onOpenLink, headingAction, sources = false }: {
   source: string;
   onOpenLink: (href: string) => void;
   headingAction?: (heading: string) => ReactNode;
+  sources?: boolean;
 }) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
+  const listed = useMemo(() => sources ? markdownLinks(blocks) : [], [sources, blocks]);
   const [asking, setAsking] = useState<{ href: string; text: string; host: string } | null>(null);
   const follow = (href: string, text: string) => {
     const host = linkTargetHost(text, href);
@@ -470,5 +473,7 @@ export function MarkdownView({ source, onOpenLink, headingAction }: {
         <tbody>{block.rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column}>{renderInline(cell, follow)}</td>)}</tr>)}</tbody>
       </table></div>;
     }
-  })}</div></>;
+  })}</div>{listed.length > 0 && <section className="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources</h3>
+    <ol>{listed.map((link) => <li key={link.href}><a href={link.href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); follow(link.href, link.text); }}>{displayText(link.text)}</a>
+      {link.text !== link.href && <span className="pj-small pj-muted pj-mono"> {displayText(link.href)}</span>}</li>)}</ol></section>}</>;
 }

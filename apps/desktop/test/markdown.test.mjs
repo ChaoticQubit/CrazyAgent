@@ -220,6 +220,47 @@ test("every link shows its target on hover", () => {
     { kind: "text", text: "see https://a.example or https://c.example " }, { kind: "strong", children: [{ kind: "text", text: "now" }] }] }]);
 });
 
+test("a Sources list shows each report link once with its target beside differing text, only when asked for", () => {
+  const source = "[https://docs.example](https://other.example/x), [docs](https://acme.dev/a) and [docs again](https://acme.dev/a)";
+  const listed = renderToStaticMarkup(createElement(md.MarkdownView, { source, sources: true, onOpenLink: () => {} }));
+  const list = listed.slice(listed.indexOf('<section class="pj-sources"'));
+  assert.match(list, /^<section class="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources<\/h3><ol>/);
+  assert.equal((list.match(/<li>/g) ?? []).length, 2);
+  assert.match(list, /<a href="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a><span class="pj-small pj-muted pj-mono"> https:\/\/other.example\/x<\/span>/);
+  assert.match(list, /<a href="https:\/\/acme.dev\/a" [^>]*>docs<\/a><span class="pj-small pj-muted pj-mono"> https:\/\/acme.dev\/a<\/span>/);
+  assert.doesNotMatch(render(source), /pj-sources/);
+  const context = readFileSync(new URL("../src/screens/project/context.tsx", import.meta.url), "utf8");
+  assert.match(context, /<MarkdownView source=\{text\} onOpenLink=\{open\} sources /, "the Context tab lists Sources through the reader");
+  assert.doesNotMatch(context, /pj-sources|markdownLinks/, "the Context tab keeps no Sources list of its own that skips the ask");
+});
+
+test("a click on a Sources link whose URL text names another host asks first like the report link; other Sources open at once", async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(linksFixture);
+    return evaluate(`(async () => {
+      const tick = () => new Promise((done) => setTimeout(done, 0));
+      const source = (text) => [...document.querySelectorAll(".pj-sources a")].find((anchor) => anchor.textContent === text);
+      const button = (label) => [...document.querySelectorAll("dialog[open] button")].find((item) => item.textContent === label);
+      Fixture.mount("[https://docs.example](https://other.example/x) and [the docs](https://third.example/)", true);
+      const steps = {};
+      source("https://docs.example").click(); await tick();
+      steps.asked = Fixture.state();
+      button("Cancel").click(); await tick();
+      steps.cancelled = Fixture.state();
+      source("https://docs.example").click(); await tick();
+      button("Open").click(); await tick();
+      steps.confirmed = Fixture.state();
+      source("the docs").click(); await tick();
+      steps.direct = Fixture.state();
+      return steps;
+    })()`);
+  });
+  assert.deepEqual(seen.asked, { opened: [], question: "Open other.example?", body: "The link text shows https://docs.example, but it opens https://other.example/x." });
+  assert.deepEqual(seen.cancelled, { opened: [], question: null, body: null });
+  assert.deepEqual(seen.confirmed, { opened: ["https://other.example/x"], question: null, body: null });
+  assert.deepEqual(seen.direct, { opened: ["https://other.example/x", "https://third.example/"], question: null, body: null });
+});
+
 test("a click on a link whose URL text names another host asks first; Cancel opens nothing, Open opens the target, other links open at once", async () => {
   const seen = await withPage(async ({ evaluate }) => {
     await evaluate(linksFixture);
