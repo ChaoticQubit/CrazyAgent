@@ -738,6 +738,93 @@ fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() 
     }
 }
 
+/// An Accept that fails after saving its intent is repaired by the owner's next click, not
+/// left stale until the next upkeep: one that wrote nothing is retried and lands, one that
+/// wrote the files or moved the branch is finished, and a Discard goes through.
+#[test]
+fn an_accept_that_failed_after_saving_its_intent_is_repaired_by_the_next_owner_action() {
+    for step in [
+        owner::Step::Recorded,
+        owner::Step::FilesWritten,
+        owner::Step::BranchMoved,
+    ] {
+        let case = Case::new();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        let tip = case.tip();
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+        assert_eq!(store::in_flight(&case.db).unwrap().len(), 1, "{step:?}");
+
+        let again = case.accept(&id);
+
+        assert!(store::in_flight(&case.db).unwrap().is_empty(), "{step:?}");
+        if step == owner::Step::Recorded {
+            assert!(
+                matches!(again, Ok(AcceptOutcome::Landed { .. })),
+                "{again:?}"
+            );
+        } else {
+            assert_eq!(refused(again), "changes_stale", "{step:?}");
+        }
+        assert_eq!(case.view(&id).state, ChangeState::Accepted, "{step:?}");
+        assert_ne!(case.tip(), tip, "{step:?}");
+        assert_eq!(case.owner(&["status", "--porcelain"]), "", "{step:?}");
+    }
+
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let tip = case.tip();
+    let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| {
+        at == owner::Step::Recorded
+    });
+    assert_eq!(refused(stopped), "changes_git_failed");
+
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+
+    assert!(store::in_flight(&case.db).unwrap().is_empty());
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+    assert_eq!(case.tip(), tip);
+}
+
+/// A discarded change set whose ref cannot be deleted, here behind a stale ref lock a crash
+/// left, never stops the others from being pruned, and is pruned itself once it can be.
+#[test]
+fn a_discarded_set_whose_ref_cannot_be_deleted_never_stops_the_others_from_pruning() {
+    let case = Case::new();
+    case.edit("src/first.rs", "fn first() {}\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &first, &case.view(&first).head, NOW_MS).unwrap();
+    case.edit("src/second.rs", "fn second() {}\n");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(first, second);
+    discard(&case.db, &second, &case.view(&second).head, NOW_MS).unwrap();
+    let reference = |id: &ChangeSetId| format!("refs/crazyagent/discarded/{}", id.as_str());
+    let lock = case
+        .repo
+        .join(".git")
+        .join(format!("{}.lock", reference(&first)));
+    assert!(lock.parent().unwrap().is_dir());
+    write(&lock, "");
+
+    assert_eq!(prune(&case.db, NOW_MS + 7 * DAY_MS).unwrap(), 1);
+
+    assert_eq!(
+        case.owner(&["for-each-ref", "--format=%(refname)", "refs/crazyagent/"])
+            .trim(),
+        reference(&first)
+    );
+    assert!(!store::load(&case.db, &first).unwrap().pruned);
+    assert!(store::load(&case.db, &second).unwrap().pruned);
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(prune(&case.db, NOW_MS + 7 * DAY_MS).unwrap(), 1);
+    assert_eq!(case.owner(&["for-each-ref", "refs/crazyagent/"]), "");
+    assert!(store::load(&case.db, &first).unwrap().pruned);
+}
+
 #[test]
 fn a_turn_past_the_tree_bounds_is_refused_and_leaves_nothing_committed_or_staged() {
     let case = Case::new();

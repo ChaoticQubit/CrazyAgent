@@ -269,7 +269,7 @@ pub(super) fn accept(
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
-    let mut record = store::load(db, id)?;
+    let mut record = settled(db, id)?;
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict)
         || record.head != expected_head
         || record.intent.is_some()
@@ -358,7 +358,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
-    let mut record = store::load(db, id)?;
+    let mut record = settled(db, id)?;
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict)
         || record.intent.is_some()
     {
@@ -397,69 +397,98 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     store::save(db, &record)
 }
 
-/// Finishes or undoes owner-checkout and worktree work an engine stop interrupted:
-/// an Accept whose branch moved is finished, one whose files were written but whose
-/// branch did not move is moved by compare and swap, one that wrote nothing is
-/// dropped, and an agent worktree reset is run again while the worktree still holds
-/// the old or new commit. Input: the store. Output: Ok once nothing is in flight.
+/// Finishes or undoes owner-checkout and worktree work an engine stop interrupted, one
+/// change set at a time: a change set that cannot be settled now is logged by its plain
+/// code and stays in flight for the next run, so it never stops the others. Input: the
+/// store. Output: Ok once every change set it could settle holds no intent.
 pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
     store::initialize(db)?;
     for found in store::in_flight(db)? {
         let _held = hold(&found.repository);
-        let mut record = store::load(db, &found.id)?;
-        match record.intent.clone() {
-            Some(Intent::Land {
-                reference,
-                old,
-                new,
-            }) => {
-                let owner = Repo::open(&record.repository.join(".git"), Some(&record.repository))?;
-                let tip = owner.commit_of(&reference)?;
-                let written = tip.as_deref() == Some(old.as_str())
-                    && owner.test(&["diff-index", "--cached", "--quiet", &new, "--"])?;
-                let moved = written
-                    && owner
-                        .exec(
-                            &[
-                                "update-ref",
-                                "-m",
-                                "CrazyAgent: accept",
-                                &reference,
-                                &new,
-                                &old,
-                            ],
-                            None,
-                            &[],
-                            256,
-                        )?
-                        .code
-                        == 0;
-                if moved || tip.as_deref() == Some(new.as_str()) {
-                    finish(db, &mut record, &new)?;
-                } else {
-                    record.intent = None;
-                    store::save(db, &record)?;
-                }
-            }
-            Some(Intent::Reset { target }) => {
-                let agent = flow::agent(&record)?;
-                let current = agent
-                    .commit_of("HEAD")?
-                    .ok_or_else(|| failure("changes_git_failed"))?;
-                let reset =
-                    flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
-                if reset {
-                    flow::reset_agent(&agent, &target)?;
-                }
-                if !record.is_open() {
-                    let start = if reset { &target } else { &record.head };
-                    store::set_base(db, &record.worktree, start)?;
-                }
-                record.intent = None;
-                store::save(db, &record)?;
-            }
-            None => {}
+        let settled = store::load(db, &found.id).and_then(|mut record| settle(db, &mut record));
+        if let Err(error) = settled {
+            eprintln!(
+                "landing_reconcile_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
         }
     }
+    Ok(())
+}
+
+/// Loads a change set for an owner action, first settling an intent a failed or stopped
+/// Accept, update or restore left on it, so the owner's next click repairs the change set
+/// instead of finding it stale until the next upkeep. The caller holds [`hold`] on its
+/// repository. Inputs: the store and the change set. Output: the record, holding no intent.
+pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, EngineError> {
+    let mut record = store::load(db, id)?;
+    if record.intent.is_some() {
+        settle(db, &mut record)?;
+        record = store::load(db, id)?;
+    }
+    assert!(record.intent.is_none());
+    Ok(record)
+}
+
+/// Finishes or undoes the one Accept or worktree reset a change set holds as its intent:
+/// an Accept whose branch moved is finished, one whose files were written but whose
+/// branch did not move is moved by compare and swap, one that wrote nothing is dropped,
+/// and an agent worktree reset is run again while the worktree still holds the old or new
+/// commit. The caller holds [`hold`] on its repository. Inputs: the store and the loaded
+/// record. Output: Ok once the stored record holds no intent.
+fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
+    match record.intent.clone() {
+        Some(Intent::Land {
+            reference,
+            old,
+            new,
+        }) => {
+            let owner = Repo::open(&record.repository.join(".git"), Some(&record.repository))?;
+            let tip = owner.commit_of(&reference)?;
+            let written = tip.as_deref() == Some(old.as_str())
+                && owner.test(&["diff-index", "--cached", "--quiet", &new, "--"])?;
+            let moved = written
+                && owner
+                    .exec(
+                        &[
+                            "update-ref",
+                            "-m",
+                            "CrazyAgent: accept",
+                            &reference,
+                            &new,
+                            &old,
+                        ],
+                        None,
+                        &[],
+                        256,
+                    )?
+                    .code
+                    == 0;
+            if moved || tip.as_deref() == Some(new.as_str()) {
+                finish(db, record, &new)?;
+            } else {
+                record.intent = None;
+                store::save(db, record)?;
+            }
+        }
+        Some(Intent::Reset { target }) => {
+            let agent = flow::agent(record)?;
+            let current = agent
+                .commit_of("HEAD")?
+                .ok_or_else(|| failure("changes_git_failed"))?;
+            let reset = flow::holds_only(&agent, &target)? || flow::holds_only(&agent, &current)?;
+            if reset {
+                flow::reset_agent(&agent, &target)?;
+            }
+            if !record.is_open() {
+                let start = if reset { &target } else { &record.head };
+                store::set_base(db, &record.worktree, start)?;
+            }
+            record.intent = None;
+            store::save(db, record)?;
+        }
+        None => {}
+    }
+    assert!(record.intent.is_none());
     Ok(())
 }
