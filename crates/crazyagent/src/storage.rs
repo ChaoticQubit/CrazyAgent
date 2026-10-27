@@ -680,6 +680,7 @@ impl Storage {
                                 OwnerRead::ProjectMaster { .. }
                                     | OwnerRead::ProjectMasterTurns { .. }
                                     | OwnerRead::ProjectMasterSessions { .. }
+                                    | OwnerRead::ProjectMasterInputs { .. }
                             ) {
                                 let _ = reply.send(master_session::read(
                                     &mut connection,

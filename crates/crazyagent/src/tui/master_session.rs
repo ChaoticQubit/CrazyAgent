@@ -17,6 +17,7 @@ use crate::master_session::{
 use crate::master_sessions::MasterSessionSummary;
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
 use crate::routing::{ResourceBudget, RouteRequest};
+use crate::tui::screens::project_master::TURNS_SHOWN_MAX as INPUTS_SHOWN_MAX;
 use std::time::{Duration, Instant};
 
 const DIMENSIONS: [&str; 7] = [
@@ -58,6 +59,7 @@ pub(super) enum Job {
         context: Context,
         confirmation: Option<Box<Confirmation>>,
         sessions: bool,
+        known: Vec<Cursor>,
     },
     Mutation {
         submission: Submission,
@@ -100,6 +102,7 @@ pub(super) struct View {
     turns: Vec<MasterTurnView>,
     revision: Cursor,
     input: Option<ConversationEntry>,
+    inputs: Vec<ConversationEntry>,
     sessions: Option<Vec<MasterSessionSummary>>,
 }
 
@@ -751,6 +754,14 @@ impl State {
         self.sessions_shown = shown;
     }
 
+    /// The owner's messages of the shown turns of the session in view, oldest first, so a
+    /// resumed or parked session shows its whole history. Output: empty before a read.
+    pub fn inputs(&self) -> &[ConversationEntry] {
+        self.view
+            .as_ref()
+            .map_or(&[], |view| view.inputs.as_slice())
+    }
+
     /// The project's sessions as last read, live one included, newest activity first.
     /// Output: None while the list is hidden or before its first read.
     pub fn sessions(&self) -> Option<&[MasterSessionSummary]> {
@@ -827,10 +838,16 @@ impl State {
             return None;
         }
         self.flight = Some(context.clone());
+        let known = self
+            .inputs()
+            .iter()
+            .map(|entry| entry.event_cursor.clone())
+            .collect();
         Some(Job::Read {
             context,
             confirmation: confirmation.map(Box::new),
             sessions: self.sessions_shown,
+            known,
         })
     }
 
@@ -909,7 +926,9 @@ impl State {
                     }
                 };
                 if current {
-                    self.view = Some(*view);
+                    let mut view = *view;
+                    view.inputs = shown_inputs(&view.turns, self.inputs(), view.inputs);
+                    self.view = Some(view);
                 }
                 if let Some(submission) = completed {
                     self.finish_read(&submission);
@@ -2124,6 +2143,7 @@ pub(super) async fn read_view(
     context: &Context,
     confirmation: Option<&Confirmation>,
     sessions: bool,
+    known: &[Cursor],
 ) -> Result<View, String> {
     let state = controller
         .read(OwnerRead::ProjectMaster {
@@ -2140,6 +2160,7 @@ pub(super) async fn read_view(
         turns: Vec::new(),
         revision: state.revision,
         input: None,
+        inputs: Vec::new(),
         sessions: None,
     };
     if let Some(session) = &view.session {
@@ -2155,6 +2176,15 @@ pub(super) async fn read_view(
             session,
             &view.revision,
             &state.config_id,
+        )
+        .await?;
+        view.inputs = read_inputs(
+            controller,
+            context,
+            session,
+            &view.turns,
+            known,
+            (&view.revision, &state.config_id),
         )
         .await?;
     }
@@ -2174,6 +2204,75 @@ pub(super) async fn read_view(
         view.sessions = Some(read_sessions(controller, &context.project).await?);
     }
     Ok(view)
+}
+
+/// Reads the owner's messages of the shown turns the client does not hold yet, so a
+/// resumed session shows its earlier lines. Inputs: the controller, context, session,
+/// its turns, the input cursors already held and the read basis. Output: the newly read
+/// entries; empty when every shown turn's message is held.
+async fn read_inputs(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &MasterSessionView,
+    turns: &[MasterTurnView],
+    known: &[Cursor],
+    basis: (&Cursor, &ConfigId),
+) -> Result<Vec<ConversationEntry>, String> {
+    let shown = &turns[turns.len().saturating_sub(INPUTS_SHOWN_MAX)..];
+    let missing: Vec<Cursor> = shown
+        .iter()
+        .map(|turn| turn.input_cursor.clone())
+        .filter(|cursor| !known.contains(cursor))
+        .collect();
+    let mut entries = Vec::new();
+    for chunk in missing.chunks(usize::from(crate::conversation::PAGE_ITEMS_MAX)) {
+        let reply = controller
+            .read(OwnerRead::ProjectMasterInputs {
+                project_id: context.project.clone(),
+                session_id: session.session_id.clone(),
+                cursors: chunk.to_vec(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        same_basis(&reply, basis.0, basis.1)?;
+        let OwnerData::ProjectMasterInputs { entries: found } = reply.data else {
+            return Err("master_inputs_read_required".into());
+        };
+        if found.len() > chunk.len()
+            || found
+                .iter()
+                .any(|entry| !chunk.contains(&entry.event_cursor))
+        {
+            return Err("master_inputs_read_context".into());
+        }
+        entries.extend(found);
+    }
+    assert!(entries.len() <= missing.len());
+    Ok(entries)
+}
+
+/// The owner's messages a view keeps: the held and newly read entries of its shown turns,
+/// oldest first, one per turn. Inputs: the turns, the held entries and the new ones.
+/// Output: at most one entry per shown turn.
+fn shown_inputs(
+    turns: &[MasterTurnView],
+    held: &[ConversationEntry],
+    fresh: Vec<ConversationEntry>,
+) -> Vec<ConversationEntry> {
+    let shown: Vec<&Cursor> = turns[turns.len().saturating_sub(INPUTS_SHOWN_MAX)..]
+        .iter()
+        .map(|turn| &turn.input_cursor)
+        .collect();
+    let mut kept: Vec<ConversationEntry> = held
+        .iter()
+        .cloned()
+        .chain(fresh)
+        .filter(|entry| shown.contains(&&entry.event_cursor))
+        .collect();
+    kept.sort_by_key(|entry| entry.event_cursor.value());
+    kept.dedup_by_key(|entry| entry.event_cursor.value());
+    assert!(kept.len() <= shown.len());
+    kept
 }
 
 /// Reads the project's master sessions for the Sessions list: the live one and the

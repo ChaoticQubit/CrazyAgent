@@ -950,6 +950,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.master_sessions(&ticket).await }.await;
             routed(result)
         }
+        "desktop_master_inputs" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                session_id: String,
+                cursors: Vec<String>,
+            }
+            let Args { ticket, session_id, cursors } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .master_inputs(&ticket, &session_id, &cursors) .await }.await;
+            routed(result)
+        }
         "desktop_master_session_turns" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

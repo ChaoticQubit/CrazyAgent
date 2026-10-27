@@ -870,16 +870,21 @@ fn live_capacity(tx: &Transaction<'_>, parks_one: bool) -> Result<bool, EngineEr
 
 /// Makes a parked session of a project live again in one transaction: the live session,
 /// if any, is parked first, and its outstanding turn is cancelled only when the owner
-/// confirmed it. Takes the transaction, project, session, confirm flag, the revision
-/// read at and the new revision. Returns Applied, or a plain rejection before any write.
+/// confirmed it. The chosen session must still run under the current settings and engine
+/// run as a send would (rebind check and selection check). Takes the transaction, config,
+/// source hash, provenance, project, session and confirm flag. Returns Applied, or a
+/// plain rejection before any write.
 fn resume(
     tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    source_hash: &str,
+    provenance: &OwnerProvenance,
     project: &ProjectId,
     id: &SessionId,
     cancel_running: bool,
-    revision: u64,
-    next: u64,
 ) -> Result<Outcome, EngineError> {
+    let revision = provenance.revision_before.value();
+    let next = provenance.revision_after.value();
     let Some(mut chosen) =
         load_session(tx, id, revision)?.filter(|session| &session.project_id == project)
     else {
@@ -893,6 +898,20 @@ fn resume(
         }
     }
     assert!(chosen.current_turn.is_none());
+    let mut bound = chosen.clone();
+    if !rebind(
+        tx,
+        &mut bound,
+        config,
+        source_hash,
+        &provenance.engine_epoch,
+        Cursor::new(next),
+    )? {
+        return Ok(reject("master_source_conflict"));
+    }
+    if let Err(reason) = validate_selection(config, project, &chosen.selection) {
+        return Ok(reject(&reason.0));
+    }
     let current = live(tx, project, revision)?;
     if current
         .as_ref()
@@ -4270,7 +4289,15 @@ fn execute(
         cancel_running,
     } = action
     {
-        return resume(tx, project_id, session_id, *cancel_running, revision, next);
+        return resume(
+            tx,
+            config,
+            source_hash,
+            provenance,
+            project_id,
+            session_id,
+            *cancel_running,
+        );
     }
     let opening = match action {
         MasterOwnerAction::Open {
@@ -4753,6 +4780,20 @@ pub(super) fn read(
         OwnerRead::ProjectMasterSessions { project_id } => OwnerData::ProjectMasterSessions {
             sessions: crate::master_sessions::list(&tx, project_id)?,
         },
+        OwnerRead::ProjectMasterInputs {
+            project_id,
+            session_id,
+            cursors,
+        } => {
+            if load_session(&tx, session_id, revision)?
+                .is_none_or(|session| &session.project_id != project_id)
+            {
+                return Err(error("master_session_missing"));
+            }
+            OwnerData::ProjectMasterInputs {
+                entries: crate::conversation::master_inputs(&tx, project_id, session_id, cursors)?,
+            }
+        }
         OwnerRead::ProjectMasterTurns {
             project_id,
             session_id,

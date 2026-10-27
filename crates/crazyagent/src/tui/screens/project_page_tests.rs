@@ -8,8 +8,11 @@ use super::{Flow, Place, ProjectTab, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
+use crate::engine::owner::OwnerMutation;
 use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
-use crate::master_session::{MasterSessionPhase, MasterSessionView, MasterTurnView};
+use crate::master_session::{
+    MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
+};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
@@ -1060,6 +1063,57 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
     .await;
     assert!(!shown.contains("is closed"), "{shown}");
     assert!(!shown.contains("Settings changed"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_session_shows_the_owner_s_earlier_messages() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    shell.key(Key::Char('e'));
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("This session is parked.")
+    })
+    .await;
+    say(&mut shell, &mut connection, "Add a dark theme").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Add a dark theme") && !shown.contains("Thinking")
+    })
+    .await;
+    assert!(!shown.contains("Plan the first slice"), "{shown}");
+
+    latest_master(&mut engine, &notes).await;
+    engine
+        .controller
+        .begin_mutation(
+            OwnerMutation::ProjectMaster {
+                action: MasterOwnerAction::Resume {
+                    project_id: notes.clone(),
+                    session_id: first.session_id.clone(),
+                    cancel_running: false,
+                },
+            },
+            1,
+        )
+        .unwrap();
+    let resumed = engine.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(
+            resumed,
+            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ),
+        "{resumed:?}"
+    );
+    let (live, _) = latest_master(&mut engine, &notes).await;
+    assert_eq!(live.unwrap().session_id, first.session_id);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Plan the first slice")
+    })
+    .await;
+    assert!(!shown.contains("Add a dark theme"), "{shown}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

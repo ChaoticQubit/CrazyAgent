@@ -12,9 +12,9 @@ const CONFIG: &str = r#"version = 1
 timeout_ms = 2000
 allowed_destinations = ["session-profile"]
 [routing]
-approved_accounts = ["session-account"]
+approved_accounts = ["session-account", "native-account"]
 [model_access]
-accounts = ["session-account"]
+accounts = ["session-account", "native-account"]
 [[model_access.connections]]
 id = "session-connection"
 provider = "local-provider"
@@ -24,9 +24,24 @@ account_ref = "session-account"
 endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }
 model = { id = "local-model", author = "local-author" }
 auth = { method = "none" }
+[[model_access.connections]]
+id = "native-connection"
+provider = "anthropic"
+harness = "claude-code"
+protocol = "native"
+account_ref = "native-account"
+endpoint = { kind = "native" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "native-profile" }
 [[model_access.pools]]
 id = "session-pool"
 members = ["session-connection"]
+projects = ["session-project"]
+roles = ["project_leader"]
+fallback_allowed = false
+[[model_access.pools]]
+id = "native-pool"
+members = ["native-connection"]
 projects = ["session-project"]
 roles = ["project_leader"]
 fallback_allowed = false
@@ -134,6 +149,14 @@ impl Case {
     }
 
     async fn basis(&self) -> (ConfigId, String, Box<MasterSelection>) {
+        self.basis_for(MasterBackend::Rcli).await
+    }
+
+    async fn basis_for(&self, backend: MasterBackend) -> (ConfigId, String, Box<MasterSelection>) {
+        let (pool, account) = match backend {
+            MasterBackend::Rcli => ("session-pool", "session-account"),
+            MasterBackend::Codex | MasterBackend::Claude => ("native-pool", "native-account"),
+        };
         let basis = self
             .read(OwnerRead::ModelAccessPage {
                 collection: ModelAccessCollection::Pools,
@@ -146,14 +169,14 @@ impl Case {
         };
         let target = reference("session-profile");
         let selection = MasterSelection {
-            backend: MasterBackend::Rcli,
-            pool_ref: reference("session-pool"),
+            backend,
+            pool_ref: reference(pool),
             target_profile_ref: target.clone(),
             route: RouteRequest {
                 preferred_target: Some(target.clone()),
                 required_target: Some(target),
                 required_capabilities: vec![],
-                account_ref: reference("session-account"),
+                account_ref: reference(account),
                 budget_ref: reference("session-budget"),
                 resources: ResourceBudget::unit(),
             },
@@ -176,7 +199,17 @@ impl Case {
     }
 
     async fn renew(&self, id: &str, cancel_running: bool) -> OwnerResult {
-        let (expected_config_id, expected_source_hash, selection) = self.basis().await;
+        self.renew_with(id, cancel_running, MasterBackend::Rcli)
+            .await
+    }
+
+    async fn renew_with(
+        &self,
+        id: &str,
+        cancel_running: bool,
+        backend: MasterBackend,
+    ) -> OwnerResult {
+        let (expected_config_id, expected_source_hash, selection) = self.basis_for(backend).await;
         self.master(
             id,
             MasterOwnerAction::NewSession {
@@ -257,8 +290,17 @@ impl Case {
     }
 
     async fn reopen(self) -> Self {
+        self.reopen_with(None).await
+    }
+
+    async fn reopen_with(self, settings: Option<&str>) -> Self {
         let project = self.project.clone();
         let root = self.close().await;
+        if let Some(settings) = settings {
+            let global = root.path().join("global.toml");
+            std::fs::write(&global, settings).unwrap();
+            std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let (storage, started) = start(root.path()).await;
         Self {
             storage,
@@ -303,6 +345,20 @@ impl Case {
             .collect::<Result<_, _>>()
             .unwrap()
     }
+}
+
+fn snapshot(case: &Case) -> Vec<(String, String, i64, String)> {
+    let db = case.db();
+    let mut statement = db
+        .prepare("SELECT id,phase,version,body FROM master_sessions ORDER BY created")
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 fn live_count(phases: &[(String, String)]) -> usize {
@@ -602,8 +658,14 @@ async fn results_of_a_parked_session_wait_for_it_and_its_agents_are_its_own() {
 #[tokio::test]
 async fn upgrading_a_version_2_database_makes_ended_sessions_resumable() {
     let case = Case::new().await;
-    assert_eq!(case.open("open-first").await, OwnerResult::Applied);
+    assert_eq!(case.open("open-zero").await, OwnerResult::Applied);
+    assert_eq!(
+        case.renew_with("open-first", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied
+    );
     let first = case.shown().await;
+    assert_eq!(first.selection.backend, MasterBackend::Claude);
     assert_eq!(
         case.submit(
             "first-message",
@@ -681,12 +743,14 @@ async fn upgrading_a_version_2_database_makes_ended_sessions_resumable() {
     );
     drop(db);
     let phases = case.phases();
+    assert_eq!(phases.len(), 3);
+    assert_eq!(phases[0].1, "parked");
     assert_eq!(
-        phases[0],
+        phases[1],
         (first.session_id.as_str().into(), "parked".into())
     );
     assert_eq!(
-        phases[1],
+        phases[2],
         (second.session_id.as_str().into(), "configured".into())
     );
     assert_eq!(
@@ -706,4 +770,204 @@ fn root_backups(case: &Case) -> Vec<String> {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
         .collect()
+}
+
+fn git(folder: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Session Test",
+            "-c",
+            "user.email=session@test.invalid",
+        ])
+        .args(args)
+        .current_dir(folder)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn parking_switching_and_new_sessions_never_touch_a_dirty_master_worktree() {
+    let case = Case::new().await;
+    let repository = case.root.path().join("repository");
+    git(&repository, &["init", "-q", "-b", "main"]);
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "-q", "-m", "start"]);
+    let worktree = case.root.path().join("master-worktree");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "master-work",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(worktree.join("draft.md"), "Unsaved master draft\n").unwrap();
+    std::fs::write(worktree.join("README.md"), "Edited by the master\n").unwrap();
+    let dirty = git(&worktree, &["status", "--porcelain"]);
+    assert!(
+        dirty.contains("draft.md") && dirty.contains("README.md"),
+        "{dirty}"
+    );
+
+    assert_eq!(case.open("open-dirty").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(case.renew("renew-dirty", false).await, OwnerResult::Applied);
+    let second = case.shown().await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(
+        case.resume("resume-dirty", &first.session_id, false).await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        case.master(
+            "park-dirty",
+            MasterOwnerAction::Close {
+                project_id: case.project.clone(),
+                session_id: first.session_id.clone(),
+            },
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(live_count(&case.phases()), 0);
+
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("draft.md")).unwrap(),
+        "Unsaved master draft\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "Edited by the master\n"
+    );
+    assert_eq!(git(&worktree, &["status", "--porcelain"]), dirty);
+    let listed = git(&repository, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains(worktree.to_str().unwrap()), "{listed}");
+    case.close().await;
+}
+
+#[tokio::test]
+async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_admit() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
+    let rcli = case.shown().await;
+    assert_eq!(
+        case.renew_with("renew-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied
+    );
+    let native = case.shown().await;
+    assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
+    let case = case.reopen().await;
+
+    let before = snapshot(&case);
+    assert_eq!(
+        case.resume("resume-stale-rcli", &rcli.session_id, false)
+            .await,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        },
+        "an RCLI session cannot move to a new engine run, so a send would refuse it too"
+    );
+    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+
+    assert_eq!(
+        case.resume("resume-native", &native.session_id, false)
+            .await,
+        OwnerResult::Applied,
+        "a native session moves to the new engine run as a send does"
+    );
+    assert_eq!(case.shown().await.session_id, native.session_id);
+    assert_eq!(
+        case.renew_with("renew-after-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied
+    );
+
+    let changed = CONFIG.replace("configured-claude-model", "replaced-claude-model");
+    assert_ne!(changed, CONFIG);
+    let case = case.reopen_with(Some(&changed)).await;
+    let before = snapshot(&case);
+    assert_eq!(
+        case.resume("resume-out-of-scope", &native.session_id, false)
+            .await,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        },
+        "the session's own pool changed, so it no longer runs under the current settings"
+    );
+    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+    case.close().await;
+}
+
+#[tokio::test]
+async fn a_parked_session_s_owner_messages_are_read_back_for_its_turns_only() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-history").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(
+        case.submit("history-message", &first.session_id, "Plan the first slice")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        case.renew("renew-history", true).await,
+        OwnerResult::Applied
+    );
+    let second = case.shown().await;
+    assert_eq!(
+        case.submit("other-message", &second.session_id, "Add a dark theme")
+            .await,
+        OwnerResult::Applied
+    );
+    let own = case.turns(&first.session_id).await[0].input_cursor.clone();
+    let other = case.turns(&second.session_id).await[0].input_cursor.clone();
+    let read = |cursors: Vec<Cursor>| {
+        case.read(OwnerRead::ProjectMasterInputs {
+            project_id: case.project.clone(),
+            session_id: first.session_id.clone(),
+            cursors,
+        })
+    };
+    let OwnerData::ProjectMasterInputs { entries } =
+        read(vec![other.clone(), own.clone()]).await.data
+    else {
+        panic!("the owner messages are read");
+    };
+    assert_eq!(
+        entries.len(),
+        1,
+        "another session's message is not this session's history"
+    );
+    assert_eq!(entries[0].event_cursor, own);
+    assert_eq!(entries[0].text, "Plan the first slice");
+
+    let too_many = vec![own.clone(); usize::from(crate::conversation::PAGE_ITEMS_MAX) + 1];
+    let (send, receive) = oneshot::channel();
+    case.storage
+        .sender
+        .try_send(Job::OwnerRead(
+            case.started.owners[0].admission.clone(),
+            OwnerRead::ProjectMasterInputs {
+                project_id: case.project.clone(),
+                session_id: first.session_id.clone(),
+                cursors: too_many,
+            },
+            send,
+        ))
+        .unwrap_or_else(|_| panic!("owner read queue unavailable"));
+    assert_eq!(
+        receive.await.unwrap().unwrap_err().0,
+        "master_inputs_bounds"
+    );
+    case.close().await;
 }

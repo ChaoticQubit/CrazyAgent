@@ -904,7 +904,8 @@ impl TeamRuntime {
             .connection
             .prepare(
                 "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled'))
+                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
                  UNION SELECT project FROM team_settings WHERE keep_warm=1
                  UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')",
             )

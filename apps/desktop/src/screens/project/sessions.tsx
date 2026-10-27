@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { failureCopy, readSessions, receiptState, resumeSession, startNewSession } from "../../api-projects";
+import { failureCopy, readOwnerLines, readSessions, receiptState, resumeSession, startNewSession } from "../../api-projects";
 import type { ReceiptState } from "../../api-projects";
-import type { IntentReceipt, MasterSessionSummary } from "../../engine-client";
+import type { IntentReceipt, MasterSessionSummary, MasterTurn } from "../../engine-client";
 import { displayText } from "../conversation";
 import { Badge } from "./shared";
 
@@ -59,6 +59,48 @@ export function switchOutcome(state: ReceiptState): { kind: "done" } | { kind: "
   return { kind: "problem", code: "master_outcome_pending" };
 }
 
+/** The most owner lines one read asks the engine for. */
+export const OWNER_LINES_PER_READ = 32;
+
+/** Input cursors of the turns whose owner message the view holds in neither the lines this
+ * window sent nor the lines read before, newest kept, at most `OWNER_LINES_PER_READ`.
+ * Inputs: the turns, the sent lines by turn id and the read lines by input cursor. */
+export function missingInputs(turns: MasterTurn[], sent: Record<string, string>, lines: Record<string, string>): string[] {
+  const missing = turns
+    .filter((turn) => sent[turn.id] === undefined && turn.input_cursor !== undefined && lines[turn.input_cursor] === undefined)
+    .map((turn) => turn.input_cursor as string);
+  return missing.slice(-OWNER_LINES_PER_READ);
+}
+
+/** The owner's message of a turn: the one this window sent, else the one read from the
+ * engine. Inputs: the turn, the sent lines and the read lines. Output: the text or undefined. */
+export function ownerText(turn: MasterTurn, sent: Record<string, string>, lines: Record<string, string>): string | undefined {
+  return sent[turn.id] ?? (turn.input_cursor === undefined ? undefined : lines[turn.input_cursor]);
+}
+
+/** Reads the owner lines a session's turns are missing and returns the held lines with them.
+ * Inputs: the master ticket, the session id, its turns, the sent and the held lines.
+ * Output: the lines by input cursor; the held ones when nothing is missing or the read fails. */
+export async function withOwnerLines(ticket: string, session: string, turns: MasterTurn[], sent: Record<string, string>, lines: Record<string, string>): Promise<Record<string, string>> {
+  const missing = missingInputs(turns, sent, lines);
+  if (missing.length === 0) return lines;
+  const read = await readOwnerLines(ticket, session, missing);
+  if (read.kind !== "ok") return lines;
+  const next = { ...lines };
+  for (const entry of read.value.entries) next[entry.input_cursor] = entry.text;
+  return next;
+}
+
+/** The words for a refused New session or Resume. A session opened before the engine or
+ * its settings changed cannot continue, so Resume says to start a new one. Inputs: which
+ * switch was refused and the engine's code. Output: one plain sentence. */
+export function switchProblem(kind: "new" | "resume", code: string): string {
+  if (kind === "resume" && code === "master_source_conflict") {
+    return "This session started before the engine or its settings changed, so it can't continue. Start a new session.";
+  }
+  return failureCopy({ code });
+}
+
 type Pending = { kind: "new" } | { kind: "resume"; session: MasterSessionSummary };
 
 /** The master view's session header: the live session, a visible New session button and
@@ -97,7 +139,7 @@ export function SessionsBar({ ticket, liveId, onSwitched }: { ticket: string; li
       if (outcome.kind === "confirm") setPending(next);
       else {
         setPending(null);
-        if (outcome.kind === "problem") setProblem(failureCopy(outcome));
+        if (outcome.kind === "problem") setProblem(switchProblem(next.kind, outcome.code));
         else setShown(false);
         await onSwitched().catch(() => undefined);
         await load();

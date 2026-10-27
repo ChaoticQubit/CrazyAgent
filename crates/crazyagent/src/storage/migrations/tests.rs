@@ -226,10 +226,11 @@ fn refused<T>(result: Result<T, EngineError>) -> String {
 }
 
 fn probe(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    tx.execute_batch(
+    tx.execute_batch(&format!(
         "CREATE TABLE migration_probe (step INTEGER PRIMARY KEY); \
-         INSERT INTO migration_probe VALUES (3);",
-    )
+         INSERT INTO migration_probe VALUES ({});",
+        latest(STEPS) + 1
+    ))
     .map_err(error)
 }
 
@@ -413,17 +414,19 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
             .unwrap()
     };
 
+    let newest = latest(STEPS);
+    let probe_step = newest + 1;
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
 
-    assert_eq!(version(&db).unwrap(), 3);
-    assert_eq!(probed(&db), vec![3]);
+    assert_eq!(version(&db).unwrap(), probe_step);
+    assert_eq!(probed(&db), vec![probe_step]);
     let mut after = rows(&db);
     assert_eq!(after.remove("migration_probe").unwrap().len(), 1);
     assert_eq!(after, before);
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     let first = backups[0].file_name().unwrap().to_str().unwrap().to_owned();
-    assert!(first.starts_with("1-to-3-"), "{first}");
+    assert!(first.starts_with(&format!("1-to-{probe_step}-")), "{first}");
     assert_eq!(
         std::fs::read(backups[0].join("global.toml")).unwrap(),
         std::fs::read(root.global()).unwrap()
@@ -432,11 +435,13 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
     assert_eq!(root.backups().len(), 1, "nothing is pending, so no backup");
 
-    db.execute_batch("DROP TABLE migration_probe; PRAGMA user_version = 2")
-        .unwrap();
+    db.execute_batch(&format!(
+        "DROP TABLE migration_probe; PRAGMA user_version = {newest}"
+    ))
+    .unwrap();
     upgrade(&mut db, &root.database(), Some(&sources), &steps).unwrap();
-    assert_eq!(version(&db).unwrap(), 3);
-    assert_eq!(probed(&db), vec![3]);
+    assert_eq!(version(&db).unwrap(), probe_step);
+    assert_eq!(probed(&db), vec![probe_step]);
     let names: Vec<String> = root
         .backups()
         .iter()
@@ -445,7 +450,9 @@ async fn every_pending_step_runs_in_order_from_any_older_version() {
     assert_eq!(names.len(), 2);
     assert!(names.contains(&first));
     assert!(
-        names.iter().any(|name| name.starts_with("2-to-3-")),
+        names
+            .iter()
+            .any(|name| name.starts_with(&format!("{newest}-to-{probe_step}-"))),
         "{names:?}"
     );
 }
@@ -470,7 +477,10 @@ async fn failing_step_rolls_back_and_names_the_backup() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     assert!(
-        failed.starts_with("storage_migration_failed: step 4 failed:"),
+        failed.starts_with(&format!(
+            "storage_migration_failed: step {} failed:",
+            latest(STEPS) + 2
+        )),
         "{failed}"
     );
     assert!(failed.contains("the database is unchanged"), "{failed}");
@@ -486,7 +496,7 @@ async fn failing_step_rolls_back_and_names_the_backup() {
     drop(copy);
 
     upgrade(&mut db, &root.database(), Some(&sources), &steps(&[probe])).unwrap();
-    assert_eq!(version(&db).unwrap(), 3);
+    assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
 }
 
 #[tokio::test]
@@ -509,9 +519,10 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
     assert!(
-        failed.starts_with(
-            "storage_migration_failed: step 4 failed: the step ended the upgrade transaction;"
-        ),
+        failed.starts_with(&format!(
+            "storage_migration_failed: step {} failed: the step ended the upgrade transaction;",
+            latest(STEPS) + 2
+        )),
         "{failed}"
     );
     assert!(

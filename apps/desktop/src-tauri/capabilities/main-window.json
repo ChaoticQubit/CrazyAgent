@@ -105,6 +105,7 @@
     "allow-desktop-close-master",
     "allow-desktop-master-sessions",
     "allow-desktop-master-session-turns",
+    "allow-desktop-master-inputs",
     "allow-desktop-new-master-session",
     "allow-desktop-resume-master-session",
     "allow-desktop-owner-profile",

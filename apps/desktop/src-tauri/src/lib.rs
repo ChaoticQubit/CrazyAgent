@@ -1197,6 +1197,21 @@ async fn desktop_master_sessions(
 }
 
 #[tauri::command]
+async fn desktop_master_inputs(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    cursors: Vec<String>,
+) -> Result<bridge::master::MasterInputs, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .master_inputs(&ticket, &session_id, &cursors)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_session_turns(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2274,6 +2289,7 @@ pub fn run() {
             desktop_close_master,
             desktop_master_sessions,
             desktop_master_session_turns,
+            desktop_master_inputs,
             desktop_new_master_session,
             desktop_resume_master_session,
             desktop_cancel_master_turn,

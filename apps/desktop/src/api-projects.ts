@@ -1,10 +1,10 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projects, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, IntentReceipt, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
 } from "./engine-client";
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
@@ -541,6 +541,12 @@ export function endMaster(ticket: string, session: string, generation: number): 
 /** Lists the selected project's master sessions. Input: the master ticket. Output: the list. */
 export function readSessions(ticket: string): Promise<Result<MasterSessions>> {
   return wrap(() => masterSessions(ticket));
+}
+
+/** Reads the owner messages behind some turns of a session. Inputs: the master ticket, the
+ * session id and at most 32 turn input cursors. Output: the lines the engine found. */
+export function readOwnerLines(ticket: string, session: string, cursors: string[]): Promise<Result<MasterInputs>> {
+  return wrap(() => masterInputs(ticket, session, cursors));
 }
 
 /** Parks the live session and opens a fresh one. Inputs: the master ticket, whether the owner

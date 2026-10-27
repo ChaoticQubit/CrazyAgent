@@ -261,11 +261,11 @@ impl ProjectPage {
     }
 
     fn transcript(&self) -> Option<Transcript> {
-        let (session, turns, input) = self.master.transcript()?;
+        let (session, turns, _) = self.master.transcript()?;
         let read = MasterRead {
             session: session.map(|session| session.phase),
             turns,
-            inputs: input.map_or(&[][..], std::slice::from_ref),
+            inputs: self.master.inputs(),
         };
         let harness = match session {
             Some(session) => backend_name(session.selection.backend),

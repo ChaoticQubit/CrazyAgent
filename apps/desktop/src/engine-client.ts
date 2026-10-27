@@ -1565,6 +1565,7 @@ export interface MasterTurn {
   tasks?: MasterTask[];
   changes?: string | null;
   engine_request?: MasterEngineRequest | null;
+  input_cursor?: string;
 }
 
 /** What the engine asked the master in a turn Ask agent to update started: the change set,
@@ -1615,6 +1616,24 @@ export interface MasterSessions {
 /** Lists the selected project's master sessions, the live one first, then newest activity first. */
 export function masterSessions(ticket: string): Promise<MasterSessions> {
   return invoke<MasterSessions>("desktop_master_sessions", { ticket });
+}
+
+/** One owner message behind a master turn, keyed by the turn's input cursor. */
+export interface OwnerLine {
+  input_cursor: string;
+  text: string;
+}
+
+/** The owner messages read for some turns of a session. */
+export interface MasterInputs {
+  ticket: string;
+  revision: string;
+  entries: OwnerLine[];
+}
+
+/** Reads the owner messages behind at most 32 turns of a session of the selected project. */
+export function masterInputs(ticket: string, sessionId: string, cursors: string[]): Promise<MasterInputs> {
+  return invoke<MasterInputs>("desktop_master_inputs", { ticket, sessionId, cursors });
 }
 
 /** Reads one page of any session of the selected project, live or parked. */
