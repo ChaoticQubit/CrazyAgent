@@ -40,6 +40,12 @@ use std::time::{Duration, Instant};
 
 const BRIEF_BYTES_MAX: usize = 6000;
 const RESULT_IN_MESSAGE_BYTES_MAX: usize = 3000;
+/// The most bytes one sub-agent results message holds, so neither the stored message nor
+/// the text typed into a live master, with its speaker tag, ever loses a line.
+const RESULTS_MESSAGE_BYTES_MAX: usize = super::MESSAGE_BYTES_MAX * 2 - 64;
+const RESULTS_TRAILER: &str = "\nTell the owner what was done.";
+const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
+const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
 const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
@@ -1825,17 +1831,8 @@ impl TeamRuntime {
             return Ok(());
         };
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
-        let speaker = if author == "owner" {
-            "[owner] "
-        } else if text.starts_with("[team] ") {
-            ""
-        } else {
-            "[team] "
-        };
-        let typed = bound_text(
-            &format!("{heard}{speaker}{text}"),
-            super::master::INPUT_TEXT_MAX,
-        );
+        let (typed, noted) = live_input(&heard, &author, &text);
+        let newest = newest.filter(|_| noted);
         let state = match super::master::master_input(
             &self.connection,
             host.as_ref(),
@@ -1950,7 +1947,6 @@ impl TeamRuntime {
         if pending > 0 {
             return Ok(());
         }
-        type ReadyTask = (i64, String, String, Option<String>, Option<String>);
         let live = crate::master_sessions::live_session(&self.connection, project)?;
         let ready: Vec<ReadyTask> = {
             let mut statement = self
@@ -1981,20 +1977,7 @@ impl TeamRuntime {
         if ready.is_empty() {
             return Ok(());
         }
-        let mut text = String::from("Results from your sub-agents:\n");
-        for (id, harness, status, result, problem) in &ready {
-            let label = super::TaskStatus::parse(status).map_or("Finished", TaskStatus::label);
-            text.push_str(&format!("\nTask {id} ({harness}): {label}"));
-            if let Some(problem) = problem {
-                text.push_str(&format!(" - {problem}"));
-            }
-            text.push('\n');
-            if let Some(result) = result {
-                text.push_str(&bound_text(result.trim(), RESULT_IN_MESSAGE_BYTES_MAX));
-                text.push('\n');
-            }
-        }
-        text.push_str("\nTell the owner what was done.");
+        let (text, held) = results_message(&ready);
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2009,7 +1992,7 @@ impl TeamRuntime {
         )?
         .is_ok()
         {
-            for (id, ..) in &ready {
+            for (id, ..) in &ready[..held] {
                 tx.execute("UPDATE team_tasks SET delivered=1 WHERE id=?1", [id])
                     .map_err(error)?;
             }
@@ -4235,6 +4218,69 @@ fn conversation_note(ended: &EndedTask) -> String {
     };
     assert!(note.len() <= NOTE_BYTES_MAX);
     note
+}
+
+type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+
+/// Writes one results message for the finished master tasks that fit, oldest first: each
+/// task's line, its problem and its result, every agent-written part with its brackets made
+/// plain so no line can pose as the owner's. Takes the ready tasks, at least one.
+/// Returns the text, at most `RESULTS_MESSAGE_BYTES_MAX` bytes, and how many tasks it holds.
+fn results_message(ready: &[ReadyTask]) -> (String, usize) {
+    assert!(!ready.is_empty());
+    let mut text = String::from("Results from your sub-agents:\n");
+    let mut held = 0;
+    for (id, harness, status, result, problem) in ready {
+        let label = super::TaskStatus::parse(status).map_or("Finished", TaskStatus::label);
+        let mut part = format!("\nTask {id} ({}): {label}", excerpt(harness, 64));
+        if let Some(problem) = problem {
+            part.push_str(" - ");
+            part.push_str(&super::events::plain_brackets(&bound_text(
+                problem.trim(),
+                RESULT_IN_MESSAGE_BYTES_MAX,
+            )));
+        }
+        part.push('\n');
+        if let Some(result) = result {
+            part.push_str(&super::events::plain_brackets(&bound_text(
+                result.trim(),
+                RESULT_IN_MESSAGE_BYTES_MAX,
+            )));
+            part.push('\n');
+        }
+        if held > 0 && text.len() + part.len() + RESULTS_TRAILER.len() > RESULTS_MESSAGE_BYTES_MAX {
+            break;
+        }
+        text.push_str(&part);
+        held += 1;
+    }
+    text.push_str(RESULTS_TRAILER);
+    assert!((1..=ready.len()).contains(&held));
+    assert!(text.len() <= RESULTS_MESSAGE_BYTES_MAX);
+    (text, held)
+}
+
+/// Writes what a live master is typed for one pending message: the owner's direct prompt
+/// notes when they fit beside the whole message, then the message under its speaker tag.
+/// Notes that do not fit wait for the next message instead of cutting the message's tail.
+/// Takes the notes, the message author and its text. Returns the text and whether the notes
+/// went with it.
+fn live_input(heard: &str, author: &str, text: &str) -> (String, bool) {
+    let speaker = if author == "owner" {
+        "[owner] "
+    } else if text.starts_with("[team] ") {
+        ""
+    } else {
+        "[team] "
+    };
+    let message = format!("{speaker}{text}");
+    if heard.len() + message.len() <= super::master::INPUT_TEXT_MAX {
+        return (format!("{heard}{message}"), true);
+    }
+    (
+        bound_text(&message, super::master::INPUT_TEXT_MAX),
+        heard.is_empty(),
+    )
 }
 
 /// Flattens every whitespace run to one space and cuts the text to `max` bytes, ending a

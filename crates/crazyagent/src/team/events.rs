@@ -1233,8 +1233,9 @@ const CLOSE_BRACKETS: [char; 16] = [
 
 /// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
 /// and tortoise shell ones among them, into parentheses, so agent text can never show a
-/// `[owner]` or `[team]` tag to the master. Takes the text. Returns it with them replaced.
-fn plain_brackets(text: &str) -> String {
+/// `[owner]` or `[team]` tag to the master; sub-agent results use it too. Takes the text.
+/// Returns it with them replaced.
+pub(super) fn plain_brackets(text: &str) -> String {
     text.chars()
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
