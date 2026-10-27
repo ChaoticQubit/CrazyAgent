@@ -707,7 +707,7 @@ impl ProjectChanges {
             help.push(("O", "Open in IDE"));
         }
         if self.diff.is_some() {
-            help.push(("v", "$EDITOR"));
+            help.push(("v", "Edit your copy"));
             help.push(("Esc", "Back to the list"));
         } else {
             help.extend([TABS, ("Esc", "Home")]);

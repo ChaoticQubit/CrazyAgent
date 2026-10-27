@@ -15,15 +15,25 @@ const GROUP_ITEMS_SHOWN: usize = 2;
 const GROUP_LINES_MAX: usize = 2;
 const QUIET_CODES: [&str; 2] = ["trusted_connection_unavailable", "not_ready"];
 
+/// One item the owner can act on in the banner: a failed resume by its agent, or a notice
+/// by its ledger kind and number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pick {
+    Run(i64),
+    Notice(ActionKind, i64),
+}
+
 /// One project's interrupted work above its tabs: what an engine stop cut short, what
-/// resumed, what failed, and the ledger notices that wait for the owner. Ctrl-R retries
-/// the first failed resume and Ctrl-D dismisses the first notice. Shows nothing once
+/// resumed, what failed, and the ledger notices that wait for the owner. Ctrl-N picks the
+/// next failed resume or notice; Ctrl-R retries the picked failed resume and Ctrl-D
+/// dismisses the picked notice, the first of each until one is picked. Shows nothing once
 /// every run resumed and every notice is dismissed. Sends one request at a time.
 pub(in crate::tui) struct ProjectRecovery {
     project: ProjectId,
     banner: Option<RecoveryBanner>,
     problem: Option<String>,
     note: Option<String>,
+    picked: Option<Pick>,
     queued: Option<RecoveryQuery>,
     sent: Option<RecoveryQuery>,
     read_ms: Option<i64>,
@@ -37,6 +47,7 @@ impl ProjectRecovery {
             banner: None,
             problem: None,
             note: None,
+            picked: None,
             queued: None,
             sent: None,
             read_ms: None,
@@ -109,22 +120,37 @@ impl ProjectRecovery {
         self.sent.is_some() || self.queued.is_some()
     }
 
-    /// Handles Ctrl-R (retry the first failed resume) and Ctrl-D (dismiss the first notice)
-    /// while the banner shows one. Input: the key. Output: whether the key was the banner's.
+    /// Handles Ctrl-R (retry the picked failed resume), Ctrl-D (dismiss the picked notice)
+    /// and, with more than one of them, Ctrl-N (pick the next failed resume or notice) while
+    /// the banner shows one. Input: the key. Output: whether the key was the banner's.
     pub(in crate::tui) fn key(&mut self, key: &Key) -> bool {
         let Some(banner) = self.banner.as_ref().filter(|banner| open(banner)) else {
             return false;
         };
         let action = match key {
-            Key::Ctrl('r') => first_failed(banner).map(|run| RecoveryQuery::Retry {
+            Key::Ctrl('r') => self.retried(banner).map(|run| RecoveryQuery::Retry {
                 project: self.project.clone(),
                 agent: run.agent,
             }),
-            Key::Ctrl('d') => banner.notices.first().map(|notice| RecoveryQuery::Dismiss {
+            Key::Ctrl('d') => self.dismissed(banner).map(|notice| RecoveryQuery::Dismiss {
                 project: self.project.clone(),
                 kind: notice.action_kind,
                 id: notice.id,
             }),
+            Key::Ctrl('n') => {
+                let picks = picks(banner);
+                if picks.len() < 2 {
+                    return false;
+                }
+                let at = self
+                    .picked
+                    .and_then(|picked| picks.iter().position(|pick| *pick == picked))
+                    .unwrap_or(0);
+                assert!(at < picks.len());
+                self.picked = Some(picks[(at + 1) % picks.len()]);
+                self.note = None;
+                return true;
+            }
             _ => return false,
         };
         if self.busy() {
@@ -134,6 +160,32 @@ impl ProjectRecovery {
             self.queued = Some(action);
         }
         true
+    }
+
+    /// The failed resume Ctrl-R retries: the picked one while it is still failed, else the
+    /// first. Input: the banner. Output: the run, or none when nothing failed.
+    fn retried<'a>(&self, banner: &'a RecoveryBanner) -> Option<&'a BannerRun> {
+        match self.picked {
+            Some(Pick::Run(agent)) => banner
+                .runs
+                .iter()
+                .find(|run| run.agent == agent && run.state == RunShown::Failed),
+            _ => None,
+        }
+        .or_else(|| first_failed(banner))
+    }
+
+    /// The notice Ctrl-D dismisses: the picked one while it is still listed, else the first.
+    /// Input: the banner. Output: the notice, or none when there is none.
+    fn dismissed<'a>(&self, banner: &'a RecoveryBanner) -> Option<&'a BannerNotice> {
+        match self.picked {
+            Some(Pick::Notice(kind, id)) => banner
+                .notices
+                .iter()
+                .find(|notice| notice.action_kind == kind && notice.id == id),
+            _ => None,
+        }
+        .or_else(|| banner.notices.first())
     }
 
     fn resuming(&self) -> bool {
@@ -234,11 +286,14 @@ impl ProjectRecovery {
             }
         }
         let mut keys = Vec::new();
-        if let Some(run) = first_failed(banner) {
+        if let Some(run) = self.retried(banner) {
             keys.push(format!("Ctrl-R Retry {}", run.label));
         }
-        if let Some(notice) = banner.notices.first() {
+        if let Some(notice) = self.dismissed(banner) {
             keys.push(format!("Ctrl-D Dismiss {}", notice_subject(notice)));
+        }
+        if picks(banner).len() > 1 {
+            keys.push("Ctrl-N Next item".to_owned());
         }
         if !keys.is_empty() {
             rows.push(Row::of(keys.join("   "), look.accent));
@@ -260,6 +315,23 @@ fn open(banner: &RecoveryBanner) -> bool {
 
 fn first_failed(banner: &RecoveryBanner) -> Option<&BannerRun> {
     banner.runs.iter().find(|run| run.state == RunShown::Failed)
+}
+
+/// Every item the owner can act on, in the order Ctrl-N walks them: the failed resumes,
+/// then the notices. Input: the banner. Output: the items.
+fn picks(banner: &RecoveryBanner) -> Vec<Pick> {
+    banner
+        .runs
+        .iter()
+        .filter(|run| run.state == RunShown::Failed)
+        .map(|run| Pick::Run(run.agent))
+        .chain(
+            banner
+                .notices
+                .iter()
+                .map(|notice| Pick::Notice(notice.action_kind, notice.id)),
+        )
+        .collect()
 }
 
 fn run_name(run: &BannerRun) -> String {

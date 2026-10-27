@@ -979,8 +979,12 @@ impl ProjectPage {
             && self.screen.review.is_none()
             && self.screen.pool_picker.is_none()
             && self.screen.confirm_delete.is_none()
+            && self.screen.confirm_stop.is_none()
+            && self.screen.adding.is_none()
+            && self.screen.folders.is_none()
             && self.screen.general.is_none()
             && !self.screen.confirm_remove
+            && !self.screen.changes.editing()
     }
 
     fn changes_have_keys(&self) -> bool {

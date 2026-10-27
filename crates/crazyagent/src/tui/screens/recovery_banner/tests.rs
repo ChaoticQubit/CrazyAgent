@@ -86,7 +86,7 @@ fn recovery_banner_lists_interrupted_resumed_failed() {
             "Failed       Sub-agent 3 (Codex): The account is unavailable.",
             "Check        Ada's start may or may not have run; check the agent first; change set set-1 landed while CrazyAgent",
             "             stopped",
-            "Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss Ada's start",
+            "Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss Ada's start   Ctrl-N Next item",
             "",
         ]
     );
@@ -113,6 +113,110 @@ fn recovery_banner_lists_interrupted_resumed_failed() {
         "a done choice reads the list again"
     );
     assert!(!recovery.key(&Key::Ctrl('x')));
+}
+
+/// The banner's key line. Input: the banner. Output: the line naming what each key acts on.
+fn keys(recovery: &ProjectRecovery) -> String {
+    text(recovery, 120)
+        .into_iter()
+        .find(|line| line.starts_with("Ctrl-"))
+        .expect("the banner shows its keys")
+}
+
+/// Answers the request in flight as done, then the read that follows with a banner.
+/// Inputs: the project banner and the banner the read returns.
+fn done_then_read(recovery: &mut ProjectRecovery, banner: RecoveryBanner) {
+    let sent = recovery.sent.clone().expect("a choice is in flight");
+    recovery.apply(&RecoveryEvent {
+        query: sent,
+        result: Ok(RecoveryReply::Done),
+    });
+    let read = recovery.next_query(NOW).expect("a done choice reads again");
+    assert_eq!(read, RecoveryQuery::Read { project: project() });
+    recovery.apply(&RecoveryEvent {
+        query: read,
+        result: Ok(RecoveryReply::Banner(banner)),
+    });
+}
+
+#[test]
+fn ctrl_n_picks_which_failed_resume_or_notice_the_keys_act_on() {
+    let failed = |notices: Vec<BannerNotice>| RecoveryBanner {
+        runs: vec![
+            run(
+                3,
+                "Sub-agent 3",
+                RunShown::Failed,
+                Some("The account is unavailable."),
+            ),
+            run(5, "Sub-agent 5", RunShown::Failed, Some("The harness stopped.")),
+        ],
+        notices,
+        more: 0,
+    };
+    let spawn = notice(ActionKind::AgentSpawn, 7, NoticeShown::Unknown);
+    let landed = notice(ActionKind::LandingAccept, 8, NoticeShown::Landed);
+    let mut recovery = shown(failed(vec![spawn.clone(), landed.clone()]));
+    assert_eq!(
+        keys(&recovery),
+        "Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss Ada's start   Ctrl-N Next item"
+    );
+
+    assert!(recovery.key(&Key::Ctrl('n')));
+    assert_eq!(
+        keys(&recovery),
+        "Ctrl-R Retry Sub-agent 5   Ctrl-D Dismiss Ada's start   Ctrl-N Next item"
+    );
+    assert!(recovery.key(&Key::Ctrl('r')));
+    assert_eq!(
+        recovery.next_query(NOW),
+        Some(RecoveryQuery::Retry {
+            project: project(),
+            agent: 5
+        }),
+        "the picked failed resume is retried, not the first"
+    );
+    done_then_read(&mut recovery, failed(vec![spawn.clone(), landed]));
+    assert!(
+        keys(&recovery).starts_with("Ctrl-R Retry Sub-agent 5"),
+        "the pick stays on a resume that failed again"
+    );
+
+    assert!(recovery.key(&Key::Ctrl('n')));
+    assert!(recovery.key(&Key::Ctrl('n')));
+    assert_eq!(
+        keys(&recovery),
+        "Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss change set set-1   Ctrl-N Next item"
+    );
+    assert!(recovery.key(&Key::Ctrl('d')));
+    assert_eq!(
+        recovery.next_query(NOW),
+        Some(RecoveryQuery::Dismiss {
+            project: project(),
+            kind: ActionKind::LandingAccept,
+            id: 8
+        }),
+        "the picked notice is dismissed, not the first"
+    );
+    done_then_read(&mut recovery, failed(vec![spawn]));
+    assert_eq!(
+        keys(&recovery),
+        "Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss Ada's start   Ctrl-N Next item",
+        "a pick that is gone falls back to the first of each"
+    );
+    assert!(recovery.key(&Key::Ctrl('n')));
+    assert!(keys(&recovery).starts_with("Ctrl-R Retry Sub-agent 5"));
+
+    let mut single = shown(RecoveryBanner {
+        runs: vec![run(3, "Sub-agent 3", RunShown::Failed, None)],
+        notices: vec![],
+        more: 0,
+    });
+    assert_eq!(keys(&single), "Ctrl-R Retry Sub-agent 3");
+    assert!(
+        !single.key(&Key::Ctrl('n')),
+        "with one item Ctrl-N is not the banner's"
+    );
 }
 
 #[test]

@@ -33,4 +33,4 @@
 
 
 
- Enter Open   a Add file   o Open in app   d Delete   m Save to memory   v $EDITOR   Shift-←→ Tabs   Esc Home    ? Help
+ Enter Open   a Add file   o Open in app   d Delete   m Save to memory   v Edit file   Shift-←→ Tabs   Esc Home  ? Help

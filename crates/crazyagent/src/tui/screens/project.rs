@@ -33,6 +33,9 @@ const NAME_BYTES_MAX: usize = 256;
 const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
+const STALE_READING: &str =
+    "This project changed since you opened the form. Your edit is kept while the saved one is read.";
+const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
 
 /// Names the six tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
@@ -332,7 +335,8 @@ impl Field {
 
 /// The General form on the Settings tab: the project's name, description,
 /// tech stack, platforms and research, saved as one engine edit.
-/// Holds the setup revision it started from, so a change made elsewhere is refused.
+/// Holds the setup revision it started from, so a change made elsewhere is refused; after
+/// such a refusal it keeps the draft and takes the revision of the setup read next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct GeneralEdit {
     pub name: TextInput,
@@ -344,6 +348,7 @@ pub(in crate::tui) struct GeneralEdit {
     pub revision: u64,
     pub busy: bool,
     pub error: Option<String>,
+    pub stale: bool,
 }
 
 impl GeneralEdit {
@@ -367,6 +372,7 @@ impl GeneralEdit {
             revision: setup.revision,
             busy: false,
             error: None,
+            stale: false,
         }
     }
 
@@ -568,6 +574,7 @@ pub(in crate::tui) struct ProjectScreen {
     context_read_ms: Option<i64>,
     read_paths_read_ms: Option<i64>,
     folders_version: u64,
+    folders_stale: bool,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -632,6 +639,7 @@ impl ProjectScreen {
             context_read_ms: None,
             read_paths_read_ms: None,
             folders_version: 0,
+            folders_stale: false,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -828,6 +836,11 @@ impl ProjectScreen {
         };
         match view {
             SetupView::Setup(Some(setup)) => {
+                if let Some(general) = self.general.as_mut().filter(|general| general.stale) {
+                    general.revision = setup.revision;
+                    general.stale = false;
+                    general.error = Some(format!("This project changed elsewhere. {KEEP_MINE}"));
+                }
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
                 self.setup_due = false;
@@ -849,6 +862,17 @@ impl ProjectScreen {
                 self.memories_read_ms = Some(self.now_ms);
             }
             SetupView::ReadPaths(saved) => {
+                if std::mem::take(&mut self.folders_stale)
+                    && let Some(folders) = self.folders.as_mut()
+                {
+                    self.folders_version = saved.version;
+                    let now = if saved.paths.is_empty() {
+                        "no extra folders".to_owned()
+                    } else {
+                        saved.paths.join(":")
+                    };
+                    folders.error = Some(format!("Saved now: {now}. {KEEP_MINE}"));
+                }
                 self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
@@ -879,14 +903,23 @@ impl ProjectScreen {
         self.assert_consistent();
     }
 
-    /// Puts a refused add, edit or remove back in its box with the reason.
+    /// Puts a refused add, edit or remove back in its box with the reason. A General or
+    /// read-only folders edit refused as stale keeps its draft and reads the saved value again.
     /// Takes the change query and the plain problem code.
     /// Returns true when an open box took the refusal.
     fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
         let SetupQuery::Change { action, .. } = query else {
             return false;
         };
-        let reason = Some(plain_problem(code));
+        let stale = matches!(
+            code,
+            crate::storage::versioned::STALE_CODE | "project_setup_revision"
+        );
+        let reason = Some(if stale {
+            STALE_READING.to_owned()
+        } else {
+            plain_problem(code)
+        });
         match action {
             SetupAction::AddDocuments { .. } if self.adding.is_some() => {
                 if let Some(adding) = self.adding.as_mut() {
@@ -900,13 +933,20 @@ impl ProjectScreen {
                     folders.busy = false;
                     folders.error = reason;
                 }
+                if stale {
+                    self.folders_stale = true;
+                    self.read_paths = None;
+                    self.read_paths_read_ms = None;
+                }
                 true
             }
             SetupAction::Update { .. } if self.general.is_some() => {
                 if let Some(general) = self.general.as_mut() {
                     general.busy = false;
                     general.error = reason;
+                    general.stale |= stale;
                 }
+                self.setup_due |= stale;
                 true
             }
             _ => false,
@@ -1942,6 +1982,7 @@ impl ProjectScreen {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
                         input.set(&saved.paths.join(":"));
                         self.folders_version = saved.version;
+                        self.folders_stale = false;
                         self.folders = Some(AddFile {
                             input,
                             busy: false,

@@ -1525,9 +1525,9 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     screen.key(key(KeyCode::Up));
     assert_eq!(screen.general.as_ref().unwrap().cursor, 11);
 
-    let update = SetupAction::Update {
+    let update_at = |expected_revision: u64| SetupAction::Update {
         project_id: project.clone(),
-        expected_revision: 4,
+        expected_revision,
         name: Some("Notes Pro".into()),
         setup: ProjectSetup {
             about: "Terminal-first notes.".into(),
@@ -1539,6 +1539,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
             documents: vec![],
         },
     };
+    let update = update_at(4);
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
         ProjectReply::Change(Box::new(update.clone()))
@@ -1559,22 +1560,47 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     );
     let general = screen.general.as_ref().unwrap();
     assert!(!general.busy);
+    assert!(general.stale);
     assert_eq!(
         general.error.as_deref(),
-        Some("This project changed since you opened the form. Open it again.")
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
     );
     assert_eq!(screen.problem, None);
+    let read = screen.next_query(20);
     assert_eq!(
-        screen.next_query(20),
+        read,
         Some(SetupQuery::Setup {
             project: project.clone()
         }),
         "an edit always re-reads the setup"
     );
+    let mut elsewhere = stored(&project);
+    elsewhere.name = "Notes Server".into();
+    elsewhere.revision = 5;
+    screen.apply(
+        &read.unwrap(),
+        Ok(SetupView::Setup(Some(Box::new(elsewhere)))),
+    );
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
+    assert_eq!(general.stack.value(), "rust, sqlite, tauri");
+    assert_eq!(general.revision, 5, "the form takes the saved revision");
+    assert!(!general.stale);
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "This project changed elsewhere. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    let drawn = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(drawn.contains("Enter saves your edit over it"), "{drawn}");
 
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Change(Box::new(update))
+        ProjectReply::Change(Box::new(update_at(5))),
+        "Enter keeps the owner's edit over the saved one"
     );
     screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
     assert!(screen.general.is_none());
@@ -1583,6 +1609,95 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     screen.key(key(KeyCode::Char('g')));
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.general.is_none());
+}
+
+#[test]
+fn a_general_save_takes_the_re_read_revision_only_after_a_stale_refusal() {
+    let project = ProjectId::new("general-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('g')));
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    screen.key(control_u);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("the edit is sent");
+    };
+    let SetupAction::Update {
+        expected_revision, ..
+    } = &*sent
+    else {
+        panic!("the General form sends a setup update");
+    };
+    assert_eq!(*expected_revision, 4);
+    let update = *sent;
+    let change = SetupQuery::Change {
+        action: update.clone(),
+        generation: 2,
+    };
+
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "project_about_invalid".into(),
+        })),
+    );
+    assert!(!screen.general.as_ref().unwrap().stale);
+    let read = screen.next_query(20).expect("an edit re-reads the setup");
+    let mut elsewhere = stored(&project);
+    elsewhere.revision = 5;
+    screen.apply(&read, Ok(SetupView::Setup(Some(Box::new(elsewhere)))));
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(
+        general.revision, 4,
+        "a refusal that is not stale keeps the revision the form opened at"
+    );
+    assert_eq!(
+        general.error.as_deref(),
+        Some("The description is too long or has characters that can't be saved.")
+    );
+
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("the edit is sent again");
+    };
+    assert_eq!(
+        *sent, update,
+        "the form still saves at the revision it opened at"
+    );
+    screen.apply(&change, Err("stale_revision".into()));
+    let general = screen.general.as_ref().unwrap();
+    assert!(general.stale, "a stale refusal by error is stale too");
+    assert!(!general.busy);
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.problem, None);
+    let read = screen
+        .next_query(30)
+        .expect("a stale refusal reads the setup again");
+    assert_eq!(
+        read,
+        SetupQuery::Setup {
+            project: project.clone()
+        }
+    );
+    let mut elsewhere = stored(&project);
+    elsewhere.revision = 6;
+    screen.apply(&read, Ok(SetupView::Setup(Some(Box::new(elsewhere)))));
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.revision, 6);
+    assert_eq!(general.name.value(), "Notes Pro");
+
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.general.is_none(), "Esc keeps the saved one");
+    screen.key(key(KeyCode::Char('g')));
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes CLI");
+    assert_eq!((general.revision, general.stale), (6, false));
+    assert_eq!(general.error, None);
 }
 
 #[test]
@@ -1993,6 +2108,143 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     );
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.folders.is_none());
+}
+
+/// Answers the screen's reads as unavailable until it asks for the read-only folders.
+/// Inputs: the screen and the time of the first read. Output: the folders read.
+fn next_folders_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::ReadPaths { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the read-only folders");
+}
+
+#[test]
+fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("folders-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_folders_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec!["/Users/owner/shared".into()],
+            version: 3,
+        })),
+    );
+    screen.key(key(KeyCode::Char('f')));
+    assert_eq!(screen.paste(":/Users/owner/notes"), ProjectReply::Handled);
+    let save_at = |version: u64| SetupAction::SetReadPaths {
+        project_id: project.clone(),
+        version,
+        paths: vec!["/Users/owner/shared".into(), "/Users/owner/notes".into()],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3)))
+    );
+    let change = SetupQuery::Change {
+        action: save_at(3),
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let folders = screen.folders.as_ref().unwrap();
+    assert!(!folders.busy);
+    assert_eq!(
+        folders.input.value(),
+        "/Users/owner/shared:/Users/owner/notes"
+    );
+    assert_eq!(
+        folders.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.read_paths, None);
+
+    let read = next_folders_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec!["/Users/owner/other".into()],
+            version: 4,
+        })),
+    );
+    let folders = screen.folders.as_ref().unwrap();
+    assert_eq!(
+        folders.input.value(),
+        "/Users/owner/shared:/Users/owner/notes",
+        "the typed list is kept"
+    );
+    assert_eq!(
+        folders.error.as_deref(),
+        Some(
+            "Saved now: /Users/owner/other. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's list over the saved one"
+    );
+
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(4),
+            generation: 3,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "read_path_not_absolute".into(),
+        })),
+    );
+    let read = next_folders_read(&mut screen, 60);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec![],
+            version: 5,
+        })),
+    );
+    assert_eq!(
+        screen.folders.as_ref().unwrap().error.as_deref(),
+        Some("Type the full path of each folder, starting with /."),
+        "a refusal that is not stale keeps the version the box opened at"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4)))
+    );
+
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(4),
+            generation: 4,
+        },
+        Err("stale_revision".into()),
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let read = next_folders_read(&mut screen, 80);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec![],
+            version: 6,
+        })),
+    );
+    assert!(screen.folders.is_none(), "Esc keeps the saved one");
+    screen.key(key(KeyCode::Char('f')));
+    let folders = screen.folders.as_ref().unwrap();
+    assert_eq!(folders.input.value(), "");
+    assert_eq!(folders.error, None, "a box opened afresh carries no stale note");
 }
 
 fn console_screen() -> ProjectScreen {
@@ -2471,7 +2723,7 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
     let look = Look::plain();
     screen.key(key(KeyCode::Esc));
     let drawn = project_screen(&mut screen, 120, 36, &look);
-    assert!(drawn.help.contains(&("v", "$EDITOR")), "{:?}", drawn.help);
+    assert!(drawn.help.contains(&("v", "Edit file")), "{:?}", drawn.help);
     assert!(
         drawn.help.contains(&("o", "Open in app")),
         "{:?}",
