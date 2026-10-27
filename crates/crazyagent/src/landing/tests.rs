@@ -1346,3 +1346,35 @@ fn a_second_open_change_set_for_one_worktree_is_refused_and_both_rows_stay() {
         Some(updated)
     );
 }
+
+fn all_pages(case: &Case, id: &ChangeSetId) -> Vec<ChangeDiff> {
+    let mut pages = vec![diff(&case.db, id, 0).unwrap()];
+    while let Some(next) = pages.last().and_then(|page| page.next) {
+        pages.push(diff(&case.db, id, next).unwrap());
+    }
+    pages
+}
+
+#[test]
+fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
+    let case = Case::new();
+    let big: String = (0..3000).map(|line| format!("line {line}\n")).collect();
+    case.edit("big.txt", &big);
+    case.edit("notes.txt", "a note\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let first = all_pages(&case, &id);
+    assert!(first.len() > 1, "a 3000-line file fit one page");
+    assert!(first.iter().all(|page| !page.truncated));
+    let text: String = first.iter().map(|page| page.text.as_str()).collect();
+    assert!(text.contains("+line 0\n") && text.contains("+line 2999\n"));
+    assert!(text.contains("+a note\n"));
+    let record = store::load(&case.db, &id).unwrap();
+    let (git, moved) = (case.repo.join(".git"), case.repo.join("git-moved"));
+    std::fs::rename(&git, &moved).unwrap();
+    assert!(diff::page(&record.repository, &record.head, &record.base, 0).is_err());
+    let again = all_pages(&case, &id);
+    let past = diff(&case.db, &id, 900).unwrap();
+    std::fs::rename(&moved, &git).unwrap();
+    assert_eq!(again, first);
+    assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
+}

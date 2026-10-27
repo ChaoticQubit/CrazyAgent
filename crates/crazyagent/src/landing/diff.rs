@@ -1,10 +1,43 @@
-use super::git::{OUTPUT_BYTES_MAX, Repo, failure};
+use super::git::{OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 const DIFF_TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
 const PAGE_BUDGET: usize = 24 * 1024;
+const RECENT_BYTES_MAX: usize = 16 * 1024 * 1024;
+const RECENT_MAX: usize = 32;
+
+/// A change's diff computed once: its files and plain patch text, each cut into pages,
+/// and whether git's output stopped at the byte bound.
+struct Computed {
+    files: Vec<ChangedFile>,
+    lists: Vec<Range<usize>>,
+    patch: String,
+    texts: Vec<Range<usize>>,
+    overflow: bool,
+}
+
+impl Computed {
+    fn bytes(&self) -> usize {
+        self.patch.len()
+            + self
+                .files
+                .iter()
+                .map(|file| file.path.len() + file.old_path.as_ref().map_or(0, String::len))
+                .sum::<usize>()
+    }
+}
+
+/// A change's repository with its base and head commits.
+type Key = (PathBuf, String, String);
+
+/// The diffs computed for recent pages, least recently read first, at most `RECENT_MAX`
+/// and `RECENT_BYTES_MAX` apart from the newest.
+static RECENT: LazyLock<Mutex<VecDeque<(Key, Arc<Computed>)>>> = LazyLock::new(Default::default);
 
 /// Line counts of a change: how many paths changed and how many lines were added and
 /// removed across them, binary files counting no lines.
@@ -202,11 +235,13 @@ fn escaped(c: char) -> usize {
 }
 
 /// Cuts plain text into pages that each fit `PAGE_BUDGET` once escaped, at a line end
-/// where one falls inside the page. Input: the text. Output: the pages, in order.
-fn text_pages(text: &str) -> Vec<&str> {
+/// where one falls inside the page. Input: the text. Output: the pages as byte ranges,
+/// in order.
+fn text_pages(text: &str) -> Vec<Range<usize>> {
     let mut pages = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
+    let mut start = 0;
+    while start < text.len() {
+        let rest = &text[start..];
         let mut size = 0;
         let mut end = rest.len();
         let mut line_end = None;
@@ -221,8 +256,8 @@ fn text_pages(text: &str) -> Vec<&str> {
             }
         }
         assert!(end > 0 && rest.is_char_boundary(end));
-        pages.push(&rest[..end]);
-        rest = &rest[end..];
+        pages.push(start..start + end);
+        start += end;
     }
     pages
 }
@@ -251,15 +286,10 @@ fn file_pages(files: &[ChangedFile]) -> Result<Vec<std::ops::Range<usize>>, Engi
     Ok(pages)
 }
 
-/// Builds one page of a change's diff: its files and patch text with no external diff
-/// or text conversion, bounded to `DIFF_TEXT_BYTES_MAX`, made plain. Inputs: the
-/// repository, the two commits and the page. Output: the page.
-pub(super) fn page(
-    repo: &Repo,
-    base: &str,
-    head: &str,
-    page: u16,
-) -> Result<ChangeDiff, EngineError> {
+/// Computes a change's diff: its files and patch text with no external diff or text
+/// conversion, bounded to `DIFF_TEXT_BYTES_MAX`, made plain and cut into pages.
+/// Inputs: the repository and the two commits. Output: the computed diff.
+fn compute(repo: &Repo, base: &str, head: &str) -> Result<Computed, EngineError> {
     let files = files(repo, base, head)?;
     let output = repo.exec(
         &[
@@ -283,21 +313,80 @@ pub(super) fn page(
     let patch = plain(&String::from_utf8_lossy(&output.stdout));
     let texts = text_pages(&patch);
     let lists = file_pages(&files)?;
-    let count = texts.len().max(lists.len()).max(1);
+    Ok(Computed {
+        files,
+        lists,
+        patch,
+        texts,
+        overflow: output.overflow,
+    })
+}
+
+/// Reads a change's diff from the recent ones, or computes it and keeps it when both
+/// sides are commit ids, whose diff never changes. Inputs: the repository and the two
+/// commits. Output: the computed diff.
+fn computed(repository: &Path, base: &str, head: &str) -> Result<Arc<Computed>, EngineError> {
+    let key = (repository.to_path_buf(), base.to_owned(), head.to_owned());
+    let lasting = is_object_id(base) && is_object_id(head);
+    if lasting {
+        let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = recent
+            .iter()
+            .position(|(seen, _)| *seen == key)
+            .and_then(|at| recent.remove(at))
+        {
+            let found = Arc::clone(&entry.1);
+            recent.push_back(entry);
+            return Ok(found);
+        }
+    }
+    let fresh = Arc::new(compute(&super::flow::shared(repository)?, base, head)?);
+    if lasting {
+        let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+        recent.retain(|(seen, _)| *seen != key);
+        recent.push_back((key, Arc::clone(&fresh)));
+        while recent.len() > 1
+            && (recent.len() > RECENT_MAX
+                || recent.iter().map(|(_, kept)| kept.bytes()).sum::<usize>() > RECENT_BYTES_MAX)
+        {
+            recent.pop_front();
+        }
+        assert!(recent.len() <= RECENT_MAX);
+        assert!(
+            recent
+                .back()
+                .is_some_and(|(_, kept)| Arc::ptr_eq(kept, &fresh))
+        );
+    }
+    Ok(fresh)
+}
+
+/// Builds one page of a change's diff from the change's diff computed once, so paging
+/// does not rerun git or rescan the patch. Inputs: the repository, the two commits and
+/// the page. Output: the page.
+pub(super) fn page(
+    repository: &Path,
+    base: &str,
+    head: &str,
+    page: u16,
+) -> Result<ChangeDiff, EngineError> {
+    let computed = computed(repository, base, head)?;
+    let count = computed.texts.len().max(computed.lists.len()).max(1);
     let index = usize::from(page);
-    let truncated = output.overflow || count > usize::from(u16::MAX);
+    let truncated = computed.overflow || count > usize::from(u16::MAX);
     let next = (index + 1 < count)
         .then(|| u16::try_from(index + 1).ok())
         .flatten();
-    let shown = lists
+    let shown = computed
+        .lists
         .get(index)
-        .map_or(&[][..], |range| &files[range.clone()]);
+        .map_or(&[][..], |range| &computed.files[range.clone()]);
     assert!(next.is_none_or(|next| next > page));
     Ok(ChangeDiff {
         files: shown.to_vec(),
-        text: texts
-            .get(index)
-            .map_or_else(String::new, |text| (*text).to_owned()),
+        text: computed.texts.get(index).map_or_else(String::new, |range| {
+            computed.patch[range.clone()].to_owned()
+        }),
         next,
         truncated,
     })
