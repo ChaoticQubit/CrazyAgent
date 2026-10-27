@@ -4188,6 +4188,7 @@ fn run_code(error: &RunError) -> &str {
         RunError::Jobs(_) => "research_jobs_failed",
         RunError::Busy => "account_busy",
         RunError::Uncertain(code) => code,
+        RunError::Setup(code) => code,
     }
 }
 
