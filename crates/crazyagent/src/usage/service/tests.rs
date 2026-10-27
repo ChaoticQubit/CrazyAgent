@@ -88,3 +88,53 @@ fn the_master_counts_as_its_projects_master_and_an_agent_without_an_account_is_u
         ]
     );
 }
+
+#[test]
+fn a_step_that_panics_ends_only_that_step_and_the_next_step_still_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch(
+        "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
+            connection TEXT, status TEXT, stopped_ms INTEGER);
+         INSERT INTO team_agents VALUES (4,'alpha','sub_agent','claude-code',NULL,'working',NULL);
+         CREATE TABLE held (n INTEGER);",
+    )
+    .unwrap();
+    append(
+        &team.join("agents/agent-4/home/projects/f/s4.jsonl"),
+        &assistant("m4", 9),
+    );
+    let mut usage = Usage::open(
+        &root.join("engine.db"),
+        &team,
+        Box::new(|| None),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let panicked = guarded(|| {
+        let tx = usage.db.unchecked_transaction().map_err(storage)?;
+        tx.execute("INSERT INTO held (n) VALUES (1)", [])
+            .map_err(storage)?;
+        panic!("a step broke an invariant");
+    });
+    assert_eq!(panicked.as_deref(), Some("usage_step_panicked"));
+    let held: i64 = db
+        .query_row("SELECT COUNT(*) FROM held", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(held, 0);
+    assert_eq!(guarded(|| usage.step(NOW)), None);
+    let counted: i64 = db
+        .query_row(
+            "SELECT SUM(input) FROM usage_tokens WHERE agent='team-4'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(counted, 9);
+    assert_eq!(
+        guarded(|| Err(failure("usage_unavailable"))).as_deref(),
+        Some("usage_unavailable")
+    );
+}
