@@ -38,6 +38,8 @@ fn limits_round_trip_through_the_engine_database_and_reopen() {
             plan: Some("max".into()),
             five_hour: window(42.5, 1_000_000),
             weekly: window(80.0, 9_000_000),
+            polled_five_hour: window(42.5, 1_000_000),
+            polled_weekly: window(80.0, 9_000_000),
             five_hour_reset_override_ms: None,
             weekly_reset_override_ms: None,
             source: Some(LimitSource::Poll),
@@ -77,6 +79,95 @@ fn a_partial_reading_keeps_the_other_window_plan_and_its_manual_reset() {
     assert_eq!(stored.source, Some(LimitSource::Poll));
     assert_eq!(stored.observed_ms, Some(200));
     assert_eq!(stored.checked_ms, Some(200));
+}
+
+#[test]
+fn a_transcript_reading_leaves_the_windows_the_last_poll_read() {
+    let (_root, db) = store();
+    let codex = account("codex-p");
+    let polled = Observation {
+        plan: None,
+        five_hour: window(100.0, 9_000_000),
+        weekly: window(30.0, 90_000_000),
+    };
+    record_observation(&db, &codex, &polled, LimitSource::Poll, 1_000).unwrap();
+    let stale = 1_000 + service::POLL_EVERY_MS;
+    let read = Observation {
+        plan: None,
+        five_hour: window(0.0, 8_000_000),
+        weekly: window(99.0, 80_000_000),
+    };
+    record_observation(&db, &codex, &read, LimitSource::Transcript, stale).unwrap();
+    let stored = limits(&db, &codex).unwrap().unwrap();
+    assert_eq!(stored.source, Some(LimitSource::Transcript));
+    assert_eq!(stored.five_hour, read.five_hour);
+    assert_eq!(stored.weekly, read.weekly);
+    assert_eq!(stored.polled_five_hour, polled.five_hour);
+    assert_eq!(stored.polled_weekly, polled.weekly);
+    assert_eq!(stored.polled_five_hour_at(stale), polled.five_hour);
+    set_reset_override(&db, &codex, WindowKind::FiveHour, Some(stale + 1)).unwrap();
+    let overridden = limits(&db, &codex).unwrap().unwrap();
+    assert_eq!(
+        overridden.polled_five_hour_at(stale + 1),
+        Some(LimitWindow {
+            used_percent: 0.0,
+            resets_at_ms: None,
+        })
+    );
+    let partial = Observation {
+        plan: None,
+        five_hour: window(40.0, 9_500_000),
+        weekly: None,
+    };
+    record_observation(&db, &codex, &partial, LimitSource::Poll, stale + 2).unwrap();
+    let after = limits(&db, &codex).unwrap().unwrap();
+    assert_eq!(after.polled_five_hour, partial.five_hour);
+    assert_eq!(after.five_hour, partial.five_hour);
+    assert_eq!(after.polled_weekly, polled.weekly);
+    assert_eq!(after.weekly, read.weekly);
+    assert_eq!(after.five_hour_reset_override_ms, None);
+}
+
+#[test]
+fn a_store_made_before_polled_copies_reads_and_gains_them_from_rows_a_poll_wrote() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE account_limits (account TEXT PRIMARY KEY, plan TEXT,
+            five_hour_percent REAL, five_hour_resets_ms INTEGER, weekly_percent REAL,
+            weekly_resets_ms INTEGER, five_hour_reset_override_ms INTEGER,
+            weekly_reset_override_ms INTEGER, source TEXT, observed_ms INTEGER,
+            checked_ms INTEGER, failure TEXT);
+         INSERT INTO account_limits (account,five_hour_percent,five_hour_resets_ms,
+            weekly_percent,weekly_resets_ms,source,observed_ms)
+         VALUES ('polled',100.0,9000,40.0,90000,'poll',10),
+                ('read',50.0,8000,60.0,80000,'transcript',20);",
+    )
+    .unwrap();
+    let expect = |db: &Connection| {
+        let polled = limits(db, &account("polled")).unwrap().unwrap();
+        assert_eq!(polled.five_hour, window(100.0, 9_000));
+        assert_eq!(polled.polled_five_hour, window(100.0, 9_000));
+        assert_eq!(polled.polled_weekly, window(40.0, 90_000));
+        let read = limits(db, &account("read")).unwrap().unwrap();
+        assert_eq!(read.five_hour, window(50.0, 8_000));
+        assert_eq!(read.polled_five_hour, None);
+        assert_eq!(read.polled_weekly, None);
+        assert_eq!(all_limits(db).unwrap(), vec![polled, read]);
+    };
+    expect(&db);
+    initialize(&db).unwrap();
+    expect(&db);
+    initialize(&db).unwrap();
+    let columns: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('account_limits')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 16);
+    expect(&db);
 }
 
 #[test]
