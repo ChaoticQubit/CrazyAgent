@@ -6,15 +6,13 @@ use crate::terminal::{
     TerminalRequest, TerminalStream,
 };
 #[cfg(unix)]
-use crate::terminal::{HostError, prompt_keys};
+use crate::terminal::{HostError, type_prompt};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
 #[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
-#[cfg(unix)]
-const PASTE_SETTLE: Duration = Duration::from_millis(200);
 #[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
 
@@ -243,25 +241,6 @@ async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<b
         .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
 }
 
-/// Types one owner prompt into an agent's app as one submission: a paste when the app turned
-/// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
-/// the text. Returns whether it was typed; blank or oversized text types nothing.
-#[cfg(unix)]
-fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
-    let bracketed = host.input_live(agent)?;
-    let Some(keys) = prompt_keys(text, bracketed) else {
-        return Ok(false);
-    };
-    for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        host.input(agent, chunk)?;
-    }
-    if bracketed {
-        std::thread::sleep(PASTE_SETTLE);
-    }
-    host.input(agent, b"\r")?;
-    Ok(true)
-}
-
 async fn open(
     stream: &mut UnixStream,
     packet: &[u8; 37],
@@ -326,6 +305,29 @@ async fn heard(database: PathBuf, agent: i64, text: String) {
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
         let _ = crate::team::direct::record(&connection, agent, &text, now);
         Some(())
+    })
+    .await;
+}
+
+/// Records keys the owner typed into a team agent's terminal as the owner typing signal
+/// that holds engine input to a live master back. Takes the engine database, the team agent
+/// id and the keys. A failure loses only the signal; the keys already reached the terminal.
+#[cfg(unix)]
+async fn typed(database: PathBuf, agent: i64, bytes: Vec<u8>) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .ok()?;
+        connection.busy_timeout(Duration::from_secs(5)).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())?;
+        crate::team::master::owner_typed(&connection, agent, &bytes, now).ok()
     })
     .await;
 }
@@ -405,8 +407,17 @@ async fn watch(
                     }
                 }
                 Some(request) => {
+                    let keys = match (&request, member, &database) {
+                        (TerminalRequest::Input { bytes }, Some(member), Some(database)) => {
+                            Some((database.clone(), member, bytes.clone()))
+                        }
+                        _ => None,
+                    };
                     if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
                         break "terminal_ended";
+                    }
+                    if let Some((database, member, bytes)) = keys {
+                        typed(database, member, bytes).await;
                     }
                 }
             },

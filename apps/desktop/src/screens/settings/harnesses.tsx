@@ -73,7 +73,7 @@ export function HarnessesView({ catalog, checkedAt, onCheck }: { catalog: Loaded
 
 /** Settings, Harnesses: reads the engine's harness catalog with detection. */
 export function Harnesses() {
-  const [catalog, reload] = useLoad(harnessCatalog);
+  const [catalog, reload] = useLoad(harnessCatalog, [], "harness-catalog");
   const [checkedAt, setCheckedAt] = useState<string>();
   return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)}
     onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;

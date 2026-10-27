@@ -29,7 +29,7 @@ FIELDS = (
     "slots", "cpu_millis", "memory_mib", "processes", "output_bytes",
     "wall_time_ms", "spend_microunits",
 )
-DEFAULTS = (1, 1000, 512, 4, 1048576, 120000, 0)
+DEFAULTS = (1, 1000, 512, 4, 2097152, 120000, 0)
 CAPACITY = (2, 2000, 1024, 8, 2097152, 120000, 10)
 ALLOWANCE = (2, 900, 384, 3, 524288, 45000, 1)
 F2 = b"\x1bOQ"
@@ -233,6 +233,7 @@ def seed(binary, root):
             assert reply["outcome"] == {"kind": "Applied"}, reply
         with terminal(binary, root / "engine.sock") as (child, master):
             conversation.body_contains(master, child, "Project owner conversation")
+            conversation.body_contains(master, child, "Project P 686")
             os.write(master, NOTE.encode() + b"\r")
             conversation.committed(master, child, database, "p", "message", 0, NOTE)
             os.write(master, b"\x02")

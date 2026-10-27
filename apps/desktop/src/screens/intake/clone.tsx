@@ -155,7 +155,7 @@ export function GitHubSignIn({ status, reloadStatus }: { status: GitHubStatus; r
  * account's repositories page by page and clones one into the projects folder. */
 export function CloneFromGitHub() {
   const session = useAppSession();
-  const [status, reloadStatus] = useLoad(loadGitHubStatus);
+  const [status, reloadStatus] = useLoad(loadGitHubStatus, [], "github-status");
   const [problem, setProblem] = useState("");
   const [repos, setRepos] = useState<Loaded<GitHubRepo[]>>({ kind: "loading" });
   const [next, setNext] = useState<number | null>(null);

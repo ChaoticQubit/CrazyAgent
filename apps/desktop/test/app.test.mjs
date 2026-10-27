@@ -143,6 +143,26 @@ test("Get set up stays until one account is ready and one pool exists; harnesses
   assert.equal(unknown.items[2].body, "See which coding agents are installed on this Mac.");
 });
 
+test("Get set up stays hidden until every read it uses has settled, so Home never flashes it", () => {
+  const harnesses = ok([harness("codex", "ready")]);
+  const loading = { kind: "loading" };
+  const failed = { kind: "error", message: "The engine is busy." };
+  assert.equal(setupSteps(loading, ok([]), harnesses, toolsReady).visible, false);
+  assert.equal(setupSteps(ok([]), loading, harnesses, toolsReady).visible, false);
+  assert.equal(setupSteps(ok([]), ok([]), loading, toolsReady).visible, false);
+  assert.equal(setupSteps(ok([]), ok([]), harnesses, loading).visible, false);
+  assert.equal(setupSteps(loading, loading, loading, loading).visible, false);
+  assert.equal(setupSteps(ok([]), ok([]), harnesses, toolsReady).visible, true);
+  assert.equal(setupSteps(failed, ok([]), harnesses, toolsReady).visible, true);
+  const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), harnesses, onRetryProjects: () => {} };
+  const waiting = renderToStaticMarkup(createElement(HomeView, { ...props, accounts: loading, pools: loading, tools: loading }));
+  assert.doesNotMatch(waiting, /Get set up|with-setup/);
+  assert.match(waiting, /Harbor/);
+  const settled = renderToStaticMarkup(createElement(HomeView, { ...props, accounts: ok([]), pools: ok([]), tools: toolsReady }));
+  assert.match(settled, /class="home with-setup"/);
+  assert.match(settled, /<h2>Get set up<\/h2>/);
+});
+
 test("Add an account is done only when an account is ready for agents, and says which; otherwise it links to Accounts", () => {
   const harnesses = ok([]);
   const claude = (id, status) => account({ id, name: "ChaoticQubit", provider: "claude", provider_name: "Claude", status });
@@ -203,7 +223,7 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
     const checking = item(tools);
     assert.equal(checking.done, false);
     assert.equal(checking.body, "Checking tmux, uv and graphify on this computer.");
-    assert.equal(steps(tools).visible, true);
+    assert.equal(steps(tools).visible, tools.kind !== "loading", "a read still loading hides the panel; tools still being checked keep it");
   }
   assert.equal(item(toolsRead({ state: "installing" }, found, missing)).body, "Setup is installing the tools. This updates when it finishes.");
   assert.equal(item(toolsRead(found, found, found, { running: true })).done, true);
@@ -224,14 +244,13 @@ test("Home keeps the Get set up panel with Set up tools after a skipped tools st
   assert.match(skipped, /graphify isn&#x27;t installed\./);
   assert.match(skipped, /<a class="btn small" href="#\/settings\/pack">Set up tools<\/a>/);
   const checking = renderToStaticMarkup(createElement(HomeView, { ...props, tools: { kind: "loading" } }));
-  assert.match(checking, /Checking tmux, uv and graphify on this computer\./);
-  assert.doesNotMatch(checking, /Couldn&#x27;t check|role="alert"/);
+  assert.doesNotMatch(checking, /Get set up|with-setup|Couldn&#x27;t check|role="alert"/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(HomeView, { ...props, tools: toolsReady })), /Get set up/);
 });
 
 test("Home shows the empty state, setup panel and Needs you from real reads only", () => {
   const accounts = ok(Array.from({ length: 5 }, (_, index) => account({ id: `a${index}`, name: `Claude ${index}`, status: "not_signed_in", status_label: "Not signed in" })));
-  const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, tools: { kind: "loading" }, onRetryProjects: () => {} }));
+  const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, tools: { kind: "not_ready" }, onRetryProjects: () => {} }));
   assert.match(markup, /<h2>No projects yet<\/h2>/);
   assert.match(markup, /Create a project and agents start the research you pick\./);
   assert.match(markup, /<h2>Get set up<\/h2>/);

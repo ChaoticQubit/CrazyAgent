@@ -90,6 +90,10 @@ pub enum Request {
     TeamGraph {
         project: ProjectId,
     },
+    ProjectFiles {
+        project: ProjectId,
+        query: String,
+    },
     TerminalAttach {
         agent: AgentId,
     },
@@ -142,6 +146,7 @@ impl std::fmt::Debug for Request {
             Self::Wire { .. } => "Wire",
             Self::Settings(_) => "Settings",
             Self::TeamGraph { .. } => "TeamGraph",
+            Self::ProjectFiles { .. } => "ProjectFiles",
             Self::TerminalAttach { .. } => "TerminalAttach",
             Self::TerminalInput { .. } => "TerminalInput",
             Self::TerminalResize { .. } => "TerminalResize",
@@ -205,6 +210,11 @@ pub enum Arrival {
     TeamGraph {
         project: ProjectId,
         result: Result<Box<TeamGraph>, String>,
+    },
+    ProjectFiles {
+        project: ProjectId,
+        query: String,
+        result: Result<Vec<String>, String>,
     },
     Terminal {
         agent: AgentId,

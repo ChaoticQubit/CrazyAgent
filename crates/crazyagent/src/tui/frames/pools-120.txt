@@ -33,4 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
- a New pool   Enter Edit   d Delete   Shift-←→ Sections   Esc Home                                               ? Help 
+ a New pool   Enter Edit   o Account choice   d Delete   Shift-←→ Sections   Esc Home                            ? Help 

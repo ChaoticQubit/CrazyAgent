@@ -2410,6 +2410,9 @@ fn owner_read(
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
         },
+        OwnerRead::TeamEvents => OwnerData::TeamEvents {
+            events: Box::new(crate::team::events::app(&tx)?),
+        },
         OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
             graph: Box::new(crate::team::graph(&crate::team::status(
                 &tx,
@@ -2462,6 +2465,17 @@ fn owner_read(
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
         OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
             schedule: crate::scheduling::load(&tx)?,
+        },
+        OwnerRead::AccountRanking => OwnerData::AccountRanking {
+            pools: crate::scheduling::ranking(
+                &tx,
+                config
+                    .settings
+                    .model_access
+                    .as_ref()
+                    .unwrap_or(&crate::config::ModelAccess::default()),
+                crate::team::now_ms(),
+            )?,
         },
         OwnerRead::Page {
             view,

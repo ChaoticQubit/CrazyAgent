@@ -36,7 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
-use crazyagent::scheduling::{Schedule, ScheduleChange};
+use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
@@ -590,6 +590,17 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_files(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    query: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_files(&id, &query).await
+}
+
+#[tauri::command]
 async fn desktop_set_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -688,6 +699,21 @@ async fn desktop_team_keep_warm(
 }
 
 #[tauri::command]
+async fn desktop_team_live_master(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_live_master(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_pause(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -719,6 +745,30 @@ async fn desktop_team_hand_off(
 }
 
 #[tauri::command]
+async fn desktop_team_events(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::team::events::AppEvents, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.team_events().await
+}
+
+#[tauri::command]
+async fn desktop_team_wake_rule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    target: crazyagent::team::events::RuleTarget,
+    rule: Option<crazyagent::team::events::WakeRule>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_wake_rule(target, rule, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_rename(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -732,6 +782,28 @@ async fn desktop_team_rename(
         .await?
         .team_rename(&id, agent, handle, generation)
         .await
+}
+
+#[tauri::command]
+async fn desktop_team_seen(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    upto: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.team_seen(&id, upto, generation).await
+}
+
+#[tauri::command]
+async fn desktop_team_attention(
+    window: WebviewWindow,
+    unseen: u32,
+    alert: bool,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    bridge::attention(&window, unseen, alert)
 }
 
 #[tauri::command]
@@ -1389,6 +1461,15 @@ async fn desktop_account_schedule(
 }
 
 #[tauri::command]
+async fn desktop_account_ranking(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<PoolRanking>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.account_ranking().await
+}
+
+#[tauri::command]
 async fn desktop_set_account_schedule(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1749,11 +1830,14 @@ async fn desktop_restart_agent(
 async fn desktop_usage_report(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    project_id: Option<String>,
     since_ms: Option<i64>,
     offset_minutes: i32,
 ) -> Result<UsageReport, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.usage_report(since_ms, offset_minutes)?;
+    let call = lock(&state)
+        .await?
+        .usage_report(project_id, since_ms, offset_minutes)?;
     call.await
 }
 
@@ -2154,16 +2238,22 @@ pub fn run() {
             desktop_add_project_documents,
             desktop_delete_project_context,
             desktop_project_read_paths,
+            desktop_project_files,
             desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
             desktop_team_rename,
             desktop_team_graph,
+            desktop_team_events,
+            desktop_team_wake_rule,
+            desktop_team_seen,
+            desktop_team_attention,
             desktop_terminal_attach,
             desktop_terminal_input,
             desktop_terminal_prompt,
@@ -2235,6 +2325,7 @@ pub fn run() {
             desktop_save_owner_profile,
             desktop_pool_summaries,
             desktop_account_schedule,
+            desktop_account_ranking,
             desktop_set_account_schedule,
             desktop_account_catalog,
             desktop_list_accounts,

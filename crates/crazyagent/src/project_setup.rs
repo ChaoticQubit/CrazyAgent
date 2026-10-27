@@ -962,6 +962,7 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 /// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
 /// Returns the pool's best signed-in harness, Codex before Claude Code, as master and as one
 /// research agent per toggle, tools on; Codex when the pool has no signed-in harness, never RCLI.
+/// Without research no harness is chosen, which means any harness up to `TEAM_AGENTS_MAX`.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
@@ -985,9 +986,13 @@ pub fn default_team(
     let team = TeamPlan {
         master,
         master_tools: true,
+        max_agents: if sub_harnesses.is_empty() {
+            TEAM_AGENTS_MAX
+        } else {
+            1 + agents
+        },
         sub_harnesses,
         min_agents: 1,
-        max_agents: 1 + agents,
     };
     assert!(team.validate().is_ok());
     team

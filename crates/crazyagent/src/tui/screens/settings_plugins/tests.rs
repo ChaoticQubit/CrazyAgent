@@ -7,6 +7,7 @@ use crate::tui::client::OwnerEvent;
 use crate::tui::screens::settings_accounts::tests::{check, dataset, list_ctx, render};
 use crate::tui::seam::Request;
 use crate::tui::shell::Shell;
+use crate::tui::theme::{Appearance, Colors, Depth, Theme};
 
 fn skill(name: &str, enabled: bool) -> SkillView {
     SkillView {
@@ -204,14 +205,26 @@ fn remove_asks_first() {
     let (skills, servers) = lists();
     let mut ctx = plugin_ctx(80, 24);
     let mut screen = Plugins::with(skills, servers);
-    screen.key(&Key::Enter, &mut ctx);
-    screen.key(&Key::Right, &mut ctx);
-    screen.key(&Key::Right, &mut ctx);
-    screen.key(&Key::Enter, &mut ctx);
+    assert!(
+        screen
+            .hints(&ctx)
+            .iter()
+            .any(|hint| hint.key == "d" && hint.label == "Remove")
+    );
+    screen.key(&Key::Char('d'), &mut ctx);
     assert_eq!(screen.modal(&ctx).unwrap().0.title, "Remove");
     screen.key(&Key::Enter, &mut ctx);
     assert!(screen.modal(&ctx).is_none(), "Cancel is focused first");
     assert_eq!(ctx.queued(), 0);
+    screen.key(&Key::Char('d'), &mut ctx);
+    screen.key(&Key::Right, &mut ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id }) if id == "skill-frontend-design")
+        ),
+        other => panic!("a remove expected, got {other:?}"),
+    }
 }
 
 #[test]
@@ -727,21 +740,34 @@ fn detail(enabled: bool) -> crate::skills::SkillDetail {
     }
 }
 
+fn read(detail: crate::skills::SkillDetail) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::SkillDetail(Ok(detail)),
+    ))))
+}
+
 #[test]
-fn a_skill_details_first_action_opens_its_full_skill_md() {
+fn enter_on_a_skill_opens_its_page_and_skill_names_share_the_accent() {
     let (skills, servers) = lists();
     let mut ctx = plugin_ctx(80, 24);
+    ctx.theme = Theme::new(Depth::TrueColor, Colors::Dark, Appearance::Dark);
+    assert!(ctx.theme.accent.fg.is_some());
     let mut screen = Plugins::with(skills, servers);
-    screen.key(&Key::Enter, &mut ctx);
-    let (modal, _) = screen.modal(&ctx).unwrap();
-    assert!(
-        texts(&modal.body).last().unwrap().contains("Read SKILL.md"),
-        "{:?}",
-        texts(&modal.body)
-    );
+    let body = screen.body(76, &ctx);
+    let fg = |name: &str| {
+        body.iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.trim() == name)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+            .style
+            .fg
+    };
+    assert_eq!(fg("tiger-style"), ctx.theme.accent.fg);
+    assert_eq!(fg("linear-method"), ctx.theme.accent.fg);
+    assert_ne!(fg("figma"), ctx.theme.accent.fg, "server names stay plain");
     let flow = screen.key(&Key::Enter, &mut ctx);
     let Flow::Replace(mut next) = flow else {
-        panic!("the skill page replaces the list");
+        panic!("Enter on a skill opens its page in place of the list");
     };
     assert_eq!(
         next.crumbs(),
@@ -752,10 +778,73 @@ fn a_skill_details_first_action_opens_its_full_skill_md() {
     next.shown(&mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::SkillDetail { ref id } if id == "skill-frontend-design")
+            matches!(*job, SettingsJob::SkillDetail { ref id, project: None } if id == "skill-frontend-design")
         ),
         other => panic!("a skill read expected, got {other:?}"),
     }
+}
+
+#[test]
+fn a_project_opens_the_skill_page_for_its_own_switch_and_goes_back_to_its_settings() {
+    let tidepool = crate::protocol::ProjectId::new("tidepool").unwrap();
+    let mut ctx = plugin_ctx(80, 24);
+    let mut page = SkillDetailPage::new("skill-frontend-design".into(), "frontend-design".into())
+        .for_project(tidepool, "Tidepool".into());
+    assert_eq!(page.crumbs(), ["Tidepool", "Settings", "frontend-design"]);
+    assert!(matches!(
+        page.place(),
+        Some(Place::Project {
+            tab: ProjectTab::Settings,
+            ..
+        })
+    ));
+    let asked = |ctx: &mut Ctx| match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::SkillDetail { ref id, project: Some(ref project) } if id == "skill-frontend-design" && project.as_str() == "tidepool"),
+            "{job:?}"
+        ),
+        other => panic!("a project skill read expected, got {other:?}"),
+    };
+    page.shown(&mut ctx);
+    asked(&mut ctx);
+    let mut here = detail(true);
+    here.skill.on_here = Some(true);
+    page.arrive(&read(here), &mut ctx);
+    assert!(texts(&page.lines(70, &ctx))[0].starts_with("frontend-design  On for this project"));
+    page.key(&Key::Char(' '), &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::Plugin(PluginChange::Switch { ref project, ref id, on: false }) if project.as_str() == "tidepool" && id == "skill-frontend-design")
+        ),
+        other => panic!("a project switch expected, got {other:?}"),
+    }
+    page.arrive(&changed(None), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "frontend-design is off for this project."
+    );
+    asked(&mut ctx);
+    let mut off = detail(false);
+    off.skill.on_here = Some(true);
+    page.arrive(&read(off), &mut ctx);
+    assert!(texts(&page.lines(70, &ctx))[0].starts_with("frontend-design  Off for this project"));
+    page.key(&Key::Char(' '), &mut ctx);
+    assert_eq!(
+        ctx.queued(),
+        0,
+        "a skill off in Settings is not switched here"
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "frontend-design is off in Settings for every project. Turn it on there first."
+    );
+    let Flow::Replace(back) = page.key(&Key::Esc, &mut ctx) else {
+        panic!("Esc goes back to the project");
+    };
+    assert!(matches!(
+        back.place(),
+        Some(Place::Project { ref id, tab: ProjectTab::Settings, .. }) if id.as_str() == "tidepool"
+    ));
 }
 
 #[test]
@@ -802,10 +891,7 @@ fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
         matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::SkillDetail { .. })),
         "the skill reloads"
     );
-    let read = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
-        SettingsEvent::SkillDetail(Ok(detail(false))),
-    ))));
-    page.arrive(&read, &mut ctx);
+    page.arrive(&read(detail(false)), &mut ctx);
     assert!(texts(&page.lines(70, &ctx))[0].starts_with("frontend-design  Off"));
     let Flow::Replace(back) = page.key(&Key::Esc, &mut ctx) else {
         panic!("Esc goes back to the list");
