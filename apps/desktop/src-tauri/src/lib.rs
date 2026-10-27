@@ -44,7 +44,7 @@ use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tokio::sync::MutexGuard;
+use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
 pub struct NativeState(BridgeQueue);
@@ -61,8 +61,12 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     Ok(())
 }
 
-async fn lock(state: &NativeState) -> Result<MutexGuard<'_, NativeBridge>, BridgeError> {
+async fn lock(state: &NativeState) -> Result<RwLockWriteGuard<'_, NativeBridge>, BridgeError> {
     state.0.enter().await
+}
+
+async fn read(state: &NativeState) -> Result<RwLockReadGuard<'_, NativeBridge>, BridgeError> {
+    state.0.read().await
 }
 
 const SOCKET_OVERRIDE: &str = "CRAZYAGENT_DESKTOP_SOCKET";
@@ -231,16 +235,20 @@ async fn desktop_status(
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
-    Ok(lock(&state).await?.status())
+    Ok(read(&state).await?.status())
 }
 
 #[tauri::command]
 async fn desktop_harness_catalog(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    check: Option<bool>,
 ) -> Result<Vec<HarnessEntry>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.harness_catalog().await
+    read(&state)
+        .await?
+        .harness_catalog(check.unwrap_or(false))
+        .await
 }
 
 #[tauri::command]
@@ -355,7 +363,7 @@ async fn desktop_project_setup(
     id: String,
 ) -> Result<Option<StoredSetup>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.project_setup(&id).await
+    read(&state).await?.project_setup(&id).await
 }
 
 #[tauri::command]
@@ -365,7 +373,7 @@ async fn desktop_research_jobs(
     id: String,
 ) -> Result<bridge::project_setup::ResearchJobs, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.research_jobs(&id).await
+    read(&state).await?.research_jobs(&id).await
 }
 
 #[tauri::command]
@@ -375,7 +383,7 @@ async fn desktop_project_context(
     id: String,
 ) -> Result<ProjectContext, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.project_context(&id).await
+    read(&state).await?.project_context(&id).await
 }
 
 #[tauri::command]
@@ -432,7 +440,7 @@ async fn desktop_project_memories(
     after: Option<String>,
 ) -> Result<Vec<MemoryItem>, BridgeError> {
     main_window(&window)?;
-    lock(&state)
+    read(&state)
         .await?
         .project_memories(&id, after.as_deref())
         .await
@@ -637,7 +645,7 @@ async fn desktop_team_status(
     id: String,
 ) -> Result<TeamStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.team_status(&id).await
+    read(&state).await?.team_status(&id).await
 }
 
 #[tauri::command]
@@ -813,7 +821,7 @@ async fn desktop_team_graph(
     id: String,
 ) -> Result<TeamGraph, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.team_graph(&id).await
+    read(&state).await?.team_graph(&id).await
 }
 
 #[tauri::command]
@@ -963,7 +971,7 @@ async fn desktop_projects_home(
     state: State<'_, NativeState>,
 ) -> Result<ProjectsHome, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.projects_home().await
+    read(&state).await?.projects_home().await
 }
 
 #[tauri::command]
@@ -1000,7 +1008,7 @@ async fn desktop_found_projects(
     state: State<'_, NativeState>,
 ) -> Result<Vec<FoundProject>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.found_projects().await
+    read(&state).await?.found_projects().await
 }
 
 #[tauri::command]
@@ -1132,7 +1140,7 @@ async fn desktop_setup_status(
     state: State<'_, NativeState>,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.setup_status().await
+    read(&state).await?.setup_status().await
 }
 
 #[tauri::command]
@@ -1519,7 +1527,7 @@ async fn desktop_pool_summaries(
     state: State<'_, NativeState>,
 ) -> Result<Vec<PoolSummary>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.pool_summaries().await
+    read(&state).await?.pool_summaries().await
 }
 
 #[tauri::command]
@@ -1571,7 +1579,7 @@ async fn desktop_list_accounts(
     limit: u16,
 ) -> Result<AccountPage, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.list_accounts(after, limit).await
+    read(&state).await?.list_accounts(after, limit).await
 }
 
 #[tauri::command]
@@ -1633,7 +1641,7 @@ async fn desktop_plugin_skills(
     project_id: Option<String>,
 ) -> Result<Vec<SkillView>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.plugin_skills(project_id).await
+    read(&state).await?.plugin_skills(project_id).await
 }
 
 #[tauri::command]
@@ -1643,7 +1651,7 @@ async fn desktop_plugin_servers(
     project_id: Option<String>,
 ) -> Result<Vec<ServerView>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.plugin_servers(project_id).await
+    read(&state).await?.plugin_servers(project_id).await
 }
 
 #[tauri::command]

@@ -15,6 +15,9 @@ test("every plain bridge command is routed with its own arguments and native one
   assert.deepEqual(setup.args.map((arg) => arg.name), ["id", "setup", "name", "revision", "generation"]);
   assert.match(setup.body, /^lock\(state\)\s*\.await\?\s*\.update_project_setup\(&id, setup, name, revision, generation\)\s*\.await$/);
   assert.equal(planned.get("desktop_connect").route.body, "let mut bridge = lock(state).await?; bridge.connect().await");
+  const catalog = planned.get("desktop_harness_catalog").route;
+  assert.deepEqual(catalog.args.map((arg) => arg.name), ["check"]);
+  assert.match(catalog.body, /^read\(state\)\s*\.await\?\s*\.harness_catalog\(check\.unwrap_or\(false\)\)\s*\.await$/, "plain reads share the bridge as the app's do");
   for (const native of ["desktop_pick_folder", "desktop_terminal_attach", "desktop_install_update", "desktop_engine_versions"]) {
     assert.ok(planned.get(native).skip, `${native} needs the native app`);
   }

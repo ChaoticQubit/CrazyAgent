@@ -61,12 +61,12 @@ impl NativeBridge {
     /// Reads the plain pool list with each member's status.
     /// Input: none. Output: every pool's name, counts such as "2 ChatGPT, 1 Claude"
     /// and member status words.
-    pub async fn pool_summaries(&mut self) -> Result<Vec<PoolSummary>, BridgeError> {
+    pub async fn pool_summaries(&self) -> Result<Vec<PoolSummary>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
         let pools = self
-            .controller()?
+            .reader()?
             .pool_summaries()
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))?;

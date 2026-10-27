@@ -1,6 +1,6 @@
 #[rustfmt::skip]
 pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json::Value) -> super::Routed {
-    use super::{lock, parse, routed, Routed};
+    use super::{lock, parse, read, routed, Routed};
     use crazyagent_desktop::bridge::BridgeError;
     use crazyagent::accounts::AccountDraft;
     use crazyagent::config::ModelAccessEdit;
@@ -21,11 +21,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_status" => {
-            let result: Result<_, BridgeError> = async { Ok(lock(state).await?.status()) }.await;
+            let result: Result<_, BridgeError> = async { Ok(read(state).await?.status()) }.await;
             routed(result)
         }
         "desktop_harness_catalog" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.harness_catalog().await }.await;
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                check: Option<bool>,
+            }
+            let Args { check } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state) .await? .harness_catalog(check.unwrap_or(false)) .await }.await;
             routed(result)
         }
         "desktop_baselines" => {
@@ -154,7 +163,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.project_setup(&id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.project_setup(&id).await }.await;
             routed(result)
         }
         "desktop_research_jobs" => {
@@ -167,7 +176,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.research_jobs(&id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.research_jobs(&id).await }.await;
             routed(result)
         }
         "desktop_project_context" => {
@@ -180,7 +189,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.project_context(&id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.project_context(&id).await }.await;
             routed(result)
         }
         "desktop_project_context_item" => {
@@ -240,7 +249,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .project_memories(&id, after.as_deref()) .await }.await;
+            let result: Result<_, BridgeError> = async { read(state) .await? .project_memories(&id, after.as_deref()) .await }.await;
             routed(result)
         }
         "desktop_review_memory" => {
@@ -460,7 +469,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.team_status(&id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.team_status(&id).await }.await;
             routed(result)
         }
         "desktop_team_message" => {
@@ -630,7 +639,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.team_graph(&id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.team_graph(&id).await }.await;
             routed(result)
         }
         "desktop_update_project_setup" => {
@@ -709,7 +718,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_projects_home" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.projects_home().await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.projects_home().await }.await;
             routed(result)
         }
         "desktop_set_projects_home" => {
@@ -741,7 +750,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_found_projects" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.found_projects().await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.found_projects().await }.await;
             routed(result)
         }
         "desktop_folder_size" => {
@@ -856,7 +865,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_setup_status" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.setup_status().await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.setup_status().await }.await;
             routed(result)
         }
         "desktop_run_setup" => {
@@ -1203,7 +1212,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_pool_summaries" => {
-            let result: Result<_, BridgeError> = async { lock(state).await?.pool_summaries().await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.pool_summaries().await }.await;
             routed(result)
         }
         "desktop_account_schedule" => {
@@ -1243,7 +1252,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.list_accounts(after, limit).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.list_accounts(after, limit).await }.await;
             routed(result)
         }
         "desktop_add_account" => {
@@ -1323,7 +1332,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.plugin_skills(project_id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.plugin_skills(project_id).await }.await;
             routed(result)
         }
         "desktop_plugin_servers" => {
@@ -1336,7 +1345,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.plugin_servers(project_id).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.plugin_servers(project_id).await }.await;
             routed(result)
         }
         "desktop_add_skill" => {

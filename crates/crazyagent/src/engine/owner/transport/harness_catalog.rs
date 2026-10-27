@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::{HarnessEntry, Search, catalog};
+use crate::harnesses::{HarnessEntry, Search};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -12,6 +12,7 @@ struct Envelope {
 #[serde(rename_all = "snake_case")]
 enum Action {
     List,
+    Check,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -22,13 +23,14 @@ enum WireReply {
 }
 
 impl OwnerClient {
-    /// Lists every harness the engine knows with its status on this machine.
-    /// Input: none beyond the attached owner capability. Output: catalog entries in
-    /// owner priority order, or the engine's plain refusal code.
-    pub async fn harness_catalog(&self) -> Result<Vec<HarnessEntry>, EngineError> {
+    /// Lists every harness the engine knows with its status on this machine, from the
+    /// engine's last probe unless `check` asks it to look again now. Input: whether to probe now,
+    /// beyond the attached owner capability. Output: catalog entries in owner priority order, or
+    /// the engine's plain refusal code.
+    pub async fn harness_catalog(&self, check: bool) -> Result<Vec<HarnessEntry>, EngineError> {
         tokio::time::timeout(self.timeout, async {
             let frame = encode_frame(&Envelope {
-                harness_catalog: Action::List,
+                harness_catalog: if check { Action::Check } else { Action::List },
             })
             .map_err(|_| failure("harness_catalog_request_bounds"))?;
             self.root.verify()?;
@@ -89,7 +91,7 @@ pub(super) async fn serve(
         return Err(failure("harness_catalog_request_bounds"));
     }
     let Envelope {
-        harness_catalog: Action::List,
+        harness_catalog: action,
     } = serde_json::from_slice(bytes).map_err(|_| failure("harness_catalog_request_invalid"))?;
     let runtime = OwnerRuntimeHandle {
         engine: engine.clone(),
@@ -106,7 +108,9 @@ pub(super) async fn serve(
             search = search.with_registered(id, path.to_path_buf());
         }
     }
-    let entries = tokio::task::spawn_blocking(move || catalog(&search))
+    let entries = engine
+        .harness_probe
+        .entries(search, matches!(action, Action::Check))
         .await
         .map_err(|_| failure("harness_catalog_unavailable"))?;
     assert!(!entries.is_empty());

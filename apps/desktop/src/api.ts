@@ -652,10 +652,11 @@ export interface HarnessEntry {
   aliases: string[];
 }
 
-/** Reads the harness catalog with what is installed on this Mac. Output: harnesses in
+/** Reads the harness catalog with what is installed on this Mac, from the engine's last look
+ * unless `check` asks it to look again now. Input: whether to look again. Output: harnesses in
  * catalog priority order. */
-export function harnessCatalog(): Promise<Result<HarnessEntry[]>> {
-  return call<HarnessEntry[]>("desktop_harness_catalog");
+export function harnessCatalog(check = false): Promise<Result<HarnessEntry[]>> {
+  return call<HarnessEntry[]>("desktop_harness_catalog", { check });
 }
 
 /** Reads skills for global settings (no project) or one project's settings, where global

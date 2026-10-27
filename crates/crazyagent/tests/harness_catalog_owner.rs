@@ -32,7 +32,10 @@ async fn tui_and_desktop_owners_list_the_engine_harness_catalog() {
     let task = tokio::spawn(server.run(stopped));
     for kind in [OwnerClientKind::Tui, OwnerClientKind::Desktop] {
         let client = OwnerClient::attach(root.path(), kind, Duration::from_secs(5)).unwrap();
-        let entries = client.harness_catalog().await.unwrap();
+        let entries = client
+            .harness_catalog(kind == OwnerClientKind::Desktop)
+            .await
+            .unwrap();
         let ids: Vec<_> = entries.iter().map(|entry| entry.id.as_str()).collect();
         let expected: Vec<_> = specs().iter().map(|spec| spec.id).collect();
         assert_eq!(ids, expected);
@@ -82,7 +85,7 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
         OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
             .await
             .unwrap();
-    let entries = controller.harness_catalog().await;
+    let entries = controller.harness_catalog(false).await;
     tokio::time::timeout(Duration::from_secs(5), service.shutdown())
         .await
         .unwrap()

@@ -28,16 +28,18 @@ pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {
     /// Lists the engine's harness catalog for the master, sub-agent and research pickers.
-    /// Input: none; uses the attached owner connection. Output: entries in owner
-    /// priority order, or `controller_disconnected` without a connection.
+    /// Input: whether the engine should probe now instead of answering from its last probe;
+    /// uses the attached owner connection. Output: entries in owner priority order, or
+    /// `controller_disconnected` without a connection.
     pub async fn harness_catalog(
         &self,
+        check: bool,
     ) -> Result<Vec<crate::harnesses::HarnessEntry>, EngineError> {
         let client = self
             .client
             .as_ref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?;
-        client.harness_catalog().await
+        client.harness_catalog(check).await
     }
 }
 
@@ -232,6 +234,12 @@ impl OwnerController {
         self.view.as_ref()
     }
 
+    /// Takes the view a `reader` copy ended its read with, as if that read had run here.
+    /// Takes the copy's view. Returns nothing; pending intent and the connection are unchanged.
+    pub fn adopt_view(&mut self, view: ControllerView) {
+        self.view = Some(view);
+    }
+
     /// Borrows the one unresolved exact native mutation.
     /// Takes the controller without sending or editing intent.
     /// Returns absence only when no mutation is retained.
@@ -254,6 +262,22 @@ impl OwnerController {
         self.client
             .clone()
             .ok_or_else(|| EngineError("controller_disconnected".into()))
+    }
+
+    /// Builds a controller for reads on the same connection, starting from this controller's
+    /// view with nothing pending, so plain reads can run side by side while this controller
+    /// stays untouched until it takes the copy's view with `adopt_view`. Takes the controller.
+    /// Returns the copy, or `controller_disconnected`.
+    pub fn reader(&self) -> Result<Self, EngineError> {
+        Ok(Self {
+            client: Some(self.shared_client()?),
+            identity: self.identity.clone(),
+            view: self.view.clone(),
+            pending: None,
+            pending_account_profile: None,
+            kind: self.kind,
+            timeout: self.timeout,
+        })
     }
 
     /// Disconnects this client without stopping the shared engine.

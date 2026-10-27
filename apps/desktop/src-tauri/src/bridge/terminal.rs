@@ -109,10 +109,10 @@ impl NativeBridge {
     /// Reads one project's team graph: master, harness groups, agents and task edges.
     /// Takes the project id.
     /// Returns the bounded graph of that project or a plain failure code.
-    pub async fn team_graph(&mut self, id: &str) -> Result<TeamGraph, BridgeError> {
+    pub async fn team_graph(&self, id: &str) -> Result<TeamGraph, BridgeError> {
         let project_id = ProjectId::new(id).map_err(|_| failure("invalid_project"))?;
         let graph = self
-            .controller()?
+            .reader()?
             .team_graph(project_id.clone())
             .await
             .map_err(|e| read_failure(&e.0))?;

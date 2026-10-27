@@ -45,3 +45,26 @@ test("a second mount of a cached read shows its last value at once, then the new
   assert.deepEqual(seen.fourth, ["d:second"], "the failed refresh left the last good value cached");
   assert.deepEqual(seen.uncached, ["e:loading"], "a read without a cache key still starts loading");
 });
+
+test("screens mounting together share one cached read in flight; a reload reads fresh; uncached reads stay separate", async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    const mounted = await evaluate(`Fixture.mountTwins("twin")`);
+    const answered = await evaluate(`Fixture.answerTwin(0, "one")`);
+    const reloaded = await evaluate(`Fixture.reloadTwin("x")`);
+    const fresh = await evaluate(`Fixture.answerTwin(1, "two")`);
+    const busy = await evaluate(`Fixture.mountTwins("busy")`);
+    const reloadedBusy = await evaluate(`Fixture.reloadTwin("x")`);
+    const newer = await evaluate(`Fixture.answerTwin(1, "newer")`);
+    const uncached = await evaluate(`Fixture.mountTwins()`);
+    return { mounted, answered, reloaded, fresh, busy, reloadedBusy, newer, uncached };
+  });
+  assert.deepEqual(seen.mounted, { reads: 1, x: "loading", y: "loading" }, "two mounts of one cached read ask the engine once");
+  assert.deepEqual(seen.answered, { reads: 1, x: "one", y: "one" }, "both screens get the shared reply");
+  assert.equal(seen.reloaded.reads, 2, "a reload asks the engine again");
+  assert.deepEqual(seen.fresh, { reads: 2, x: "two", y: "one" });
+  assert.equal(seen.busy.reads, 1);
+  assert.equal(seen.reloadedBusy.reads, 2, "a reload never joins a read that started before it");
+  assert.equal(seen.newer.x, "newer");
+  assert.equal(seen.uncached.reads, 2, "reads without a cache key are not shared");
+});

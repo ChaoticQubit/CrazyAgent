@@ -11,7 +11,7 @@ use tauri::ipc::Origin;
 async fn flow(root: &Path) -> Result<(), String> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert_eq!(
-        bridge.harness_catalog().await.unwrap_err().code,
+        bridge.harness_catalog(false).await.unwrap_err().code,
         "not_connected"
     );
     assert!(
@@ -22,9 +22,17 @@ async fn flow(root: &Path) -> Result<(), String> {
             .connected
     );
     let entries = bridge
-        .harness_catalog()
+        .harness_catalog(false)
         .await
         .map_err(|e| e.code.to_owned())?;
+    assert_eq!(
+        bridge
+            .harness_catalog(true)
+            .await
+            .map_err(|e| e.code.to_owned())?,
+        entries,
+        "an owner's check sees the same harnesses"
+    );
     let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
     let expected: Vec<&str> = specs().iter().map(|spec| spec.id).collect();
     assert_eq!(ids, expected);

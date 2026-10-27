@@ -136,9 +136,9 @@ impl NativeBridge {
     /// Reads the stored setup of one project.
     /// Takes the project id.
     /// Returns the setup, or none for a project created without one.
-    pub async fn project_setup(&mut self, id: &str) -> Result<Option<StoredSetup>, BridgeError> {
+    pub async fn project_setup(&self, id: &str) -> Result<Option<StoredSetup>, BridgeError> {
         let setup = self
-            .controller()?
+            .reader()?
             .project_setup(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -148,9 +148,9 @@ impl NativeBridge {
     /// Lists a project's research jobs with plain status labels.
     /// Takes the project id.
     /// Returns the jobs in creation order.
-    pub async fn research_jobs(&mut self, id: &str) -> Result<ResearchJobs, BridgeError> {
+    pub async fn research_jobs(&self, id: &str) -> Result<ResearchJobs, BridgeError> {
         let jobs = self
-            .controller()?
+            .reader()?
             .research_jobs(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -163,9 +163,9 @@ impl NativeBridge {
     /// Lists the brief, documents and research reports of a project folder.
     /// Takes the project id.
     /// Returns the folder path and its context items.
-    pub async fn project_context(&mut self, id: &str) -> Result<ProjectContext, BridgeError> {
+    pub async fn project_context(&self, id: &str) -> Result<ProjectContext, BridgeError> {
         let context = self
-            .controller()?
+            .reader()?
             .project_context(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -249,7 +249,7 @@ impl NativeBridge {
     /// Takes the project id and the last memory id already shown, if any.
     /// Returns at most one engine batch with plain status names.
     pub async fn project_memories(
-        &mut self,
+        &self,
         id: &str,
         after: Option<&str>,
     ) -> Result<Vec<MemoryItem>, BridgeError> {
@@ -258,7 +258,7 @@ impl NativeBridge {
             .map(|after| RequestId::new(after).map_err(|_| failure("invalid_memory")))
             .transpose()?;
         let entries = self
-            .controller()?
+            .reader()?
             .project_memories(project_id, after)
             .await
             .map_err(|e| read_failure(&e.0))?;
