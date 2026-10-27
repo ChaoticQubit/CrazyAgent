@@ -1818,6 +1818,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .save_process_text(project_id, text, version, opened)?; call.await }.await;
             routed(result)
         }
+        "desktop_ide_state" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                retry: bool,
+            }
+            let Args { retry } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.ide_state(retry)?; call.await }.await;
+            routed(result)
+        }
         "desktop_import_global_instructions" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.import_global_instructions()?; call.await }.await;
             routed(result)
