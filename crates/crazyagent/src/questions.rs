@@ -665,7 +665,7 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
     ensure(&tx)?;
     let rows: Vec<(String, i64)> = {
         let mut statement = tx
-            .prepare_cached(
+            .prepare(
                 "SELECT project, COUNT(*) FROM owner_questions WHERE status='pending'
                  GROUP BY project ORDER BY project LIMIT ?1",
             )
@@ -912,7 +912,7 @@ fn prune(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
     assert!(keep >= KEPT_PER_PROJECT_MAX - PENDING_PER_PROJECT_MAX);
     let dropped: Vec<i64> = {
         let mut statement = tx
-            .prepare_cached(
+            .prepare(
                 "SELECT id FROM owner_questions WHERE project=?1 AND status!='pending'
                  ORDER BY id DESC LIMIT -1 OFFSET ?2",
             )
@@ -981,7 +981,7 @@ fn select(
         Option<i64>,
     );
     let rows: Vec<Row> = {
-        let mut statement = tx.prepare_cached(query).map_err(unavailable)?;
+        let mut statement = tx.prepare(query).map_err(unavailable)?;
         statement
             .query_map(parameters, |row| {
                 Ok((
