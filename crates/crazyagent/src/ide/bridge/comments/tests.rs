@@ -77,6 +77,16 @@ fn ide_comment_reaches_the_agent_as_one_message_with_file_and_line() {
         text,
         "On Ada (@builder)'s changes \"Say one in Italian\", README line 1:\n\nSay uno once.\nKeep the rest."
     );
+    let turns: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM team_owner_turns", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        turns, 0,
+        "an IDE comment quotes agent text, so it is never an owner turn"
+    );
     for path in ["Cargo.toml", "../repo/README", ".git/config", "OLD"] {
         assert_eq!(
             comment(&case.db, &case.project, &set.id, path, 1, "Here")

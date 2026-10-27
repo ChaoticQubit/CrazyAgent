@@ -470,8 +470,9 @@ pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, Eng
 
 /// Records an answer the owner gave in a team master's chat. The master names the owner's
 /// message and may record only a question it asked itself; the answer is that message's
-/// text, never the master's own words, and the message must be an owner message of the
-/// question's project sent after the question was asked. Nothing is delivered back, since
+/// text, never the master's own words, and the message must be an owner turn the engine
+/// recorded when the owner typed it in the question's project after the question was
+/// asked, never a settle notice or a framed IDE comment. Nothing is delivered back, since
 /// the master read it. Inputs: the engine connection, the master's project, its team agent
 /// id, the question id, the version the master read and the owner message id. Output:
 /// Settled, Stale, or `questions_not_found` (also for a question it did not ask),
@@ -495,8 +496,9 @@ pub fn record_from_chat(
     }
     let turn: Option<String> = tx
         .query_row(
-            "SELECT m.text FROM team_messages m, owner_questions q
-             WHERE m.id=?1 AND m.project=?2 AND m.author='owner' AND q.id=?3 AND m.id>q.turn_floor",
+            "SELECT m.text FROM team_messages m, team_owner_turns t, owner_questions q
+             WHERE m.id=?1 AND m.project=?2 AND m.author='owner' AND t.message=m.id
+             AND t.project=m.project AND q.id=?3 AND m.id>q.turn_floor",
             params![owner_turn, project.as_str(), column(question.id)],
             |row| row.get(0),
         )
@@ -733,7 +735,7 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
     ensure(&tx)?;
     let rows: Vec<(String, i64)> = {
         let mut statement = tx
-            .prepare_cached(
+            .prepare(
                 "SELECT project, COUNT(*) FROM owner_questions WHERE status='pending'
                  GROUP BY project ORDER BY project LIMIT ?1",
             )
@@ -1008,7 +1010,7 @@ fn prune(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
     assert!(keep >= KEPT_PER_PROJECT_MAX - PENDING_PER_PROJECT_MAX);
     let dropped: Vec<i64> = {
         let mut statement = tx
-            .prepare_cached(
+            .prepare(
                 "SELECT id FROM owner_questions WHERE project=?1 AND status!='pending'
                  ORDER BY id DESC LIMIT -1 OFFSET ?2",
             )
@@ -1077,7 +1079,7 @@ fn select(
         Option<i64>,
     );
     let rows: Vec<Row> = {
-        let mut statement = tx.prepare_cached(query).map_err(unavailable)?;
+        let mut statement = tx.prepare(query).map_err(unavailable)?;
         statement
             .query_map(parameters, |row| {
                 Ok((
