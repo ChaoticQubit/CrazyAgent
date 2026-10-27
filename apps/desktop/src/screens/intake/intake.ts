@@ -139,6 +139,22 @@ export function devicePolling(device: { code: { expires_s: number }; started: nu
   return device !== null && !signedIn && !deviceLine(device.code.expires_s, device.started, nowMs).expired;
 }
 
+/** Lets one call of an async read run at a time: a call made while one is still running reads
+ * nothing and gives null, so a double click can't read the same page twice. A failed read
+ * frees the guard like a finished one. Input: the read. Output: the guarded read. */
+export function oneAtATime<A extends unknown[], T>(read: (...args: A) => Promise<T>): (...args: A) => Promise<T | null> {
+  let running = false;
+  return async (...args: A) => {
+    if (running) return null;
+    running = true;
+    try {
+      return await read(...args);
+    } finally {
+      running = false;
+    }
+  };
+}
+
 /** Allows only a GitHub page over https as the device sign-in page.
  * Input: the page the engine sent. Output: the same address, or null when it is anything else. */
 export function gitHubPage(uri: string): string | null {
