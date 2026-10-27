@@ -1,5 +1,5 @@
 use super::new_project::{
-    ANY_HARNESS_NOTE, Control, HarnessState, PLATFORM_ORDER, Phase, PickFor, Step, Wizard,
+    Control, HarnessState, PLATFORM_ORDER, Phase, PickFor, Step, Wizard, any_harness_note,
     harness_name, size_label, team_summary,
 };
 use super::new_project_input::{TextInput, cells, char_cells};
@@ -1129,7 +1129,7 @@ fn team(draw: &mut Draw) {
         &look,
     ));
     if team.sub_harnesses.is_empty() {
-        draw.note(ANY_HARNESS_NOTE, look.muted);
+        draw.note(any_harness_note(team), look.muted);
     }
     if let Some((text, _)) = draw.note_for(Control::Team) {
         draw.note(&text, look.error);

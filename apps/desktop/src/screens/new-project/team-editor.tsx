@@ -3,7 +3,7 @@ import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
 import type { PoolChoice, ResearchKind } from "../../api-projects";
 import {
-  ANY_HARNESS_NOTE, HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, agentTotalText, harnessChoices, harnessLabel,
+  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, addHarnessRow, agentTotalText, anyHarnessNote, harnessChoices, harnessLabel,
   poolFits, poolName, removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamNotes,
 } from "./wizard";
 import type { TeamDraft } from "./wizard";
@@ -106,7 +106,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
           </div>;
         })}
       </div>}
-      {team.sub_harnesses.length === 0 && <p className="pj-help">{ANY_HARNESS_NOTE}</p>}
+      {team.sub_harnesses.length === 0 && <p className="pj-help">{anyHarnessNote(team)}</p>}
       <div><button type="button" className="btn" disabled={team.sub_harnesses.length >= SUB_HARNESSES_MAX} onClick={() => onChange(addHarnessRow(team, harnesses))}>+ Add harness</button></div>
     </section>
     <section className="pj-stack-s" aria-labelledby={`${prefix}-range`}>

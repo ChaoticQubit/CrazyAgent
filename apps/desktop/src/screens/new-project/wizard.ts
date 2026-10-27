@@ -173,9 +173,17 @@ export function totalAgents(team: TeamPlan): number {
 /** What an empty agent list means (DEC-096 addendum 3): any harness runs, up to the team maximum. */
 export const ANY_HARNESS_NOTE = "Any harness, no limit. Add a harness to limit which ones run and how many.";
 
-/** Names the agents an empty agent list allows. Input: the team. Output: for example "Any harness, up to 64 agents". */
+/** Says what an empty agent list runs: any harness, or no sub-agent under a team maximum of one.
+ * Input: the team. Output: the note shown where the agent rows would be. */
+export function anyHarnessNote(team: TeamPlan): string {
+  return team.max_agents <= 1 ? "No sub-agents run with a team maximum of 1. Raise the maximum to let any harness run." : ANY_HARNESS_NOTE;
+}
+
+/** Names the sub-agents an empty agent list allows: the team maximum less the master.
+ * Input: the team. Output: for example "Any harness, up to 63 agents". */
 export function anyHarnessTotal(team: TeamPlan): string {
-  return `Any harness, up to ${team.max_agents} ${team.max_agents === 1 ? "agent" : "agents"}`;
+  const subs = Math.max(0, team.max_agents - 1);
+  return subs === 0 ? "No sub-agents (team maximum is 1)" : `Any harness, up to ${subs} ${subs === 1 ? "agent" : "agents"}`;
 }
 
 /** Says how many agents the team has: up to the team maximum when no harness is chosen,
