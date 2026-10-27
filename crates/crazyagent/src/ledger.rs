@@ -65,10 +65,13 @@ pub trait Check {
     fn check(&self, action: &Action) -> Resolution;
 }
 
-/// The pending actions of one kind after a check: those to complete now, and those
-/// whose outcome is unknown, which are shown to the owner and never replayed.
+/// The pending actions of one kind after a check, every one of them already finished:
+/// those whose effect happened, those that never started, which the caller completes as
+/// new actions, and those whose outcome is unknown, which are shown to the owner and
+/// never replayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    pub done: Vec<Action>,
     pub not_started: Vec<Action>,
     pub unknown: Vec<Action>,
 }
@@ -111,8 +114,15 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     }
     let db = Connection::open(runtime.join("engine.db")).map_err(storage)?;
     db.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
-    store::initialize(&db)?;
+    initialize(&db)?;
     Ok(db)
+}
+
+/// Adds the ledger table to a connection of the engine database when missing, for a
+/// component that already holds one. Input: the connection. Output: done, or
+/// `ledger_unavailable`.
+pub fn initialize(db: &Connection) -> Result<(), EngineError> {
+    store::initialize(db)
 }
 
 /// Records the intent of an action before its effect runs. Inputs: the ledger, the kind,
@@ -150,26 +160,40 @@ pub fn pending(db: &Connection, kind: ActionKind) -> Result<Vec<Action>, EngineE
     store::pending(db, kind)
 }
 
-/// Checks every pending action of one kind against real state: a Done action is
-/// finished, a NotStarted one is returned to be completed, and an Unknown one stays
-/// pending, so each start shows it to the owner again until `finish(Outcome::Unknown)`
-/// closes it; it is never returned for replay. Inputs: the ledger, the kind and the
-/// check. Output: the actions to complete and the unknown ones.
+/// The pending action of one kind and key, if any. Inputs: the ledger, the kind and the
+/// key. Output: the action, or none when nothing of that key is pending.
+pub fn pending_key(
+    db: &Connection,
+    kind: ActionKind,
+    key: &str,
+) -> Result<Option<Action>, EngineError> {
+    store::pending_key(db, kind, key)
+}
+
+/// Checks every pending action of one kind against real state and finishes each, so none
+/// stays open: Done as done, NotStarted as failed, since its effect never happened and the
+/// caller completes it as a new action, and Unknown as unknown, never offered for replay.
+/// Call it inside the transaction that acts on the lists, so a crash cannot finish an
+/// action and lose what the owner must be shown. Inputs: the ledger, the kind and the
+/// check. Output: the finished actions by resolution.
 pub fn resolve(
     db: &Connection,
     kind: ActionKind,
     check: &impl Check,
 ) -> Result<Resolved, EngineError> {
     let mut resolved = Resolved {
+        done: Vec::new(),
         not_started: Vec::new(),
         unknown: Vec::new(),
     };
     for action in pending(db, kind)? {
-        match check.check(&action) {
-            Resolution::Done => finish(db, action.id, Outcome::Done)?,
-            Resolution::NotStarted => resolved.not_started.push(action),
-            Resolution::Unknown => resolved.unknown.push(action),
-        }
+        let (outcome, list) = match check.check(&action) {
+            Resolution::Done => (Outcome::Done, &mut resolved.done),
+            Resolution::NotStarted => (Outcome::Failed, &mut resolved.not_started),
+            Resolution::Unknown => (Outcome::Unknown, &mut resolved.unknown),
+        };
+        finish(db, action.id, outcome)?;
+        list.push(action);
     }
     Ok(resolved)
 }

@@ -135,7 +135,7 @@ fn second_pending_action_for_one_key_is_refused() {
 }
 
 #[test]
-fn resolution_finishes_done_returns_not_started_and_never_returns_unknown_for_replay() {
+fn resolution_finishes_every_pending_action_and_never_offers_an_unknown_one_for_replay() {
     let (root, db) = store();
     let folder = root.path().join("work");
     std::fs::create_dir(&folder).unwrap();
@@ -171,36 +171,97 @@ fn resolution_finishes_done_returns_not_started_and_never_returns_unknown_for_re
     )
     .unwrap();
     std::fs::write(&applied, "").unwrap();
+    drop(db);
 
+    let db = open(root.path()).unwrap();
     let resolved = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
+    assert_eq!(ids(&resolved.done), vec![done]);
     assert_eq!(ids(&resolved.not_started), vec![not_started]);
     assert_eq!(ids(&resolved.unknown), vec![unknown]);
     assert_eq!(stored_outcome(&db, done).as_deref(), Some("done"));
     assert_eq!(
-        stored_outcome(&db, unknown),
-        None,
-        "an unknown action stays open until the owner closes it"
+        stored_outcome(&db, not_started).as_deref(),
+        Some("failed"),
+        "an action that never started is closed; the caller completes it as a new one"
     );
+    assert_eq!(
+        stored_outcome(&db, unknown).as_deref(),
+        Some("unknown"),
+        "an unknown action is closed, never left open"
+    );
+    assert!(pending(&db, ActionKind::WorktreeCreate).unwrap().is_empty());
     assert_eq!(
         stored_outcome(&db, other_kind),
         None,
         "another kind is not checked"
     );
+
+    let again = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
+    assert!(
+        again.done.is_empty() && again.not_started.is_empty() && again.unknown.is_empty(),
+        "a second start finds nothing to replay"
+    );
+    let redo = begin(
+        &db,
+        ActionKind::WorktreeCreate,
+        "alpha/w-2",
+        absent.to_str().unwrap(),
+    )
+    .unwrap();
+    assert_ne!(redo, not_started);
+    assert_eq!(
+        pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-2")
+            .unwrap()
+            .map(|action| action.id),
+        Some(redo)
+    );
+    assert_eq!(
+        pending_key(&db, ActionKind::WorktreeCreate, "alpha/w-3").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn only_a_second_pending_action_reads_as_pending_and_any_kind_is_stored() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE ledger_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK(kind IN ('message')),
+            action_key TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            started_ms INTEGER NOT NULL,
+            outcome TEXT CHECK(outcome IN ('done','failed','unknown')),
+            finished_ms INTEGER,
+            CHECK((outcome IS NULL) = (finished_ms IS NULL))
+        );",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    assert_eq!(
+        code(begin(&db, ActionKind::LandingAccept, "alpha/c-1", "{}")),
+        "ledger_unavailable",
+        "a table that refuses the kind is a storage failure, not a pending action"
+    );
+    begin(&db, ActionKind::Message, "alpha/m-1", "{}").unwrap();
+    assert_eq!(
+        code(begin(&db, ActionKind::Message, "alpha/m-1", "{}")),
+        "ledger_pending"
+    );
     drop(db);
 
-    let db = open(root.path()).unwrap();
-    let again = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
-    assert_eq!(ids(&again.not_started), vec![not_started]);
-    assert_eq!(
-        ids(&again.unknown),
-        vec![unknown],
-        "an unknown action is surfaced again, never offered for replay"
-    );
-
-    finish(&db, unknown, Outcome::Unknown).unwrap();
-    let closed = resolve(&db, ActionKind::WorktreeCreate, &FileCheck).unwrap();
-    assert!(closed.unknown.is_empty());
-    assert_eq!(stored_outcome(&db, unknown).as_deref(), Some("unknown"));
+    let (_fresh_root, fresh) = store();
+    for kind in [
+        ActionKind::Message,
+        ActionKind::Dispatch,
+        ActionKind::WorktreeCreate,
+        ActionKind::AgentSpawn,
+        ActionKind::LandingAccept,
+    ] {
+        begin(&fresh, kind, "alpha/one", "{}").unwrap();
+        assert_eq!(pending(&fresh, kind).unwrap().len(), 1);
+    }
 }
 
 #[test]

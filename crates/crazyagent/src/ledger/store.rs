@@ -1,11 +1,10 @@
 use super::{Action, ActionId, ActionKind, FINISHED_KEPT, Outcome, PENDING_MAX, failure, storage};
 use crate::engine::EngineError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ledger_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL CHECK(kind IN
-        ('message','dispatch','worktree_create','agent_spawn','landing_accept')),
+    kind TEXT NOT NULL,
     action_key TEXT NOT NULL,
     payload TEXT NOT NULL,
     started_ms INTEGER NOT NULL,
@@ -39,8 +38,10 @@ pub(super) fn insert(
              WHERE (SELECT COUNT(*) FROM ledger_actions WHERE outcome IS NULL) < ?5",
             params![kind.name(), key, payload, now_ms, PENDING_MAX as i64],
         )
-        .map_err(|error| match error.sqlite_error_code() {
-            Some(rusqlite::ErrorCode::ConstraintViolation) => failure("ledger_pending"),
+        .map_err(|error| match error.sqlite_error() {
+            Some(code) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => {
+                failure("ledger_pending")
+            }
             _ => storage(error),
         })?;
     if added == 0 {
@@ -109,4 +110,29 @@ pub(super) fn pending(db: &Connection, kind: ActionKind) -> Result<Vec<Action>, 
         })
         .map_err(storage)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(storage)
+}
+
+/// Reads the pending action of one kind and key. Inputs: the ledger, the kind and the
+/// key. Output: the action or none, or `ledger_unavailable`.
+pub(super) fn pending_key(
+    db: &Connection,
+    kind: ActionKind,
+    key: &str,
+) -> Result<Option<Action>, EngineError> {
+    db.query_row(
+        "SELECT id,payload,started_ms FROM ledger_actions
+         WHERE kind=?1 AND action_key=?2 AND outcome IS NULL",
+        params![kind.name(), key],
+        |row| {
+            Ok(Action {
+                id: ActionId(row.get(0)?),
+                kind,
+                key: key.to_owned(),
+                payload: row.get(1)?,
+                started_ms: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(storage)
 }

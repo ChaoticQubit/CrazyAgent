@@ -400,6 +400,7 @@ impl TeamRuntime {
                  COMMIT;"
             ))
             .map_err(error)?;
+        delivery::settle(&connection)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
@@ -1521,12 +1522,15 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
+            return Ok(());
+        }
         if team_tool {
             tool::clear(&self.tool_record(id));
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
-            return Ok(());
+            return delivery::ended(&self.connection, Some(Busy::Message(message)), false);
         }
         worker.busy = Some(Busy::Message(message));
         self.connection
@@ -1834,6 +1838,9 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let (typed, noted) = live_input(&heard, &author, &text);
         let newest = newest.filter(|_| noted);
+        if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
+            return Ok(());
+        }
         let state = match super::master::master_input(
             &self.connection,
             host.as_ref(),
@@ -1851,6 +1858,11 @@ impl TeamRuntime {
                 params![message, state],
             )
             .map_err(error)?;
+        delivery::ended(
+            &self.connection,
+            Some(Busy::Message(message)),
+            state == "answered",
+        )?;
         if state == "failed" {
             return self.note(
                 project,
@@ -2147,6 +2159,9 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            if !delivery::intend(&self.connection, Busy::Task(task), agent, &prompt, None)? {
+                continue;
+            }
             let prompt = format!(
                 "You are a sub-agent of the project \"{}\". Work only inside {}.\nYour task: {}\nWhen you finish, reply with a short summary of what you did.",
                 stored.name,
@@ -2157,6 +2172,7 @@ impl TeamRuntime {
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
+                delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
                 continue;
             }
             worker.busy = Some(Busy::Task(task));
@@ -3011,6 +3027,7 @@ impl TeamRuntime {
                     }
                     None => {}
                 }
+                delivery::ended(&self.connection, busy, true)?;
                 self.land(id, &project, busy, end)?;
                 if !matches!(
                     end,
@@ -3110,6 +3127,7 @@ impl TeamRuntime {
                     )?,
                     None => {}
                 }
+                delivery::ended(&self.connection, worker.busy, true)?;
                 self.land(id, &worker.project, worker.busy, TurnEnd::Closed)?;
                 if worker.live
                     && let Some(started) = worker.turn_started.take()
@@ -4685,6 +4703,9 @@ pub fn agents(
         .collect::<Result<_, _>>()
         .map_err(error)
 }
+
+#[path = "runtime/delivery.rs"]
+mod delivery;
 
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
