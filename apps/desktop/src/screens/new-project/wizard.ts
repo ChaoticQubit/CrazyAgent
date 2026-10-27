@@ -170,6 +170,14 @@ export function totalAgents(team: TeamPlan): number {
   return 1 + team.sub_harnesses.reduce((sum, slot) => sum + slot.agents, 0);
 }
 
+/** Tells whether the team already has `TEAM_AGENTS_MAX` agents, counting the master, so no
+ * agent or row can be added. Input: the team. Output: true when full. */
+export function teamFull(team: TeamPlan): boolean {
+  return totalAgents(team) >= TEAM_AGENTS_MAX;
+}
+
+export const TEAM_FULL_NOTE = `A team runs at most ${TEAM_AGENTS_MAX} agents, counting the master. Lower a count or remove a harness to add another.`;
+
 /** What an empty agent list means (DEC-096 addendum 3): any harness runs, up to the team maximum. */
 export const ANY_HARNESS_NOTE = "Any harness, no limit. Add a harness to limit which ones run and how many.";
 
@@ -270,15 +278,21 @@ export function setRowHarness(team: TeamDraft, row: number, harness: string, har
   };
 }
 
+/** Sets one row's agent count, kept to 1 to `HARNESS_AGENTS_MAX` and never raised past the
+ * team's `TEAM_AGENTS_MAX` total; lowering always works. Inputs: the team, the row and the
+ * wanted count. Output: the team, with At most raised to fit when it can. */
 export function setAgents(team: TeamDraft, row: number, agents: number): TeamDraft {
-  const count = Math.min(HARNESS_AGENTS_MAX, Math.max(1, Math.round(Number.isFinite(agents) ? agents : 1)));
+  const current = team.sub_harnesses[row]?.agents ?? 1;
+  const room = Math.max(current, TEAM_AGENTS_MAX - (totalAgents(team) - current));
+  const count = Math.min(HARNESS_AGENTS_MAX, room, Math.max(1, Math.round(Number.isFinite(agents) ? agents : 1)));
   return withRoom({ ...team, sub_harnesses: team.sub_harnesses.map((slot, index) => index === row ? { ...slot, agents: count } : slot) });
 }
 
 /** Adds an agent row on the first ready harness the team does not use yet.
- * Inputs: the team and the catalog. Output: the team with one more row of one agent. */
+ * Inputs: the team and the catalog. Output: the team with one more row of one agent, or the
+ * team unchanged when it has `SUB_HARNESSES_MAX` rows or `TEAM_AGENTS_MAX` agents. */
 export function addHarnessRow(team: TeamDraft, harnesses: HarnessEntry[] | null): TeamDraft {
-  if (team.sub_harnesses.length >= SUB_HARNESSES_MAX) return team;
+  if (team.sub_harnesses.length >= SUB_HARNESSES_MAX || teamFull(team)) return team;
   const used = new Set(team.sub_harnesses.map((slot) => slot.harness));
   const ready = (harnesses ?? []).filter((harness) => harness.status.kind === "ready");
   const harness = ready.find((candidate) => !used.has(candidate.id))?.id ?? ready[0]?.id ?? team.master;
@@ -349,6 +363,7 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
   if (team.sub_harnesses.length > SUB_HARNESSES_MAX) errors.range = `Use at most ${SUB_HARNESSES_MAX} agent harnesses.`;
   else if (!Number.isInteger(team.min_agents) || !Number.isInteger(team.max_agents) || team.min_agents < 1 || team.min_agents > team.max_agents) errors.range = RANGE;
   else if (team.max_agents > TEAM_AGENTS_MAX) errors.range = `At most can be up to ${TEAM_AGENTS_MAX}.`;
+  else if (total > TEAM_AGENTS_MAX) errors.range = `This team has ${total} agents: the master and ${total - 1} more, but a team runs at most ${TEAM_AGENTS_MAX}. Remove ${total - TEAM_AGENTS_MAX} or more.`;
   else if (total > team.max_agents) errors.range = `This team has ${total} agents: the master and ${total - 1} more. Set At most to ${total} or more.`;
   else if (total < team.min_agents) errors.range = `This team has ${total} agents. Set At least to ${total} or less.`;
   return errors;

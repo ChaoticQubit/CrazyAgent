@@ -194,6 +194,38 @@ test("adding and removing agent rows keeps the agent range valid", () => {
   assert.equal(wizard.setAgents(team, 0, 0).sub_harnesses[0].agents, 1);
 });
 
+test("a team at the agent maximum takes no more agents or rows and says what to remove", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const rows = (counts) => counts.map((agents) => ({ harness: "codex", agents, tools: true }));
+  const full = { master: "codex", master_tools: true, sub_harnesses: rows([15, 15, 15, 15, 3]), min_agents: 1, max_agents: wizard.TEAM_AGENTS_MAX };
+  assert.equal(wizard.totalAgents(full), wizard.TEAM_AGENTS_MAX);
+  assert.equal(wizard.teamFull(full), true);
+  assert.equal(wizard.teamValid(full, catalog), true);
+  assert.equal(wizard.setAgents(full, 4, 4).sub_harnesses[4].agents, 3);
+  assert.equal(wizard.setAgents(full, 0, 14).sub_harnesses[0].agents, 14);
+  const lower = wizard.setAgents(full, 4, 1);
+  assert.equal(wizard.teamFull(lower), false);
+  assert.equal(wizard.setAgents(lower, 4, 15).sub_harnesses[4].agents, 3);
+  assert.equal(wizard.addHarnessRow(full, catalog), full);
+  assert.equal(wizard.addHarnessRow(lower, catalog).sub_harnesses.length, 6);
+
+  const over = { ...full, sub_harnesses: rows([15, 15, 15, 15, 15]) };
+  assert.equal(wizard.teamErrors(over, catalog).range, "This team has 76 agents: the master and 75 more, but a team runs at most 64. Remove 12 or more.");
+  assert.equal(wizard.teamErrors({ ...over, max_agents: 76 }, catalog).range, "At most can be up to 64.");
+  assert.equal(wizard.teamValid(over, catalog), false);
+
+  const html = renderToStaticMarkup(createElement(TeamEditor, { team: full, harnesses: catalog, pool: null, research: [], onChange: () => {}, prefix: "np" }));
+  assert.equal(html.match(/aria-label="More Codex agents" disabled=""/g)?.length, 5);
+  assert.equal(html.match(/aria-label="Fewer Codex agents" disabled=""/g), null);
+  assert.match(html, /class="btn" disabled="">\+ Add harness/);
+  assert.match(html, /A team runs at most 64 agents, counting the master\. Lower a count or remove a harness to add another\./);
+  const shown = renderToStaticMarkup(createElement(TeamEditor, { team: over, harnesses: catalog, pool: null, research: [], onChange: () => {}, prefix: "np" }));
+  assert.match(shown, /Remove 12 or more\./);
+  assert.doesNotMatch(shown, /Set At most to/);
+});
+
 test("the request carries every answer and no repositories", () => {
   const draft = {
     ...wizard.emptyDraft(), name: " Harbor Notes ", about: "Notes for marine engineers.", stack: ["Rust", "React"],
