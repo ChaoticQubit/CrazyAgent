@@ -37,6 +37,7 @@ exports.extensions = void 0;
 exports.parseRequest = parseRequest;
 exports.answerLine = answerLine;
 const vscode = __importStar(require("vscode"));
+const scm_model_js_1 = require("./scm-model.js");
 const REQUEST = "crazyagent.extensions.request";
 const UPDATES = "crazyagent.extensions.updates";
 const ASK_UPDATE = "Ask to update";
@@ -51,7 +52,7 @@ function parseRequest(text) {
 }
 function answerLine(reply) {
     if (reply.kind !== "ok")
-        return `CrazyAgent refused this (${reply.code}).`;
+        return (0, scm_model_js_1.unconfirmed)(reply.code) ?? `CrazyAgent refused this (${reply.code}).`;
     if (reply.data.state === "approved")
         return "This version is approved. The IDE installs it when it next starts.";
     if (reply.data.state === "dismissed")

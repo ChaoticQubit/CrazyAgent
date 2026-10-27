@@ -48,6 +48,26 @@ test("a comment on the agent side of a diff, the recorded head's text, goes to t
   assert.equal(model.headCommentTarget([set()], "/README.md"), null);
 });
 
+test("every IDE write the engine could not confirm in time reads as a check-first sentence, never a plain retry", () => {
+  const bridge = readFileSync(new URL("../../../crates/crazyagent/src/ide/bridge.rs", import.meta.url), "utf8");
+  const codes = [...new Set(bridge.match(/"ide_[a-z_]+_outcome_unknown"/g).map((quoted) => quoted.slice(1, -1)))];
+  assert.deepEqual(codes.sort(), [
+    "ide_agent_message_outcome_unknown",
+    "ide_comment_outcome_unknown",
+    "ide_extension_decide_outcome_unknown",
+    "ide_memory_decide_outcome_unknown",
+    "ide_owner_edit_outcome_unknown",
+  ]);
+  for (const code of codes) {
+    const sentence = model.unconfirmed(code);
+    assert.match(sentence, /^CrazyAgent couldn't confirm /, code);
+    assert.doesNotMatch(sentence, /\(|Try again\./, code);
+  }
+  assert.equal(model.commentRefusal("ide_comment_outcome_unknown"), model.unconfirmed("ide_comment_outcome_unknown"));
+  assert.equal(model.unconfirmed("changes_outcome_unknown"), undefined);
+  assert.equal(model.unconfirmed("ide_request_timeout"), undefined);
+});
+
 test("a refused comment reads as the desktop's sentence for the team codes, and as Changes words otherwise", () => {
   const desktop = readFileSync(new URL("../../desktop/src/api-projects.ts", import.meta.url), "utf8");
   const sentences = Object.fromEntries([...desktop.matchAll(/^ {2}([a-z_]+): "([^"]+)",$/gm)].map((match) => [match[1], match[2]]));

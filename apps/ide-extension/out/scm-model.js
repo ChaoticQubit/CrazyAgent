@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.HEAD_SCHEME = exports.BASE_SCHEME = void 0;
+exports.unconfirmed = unconfirmed;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
 exports.acceptedNote = acceptedNote;
@@ -64,6 +65,16 @@ const REFUSALS = {
     changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
 };
 exports.REFUSAL_CODES = Object.keys(REFUSALS);
+const UNCONFIRMED = {
+    ide_comment_outcome_unknown: "CrazyAgent couldn't confirm the agent got this comment. Check the agent's terminal before you send it again.",
+    ide_owner_edit_outcome_unknown: "CrazyAgent couldn't confirm the file was opened for your edit. The agent may already have been told. Check before you try again.",
+    ide_agent_message_outcome_unknown: "CrazyAgent couldn't confirm the agent got this message. Check its terminal before you send it again.",
+    ide_memory_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this memory. Check the CrazyAgent window before you decide again.",
+    ide_extension_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this update. Check the CrazyAgent app before you decide again.",
+};
+function unconfirmed(code) {
+    return Object.hasOwn(UNCONFIRMED, code) ? UNCONFIRMED[code] : undefined;
+}
 function plainLine(text) {
     return text.replace(UNSAFE, "\ufffd");
 }
@@ -188,5 +199,5 @@ function headCommentTarget(sets, uriPath) {
     return commentTarget([set], `${set.worktree.replace(/\/+$/, "")}/${shown.path}`);
 }
 function commentRefusal(code) {
-    return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : refusal(code);
+    return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : (unconfirmed(code) ?? refusal(code));
 }

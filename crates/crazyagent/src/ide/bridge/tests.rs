@@ -940,6 +940,105 @@ fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_
     let late = Instant::now() + CHANGES_TIMEOUT + READ_TIME;
     assert_eq!(bound(&IdeCall::ChangeSets {}, late), late);
 }
+
+/// A diff comment, an owner edit, a message to an agent and a memory or extension decision
+/// run under their own write bound, past the handshake deadline and within the extension's
+/// request timer, and past it each answers its own outcome-unknown code, which the IDE has
+/// a sentence for, as Accept, Discard and Restore answer theirs; reads and other calls
+/// write nothing and keep the plain timeout.
+#[test]
+fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() {
+    assert!(IDE_WRITE_TIME <= READ_TIME);
+    let sentences = include_str!("../../../../../apps/ide-extension/src/scm-model.ts");
+    let id = ChangeSetId::new("0123456789abcdef0123456789abcdef").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let writes = [
+        (
+            IdeCall::Comment {
+                id: id.clone(),
+                path: "README".into(),
+                line: 1,
+                text: "Say more here".into(),
+            },
+            "ide_comment_outcome_unknown",
+        ),
+        (
+            IdeCall::OwnerEdit {
+                agent: AgentId::new("codex-1").unwrap(),
+                path: "README".into(),
+            },
+            "ide_owner_edit_outcome_unknown",
+        ),
+        (
+            IdeCall::AgentMessage {
+                agent: 7,
+                text: "Go on".into(),
+            },
+            "ide_agent_message_outcome_unknown",
+        ),
+        (
+            IdeCall::MemoryDecide {
+                id: RequestId::new("memory-1").unwrap(),
+                revision: 1,
+                decision: Decision::Approve,
+            },
+            "ide_memory_decide_outcome_unknown",
+        ),
+        (
+            IdeCall::ExtensionDecide {
+                id: "publisher.name".into(),
+                version: "1.0.0".into(),
+                approve: true,
+            },
+            "ide_extension_decide_outcome_unknown",
+        ),
+    ];
+    for (call, code) in &writes {
+        let before = Instant::now();
+        let answered_by = bound(call, deadline);
+        assert!(answered_by >= before + IDE_WRITE_TIME, "{call:?}");
+        assert!(answered_by <= Instant::now() + IDE_WRITE_TIME, "{call:?}");
+        assert_eq!(outcome_unknown(call), Some(*code), "{call:?}");
+        assert!(
+            sentences.contains(&format!("{code}: \"")),
+            "the IDE has no sentence for {code}"
+        );
+    }
+    let changes = [
+        IdeCall::Accept {
+            id: id.clone(),
+            head: "0".repeat(40),
+            message: "Land it".into(),
+        },
+        IdeCall::Discard {
+            id: id.clone(),
+            head: "0".repeat(40),
+        },
+        IdeCall::Restore { id: id.clone() },
+    ];
+    for call in &changes {
+        assert_eq!(
+            outcome_unknown(call),
+            Some("changes_outcome_unknown"),
+            "{call:?}"
+        );
+    }
+    let reads = [
+        IdeCall::Workspace {},
+        IdeCall::Agents {},
+        IdeCall::ChangeSets {},
+        IdeCall::HeadBlob {
+            id,
+            path: "README".into(),
+            page: 0,
+        },
+        IdeCall::Memories { after: None },
+        IdeCall::Extensions {},
+    ];
+    for call in &reads {
+        assert_eq!(outcome_unknown(call), None, "{call:?}");
+    }
+}
 /// Reads one frame of any kind as JSON, or none once the engine closed the connection.
 #[cfg(target_os = "macos")]
 async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {

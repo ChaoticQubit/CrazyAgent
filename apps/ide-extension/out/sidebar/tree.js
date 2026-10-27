@@ -38,6 +38,7 @@ exports.coalesced = coalesced;
 exports.trouble = trouble;
 exports.ask = ask;
 const vscode = __importStar(require("vscode"));
+const scm_model_js_1 = require("../scm-model.js");
 class RowTree {
     view;
     #changed = new vscode.EventEmitter();
@@ -99,7 +100,7 @@ function trouble(reply) {
     if (reply.kind === "stale")
         return "This changed in CrazyAgent. The list now shows the current version.";
     if (reply.kind === "rejected")
-        return `CrazyAgent refused this (${reply.code}).`;
+        return (0, scm_model_js_1.unconfirmed)(reply.code) ?? `CrazyAgent refused this (${reply.code}).`;
     return "";
 }
 async function ask(engine, name, args = {}) {

@@ -119,6 +119,21 @@ const REFUSALS: Record<string, string> = {
 /** The Changes codes the IDE has its own sentence for, the same words as the desktop. */
 export const REFUSAL_CODES = Object.keys(REFUSALS);
 
+const UNCONFIRMED: Record<string, string> = {
+  ide_comment_outcome_unknown: "CrazyAgent couldn't confirm the agent got this comment. Check the agent's terminal before you send it again.",
+  ide_owner_edit_outcome_unknown: "CrazyAgent couldn't confirm the file was opened for your edit. The agent may already have been told. Check before you try again.",
+  ide_agent_message_outcome_unknown: "CrazyAgent couldn't confirm the agent got this message. Check its terminal before you send it again.",
+  ide_memory_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this memory. Check the CrazyAgent window before you decide again.",
+  ide_extension_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this update. Check the CrazyAgent app before you decide again.",
+};
+
+/** The sentence for an IDE write the engine could not confirm in time: it may already have
+ * taken effect, so the owner checks before trying again. Input: the engine code. Output:
+ * the sentence, or undefined for any other code. */
+export function unconfirmed(code: string): string | undefined {
+  return Object.hasOwn(UNCONFIRMED, code) ? UNCONFIRMED[code] : undefined;
+}
+
 /** Shows engine or agent text as one plain line: control and direction-changing characters
  * become a replacement mark. Input: the text. Output: the line. */
 export function plainLine(text: string): string {
@@ -281,5 +296,5 @@ export function headCommentTarget(sets: IdeChangeSet[], uriPath: string): { id: 
 /** One plain sentence for a refused comment: the desktop's words for the team codes, the
  * Changes words otherwise. Input: the engine code. Output: the sentence. */
 export function commentRefusal(code: string): string {
-  return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : refusal(code);
+  return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : (unconfirmed(code) ?? refusal(code));
 }

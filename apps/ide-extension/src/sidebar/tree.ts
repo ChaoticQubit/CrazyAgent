@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { Engine, Reply } from "../engine.js";
+import { unconfirmed } from "../scm-model.js";
 import type { Row } from "./model.js";
 
 /**
@@ -79,7 +80,7 @@ export function coalesced(load: () => Promise<void>): () => void {
 export function trouble(reply: Reply<unknown> | null): string {
   if (reply === null) return "CrazyAgent is not reachable. It will try again on the next change.";
   if (reply.kind === "stale") return "This changed in CrazyAgent. The list now shows the current version.";
-  if (reply.kind === "rejected") return `CrazyAgent refused this (${reply.code}).`;
+  if (reply.kind === "rejected") return unconfirmed(reply.code) ?? `CrazyAgent refused this (${reply.code}).`;
   return "";
 }
 

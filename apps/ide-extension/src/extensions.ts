@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import type { Engine, Reply } from "./engine.js";
 import type { Feature } from "./extension.js";
+import { unconfirmed } from "./scm-model.js";
 
 /** One extension at one version, or `latest` for the newest Open VSX lists. */
 interface Version {
@@ -46,7 +47,7 @@ export function parseRequest(text: string): Version | undefined {
  * Output: one plain sentence.
  */
 export function answerLine(reply: Reply<Asked>): string {
-  if (reply.kind !== "ok") return `CrazyAgent refused this (${reply.code}).`;
+  if (reply.kind !== "ok") return unconfirmed(reply.code) ?? `CrazyAgent refused this (${reply.code}).`;
   if (reply.data.state === "approved") return "This version is approved. The IDE installs it when it next starts.";
   if (reply.data.state === "dismissed") return "Dismissed. It shows again if a newer version comes out.";
   return "Confirm this in the CrazyAgent app. Nothing installs until you approve it there.";

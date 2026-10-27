@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.readonly = exports.EDIT_ANYWAY_COMMAND = void 0;
 const vscode = __importStar(require("vscode"));
+const scm_model_js_1 = require("./scm-model.js");
 const worktree_js_1 = require("./worktree.js");
 exports.EDIT_ANYWAY_COMMAND = "crazyagent.editAnyway";
 const readonly = (context, engine) => {
@@ -58,7 +59,7 @@ async function editAnyway(engine) {
         return;
     const reply = await engine.request("ide.owner_edit", { agent, path: file });
     if (reply.kind !== "ok") {
-        await vscode.window.showErrorMessage(`The file stays read-only (${reply.code}).`);
+        await vscode.window.showErrorMessage((0, scm_model_js_1.unconfirmed)(reply.code) ?? `The file stays read-only (${reply.code}).`);
         return;
     }
     await vscode.commands.executeCommand("workbench.action.files.setActiveEditorWriteableInSession");

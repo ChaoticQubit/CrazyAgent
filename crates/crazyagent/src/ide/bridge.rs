@@ -136,6 +136,10 @@ const WRITE_TIME: Duration = Duration::from_secs(10);
 /// the extension gave up on never holds one of the `CONNECTIONS_MAX` connections into its
 /// next poll, and the extension reads the refusal instead of closing first.
 const READ_TIME: Duration = Duration::from_secs(28);
+/// How long a diff comment, an owner edit, a message to an agent or a memory or extension
+/// decision may take before the IDE is told its outcome is unknown: past the handshake
+/// deadline, so a slow write reports what it did, and before the extension stops waiting.
+const IDE_WRITE_TIME: Duration = Duration::from_secs(28);
 const PATH_BYTES_MAX: usize = 4096;
 const TEXT_BYTES_MAX: usize = 16384;
 /// The most bytes one diff comment may hold, so with its file and line it fits one typed
@@ -701,12 +705,11 @@ pub fn install_extension(extensions: &Path) -> Result<PathBuf, EngineError> {
 /// request for the capability's own project and answers it, swaps the capability file for
 /// the extension's session, or turns the connection into the project's event subscription
 /// or a Sandboxed terminal. An answer is sent only while the capability still admits the
-/// handshake, except what an Accept, Discard or Restore did, which is reported even when
-/// its capability was revoked while it ran; a refusal is sent as it is. The handshake
-/// deadline bounds the request and every call but the subscription, the terminal and the
-/// Changes calls, which run git under `bound`; Accept, Discard or Restore past it is
-/// `changes_outcome_unknown`. Inputs: the stream, handshake packet, owner runtime and
-/// deadline.
+/// handshake, except what a write did, which is reported even when its capability was
+/// revoked while it ran; a refusal is sent as it is. The handshake deadline bounds the
+/// request and every call but the subscription, the terminal, the Changes reads and the
+/// writes, which run under `bound`; a write past it answers its `outcome_unknown` code.
+/// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
     mut stream: UnixStream,
     packet: [u8; 37],
@@ -742,19 +745,16 @@ pub(crate) async fn serve(
             (Some(refusal(&failure("ide_terminal_unavailable"))), false)
         }
         Ok(Ok((project, call))) => {
-            let writes = matches!(
-                call,
-                IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. }
-            );
+            let unknown = outcome_unknown(&call);
             let bound = bound(&call, deadline);
             let answered = tokio::time::timeout_at(bound, answer(&runtime, &project, call)).await;
-            let reply = match answered {
-                Ok(Ok(reply)) => reply,
-                Ok(Err(error)) => refusal(&error),
-                Err(_) if writes => refusal(&failure("changes_outcome_unknown")),
-                Err(_) => refusal(&failure("ide_request_timeout")),
+            let reply = match (answered, unknown) {
+                (Ok(Ok(reply)), _) => reply,
+                (Ok(Err(error)), _) => refusal(&error),
+                (Err(_), Some(code)) => refusal(&failure(code)),
+                (Err(_), None) => refusal(&failure("ide_request_timeout")),
             };
-            (Some(reply), writes)
+            (Some(reply), unknown.is_some())
         }
     };
     if let Some(reply) = reply {
@@ -770,16 +770,41 @@ pub(crate) async fn serve(
     let _ = stream.shutdown().await;
 }
 
+/// The code a write answers when its bound passes before it reports: it may already have
+/// taken effect, so the owner checks before trying again rather than reading a plain
+/// timeout. Accept, Discard and Restore keep the Changes code; a diff comment, an owner
+/// edit, a message to an agent and a memory or extension decision each have their own.
+/// Input: the call. Output: the code, or None for a call that writes nothing.
+fn outcome_unknown(call: &IdeCall) -> Option<&'static str> {
+    Some(match call {
+        IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
+            "changes_outcome_unknown"
+        }
+        IdeCall::Comment { .. } => "ide_comment_outcome_unknown",
+        IdeCall::OwnerEdit { .. } => "ide_owner_edit_outcome_unknown",
+        IdeCall::AgentMessage { .. } => "ide_agent_message_outcome_unknown",
+        IdeCall::MemoryDecide { .. } => "ide_memory_decide_outcome_unknown",
+        IdeCall::ExtensionDecide { .. } => "ide_extension_decide_outcome_unknown",
+        _ => return None,
+    })
+}
+
 /// When one IDE call must be answered by. Accept, Discard and Restore run under the
 /// desktop's Changes bound, so a slow commit still lands and reports what it did; the
-/// four Changes reads run under READ_TIME, since the extension polls them again; every
-/// other call keeps the handshake deadline. Inputs: the call and the handshake deadline.
-/// Output: the instant, never before the deadline.
+/// other writes run under IDE_WRITE_TIME for the same reason; the four Changes reads run
+/// under READ_TIME, since the extension polls them again; every other call keeps the
+/// handshake deadline. Inputs: the call and the handshake deadline. Output: the instant,
+/// never before the deadline.
 fn bound(call: &IdeCall, deadline: Instant) -> Instant {
     let time = match call {
         IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
             CHANGES_TIMEOUT
         }
+        IdeCall::Comment { .. }
+        | IdeCall::OwnerEdit { .. }
+        | IdeCall::AgentMessage { .. }
+        | IdeCall::MemoryDecide { .. }
+        | IdeCall::ExtensionDecide { .. } => IDE_WRITE_TIME,
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
