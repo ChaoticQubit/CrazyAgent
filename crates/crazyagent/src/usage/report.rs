@@ -148,77 +148,76 @@ fn harness_name(id: &str) -> String {
 
 /// Flags the rows whose key ran a harness without a reader in the range, newest harness
 /// first, and adds a row for each such key the top rows left out, after them, with the key's
-/// full count, so a key outside the top rows never shows as zero when it counted tokens.
-/// Inputs: the store, the rows, the grouping column, the project or none, the range start.
-/// Output: the rows, at most `2 * ROWS_MAX`.
+/// full count, so a key outside the top rows never shows as zero when it counted tokens. The
+/// left-out keys are counted together in one read of the range. Inputs: the store, the rows,
+/// the grouping column, whether the unattributed `''` key is listed, as for the rows, the
+/// project or none and the range start. Output: the rows, at most `2 * ROWS_MAX`.
 fn flag_unreported(
     db: &Connection,
     mut rows: Vec<UsageRow>,
     column: &str,
+    unattributed: bool,
     project: Option<&str>,
     since_ms: i64,
 ) -> Result<Vec<UsageRow>, EngineError> {
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},harness,MAX(last_ms) FROM usage_unreported
-             WHERE hour_ms>=?1 AND (?2 IS NULL OR project=?2)
+             WHERE hour_ms>=?1 AND (?2 IS NULL OR project=?2) AND (?4 OR {column}<>'')
              GROUP BY {column},harness ORDER BY MAX(last_ms) DESC,{column},harness LIMIT ?3"
         ))
         .map_err(storage)?;
     let marks: Vec<(String, String, i64)> = statement
-        .query_map(params![since_ms, project, (2 * ROWS_MAX) as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_map(
+            params![since_ms, project, (2 * ROWS_MAX) as i64, unattributed],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)?;
+    let mut left_out: Vec<&str> = Vec::new();
+    for (key, _, _) in &marks {
+        let listed = rows.iter().any(|row| row.key == *key) || left_out.contains(&key.as_str());
+        if !listed && left_out.len() < ROWS_MAX {
+            left_out.push(key);
+        }
+    }
+    let mut found = self::rows(db, column, unattributed, project, since_ms, Some(&left_out))?;
+    assert!(found.len() <= left_out.len());
     let counted = rows.len();
-    for (key, harness, last_ms) in marks {
-        let room = rows.len() < counted + ROWS_MAX;
-        match rows.iter_mut().find(|row| row.key == key) {
+    for (key, harness, last_ms) in &marks {
+        match rows.iter_mut().find(|row| row.key == *key) {
             Some(row) => {
                 row.not_reported_by
-                    .get_or_insert_with(|| harness_name(&harness));
-                row.last_ms = row.last_ms.max(last_ms);
+                    .get_or_insert_with(|| harness_name(harness));
+                row.last_ms = row.last_ms.max(*last_ms);
             }
-            None if room => {
-                let mut row =
-                    full_count(db, column, project, since_ms, &key)?.unwrap_or_else(|| UsageRow {
-                        key,
+            None if left_out.contains(&key.as_str()) => {
+                let mut row = match found.iter().position(|row| row.key == *key) {
+                    Some(at) => found.swap_remove(at),
+                    None => UsageRow {
+                        key: key.clone(),
                         tokens: Tokens::default(),
                         runs: 0,
-                        last_ms,
+                        last_ms: *last_ms,
                         not_reported_by: None,
-                    });
-                row.not_reported_by = Some(harness_name(&harness));
-                row.last_ms = row.last_ms.max(last_ms);
+                    },
+                };
+                row.not_reported_by = Some(harness_name(harness));
+                row.last_ms = row.last_ms.max(*last_ms);
                 rows.push(row);
             }
             None => {}
         }
     }
-    assert!(rows.len() <= counted + ROWS_MAX);
+    assert!(found.is_empty());
+    assert!(rows.len() == counted + left_out.len() && rows.len() <= counted + ROWS_MAX);
     assert!(
         rows[counted..]
             .iter()
             .all(|row| row.not_reported_by.is_some())
     );
     Ok(rows)
-}
-
-/// The full count of one key in the range, read for a flagged key the top rows left out.
-/// Inputs: the store, the grouping column, the project or none, the range start and the key.
-/// Output: the key's row, or none when it counted no tokens in the range.
-fn full_count(
-    db: &Connection,
-    column: &str,
-    project: Option<&str>,
-    since_ms: i64,
-    key: &str,
-) -> Result<Option<UsageRow>, EngineError> {
-    let mut found = rows(db, column, true, project, since_ms, Some(key))?;
-    assert!(found.len() <= 1 && found.iter().all(|row| row.key == key));
-    Ok(found.pop())
 }
 
 /// The names of the harnesses without a reader that ran in the range, sorted, at most
@@ -264,38 +263,56 @@ fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
     })
 }
 
+/// The counted rows of one grouping column in the range, the largest first: every key, or
+/// only the given keys, at most `ROWS_MAX` of them, all read in one pass over the range.
+/// Inputs: the store, the column, whether the unattributed `''` key is listed, the project
+/// or none, the range start and the keys or none for all. Output: at most `ROWS_MAX` rows,
+/// one a key; none for an empty key list.
 fn rows(
     db: &Connection,
     column: &str,
     unattributed: bool,
     project: Option<&str>,
     since_ms: i64,
-    key: Option<&str>,
+    keys: Option<&[&str]>,
 ) -> Result<Vec<UsageRow>, EngineError> {
+    let only = match keys {
+        Some([]) => return Ok(Vec::new()),
+        Some(keys) => {
+            assert!(keys.len() <= ROWS_MAX);
+            let marks: Vec<String> = (0..keys.len()).map(|at| format!("?{}", at + 5)).collect();
+            format!("AND {column} IN ({})", marks.join(","))
+        }
+        None => String::new(),
+    };
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
                 COUNT(DISTINCT agent||'/'||session),MAX(hour_ms)
              FROM usage_tokens WHERE hour_ms>=?1 AND (?3 OR {column}<>'')
-                AND (?4 IS NULL OR project=?4) AND (?5 IS NULL OR {column}=?5)
+                AND (?4 IS NULL OR project=?4) {only}
              GROUP BY {column}
              ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) DESC, {column}
              LIMIT ?2"
         ))
         .map_err(storage)?;
+    let limit = ROWS_MAX as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&since_ms, &limit, &unattributed, &project];
+    bound.extend(
+        keys.unwrap_or_default()
+            .iter()
+            .map(|key| key as &dyn rusqlite::ToSql),
+    );
     statement
-        .query_map(
-            params![since_ms, ROWS_MAX as i64, unattributed, project, key],
-            |row| {
-                Ok(UsageRow {
-                    key: row.get(0)?,
-                    tokens: tokens(row, 1)?,
-                    runs: count(row.get(5)?),
-                    last_ms: row.get(6)?,
-                    not_reported_by: None,
-                })
-            },
-        )
+        .query_map(bound.as_slice(), |row| {
+            Ok(UsageRow {
+                key: row.get(0)?,
+                tokens: tokens(row, 1)?,
+                runs: count(row.get(5)?),
+                last_ms: row.get(6)?,
+                not_reported_by: None,
+            })
+        })
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)
@@ -452,6 +469,7 @@ pub fn report(
             db,
             rows(db, "project", true, project, since, None)?,
             "project",
+            true,
             project,
             since,
         )?,
@@ -461,6 +479,7 @@ pub fn report(
             db,
             rows(db, "agent", false, project, since, None)?,
             "agent",
+            false,
             project,
             since,
         )?,
