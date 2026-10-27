@@ -1,5 +1,6 @@
 import type * as vscode from "vscode";
 import { registerBaseContent } from "./base-content.js";
+import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
 import { sidebarAgents } from "./sidebar/agents.js";
 import { sidebarChanges } from "./sidebar/changes.js";
@@ -16,6 +17,7 @@ export type Feature = (context: vscode.ExtensionContext, engine: Engine) => void
 const features: Feature[] = [
   registerBaseContent,
   registerChanges,
+  registerComments,
   sidebarMemories,
   sidebarAgents,
   sidebarChanges,

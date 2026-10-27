@@ -215,3 +215,35 @@ export function scmGroups(sets: IdeChangeSet[], now: number): ScmGroup[] {
   }
   return groups;
 }
+
+const COMMENT_STATES: ReadonlySet<ChangeState> = new Set(["pending", "conflict", "updating"]);
+
+const COMMENT_REFUSALS: Record<string, string> = {
+  changes_closed: "These changes were already accepted or discarded, so the agent can't act on this comment.",
+  team_conversation_full: "Too many of your messages are waiting for the master. Send more once it has answered.",
+  team_message_invalid: "The message is empty or too long.",
+  project_setup_missing: "This project was created before project setup existed.",
+};
+
+/** What the owner sees once a comment went out. */
+export const COMMENT_SENT = "Sent to the team conversation with its file and line.";
+
+/** The change set file a document is the agent side of, so a comment on it can go to that
+ * set's agent: an open set whose files are shown, and a file it changed that still exists.
+ * Inputs: the listed sets and the document's file path. Output: the set and path, or null. */
+export function commentTarget(sets: IdeChangeSet[], fsPath: string): { id: string; path: string } | null {
+  for (const set of sets) {
+    if (!COMMENT_STATES.has(set.state) || set.problem !== null) continue;
+    const root = `${set.worktree.replace(/\/+$/, "")}/`;
+    if (!fsPath.startsWith(root)) continue;
+    const path = fsPath.slice(root.length);
+    if (set.files.some((file) => file.path === path && file.status !== "deleted")) return { id: set.id, path };
+  }
+  return null;
+}
+
+/** One plain sentence for a refused comment: the desktop's words for the team codes, the
+ * Changes words otherwise. Input: the engine code. Output: the sentence. */
+export function commentRefusal(code: string): string {
+  return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : refusal(code);
+}

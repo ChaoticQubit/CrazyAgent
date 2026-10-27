@@ -34,7 +34,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 12] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 13] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -74,6 +74,10 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 12] = [
     (
         "out/base-content.js",
         include_bytes!("../../../../apps/ide-extension/out/base-content.js"),
+    ),
+    (
+        "out/comments.js",
+        include_bytes!("../../../../apps/ide-extension/out/comments.js"),
     ),
     (
         "out/scm-model.js",
@@ -612,9 +616,9 @@ async fn answer(
         | IdeCall::BaseBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
-        | IdeCall::Restore { .. } => change_call(runtime, project, call).await?,
-        IdeCall::Comment { .. }
-        | IdeCall::OwnerEdit { .. }
+        | IdeCall::Restore { .. }
+        | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
+        IdeCall::OwnerEdit { .. }
         | IdeCall::ExtensionRequest { .. }
         | IdeCall::ExtensionDecide { .. }
         | IdeCall::RevealAck { .. } => return Err(failure("ide_request_unavailable")),
@@ -623,8 +627,9 @@ async fn answer(
     Ok(IdeReply::Ok { data })
 }
 
-/// Answers a Changes call where the engine lands change sets; elsewhere it is unavailable.
-/// Inputs: the owner runtime, the project and the call. Output: the reply data.
+/// Answers a Changes call or a diff comment where the engine lands change sets; elsewhere
+/// it is unavailable. Inputs: the owner runtime, the project and the call. Output: the
+/// reply data.
 async fn change_call(
     runtime: &OwnerRuntimeHandle,
     project: &ProjectId,
@@ -632,7 +637,11 @@ async fn change_call(
 ) -> Result<serde_json::Value, EngineError> {
     #[cfg(unix)]
     {
-        changes::answer(runtime.ide()?.root, project.clone(), call).await
+        let root = runtime.ide()?.root;
+        match call {
+            IdeCall::Comment { .. } => comments::answer(root, project.clone(), call).await,
+            call => changes::answer(root, project.clone(), call).await,
+        }
     }
     #[cfg(not(unix))]
     {
@@ -822,5 +831,7 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
 
 #[cfg(unix)]
 mod changes;
+#[cfg(unix)]
+mod comments;
 #[cfg(all(test, unix))]
 mod tests;

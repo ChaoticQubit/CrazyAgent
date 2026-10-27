@@ -130,6 +130,11 @@
         "title": "Refresh changes",
         "category": "CrazyAgent",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.comments.send",
+        "title": "Send to the agent",
+        "category": "CrazyAgent"
       }
     ],
     "menus": {
@@ -209,6 +214,17 @@
         {
           "command": "crazyagent.changes.refresh",
           "when": "false"
+        },
+        {
+          "command": "crazyagent.comments.send",
+          "when": "false"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "crazyagent.comments.send",
+          "when": "commentController == crazyagent.comments",
+          "group": "inline"
         }
       ],
       "scm/title": [
