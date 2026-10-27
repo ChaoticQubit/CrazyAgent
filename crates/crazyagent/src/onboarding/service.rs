@@ -8,11 +8,13 @@ use crate::protocol::CredentialRef;
 use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
+use crate::research::jobs::JobError;
 #[cfg(unix)]
 use crate::research::runner::ResearchLimits;
 use crate::research::runner::{
-    ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
+    RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
 };
+use crate::sandbox::SandboxError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -411,8 +413,72 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         #[cfg(unix)]
         Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
-        Err(_) => Step::failed(GRAPH_NOT_STARTED),
+        Err(error) => not_started(Kind::Graph, &error),
     }
+}
+
+/// Fails a step that could not start with its plain sentence and a short cause
+/// code, and writes one diagnostic line naming the step and the cause to the
+/// engine's stderr log. Takes the step kind and the runner error. Returns the step.
+fn not_started(kind: Kind, error: &RunError) -> Step {
+    let cause = start_cause(error);
+    eprintln!("{}", start_diagnostic(kind, &cause));
+    let sentence = match kind {
+        Kind::Graph => GRAPH_NOT_STARTED,
+        Kind::Mapping => MAPPING_NOT_STARTED,
+    };
+    Step::failed(&format!("{sentence} ({cause})"))
+}
+
+/// The engine log line for a step that could not start. Takes the step kind and
+/// its cause code. Returns the line.
+fn start_diagnostic(kind: Kind, cause: &str) -> String {
+    format!("onboarding_{}_not_started cause={cause}", kind.prefix())
+}
+
+/// The short cause code of a runner error: which refusal or failure stopped the
+/// start, never the error text, which can name paths. Takes the error. Returns
+/// lowercase letters, digits and `_` only.
+fn start_cause(error: &RunError) -> String {
+    let cause = match error {
+        RunError::Invalid(reason) if reason == RUN_NAME_USED => "run_name_used".to_owned(),
+        RunError::Invalid(_) => "run_refused".to_owned(),
+        RunError::Jobs(JobError::Invalid(_)) => "job_refused".to_owned(),
+        RunError::Jobs(JobError::NotHeld) => "job_not_held".to_owned(),
+        RunError::Jobs(JobError::Storage(_)) => "job_storage".to_owned(),
+        RunError::Sandbox(SandboxError::Invalid(_)) => "sandbox_refused".to_owned(),
+        RunError::Sandbox(SandboxError::Unavailable(_)) => "sandbox_unavailable".to_owned(),
+        RunError::Sandbox(SandboxError::Io(error)) => io_cause("sandbox_io", error),
+        RunError::Context(_) => "context_refused".to_owned(),
+        RunError::Account(_) => "account_unavailable".to_owned(),
+        RunError::Busy => "account_busy".to_owned(),
+        RunError::Uncertain(_) => "cleanup_uncertain".to_owned(),
+        RunError::Io(error) => io_cause("io", error),
+    };
+    assert!(
+        cause
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    );
+    cause
+}
+
+/// `prefix` and the kind of an I/O error, such as `io_permission_denied`, without
+/// the error's own text. Takes the prefix and the error. Returns the code.
+fn io_cause(prefix: &str, error: &std::io::Error) -> String {
+    let kind: String = error
+        .kind()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{prefix}_{kind}")
 }
 
 /// Maps the project: collects the bounded evidence, saves the draft the
@@ -482,7 +548,7 @@ fn mapping_step(
             Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
             base,
         ),
-        Err(_) => (Step::failed(MAPPING_NOT_STARTED), base),
+        Err(error) => (not_started(Kind::Mapping, &error), base),
     }
 }
 
@@ -626,3 +692,5 @@ pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod claim_tests;
+#[cfg(test)]
+mod start_tests;

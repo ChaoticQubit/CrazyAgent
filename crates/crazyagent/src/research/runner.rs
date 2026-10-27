@@ -64,6 +64,9 @@ const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
+/// The `RunError::Invalid` text of a run whose agent state folder already exists,
+/// so a caller can tell this refusal from the others without reading free text.
+pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
 const PANE_EVENTS_MAX: usize = 200_000;
@@ -1139,7 +1142,7 @@ impl ResearchRunner {
         }
         let agent = self.state.join("agents").join(run.name);
         if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid("read-only run name already used".into()));
+            return Err(RunError::Invalid(RUN_NAME_USED.into()));
         }
         let lease = match run.account {
             ResearchAccount::ManagedCodex { connection, .. }

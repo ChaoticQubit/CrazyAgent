@@ -1630,6 +1630,59 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     bench.stop().await;
 }
 
+fn onboarding_created_ms(root: &Path) -> i64 {
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    database
+        .query_row(
+            "SELECT created_ms FROM onboarding WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_step_that_cannot_start_records_its_cause_code() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let account = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "never-asked-model".into(),
+    };
+    let (runner, agents) = bench.runner();
+    let created = onboarding_created_ms(&bench.root);
+    let taken = [
+        format!("onboard-g-{PROJECT}-{created}-1"),
+        format!("onboard-m-{PROJECT}-{created}-2"),
+    ];
+    for name in &taken {
+        leftover_agent(&agents, name);
+    }
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        || Some(PathBuf::from("/usr/bin/true")),
+        OnboardingLimits::default(),
+        Duration::from_millis(50),
+    );
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.graph,
+        failed("Graph build could not start (run_name_used)"),
+        "{view:?}"
+    );
+    assert_eq!(
+        view.mapping,
+        failed("Mapping agent could not start (run_name_used)"),
+        "{view:?}"
+    );
+    assert_eq!(agent_runs(&agents, "onboard-"), 2);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
