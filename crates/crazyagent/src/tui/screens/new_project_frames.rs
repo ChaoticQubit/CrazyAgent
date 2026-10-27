@@ -394,3 +394,31 @@ fn research_glyphs_keep_one_cell_and_an_ascii_fallback() {
         assert_eq!(ratatui::text::Span::raw(*glyph).width(), 1, "{glyph:?}");
     }
 }
+
+#[test]
+fn an_empty_sub_agent_list_reads_as_any_harness_up_to_the_team_maximum() {
+    let look = Look::plain();
+    let mut wizard = wizard();
+    load_catalog(&mut wizard, &["c-codex"]);
+    let team = wizard.team.clone().unwrap();
+    assert!(team.sub_harnesses.is_empty());
+    assert_eq!(
+        team_summary(&team, None),
+        format!(
+            "Codex leads. Any harness, up to {} agents. Tools on.",
+            crate::project_setup::TEAM_AGENTS_MAX
+        )
+    );
+    wizard.go(Step::Team);
+    for width in [120, 80] {
+        let shown = compose(
+            &wizard_screen(&wizard, width, 36, &look),
+            width,
+            36,
+            "",
+            &look,
+        );
+        let flat = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains(ANY_HARNESS_NOTE), "{shown}");
+    }
+}
