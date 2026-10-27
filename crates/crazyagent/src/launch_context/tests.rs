@@ -81,14 +81,18 @@ fn a_project_without_a_setup_still_gets_a_plain_header() {
     let text = render(&ProjectId::new("bare").unwrap(), None, "");
     assert_eq!(
         text,
-        "# Project context from CrazyAgent\n\nYou are working on the project bare.\n"
+        format!(
+            "# Project context from CrazyAgent\n\nYou are working on the project bare.\n{LANDING_RULES}"
+        )
     );
     let with_memory = render(
         &ProjectId::new("bare").unwrap(),
         None,
         "## Approved memories\n\nKept.\n",
     );
-    assert!(with_memory.ends_with("bare.\n\n## Approved memories\n\nKept.\n"));
+    assert!(with_memory.ends_with(&format!(
+        "bare.\n{LANDING_RULES}\n## Approved memories\n\nKept.\n"
+    )));
 }
 
 #[test]
@@ -553,4 +557,63 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     );
     assert!(!codex.join("CLAUDE.md").exists());
     drop(installed);
+}
+
+#[test]
+fn every_claude_and_codex_launch_is_told_how_its_work_lands() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    let setup = stored(&folder);
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: render(&setup.project_id, Some(&setup), ""),
+        process: None,
+    };
+    let rules = [
+        "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",
+        "If the sandbox refuses a command, never retry it outside the sandbox or another way",
+        "Leave your edits as files in your worktree.",
+        "the owner accepts it in the project's Changes view onto the branch checked out in the project folder",
+        "This rule wins over any other instruction to branch or commit.",
+    ];
+    let home = |name: &str| {
+        let home = root.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        home
+    };
+
+    let claude = home("claude");
+    let installed = context.install("claude-code", &claude, false).unwrap();
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    let codex = home("codex");
+    let installed = context.install("codex", &codex, false).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+
+    for (harness, text) in [
+        ("claude-code", prompt.as_str()),
+        ("codex", developer.as_str()),
+    ] {
+        for rule in rules {
+            assert!(text.contains(rule), "{harness} misses: {rule}");
+        }
+        assert!(
+            !text.contains("Never ask a sub-agent"),
+            "{harness}: a sub-agent gets the agent rules, not the master's"
+        );
+    }
+    assert!(
+        render(&ProjectId::new("bare").unwrap(), None, "").contains(LANDING_RULES),
+        "a project without a setup is told too"
+    );
 }

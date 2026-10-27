@@ -33,8 +33,9 @@ pub const DEFAULT_PROCESS: &str = "# CrazyAgent default process
 ## Work and branches
 
 - Work only in the worktree CrazyAgent gave you and keep each change focused on your task. Preserve work you did not make.
-- CrazyAgent owns branches and refs. Never create, switch, rename, delete or push a branch, and never rewrite history.
-- Commit with conventional messages, such as `feat: ...`, `fix: ...`, `test: ...` or `refactor: ...`. Never add a Co-Authored-By trailer or an agent name.
+- CrazyAgent owns branches, commits and refs. Never create, switch, rename, delete or push a branch, never commit, and never write inside `.git` or rewrite history.
+- Leave your edits as files in your worktree. CrazyAgent turns them into a change set, and the owner accepts it in the project's Changes view.
+- If the sandbox refuses a command, never retry it outside the sandbox or another way; report what was refused.
 
 ## Building
 
