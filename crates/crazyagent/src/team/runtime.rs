@@ -1446,19 +1446,21 @@ impl TeamRuntime {
             return Ok(());
         }
         type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+        let live = crate::master_sessions::live_session(&self.connection, project)?;
         let ready: Vec<ReadyTask> = {
             let mut statement = self
                 .connection
                 .prepare(
                     "SELECT t.id,t.harness,t.status,t.result,t.error FROM team_tasks t
                      WHERE t.project=?1 AND t.delivered=0 AND t.source='master' AND t.status IN ('done','failed','cancelled')
+                     AND (t.session IS NULL OR t.session IS ?2)
                      AND NOT EXISTS (SELECT 1 FROM team_tasks o WHERE o.project=t.project AND o.turn IS t.turn AND t.turn IS NOT NULL
                                      AND o.status IN ('queued','needs_pool','running'))
                      ORDER BY t.id LIMIT 16",
                 )
                 .map_err(error)?;
             statement
-                .query_map([project.as_str()], |row| {
+                .query_map(params![project.as_str(), live], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -1661,6 +1663,12 @@ impl TeamRuntime {
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
+                )
+                .map_err(error)?;
+            self.connection
+                .execute(
+                    "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
+                    params![task, agent],
                 )
                 .map_err(error)?;
             names::assign_task_role(&self.connection, project, agent, task)?;

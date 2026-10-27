@@ -34,10 +34,23 @@ pub(crate) type StepRun = fn(&Transaction<'_>) -> Result<(), EngineError>;
 /// Every engine.db schema step, oldest first, numbered from 2 without gaps. Version 1
 /// is the shape engines up to 0.1 wrote, which never set `PRAGMA user_version`. A step
 /// must accept that a table open creates lazily, such as owner_meta, may be absent.
-pub(crate) const STEPS: &[Step] = &[Step {
-    to: 2,
-    run: adopt_user_version,
-}];
+pub(crate) const STEPS: &[Step] = &[
+    Step {
+        to: 2,
+        run: adopt_user_version,
+    },
+    Step {
+        to: 3,
+        run: master_sessions_parked,
+    },
+];
+
+/// Step 3: master sessions can be parked and resumed, and team tasks and agents record
+/// the session that owns them (DEC-096 addendum 4b).
+fn master_sessions_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    super::master_session::allow_parked(tx)?;
+    crate::master_sessions::add_ownership_columns(tx)
+}
 
 /// Step 2: makes `PRAGMA user_version` the database version of record. owner_meta
 /// keeps its fixed `schema_version = 1` column as the owner row layout, so every query

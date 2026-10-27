@@ -663,7 +663,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 error TEXT,
                 created_ms INTEGER NOT NULL,
                 heartbeat_ms INTEGER NOT NULL,
-                stopped_ms INTEGER
+                stopped_ms INTEGER,
+                session TEXT
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -684,7 +685,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 output_bytes INTEGER NOT NULL DEFAULT 0,
                 created_ms INTEGER NOT NULL,
                 started_ms INTEGER,
-                finished_ms INTEGER
+                finished_ms INTEGER,
+                session TEXT
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
@@ -851,6 +853,13 @@ pub fn admit(
     .map_err(error)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
+    if let Some(session) = crate::master_sessions::live_session(tx, &stored.project_id)? {
+        tx.execute(
+            "UPDATE team_tasks SET session=?2 WHERE id=?1",
+            params![id, session],
+        )
+        .map_err(error)?;
+    }
     Ok(Ok(id))
 }
 

@@ -390,7 +390,7 @@ async fn real_pty_master_bootstrap_preserves_provenance_and_reconciles_once() {
             .zip(["api-account", "codex-account", "claude-account"])
             .zip(["sandbox-profile", "codex-connection", "claude-connection"]) {
             assert_eq!(session.project_id.as_str(), "p");
-            assert_eq!(session.phase, MasterSessionPhase::Closed);
+            assert_eq!(session.phase, MasterSessionPhase::Parked);
             assert_eq!(session.selection.backend, backend);
             assert_eq!(session.selection.pool_ref.as_str(), "master-pool");
             assert_eq!(session.selection.route.account_ref.as_str(), account);

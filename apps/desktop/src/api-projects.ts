@@ -1,10 +1,10 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, masterState, modelAccessPage,
-  openMaster, openProject, projects, submitMaster,
+  allMasterTurns, closeMaster, editModelAccess, masterSessions, masterState, modelAccessPage,
+  newMasterSession, openMaster, openProject, projects, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, IntentReceipt, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, IntentReceipt, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
 } from "./engine-client";
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
@@ -208,6 +208,9 @@ const copy: Record<string, string> = {
   master_session_missing: "This conversation is gone. Send again to start a new one.",
   master_session_not_active: "This conversation has ended. Send again to start a new one.",
   master_turn_outstanding: "The master is still answering your last message. Wait for it or stop it, then send.",
+  master_turn_running: "The master is still answering. Stop that reply to switch sessions.",
+  master_session_live: "That session is already the live one.",
+  master_session_closed: "That session ended with its project and can't be resumed.",
   master_turn_capacity: "This conversation is full. End it from the conversation menu, then send again.",
   master_turn_not_current: "That reply already finished.",
   master_input_too_large: "This conversation is too long for the master. End it from the conversation menu, then send again.",
@@ -533,6 +536,23 @@ export function startMaster(ticket: string, generation: number): Promise<Result<
 
 export function endMaster(ticket: string, session: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => closeMaster(ticket, session, generation));
+}
+
+/** Lists the selected project's master sessions. Input: the master ticket. Output: the list. */
+export function readSessions(ticket: string): Promise<Result<MasterSessions>> {
+  return wrap(() => masterSessions(ticket));
+}
+
+/** Parks the live session and opens a fresh one. Inputs: the master ticket, whether the owner
+ * confirmed stopping a running reply, and a draft generation. Output: the receipt. */
+export function startNewSession(ticket: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => newMasterSession(ticket, cancelRunning, generation));
+}
+
+/** Makes a parked session live again. Inputs: the master ticket, the session id, whether the
+ * owner confirmed stopping a running reply, and a draft generation. Output: the receipt. */
+export function resumeSession(ticket: string, session: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => resumeMasterSession(ticket, session, cancelRunning, generation));
 }
 
 /** Asks the engine to stop the master's reply in progress.
