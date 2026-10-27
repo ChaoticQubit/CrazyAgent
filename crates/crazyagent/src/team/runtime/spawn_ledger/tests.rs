@@ -206,6 +206,33 @@ fn ended(id: i64, outcome: &str) -> (String, Option<String>) {
     (key(id), Some(outcome.to_owned()))
 }
 
+fn shown(id: i64) -> (String, Option<String>) {
+    (key(id), None)
+}
+
+fn unsettled(refused: Result<(), String>, sentence: &str) {
+    let refused = refused.unwrap_err();
+    assert!(refused.starts_with(sentence), "{refused}");
+    assert!(refused.contains("ledger_pending"), "{refused}");
+}
+
+impl Case {
+    fn dismiss(&self, kind: ActionKind, id: i64) {
+        let ledger = self.ledger();
+        let notice = crate::ledger::pending(&ledger, kind)
+            .unwrap()
+            .into_iter()
+            .find(|action| action.key == key(id))
+            .unwrap();
+        assert!(
+            notice.payload.contains("\"unknown\":true"),
+            "{}",
+            notice.payload
+        );
+        crate::ledger::dismiss(&ledger, kind, notice.id.get(), Outcome::Unknown).unwrap();
+    }
+}
+
 #[test]
 fn worktree_create_interrupted_is_completed_or_cleaned_never_duplicated() {
     let case = Case::new();
@@ -247,14 +274,20 @@ fn worktree_create_interrupted_is_completed_or_cleaned_never_duplicated() {
         ended(nothing, "failed"),
         ended(lost, "failed"),
         ended(foreign, "unknown"),
+        shown(foreign),
     ];
     assert_eq!(case.outcomes("worktree_create"), settled);
-    assert_eq!(case.pending(ActionKind::WorktreeCreate), 0);
+    assert_eq!(case.pending(ActionKind::WorktreeCreate), 1);
 
     drop(case.runtime());
+    settle(&case.team, &case.base, foreign, false);
     assert_eq!(case.outcomes("worktree_create"), settled);
     assert!(case.listed(recorded));
     assert!(case.worktree(foreign).join("notes.txt").is_file());
+    unsettled(
+        begin_worktree(&case.base, foreign, &case.repo, &case.worktree(foreign)),
+        "An earlier add of this agent's worktree is still unsettled",
+    );
 
     begin_worktree(&case.base, partial, &case.repo, &case.worktree(partial)).unwrap();
     case.add(partial, true);
@@ -268,7 +301,13 @@ fn worktree_create_interrupted_is_completed_or_cleaned_never_duplicated() {
     let mut expected = settled;
     expected.extend([ended(partial, "failed"), ended(partial, "done")]);
     assert_eq!(case.outcomes("worktree_create"), expected);
+    assert_eq!(case.pending(ActionKind::WorktreeCreate), 1);
+
+    case.dismiss(ActionKind::WorktreeCreate, foreign);
     assert_eq!(case.pending(ActionKind::WorktreeCreate), 0);
+    expected[5] = ended(foreign, "unknown");
+    assert_eq!(case.outcomes("worktree_create"), expected);
+    assert!(case.worktree(foreign).join("notes.txt").is_file());
 }
 
 #[test]
@@ -290,22 +329,44 @@ fn agent_spawn_interrupted_does_not_start_a_second_harness() {
     begin_spawn(&case.base, never, true).unwrap();
     let piped = case.agent();
     begin_spawn(&case.base, piped, false).unwrap();
-    let second = begin_spawn(&case.base, running, true);
-    assert!(second.unwrap_err().contains("ledger_pending"));
+    let still = "An earlier start of this agent is still unsettled";
+    unsettled(begin_spawn(&case.base, running, true), still);
     assert_eq!(case.pending(ActionKind::AgentSpawn), 3);
     let team = AgentId::team(running).unwrap();
     assert!(host.alive().unwrap().contains(&team));
 
-    let runtime = case.runtime().with_terminal(host.clone()).unwrap();
+    let headless = case.runtime();
+    assert_eq!(case.pending(ActionKind::AgentSpawn), 3);
+    unsettled(begin_spawn(&case.base, running, true), still);
+    unsettled(begin_spawn(&case.base, piped, false), still);
+    let runtime = headless.with_terminal(host.clone()).unwrap();
     assert!(!host.alive().unwrap().contains(&team));
     let settled = vec![
         ended(running, "unknown"),
         ended(never, "failed"),
         ended(piped, "unknown"),
+        shown(piped),
+        shown(running),
     ];
     assert_eq!(case.outcomes("agent_spawn"), settled);
-    assert_eq!(case.pending(ActionKind::AgentSpawn), 0);
+    assert_eq!(case.pending(ActionKind::AgentSpawn), 2);
     drop(runtime);
+
+    unsettled(begin_spawn(&case.base, running, true), still);
+    settle(&case.team, &case.base, running, false);
+    spawned(&case.base, piped, Outcome::Failed);
+    drop(case.runtime().with_terminal(host.clone()).unwrap());
+    assert_eq!(case.outcomes("agent_spawn"), settled);
+    assert_eq!(case.pending(ActionKind::AgentSpawn), 2);
+    case.dismiss(ActionKind::AgentSpawn, running);
+    case.dismiss(ActionKind::AgentSpawn, piped);
+    assert_eq!(case.pending(ActionKind::AgentSpawn), 0);
+    let mut settled = settled;
+    settled[3] = ended(piped, "unknown");
+    settled[4] = ended(running, "unknown");
+    begin_spawn(&case.base, running, true).unwrap();
+    spawned(&case.base, running, Outcome::Done);
+    settled.push(ended(running, "done"));
 
     let ready = case.agent();
     begin_spawn(&case.base, ready, true).unwrap();

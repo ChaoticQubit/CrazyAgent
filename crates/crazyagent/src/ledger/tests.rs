@@ -260,3 +260,58 @@ fn pending_actions_are_bounded_and_finished_ones_are_pruned_to_the_kept_count() 
     );
     assert_eq!(stored_outcome(&db, oldest), None);
 }
+
+#[test]
+fn the_owner_dismisses_only_a_pending_action_of_its_kind_with_the_shown_outcome() {
+    let (root, db) = store();
+    let start = begin(&db, ActionKind::AgentSpawn, "team-4", "{\"team_agent\":4}").unwrap();
+    let accept = begin(&db, ActionKind::LandingAccept, "set-9", "{\"landed\":true}").unwrap();
+    drop(db);
+
+    let db = open(root.path()).unwrap();
+    assert_eq!(
+        code(dismiss(
+            &db,
+            ActionKind::LandingAccept,
+            start.get(),
+            Outcome::Unknown
+        )),
+        "ledger_missing"
+    );
+    assert_eq!(
+        code(dismiss(
+            &db,
+            ActionKind::AgentSpawn,
+            accept.get() + 100,
+            Outcome::Unknown
+        )),
+        "ledger_missing"
+    );
+    assert_eq!(
+        stored_outcome(&db, start),
+        None,
+        "a refused dismiss changes nothing"
+    );
+    assert_eq!(
+        ids(&pending(&db, ActionKind::AgentSpawn).unwrap()),
+        vec![start]
+    );
+
+    dismiss(&db, ActionKind::AgentSpawn, start.get(), Outcome::Unknown).unwrap();
+    dismiss(&db, ActionKind::LandingAccept, accept.get(), Outcome::Done).unwrap();
+    assert_eq!(stored_outcome(&db, start).as_deref(), Some("unknown"));
+    assert_eq!(stored_outcome(&db, accept).as_deref(), Some("done"));
+    assert!(pending(&db, ActionKind::AgentSpawn).unwrap().is_empty());
+    assert!(pending(&db, ActionKind::LandingAccept).unwrap().is_empty());
+    assert_eq!(
+        code(dismiss(
+            &db,
+            ActionKind::AgentSpawn,
+            start.get(),
+            Outcome::Done
+        )),
+        "ledger_finished"
+    );
+    assert_eq!(stored_outcome(&db, start).as_deref(), Some("unknown"));
+    begin(&db, ActionKind::AgentSpawn, "team-4", "{\"team_agent\":4}").unwrap();
+}

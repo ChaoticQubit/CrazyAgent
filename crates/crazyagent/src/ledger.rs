@@ -73,6 +73,13 @@ pub struct Resolved {
     pub unknown: Vec<Action>,
 }
 
+impl ActionId {
+    /// The number the ledger stores for this action, which the owner names to dismiss it.
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
 impl ActionKind {
     fn name(self) -> &'static str {
         match self {
@@ -140,7 +147,20 @@ pub fn begin(
 /// Inputs: the ledger, the action id and its outcome. Output: Ok, or `ledger_finished`
 /// when it already ended, or `ledger_missing` when no such action is kept.
 pub fn finish(db: &Connection, id: ActionId, outcome: Outcome) -> Result<(), EngineError> {
-    store::finish(db, id, outcome, crate::team::now_ms())
+    store::finish(db, None, id, outcome, crate::team::now_ms())
+}
+
+/// Closes a pending action the owner was shown once the owner dismisses it, with the
+/// outcome the owner was shown. Inputs: the ledger, the kind and number the owner names,
+/// and that outcome. Output: Ok, or `ledger_finished` when it already ended, or
+/// `ledger_missing` when no action of that kind has that number.
+pub fn dismiss(
+    db: &Connection,
+    kind: ActionKind,
+    id: i64,
+    shown: Outcome,
+) -> Result<(), EngineError> {
+    store::finish(db, Some(kind), ActionId(id), shown, crate::team::now_ms())
 }
 
 /// The pending actions of one kind, oldest first: intents recorded with no outcome, whose

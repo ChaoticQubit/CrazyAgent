@@ -11,26 +11,37 @@ const ENTRIES_SCANNED_MAX: usize = 1024;
 const POINTER_BYTES_MAX: u64 = 4096;
 
 /// What the ledger keeps about one team agent worktree the engine adds: the agent, the
-/// owner's checkout root and the worktree, both absolute.
+/// owner's checkout root and the worktree, both absolute, and whether it is a notice: an
+/// add a check could not settle, kept pending for the owner and never checked again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorktreeIntent {
     team_agent: i64,
     repository: PathBuf,
     worktree: PathBuf,
+    #[serde(default)]
+    unknown: bool,
 }
 
-/// What the ledger keeps about one team agent harness the engine starts: the agent and
-/// whether it runs in a terminal pane a later engine can see, or on pipes.
+/// What the ledger keeps about one team agent harness the engine starts: the agent,
+/// whether it runs in a terminal pane a later engine can see or on pipes, and whether it
+/// is a notice: a start a check could not settle, kept pending for the owner and never
+/// checked again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnIntent {
     team_agent: i64,
     pane: bool,
+    #[serde(default)]
+    unknown: bool,
 }
 
 fn key(agent: i64) -> String {
     format!("team-{agent}")
+}
+
+fn unavailable(_: rusqlite::Error) -> EngineError {
+    EngineError("ledger_unavailable".to_owned())
 }
 
 /// Records that the engine is about to add a team agent's worktree, before git runs, so a
@@ -48,6 +59,7 @@ pub(super) fn begin_worktree(
         team_agent: agent,
         repository: repository.to_path_buf(),
         worktree: worktree.to_path_buf(),
+        unknown: false,
     };
     assert!(
         placed(&intent),
@@ -58,7 +70,10 @@ pub(super) fn begin_worktree(
         ActionKind::WorktreeCreate,
         agent,
         serde_json::to_string(&intent),
-        "the agent worktree could not be recorded",
+        [
+            "the agent worktree could not be recorded",
+            "An earlier add of this agent's worktree is still unsettled; it settles at the next engine start or when you dismiss it",
+        ],
     )
 }
 
@@ -70,34 +85,49 @@ pub(super) fn begin_spawn(root: &Path, agent: i64, pane: bool) -> Result<(), Str
     let intent = SpawnIntent {
         team_agent: agent,
         pane,
+        unknown: false,
     };
     begin(
         root,
         ActionKind::AgentSpawn,
         agent,
         serde_json::to_string(&intent),
-        "the agent's start could not be recorded",
+        [
+            "the agent's start could not be recorded",
+            "An earlier start of this agent is still unsettled; it settles once agent terminals are available or when you dismiss it",
+        ],
     )
 }
 
+/// Records one intent under the agent's key. Inputs: the engine root, the kind, the agent,
+/// the payload, and the owner sentences for a ledger failure and for an earlier intent of
+/// the agent still pending. Output: Ok, or the sentence with its plain code.
 fn begin(
     root: &Path,
     kind: ActionKind,
     agent: i64,
     payload: serde_json::Result<String>,
-    sentence: &str,
+    [failed, unsettled]: [&str; 2],
 ) -> Result<(), String> {
-    let payload = payload.map_err(|_| super::with_code(sentence, Some("ledger_invalid")))?;
+    let payload = payload.map_err(|_| super::with_code(failed, Some("ledger_invalid")))?;
     ledger::open(root)
         .and_then(|ledger| ledger::begin(&ledger, kind, &key(agent), &payload))
         .map(|_| ())
-        .map_err(|problem| super::with_code(sentence, Some(&problem.0)))
+        .map_err(|problem| {
+            let sentence = if problem.0 == "ledger_pending" {
+                unsettled
+            } else {
+                failed
+            };
+            super::with_code(sentence, Some(&problem.0))
+        })
 }
 
 /// Ends the pending start of a team agent's harness: Done once its worker is ready (a
 /// pane's record stored), Failed when its worker ended before that. An agent with no
-/// pending start, such as one taken over after a restart, is left alone; a ledger that
-/// cannot be written logs its plain code. Inputs: the engine root, the agent and outcome.
+/// pending start, such as one taken over after a restart, is left alone, and so is a
+/// notice; a ledger that cannot be written logs its plain code. Inputs: the engine root,
+/// the agent and outcome.
 pub(super) fn spawned(root: &Path, agent: i64, outcome: Outcome) {
     logged(ledger::open(root).and_then(|ledger| finish_spawn(&ledger, agent, outcome)));
 }
@@ -117,15 +147,22 @@ pub(super) fn settle(team: &Connection, root: &Path, agent: i64, running: bool) 
 }
 
 /// Settles the intents an engine stop left pending that need no terminal: every agent
-/// worktree intent as `settle_worktrees` does, and every start of a piped agent as
-/// Unknown, since its harness may still run unseen. Pane starts wait for `recover_panes`.
-/// Inputs: the team database and the engine root.
+/// worktree intent as `settle_worktrees` does, and every start of a piped agent becomes a
+/// notice, since no pid of it was kept and its harness may still run unseen. Pane starts
+/// wait for `recover_panes`. Inputs: the team database and the engine root.
 pub(super) fn recover(team: &Connection, root: &Path) {
     logged(ledger::open(root).and_then(|ledger| {
         settle_worktrees(&ledger, team, None)?;
         for action in ledger::pending(&ledger, ActionKind::AgentSpawn)? {
-            if spawn_intent(&action).is_some_and(|intent| !intent.pane) {
-                ledger::finish(&ledger, action.id, Outcome::Unknown)?;
+            if let Some(intent) = spawn_intent(&action).filter(|intent| !intent.pane) {
+                notice(
+                    &ledger,
+                    &action,
+                    &SpawnIntent {
+                        unknown: true,
+                        ..intent
+                    },
+                )?;
             }
         }
         Ok(())
@@ -133,9 +170,9 @@ pub(super) fn recover(team: &Connection, root: &Path) {
 }
 
 /// Settles the pane starts an engine stop left pending against the stored pane records
-/// and the live panes: Done when its record was stored, Unknown when its pane is alive
-/// without one, which the caller then ends so it never runs beside a second start, and
-/// Failed when no pane is left. Inputs: the engine root, the records and the live panes.
+/// and the live panes: Done when its record was stored, Failed when no pane is left, and a
+/// notice when its pane is alive without one, which the caller then ends so it never runs
+/// beside a second start. Inputs: the engine root, the records and the live panes.
 pub(super) fn recover_panes<R, P>(
     root: &Path,
     records: &BTreeMap<i64, R>,
@@ -146,17 +183,37 @@ pub(super) fn recover_panes<R, P>(
             let Some(intent) = spawn_intent(&action).filter(|intent| intent.pane) else {
                 continue;
             };
-            let outcome = if records.contains_key(&intent.team_agent) {
-                Outcome::Done
+            if records.contains_key(&intent.team_agent) {
+                ledger::finish(&ledger, action.id, Outcome::Done)?;
             } else if alive.contains_key(&intent.team_agent) {
-                Outcome::Unknown
+                notice(
+                    &ledger,
+                    &action,
+                    &SpawnIntent {
+                        unknown: true,
+                        ..intent
+                    },
+                )?;
             } else {
-                Outcome::Failed
-            };
-            ledger::finish(&ledger, action.id, outcome)?;
+                ledger::finish(&ledger, action.id, Outcome::Failed)?;
+            }
         }
         Ok(())
     }));
+}
+
+/// Replaces a pending intent a check could not settle with a notice under the same kind
+/// and key, in one transaction: the intent ends Unknown and the notice stays pending, so
+/// the owner is shown it and the agent's next start is refused until the owner dismisses
+/// it with `ledger::dismiss`. Inputs: the ledger, the intent and the notice to keep.
+/// Output: Ok, or the ledger's failure, which leaves the intent pending as it was.
+fn notice(ledger: &Connection, action: &Action, kept: &impl Serialize) -> Result<(), EngineError> {
+    let payload =
+        serde_json::to_string(kept).map_err(|_| EngineError("ledger_invalid".to_owned()))?;
+    let held = ledger.unchecked_transaction().map_err(unavailable)?;
+    ledger::finish(&held, action.id, Outcome::Unknown)?;
+    ledger::begin(&held, action.kind, &action.key, &payload)?;
+    held.commit().map_err(unavailable)
 }
 
 fn finish_spawn(ledger: &Connection, agent: i64, outcome: Outcome) -> Result<(), EngineError> {
@@ -170,10 +227,11 @@ fn finish_spawn(ledger: &Connection, agent: i64, outcome: Outcome) -> Result<(),
 
 /// Settles pending agent worktree intents, one agent's or all: Done when `team_worktrees`
 /// records the worktree for its agent; otherwise the add never finished and nothing ran in
-/// it, so its partial worktree is removed and the intent Failed, or the intent is Unknown
-/// when what is there is not plainly that worktree, which is then left as it is. Intents
-/// another part of the engine wrote are left alone. Inputs: the ledger, the team database
-/// and the agent, none for all. Output: Ok, or the ledger's or database's failure.
+/// it, so its partial worktree is removed and the intent Failed, or the intent becomes a
+/// notice when what is there is not plainly that worktree, which is then left as it is.
+/// Notices and intents another part of the engine wrote are left alone. Inputs: the
+/// ledger, the team database and the agent, none for all. Output: Ok, or the ledger's or
+/// database's failure.
 fn settle_worktrees(
     ledger: &Connection,
     team: &Connection,
@@ -186,32 +244,42 @@ fn settle_worktrees(
         if only.is_some_and(|agent| agent != intent.team_agent) {
             continue;
         }
-        let outcome = if recorded(team, &intent)? {
-            Outcome::Done
-        } else {
-            match remove(&intent) {
-                Ok(()) => Outcome::Failed,
-                Err(code) => {
-                    eprintln!("team_worktree_left cause={code}");
-                    Outcome::Unknown
-                }
+        if recorded(team, &intent)? {
+            ledger::finish(ledger, action.id, Outcome::Done)?;
+            continue;
+        }
+        match remove(&intent) {
+            Ok(()) => ledger::finish(ledger, action.id, Outcome::Failed)?,
+            Err(code) => {
+                eprintln!("team_worktree_left cause={code}");
+                notice(
+                    ledger,
+                    &action,
+                    &WorktreeIntent {
+                        unknown: true,
+                        ..intent
+                    },
+                )?;
             }
-        };
-        ledger::finish(ledger, action.id, outcome)?;
+        }
     }
     Ok(())
 }
 
+/// Reads a pending worktree intent the engine still checks. Input: the action. Output: the
+/// intent, none for a notice or a payload another part of the engine wrote.
 fn worktree_intent(action: &Action) -> Option<WorktreeIntent> {
     serde_json::from_str::<WorktreeIntent>(&action.payload)
         .ok()
-        .filter(|intent| action.key == key(intent.team_agent))
+        .filter(|intent| action.key == key(intent.team_agent) && !intent.unknown)
 }
 
+/// Reads a pending start intent the engine still checks. Input: the action. Output: the
+/// intent, none for a notice or a payload another part of the engine wrote.
 fn spawn_intent(action: &Action) -> Option<SpawnIntent> {
     serde_json::from_str::<SpawnIntent>(&action.payload)
         .ok()
-        .filter(|intent| action.key == key(intent.team_agent))
+        .filter(|intent| action.key == key(intent.team_agent) && !intent.unknown)
 }
 
 /// Tells whether the runtime recorded this worktree for its agent, which it does only once
