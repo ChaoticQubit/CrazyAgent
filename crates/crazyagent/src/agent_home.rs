@@ -228,10 +228,10 @@ pub fn prepare(
     }
     real_folder(home)?;
     let name = harness.instruction_file();
-    remove_entry(&home.join(name))?;
     if text.is_empty() {
-        return Ok(());
+        return remove_entry(&home.join(name));
     }
+    remove_folder(&home.join(name))?;
     write_whole(home, name, text.as_bytes())
 }
 
@@ -274,7 +274,7 @@ pub fn record_skills(home: &Path, names: &[&str]) -> Result<(), AgentHomeError> 
         return Err(failure("agent_home_invalid"));
     }
     real_folder(home)?;
-    remove_entry(&home.join(SKILLS_FILE))?;
+    remove_folder(&home.join(SKILLS_FILE))?;
     let record: String = names.iter().map(|name| format!("{name}\n")).collect();
     assert!(record.len() <= SKILLS_RECORD_BYTES_MAX);
     write_whole(home, SKILLS_FILE, record.as_bytes())
@@ -379,6 +379,16 @@ fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
         Ok(_) => fs::remove_file(path),
     };
     removed.map_err(|_| failure("agent_home_unwritable"))
+}
+
+/// Clears a directory planted where a file is about to be written; a file or link stays
+/// for the rename to replace atomically, so a reader never finds the name missing.
+/// Input: the entry path. Output: unit, or `agent_home_unwritable`.
+fn remove_folder(path: &Path) -> Result<(), AgentHomeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => remove_entry(path),
+        _ => Ok(()),
+    }
 }
 
 fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {

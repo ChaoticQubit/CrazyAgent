@@ -250,6 +250,38 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
 
 #[cfg(unix)]
 #[test]
+fn a_relaunch_replaces_a_planted_skills_record_in_place_without_writing_through_it() {
+    let (_directory, root) = folder();
+    let outside = root.join("outside.txt");
+    fs::write(&outside, "owner file").unwrap();
+    let codex = home(&root, "codex");
+    std::os::unix::fs::symlink(&outside, codex.join(SKILLS_FILE)).unwrap();
+    record_skills(&codex, &["tdd"]).unwrap();
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "owner file");
+    let record = fs::symlink_metadata(codex.join(SKILLS_FILE)).unwrap();
+    assert!(record.is_file() && !record.file_type().is_symlink());
+    assert_eq!(
+        fs::read_to_string(codex.join(SKILLS_FILE)).unwrap(),
+        "tdd\n"
+    );
+
+    fs::remove_file(codex.join(SKILLS_FILE)).unwrap();
+    fs::create_dir_all(codex.join(SKILLS_FILE).join("inner")).unwrap();
+    record_skills(&codex, &[]).unwrap();
+    assert_eq!(fs::read_to_string(codex.join(SKILLS_FILE)).unwrap(), "");
+    record_skills(&codex, &["code-review"]).unwrap();
+    assert_eq!(
+        received(&codex, Harness::Codex).unwrap(),
+        Some(Received {
+            text: String::new(),
+            skills: vec!["code-review".into()],
+        }),
+        "the last record replaces the one before it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn what_an_agent_received_is_read_back_from_its_own_home() {
     use std::os::unix::fs::PermissionsExt;
     let (_directory, root) = folder();
