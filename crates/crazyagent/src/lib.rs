@@ -13,6 +13,7 @@ pub mod credentials;
 pub mod engine;
 pub mod github;
 pub mod harnesses;
+pub mod ide;
 #[cfg(unix)]
 pub mod isolation;
 pub mod landing;
