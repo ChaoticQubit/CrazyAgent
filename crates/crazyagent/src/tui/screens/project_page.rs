@@ -914,18 +914,11 @@ impl ProjectPage {
     }
 
     fn changes_have_keys(&self) -> bool {
-        self.screen.tab == Tab::Changes
-            && self.screen.edit.is_none()
-            && self.screen.review.is_none()
+        self.screen.tab == Tab::Changes && !self.screen.boxed()
     }
 
     fn plugins_have_keys(&self) -> bool {
-        self.screen.tab == Tab::Settings
-            && self.screen.pool_picker.is_none()
-            && self.screen.edit.is_none()
-            && self.screen.confirm_delete.is_none()
-            && self.screen.general.is_none()
-            && !self.screen.confirm_remove
+        self.screen.tab == Tab::Settings && !self.screen.boxed()
     }
 
     fn plugins_reply(&mut self, reply: PluginsReply, ctx: &mut Ctx) -> Flow {
@@ -977,6 +970,7 @@ impl Screen for ProjectPage {
     fn typing(&self) -> bool {
         self.screen.edit.is_some()
             || self.screen.adding.is_some()
+            || self.screen.folders.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
             || (self.changes_have_keys() && self.screen.changes.editing())
@@ -1128,6 +1122,7 @@ impl Screen for ProjectPage {
     fn draft(&self) -> bool {
         self.screen.edit.is_some()
             || self.screen.general.is_some()
+            || self.screen.folders.is_some()
             || !self.screen.input.value().trim().is_empty()
     }
 
@@ -1136,6 +1131,8 @@ impl Screen for ProjectPage {
             "Your memory edit will be lost."
         } else if self.screen.general.is_some() {
             "Your project changes will be lost."
+        } else if self.screen.folders.is_some() {
+            "Your read-only folders will not be saved."
         } else {
             "Your unsent message will be lost."
         }
