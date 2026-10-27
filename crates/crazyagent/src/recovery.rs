@@ -114,16 +114,23 @@ pub fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), EngineErr
     store::capture(db, stopped_ms)
 }
 
-/// Settles the runs the last engine stop cut short: a run whose agent the starting team
-/// runtime took over again in its live pane is dropped, every other one is recorded
-/// interrupted once, with whether its team is paused now; a paused team stays paused.
-/// Call it after the runtime adopted the panes it can and before its first tick.
+/// Settles the runs the last engine stop cut short, as the team runtime does on its first
+/// tick, and lists them. Call it only after the runtime adopted the panes it can.
 /// Input: the engine root. Output: every interrupted run not yet handled, oldest first, at
 /// most `SCANNED_MAX`.
 pub fn scan(runtime: &Path) -> Result<Vec<Interrupted>, EngineError> {
     let db = open(runtime)?;
     store::settle(&db)?;
     store::runs(&db, None, &[RunState::Interrupted], SCANNED_MAX)
+}
+
+/// Settles the runs the last engine stop cut short: a run whose agent the starting team
+/// runtime took over again in its live pane is dropped, every other one is recorded
+/// interrupted once, with whether its team is paused now; a paused team stays paused.
+/// Input: the team runtime's connection, after it adopted the panes it can and before it
+/// runs anything else. Output: done, or `recovery_unavailable`.
+pub(crate) fn settle(db: &Connection) -> Result<(), EngineError> {
+    store::settle(db)
 }
 
 /// Lists a project's newest interrupted runs in every state, oldest first, so the owner

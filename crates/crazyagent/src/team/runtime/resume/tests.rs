@@ -329,6 +329,7 @@ mod failed {
         AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
         ModelReference,
     };
+    use crate::engine::EngineError;
     use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
     use crate::protocol::{CredentialRef, ProjectId};
     use crate::recovery::{self, Interrupted, RunState};
@@ -706,6 +707,85 @@ done
         assert!(typed.contains("Verify before continuing."), "{typed}");
         assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
         assert!(!recovery::retry(&fixture.base, sub).unwrap());
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
+    /// A sub-agent cut short in a turn while the store cannot be written at the next start
+    /// holds its task: the runtime's tick fails before it does anything else, the run stays
+    /// `stopped`, and no agent starts the task fresh. Once the store is writable again the
+    /// next tick settles the run, and the agent resumes in its own Codex session and finishes
+    /// the task there.
+    #[test]
+    fn a_run_the_store_cannot_settle_holds_its_task_until_it_resumes() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'hang here: write the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        fixture.until(&mut team, "the sub-agent hangs in its task", |f| {
+            f.sub().is_some_and(|sub| {
+                f.task(task) == ("running".into(), Some(sub), 1)
+                    && f.home_file(sub, "typed").contains("hang here")
+            })
+        });
+        let sub = fixture.sub().unwrap();
+        team.shutdown().unwrap();
+        drop(team);
+        host.kill(&AgentId::team(sub).unwrap()).unwrap();
+
+        let mut team = fixture.runtime(&host);
+        let writer = Connection::open(fixture.base.join("engine.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(
+            team.tick(),
+            Err(EngineError("recovery_unavailable".into())),
+            "the store is held by another writer"
+        );
+        let state: String = fixture
+            .connection
+            .query_row(
+                "SELECT state FROM recovery_runs WHERE agent=?1",
+                [sub],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "stopped");
+        assert_eq!(fixture.task(task), ("queued".into(), None, 1), "held");
+        assert_eq!(fixture.launches(sub).len(), 1, "no fresh start");
+        assert_eq!(fixture.agent_status(sub), "stopped");
+        assert_eq!(fixture.subs(), 1, "no other sub-agent took the task");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        fixture.until(
+            &mut team,
+            "the settled run resumes and finishes its task",
+            |f| {
+                f.runs()
+                    .first()
+                    .is_some_and(|run| run.state == RunState::Resumed)
+                    && f.task(task).0 == "done"
+            },
+        );
+        let runs = fixture.runs();
+        assert_eq!(runs.len(), 1, "{runs:#?}");
+        assert_eq!(runs[0].agent, sub);
+        let resume = conversation(&runs[0]).unwrap();
+        let launched = fixture.launches(sub);
+        assert_eq!(launched.len(), 2, "{launched:?}");
+        assert!(
+            launched[1].ends_with(&format!(" resume {}", resume.id)),
+            "{launched:?}"
+        );
+        assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
+        assert_eq!(fixture.subs(), 1, "the task never started fresh");
         team.shutdown().unwrap();
         host.close(&[]).unwrap();
     }
