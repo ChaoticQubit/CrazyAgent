@@ -15,6 +15,7 @@ import { pauseSummary, shouldPoll } from "./research";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
+import { TeamActivity } from "./team-activity";
 import { useTeam } from "./team";
 import "./projects.css";
 
@@ -193,7 +194,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
-      {active === "conversation" && <ConversationTab data={data} />}
+      {active === "conversation" && <TeamActivity data={data}><ConversationTab data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
