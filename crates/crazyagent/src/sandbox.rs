@@ -13,10 +13,12 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+pub mod extra_paths;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
+pub mod toolchains;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -32,6 +34,8 @@ const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
 const HIDDEN_MAX: usize = 4;
+const TOOL_ROOTS_MAX: usize = 24;
+const TOOL_FILES_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
@@ -57,12 +61,14 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/opt/homebrew/Caskroom",
     "/opt/homebrew/share",
     "/opt/homebrew/etc",
+    "/opt/homebrew/include",
     "/usr/local/bin",
     "/usr/local/lib",
     "/usr/local/opt",
     "/usr/local/Cellar",
     "/usr/local/share",
     "/usr/local/etc",
+    "/usr/local/include",
 ];
 
 const METADATA_LITERALS: &[&str] = &[
@@ -126,9 +132,36 @@ const OWNER_SECRET_PATHS: &[&str] = &[
     ".codex",
     ".claude",
     ".claude.json",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".npmrc",
+    ".pypirc",
+    ".config/gcloud",
 ];
 
-const SYSTEM_SECRET_PATHS: &[&str] = &["/Library/Keychains", "/private/var/db/SystemKey"];
+const SYSTEM_SECRET_PATHS: &[&str] = &[
+    "/Library/Keychains",
+    "/private/var/db/SystemKey",
+    "/opt/homebrew/etc/npmrc",
+    "/usr/local/etc/npmrc",
+];
+
+const CREDENTIAL_NAMES: &[&str] = &[
+    ".npmrc",
+    "etc/npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    "credentials.toml",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".config/gcloud",
+    ".docker",
+    ".kube",
+    "pip.conf",
+    ".yarnrc.yml",
+];
 
 const ENGINE_SECRET_FILES: &[&str] = &[
     "engine.db",
@@ -444,6 +477,9 @@ pub struct ProjectSandbox {
     agent_tmp: PathBuf,
     worktrees: Vec<PathBuf>,
     read_roots: Vec<PathBuf>,
+    tool_roots: Vec<PathBuf>,
+    tool_files: Vec<PathBuf>,
+    scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
     owner_home: PathBuf,
@@ -490,6 +526,9 @@ impl ProjectSandbox {
             agent_tmp: agent_tmp.to_path_buf(),
             worktrees: Vec::new(),
             read_roots: Vec::new(),
+            tool_roots: Vec::new(),
+            tool_files: Vec::new(),
+            scratch: None,
             hidden: Vec::new(),
             network,
             owner_home: owner,
@@ -510,7 +549,12 @@ impl ProjectSandbox {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
         let secrets = engine_secrets_in(&runtime)?;
-        for root in self.writable_roots().chain(self.read_roots.iter()) {
+        for root in self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+            .chain(self.tool_files.iter())
+        {
             clear_of_secrets(root, &secrets)?;
         }
         self.engine_secrets = secrets;
@@ -606,6 +650,80 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
+    /// each folder as [`Self::allow_read`] checks it, with every credential name below it
+    /// denied, and each file when it is a canonical regular file clear of
+    /// [`Self::secret_paths`]. Only Seatbelt grants them; the Linux and Windows boundaries
+    /// leave them out. Input: the toolchains. Output: the widened sandbox, or `Invalid`.
+    pub fn allow_tools(mut self, tools: &toolchains::Toolchains) -> Result<Self, SandboxError> {
+        let owner = owner_home()?;
+        let secrets = self.secret_paths();
+        for root in tools.roots() {
+            if self.tool_roots.contains(root) {
+                continue;
+            }
+            if self.tool_roots.len() >= TOOL_ROOTS_MAX {
+                return Err(invalid("too many toolchain folders"));
+            }
+            granted_root(root, &owner, &secrets)?;
+            self.tool_roots.push(root.clone());
+        }
+        for file in tools.files() {
+            if self.tool_files.contains(file) {
+                continue;
+            }
+            if self.tool_files.len() >= TOOL_FILES_MAX {
+                return Err(invalid("too many toolchain files"));
+            }
+            clear_of_secrets(file, &secrets)?;
+            if !clean_absolute(file) || !file.is_file() || canonical(file)? != *file {
+                return Err(invalid("toolchain files must be existing canonical files"));
+            }
+            self.tool_files.push(file.clone());
+        }
+        assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
+        assert!(self.tool_files.len() <= TOOL_FILES_MAX);
+        Ok(self)
+    }
+
+    /// Grants the owner's extra read-only folders for this project (see
+    /// [`extra_paths::checked`]) as toolchain folders are granted, with credential names
+    /// carved out, skipping each one that is gone or no longer passes
+    /// [`Self::allow_read`]'s checks. Input: the saved folders. Output: the widened sandbox
+    /// and how many folders were skipped.
+    pub fn allow_extra_reads(mut self, paths: &[PathBuf]) -> Result<(Self, usize), SandboxError> {
+        let owner = owner_home()?;
+        let secrets = self.secret_paths();
+        let mut skipped = 0;
+        for path in paths {
+            if self.tool_roots.contains(path) {
+                continue;
+            }
+            if self.tool_roots.len() >= TOOL_ROOTS_MAX
+                || granted_root(path, &owner, &secrets).is_err()
+            {
+                skipped += 1;
+                continue;
+            }
+            self.tool_roots.push(path.clone());
+        }
+        assert!(skipped <= paths.len() && self.tool_roots.len() <= TOOL_ROOTS_MAX);
+        Ok((self, skipped))
+    }
+
+    /// Adds the agent's short writable temp folder (see [`toolchains::make_tmp`]), which
+    /// becomes its `TMPDIR`. Input: a canonical existing folder clear of
+    /// [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid` for an unsafe or
+    /// second folder.
+    pub fn allow_scratch(mut self, tmp: &Path) -> Result<Self, SandboxError> {
+        if self.scratch.is_some() {
+            return Err(invalid("the sandbox already has a temp folder"));
+        }
+        granted_root(tmp, &owner_home()?, &self.secret_paths())?;
+        self.scratch = Some(tmp.to_path_buf());
+        Ok(self)
+    }
+
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
@@ -679,7 +797,8 @@ impl ProjectSandbox {
 
     /// Every folder this sandbox lets the agent write: the project folder, or for a
     /// confined agent its worktree, that worktree's git admin folder and the git object
-    /// store, then its own home and temp dirs, then its extra worktrees.
+    /// store, then its own home and temp dirs, its short temp folder, then its extra
+    /// worktrees.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
         let project: Vec<&PathBuf> = match &self.checkout {
             Some(checkout) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
@@ -688,7 +807,13 @@ impl ProjectSandbox {
         project
             .into_iter()
             .chain([&self.agent_home, &self.agent_tmp])
+            .chain(self.scratch.iter())
             .chain(self.worktrees.iter())
+    }
+
+    /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
+    pub fn tool_roots(&self) -> &[PathBuf] {
+        &self.tool_roots
     }
 
     /// Whether the agent could write `path` or move it away: true when the path is one of
@@ -726,12 +851,24 @@ impl ProjectSandbox {
         }
         text.push_str(")\n");
         text.push_str("(allow file-read-metadata");
-        for root in self.writable_roots().chain(self.read_roots.iter()) {
+        for root in self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+            .chain(self.tool_files.iter())
+        {
             text.push_str(&format!("\n  (path-ancestors \"{}\")", root.display()));
         }
         text.push_str(")\n(allow file-read* file-map-executable");
-        for root in self.writable_roots().chain(self.read_roots.iter()) {
+        for root in self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+        {
             text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
+        }
+        for file in &self.tool_files {
+            text.push_str(&format!("\n  (literal \"{}\")", file.display()));
         }
         text.push_str(")\n(allow file-write*");
         for root in self.writable_roots() {
@@ -743,6 +880,17 @@ impl ProjectSandbox {
             if clean_absolute(&secret) {
                 text.push_str(&format!("\n  (subpath \"{}\")", secret.display()));
             }
+        }
+        let credentials = CREDENTIAL_NAMES
+            .iter()
+            .map(|name| regex_escape(name))
+            .collect::<Vec<_>>()
+            .join("|");
+        for root in &self.tool_roots {
+            text.push_str(&format!(
+                "\n  (regex #\"^{}/(.*/)?({credentials})(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
         }
         text.push_str(")\n(deny mach-lookup");
         for service in KEYCHAIN_SERVICES {
@@ -885,10 +1033,11 @@ impl ProjectSandbox {
     /// process leads its own group so the whole tree can be stopped.
     #[cfg(unix)]
     pub fn command(&self, profile: &Path, program: &Path) -> Command {
+        let base = self.base_env();
         let mut command = agent_command(
             profile,
             program,
-            &self.base_env(),
+            &borrowed(&base),
             std::iter::empty::<(&OsStr, Option<&OsStr>)>(),
         )
         .expect("the base agent environment holds no owner secret");
@@ -896,14 +1045,24 @@ impl ProjectSandbox {
         command
     }
 
-    fn base_env(&self) -> [(&str, &OsStr); 5] {
-        [
-            ("HOME", self.agent_home.as_os_str()),
-            ("TMPDIR", self.agent_tmp.as_os_str()),
-            ("PATH", OsStr::new(AGENT_PATH)),
-            ("LANG", OsStr::new("C")),
-            ("LC_ALL", OsStr::new("C")),
-        ]
+    /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
+    /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies, the
+    /// C locale and [`toolchains::agent_env`].
+    fn base_env(&self) -> Vec<(&'static str, OsString)> {
+        let homes = toolchains::ToolHomes::at(&self.owner_home);
+        let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
+        let mut env = vec![
+            ("HOME", self.agent_home.clone().into_os_string()),
+            ("TMPDIR", tmp.clone().into_os_string()),
+            (
+                "PATH",
+                OsString::from(toolchains::agent_path(&homes, AGENT_PATH)),
+            ),
+            ("LANG", OsString::from("C")),
+            ("LC_ALL", OsString::from("C")),
+        ];
+        env.extend(toolchains::agent_env(&self.agent_home, &homes));
+        env
     }
 
     /// Rebuilds a harness launch command (absolute program, arguments,
@@ -925,7 +1084,8 @@ impl ProjectSandbox {
                 "harness must start inside the project folder or its worktree",
             ));
         }
-        let mut command = agent_command(profile, program, &self.base_env(), harness.get_envs())?;
+        let base = self.base_env();
+        let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), SANDBOX_EXEC);
         Ok(command)
@@ -1102,7 +1262,14 @@ fn git_link(path: &Path, prefix: &str) -> Result<String, SandboxError> {
 /// Output: the pattern text, without anchors.
 fn seatbelt_pattern(path: &Path) -> String {
     let text = path.display().to_string();
-    assert!(text.starts_with('/') && !text.contains('"') && !text.contains('\\'));
+    assert!(text.starts_with('/'));
+    regex_escape(&text)
+}
+
+/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
+/// without a quote or backslash. Output: the pattern text, without anchors.
+fn regex_escape(text: &str) -> String {
+    assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
     for character in text.chars() {
         if ".^$*+?()[]{}|".contains(character) {
@@ -1111,6 +1278,12 @@ fn seatbelt_pattern(path: &Path) -> String {
         pattern.push(character);
     }
     pattern
+}
+
+fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a OsStr)> {
+    env.iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect()
 }
 
 fn invalid(reason: &str) -> SandboxError {

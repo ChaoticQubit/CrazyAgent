@@ -36,6 +36,7 @@ pub mod routing;
 pub mod sandbox;
 pub mod service;
 pub mod setup;
+pub mod skills;
 /// The short address a Unix socket is bound and reached at when its own path is too long
 /// for a socket address.
 #[cfg(unix)]

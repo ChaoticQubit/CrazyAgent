@@ -28,8 +28,8 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
 
 /** Settings: the header, the tabs and the selected tab's panel.
  * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
- * "sign_in" opens the sign-in of the given account). */
-export function Settings({ tab, action, account }: { tab: SettingsTab; action?: SettingsAction; account?: string }) {
+ * "sign_in" opens the sign-in of the given account) and the skill whose detail is open. */
+export function Settings({ tab, action, account, skill }: { tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
   return <>
     <PageHeader title="Settings" />
     <Tabs label="Settings sections" current={tab} tabs={TABS.map((item) => ({ ...item, href: formatRoute({ name: "settings", tab: item.id }) }))} />
@@ -37,7 +37,7 @@ export function Settings({ tab, action, account }: { tab: SettingsTab; action?: 
       {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
         : tab === "pools" ? <Pools creating={action === "new"} />
         : tab === "harnesses" ? <Harnesses />
-        : tab === "plugins" ? <PluginsAndSkills />
+        : tab === "plugins" ? <PluginsAndSkills skill={skill} />
         : tab === "pack" ? <PackSettings />
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />

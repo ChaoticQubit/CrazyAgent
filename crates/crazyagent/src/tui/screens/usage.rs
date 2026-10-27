@@ -299,10 +299,9 @@ pub fn summary(
     let theme = &ctx.theme;
     let total = &report.total;
     let prompt = total.input + total.cache_read + total.cache_write;
-    let cache = if prompt == 0 {
-        "none".into()
-    } else {
-        format!("{}%", (total.cache_read * 100 + prompt / 2) / prompt)
+    let cache = match (total.cache_read * 100 + prompt / 2).checked_div(prompt) {
+        Some(share) => format!("{share}%"),
+        None => "none".into(),
     };
     let (added, removed) = report.lines.iter().fold((0, 0), |(added, removed), row| {
         (added + row.added, removed + row.removed)

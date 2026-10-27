@@ -1,4 +1,4 @@
-use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation};
+use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use serde::Deserialize;
@@ -16,7 +16,8 @@ pub const DROP_BYTES_MAX: u64 =
 const REQUEST_BYTES_MAX: usize = 1024 * 1024;
 const PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 const RECORDED: &str = "Recorded. When your reply ends, the engine checks this task against the team plan and hands it to a sub-agent.";
-const INVALID: &str = "Not recorded: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
+const INVALID: &str = "Not recorded: give a task of plain text up to 4000 bytes and, if you choose them, a harness name from the team plan and a short role such as onboarding-fix.";
+const ROLE_BYTES_MAX: usize = 64;
 const FULL: &str = "Not recorded: the engine takes at most 8 tasks from one reply.";
 const UNWRITABLE: &str = "Not recorded: the engine's task record could not be written.";
 
@@ -28,6 +29,8 @@ const _: () = assert!(TASK_PROMPT_BYTES_MAX == 4000 && DELEGATIONS_PER_REPLY_MAX
 struct Recorded {
     harness: Option<String>,
     task: String,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 /// Serves the master's `delegate` tool as an MCP server over stdio until its client closes input.
@@ -107,6 +110,7 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
                 "properties": {
                     "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
                     "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
+                    "role": {"type": "string", "description": "Optional short name for this job in kebab case, such as onboarding-fix. The sub-agent is then addressed as @onboarding-fix."},
                 },
                 "required": ["task"],
                 "additionalProperties": false,
@@ -135,9 +139,15 @@ fn call(params: Option<&Value>, drop: &Path) -> Option<(&'static str, bool)> {
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
-    let Some(proposed) = delegation(argument("harness"), argument("task")) else {
+    let role = argument("role").trim();
+    let handle = names::handle(role);
+    if role.len() > ROLE_BYTES_MAX || (!role.is_empty() && handle.is_none()) {
+        return Some((INVALID, true));
+    }
+    let Some(mut proposed) = delegation(argument("harness"), argument("task")) else {
         return Some((INVALID, true));
     };
+    proposed.role = handle;
     Some(match record(drop, &proposed) {
         Ok(true) => (RECORDED, false),
         Ok(false) => (FULL, true),
@@ -200,9 +210,10 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
     }
     let mut recorded = Vec::new();
     (&file).take(DROP_BYTES_MAX).read_to_end(&mut recorded)?;
-    let mut line =
-        serde_json::to_vec(&json!({"harness": proposed.harness, "task": proposed.prompt}))
-            .map_err(std::io::Error::other)?;
+    let mut line = serde_json::to_vec(
+        &json!({"harness": proposed.harness, "task": proposed.prompt, "role": proposed.role}),
+    )
+    .map_err(std::io::Error::other)?;
     line.push(b'\n');
     let calls = recorded.iter().filter(|byte| **byte == b'\n').count();
     if calls >= DELEGATIONS_PER_REPLY_MAX || metadata.len() + line.len() as u64 > DROP_BYTES_MAX {
@@ -232,10 +243,12 @@ pub fn take(drop: &Path) -> Vec<Delegation> {
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<Recorded>(line).ok())
         .filter_map(|recorded| {
-            delegation(
+            let mut found = delegation(
                 recorded.harness.as_deref().unwrap_or_default(),
                 &recorded.task,
-            )
+            )?;
+            found.role = recorded.role.as_deref().and_then(names::handle);
+            Some(found)
         })
         .take(DELEGATIONS_PER_REPLY_MAX)
         .collect();

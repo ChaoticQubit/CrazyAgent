@@ -12,6 +12,8 @@ use crate::master_session::MasterBackend;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
+use crate::sandbox::toolchains::{ToolHomes, Toolchains};
+#[cfg(unix)]
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
@@ -787,6 +789,7 @@ fn turn_sandbox(
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
     let network = SandboxNetwork::Only(vec![remote]);
+    let tools = Toolchains::detect(repository, &ToolHomes::owner().map_err(refused)?);
     let sandbox = match engine {
         None => ProjectSandbox::new(repository, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_worktree(worktree)),
@@ -803,6 +806,7 @@ fn turn_sandbox(
     }
     .and_then(|sandbox| sandbox.allow_read(&install))
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
+    .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .map_err(refused)?;
     let installed =

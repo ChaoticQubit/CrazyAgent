@@ -67,6 +67,7 @@ impl Case {
             model: None,
             tools,
             sandbox_profile: Some(self.profile()),
+            git_identity: None,
             limits: LaunchLimits::default(),
         }
     }
@@ -100,6 +101,16 @@ fn run(key_file: Option<&Path>) -> Run<'_> {
 }
 
 fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let home = env
+        .iter()
+        .find(|(name, _)| name == "HOME")
+        .map(|(_, home)| PathBuf::from(home))
+        .unwrap();
+    env.extend(
+        toolchains::agent_env(&home, &ToolHomes::owner().unwrap())
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
+    );
     env.extend(
         crate::sandbox::AGENT_GIT_ENV
             .into_iter()
@@ -186,7 +197,7 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
             built.env,
             with_git_env(vec![
                 ("HOME".to_owned(), case.home().to_str().unwrap().to_owned()),
-                ("PATH".to_owned(), TOOLS_ON_PATH.to_owned()),
+                ("PATH".to_owned(), tools_on_path()),
                 ("LANG".to_owned(), LOCALE.to_owned()),
                 ("LC_ALL".to_owned(), LOCALE.to_owned()),
             ]),
@@ -306,11 +317,7 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
             "{setting}"
         );
     }
-    assert!(
-        built
-            .env
-            .contains(&("PATH".to_owned(), TOOLS_ON_PATH.to_owned()))
-    );
+    assert!(built.env.contains(&("PATH".to_owned(), tools_on_path())));
 }
 
 #[test]
@@ -399,7 +406,7 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "--setting-sources",
         "",
         "--settings",
-        "{\"disableAllHooks\":true,\"skipDangerousModePermissionPrompt\":true}",
+        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
     ]);
@@ -776,4 +783,64 @@ fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
         "launch_claude_config_unsafe"
     );
+}
+
+#[test]
+fn the_owner_git_identity_reaches_a_pane_agent_environment() {
+    let case = Case::new();
+    let mut request = case.request("claude-code", case.subscription(), true);
+    request.git_identity = Some(
+        crate::harnesses::launch::GitIdentity::new(
+            "Repo Owner".into(),
+            "owner@example.invalid".into(),
+        )
+        .unwrap(),
+    );
+    let built = command(&request, None, &run(None)).unwrap();
+    for (name, value) in [
+        ("GIT_AUTHOR_NAME", "Repo Owner"),
+        ("GIT_AUTHOR_EMAIL", "owner@example.invalid"),
+        ("GIT_COMMITTER_NAME", "Repo Owner"),
+        ("GIT_COMMITTER_EMAIL", "owner@example.invalid"),
+    ] {
+        assert!(
+            built.env.contains(&(name.to_owned(), value.to_owned())),
+            "{name}: {:?}",
+            built.env
+        );
+    }
+}
+
+fn tools_on_path() -> String {
+    toolchains::agent_path(&ToolHomes::owner().unwrap(), TOOLS_ON_PATH)
+}
+
+#[test]
+fn a_pane_gets_the_agent_short_temp_folder_and_the_toolchain_settings() {
+    let case = Case::new();
+    let tmp = toolchains::make_tmp(&case.home()).unwrap();
+    for harness in ["codex", "claude-code"] {
+        let request = case.request(harness, case.subscription(), true);
+        let built = command(&request, None, &run(None)).unwrap();
+        let tmpdirs: Vec<&str> = built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "TMPDIR")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(tmpdirs, [tmp.to_str().unwrap()], "{harness}");
+        for (name, value) in [
+            ("RUSTUP_AUTO_INSTALL", "0".to_owned()),
+            (
+                "CARGO_HOME",
+                case.home().join(".cargo").to_str().unwrap().to_owned(),
+            ),
+        ] {
+            assert!(
+                built.env.contains(&(name.to_owned(), value)),
+                "{harness} {name}"
+            );
+        }
+    }
+    toolchains::remove_tmp(&case.home()).unwrap();
 }

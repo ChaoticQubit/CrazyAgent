@@ -499,6 +499,11 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectReadPaths { project_id, .. } => (
+                "project_read_paths",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::Team { action } => {
                 ("team", Some(action.project().as_str().to_owned()), None)
             }
