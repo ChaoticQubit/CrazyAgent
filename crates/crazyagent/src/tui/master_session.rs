@@ -2859,6 +2859,9 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::RepositoryConfigRefused => {
             "A Git setting in this project's repository runs commands or redirects Git"
         }
+        MasterReason::InstructionsTooLarge => {
+            "App and project instructions are too long for a Claude master: shorten them on the Process page"
+        }
         MasterReason::Cancelled => "Cancelled",
         MasterReason::Unknown => "Something went wrong",
     }
@@ -2985,6 +2988,11 @@ mod turn_line_tests {
                 MasterReason::Unknown,
                 "master_runtime_binding",
                 "Turn 1: Blocked | Something went wrong (master_runtime_binding)",
+            ),
+            (
+                MasterReason::InstructionsTooLarge,
+                "master_instructions_too_large",
+                "Turn 1: Blocked | App and project instructions are too long for a Claude master: shorten them on the Process page (master_instructions_too_large)",
             ),
         ] {
             let mut lines = Vec::new();

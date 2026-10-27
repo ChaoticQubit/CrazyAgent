@@ -37,6 +37,11 @@ const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
 #[cfg(unix)]
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
 #[cfg(unix)]
+const _: () = assert!(
+    (crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1) as u64
+        < crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX
+);
+#[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
 #[cfg(unix)]
 const MASTER_HOME: &str = "home";
@@ -931,18 +936,16 @@ pub(super) fn allocate_master_capture(
 /// Writes the master's startup instruction into its private turn directory as the 0600
 /// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
 /// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
-/// file's absolute path, or a plain refusal when the directory or file is not the engine's.
+/// file's absolute path, `master_instructions_too_large` past the Claude host's limit
+/// before any credential reaches the turn, or a plain refusal when the directory or file
+/// is not the engine's.
 #[cfg(unix)]
 fn write_master_instructions(
     root: &Root,
     runtime_ref: &RequestId,
     text: &str,
 ) -> Result<PathBuf, EngineError> {
-    if text.len()
-        > crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
-            + 1
-            + crate::agent_home::PROCESS_BYTES_MAX
-    {
+    if text.len() as u64 > crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX {
         return Err(failure("master_instructions_too_large"));
     }
     let name = format!("master-runtime-{}", runtime_ref.as_str());
@@ -1185,7 +1188,22 @@ mod tests {
             &"x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX),
             &crate::agent_home::render(&full, &full),
         );
-        assert!(write_master_instructions(&root, &runtime_ref, &largest).is_ok());
+        let host_limit =
+            usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
+        assert!(largest.len() > host_limit);
+        assert_eq!(
+            write_master_instructions(&root, &runtime_ref, &largest)
+                .unwrap_err()
+                .0,
+            "master_instructions_too_large",
+            "a prompt Claude Code would refuse is never written"
+        );
+        let fits = master_prompt(
+            &"x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX),
+            &"a".repeat(host_limit - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX - 1),
+        );
+        assert_eq!(fits.len(), host_limit);
+        assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
     }
 
     #[test]

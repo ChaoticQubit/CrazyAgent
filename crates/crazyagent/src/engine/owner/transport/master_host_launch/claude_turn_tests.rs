@@ -209,6 +209,34 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     drop(folder);
     assert!(!home.exists());
 
+    let (refused_ref, _, _) = allocate_master_capture(&root).unwrap();
+    let refused_place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &refused_ref,
+        repository: &repository,
+        worktree: &worktree,
+    };
+    let host_limit = usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
+    let refused = claude_master_turn(
+        &refused_place,
+        &profile,
+        &claude,
+        &connection,
+        &"x".repeat(host_limit + 1),
+        Duration::from_secs(3600),
+        None,
+    );
+    assert_eq!(
+        refused.err().map(|error| error.0),
+        Some("master_instructions_too_large".to_owned())
+    );
+    let refused_turn = runtime.join(format!("master-runtime-{}", refused_ref.as_str()));
+    assert!(
+        !refused_turn.join("home").exists(),
+        "no credential copy is made for a prompt Claude Code would refuse"
+    );
+    assert!(!refused_turn.join("instructions.md").exists());
+
     let engine = install.join("crazyagent");
     std::fs::write(&engine, "#!/bin/sh\n").unwrap();
     std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
